@@ -57,12 +57,42 @@ JSON and there is no Keychain, so the cost of delegation (spawning a large Node 
 from a background daemon on every expiry, plus reimplementing the cooldown machinery)
 buys nothing.
 
+## Verification
+
+Run end to end against the live account on 2026-08-19, after this ADR was written.
+
+**The refresh token rotates.** `POST https://platform.claude.com/v1/oauth/token` with
+`grant_type=refresh_token` returned a *different* refresh token from the one sent. Option
+(c) above — keeping a refreshed token private — would therefore have silently destroyed the
+user's Claude Code login, exactly as predicted. It is not merely inadvisable; it is
+destructive.
+
+The response is richer than the reference implementation models: alongside `access_token`,
+`refresh_token`, `expires_in` (28800 s, 8 hours) and `token_type` it carries `account`,
+`organization`, `scope`, `token_uuid`, and **`refresh_token_expires_in`**. That last field
+must be written to `refreshTokenExpiresAt`; the first implementation of this experiment
+left the stored value stale.
+
+**Requests must identify themselves.** The endpoint sits behind Cloudflare, which answered
+an unset user agent with `403 error_code 1010 browser_signature_banned` and the advice not
+to retry. Setting `User-Agent: Tidemark/<version>` produced `200` on the first attempt.
+Identify honestly by product name; do not impersonate a browser. The reference
+implementation does the same, reserving browser-like agents for dashboard scraping we do
+not do.
+
+**The acceptance criterion held.** After writing the rotated token back through the staged
+`0600` / `fsync` / `rename(2)` path, `~/.claude/.credentials.json` kept its seven unrelated
+`mcpOAuth` entries and its mode, the new access token authenticated against
+`https://api.anthropic.com/api/oauth/usage`, and `claude -p` still answered with exit 0 —
+and did not overwrite what we had written.
+
 ## Consequences
 
 - The daemon writes to files owned by other programs. This is the sharpest edge in the
   project and must be covered by tests against the real file shapes.
-- If a provider rotates refresh tokens and we crash between receiving a new one and
-  publishing it, the user is logged out of their editor. `rename(2)` narrows this window to
-  effectively nothing, but it does not close it.
+- Anthropic **does** rotate refresh tokens, so a crash between receiving a new one and
+  publishing it logs the user out of their editor, and restoring a backup does not help —
+  the backed-up token is already dead. `rename(2)` narrows this window to effectively
+  nothing but does not close it. Back up before the exchange anyway; it is free.
 - Third-party files are never relocated, never reformatted, and never written to when
   discovered outside their canonical path.

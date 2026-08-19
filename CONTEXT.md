@@ -101,10 +101,24 @@ named field in an error.
   behaviour in a prior art implementation, not a hypothetical.
 - **Rejected on ingest** — points with a zero or absurd timestamp. They sort wrong and
   stretch every chart by decades.
+- **Window identity** — a window's key is derived from its **length**, never from the field
+  name the provider used. Codex proves why: on 2026-08-19 its only window arrived as
+  `rate_limit.primary_window` carrying `limit_window_seconds: 604800` — a *weekly* window in
+  the slot named "primary", with `secondary_window: null`. Earlier the same account had its
+  weekly figures recorded under `secondary`. Keying on the provider's positional name would
+  split one continuous window into two and emit spurious appeared/disappeared events.
 - **Secrets** — our own API keys go to the Secret Service (`org.freedesktop.secrets`).
   The daemon must handle "keyring still locked" as an explicit state rather than a crash;
   the unit orders itself after `graphical-session.target`.
 - **Third-party credential files** stay where they are. See ADR 0001.
+
+## Networking
+
+Every request sets `User-Agent: Tidemark/<version>`. This is not cosmetic:
+`platform.claude.com` sits behind Cloudflare and answers an unset agent with
+`403 browser_signature_banned`. Identify honestly by product name — never impersonate a
+browser. We authenticate with real credentials to documented endpoints; there is no reason
+to look like anything other than what we are.
 
 ## Polling
 
