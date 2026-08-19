@@ -50,6 +50,14 @@ conventional fallback and is what desktop files, D-Bus, and Flatpak all expect t
   on the bar at that position. Fill left of the mark means sustainable; fill right of it
   means the quota runs out before the reset.
 
+A pace mark needs both a length and a reset time, and a provider may withhold either.
+**This is a normal state, not a failure.** Z.ai drops `nextResetTime` from a window that
+has just reset and has nothing spent in it — observed live — and the window it does that
+to is the five-hour one, which is the window the card leads with. Two of the five
+providers also report windows with no length at all. The bar must therefore have a
+defined appearance with no mark on it; inventing a length or a reset time to keep the mark
+on screen would put a confident wrong number in front of the user.
+
 ## Providers in v1
 
 All five reach their data over tokens or a local server. None requires scraping browser
@@ -105,6 +113,27 @@ The GUI depends on `tidemark-types` and D-Bus only. Folding the vocabulary into
 features across a workspace build, so the moment the daemon is built the GUI links the
 HTTP stack too. A separate crate is the only form of this rule the build actually
 enforces. `scripts/check-layering.sh` asserts it against `cargo tree`.
+
+### Provider contract
+
+A provider knows its own identity and can produce a snapshot. The trait says nothing about
+credentials, because the five acquire them in five different ways — a key in the Secret
+Service, an OAuth token refreshed out of a third-party CLI's file, a local server holding
+its own session in the keyring — and any credential the trait named would fit at most two
+of them. Each provider owns its HTTP client for the same reason: Antigravity's talks to a
+loopback server with a self-signed certificate and needs an exception no other provider
+should be handed.
+
+Underneath the trait, every implementation splits **transport from meaning**: `fetch`
+performs the request and hands the body to a pure `parse(body, captured_at)`. All the
+traps live in the parsing — an unnamed unit enum, millisecond timestamps, numbers arriving
+as strings, remaining-instead-of-used — and none of them need a live key to get wrong.
+
+**A provider must never silently drop a window.** A window missing from the interface reads
+as "you have no such limit", which is the most dangerous thing this program can say. An
+entry of a kind we recognize but cannot parse fails the whole fetch. Only an entry of an
+*unrecognized* kind is skipped, because that is a quota type that did not exist when the
+parser was written rather than a failure to understand one that did.
 
 ### API floor
 

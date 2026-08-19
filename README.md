@@ -5,8 +5,9 @@ burned, when it resets, and whether your current pace will get you there.
 
 Native GTK4 + libadwaita. No web UI, no Electron, no embedded browser engine.
 
-> **Status: early scaffolding.** The design record is complete and the workspace builds,
-> but no provider is wired up yet — the window opens empty.
+> **Status: early.** The design record is complete, the history database works, and the
+> first provider (Z.ai) fetches and parses. Nothing is wired to the interface yet — the
+> window opens empty.
 
 ## Planned for v1
 
@@ -30,6 +31,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 The last one asserts the crate layering described in `CONTEXT.md`: the interface crate
 must not reach the network or the database. Run it whenever you add a dependency.
+
+There is a debug entry point for looking at one provider's live answer. It reads the key
+from standard input rather than an argument, because arguments are visible in `ps`:
+
+```sh
+pass my/zai | cargo run -p tidemark-core --example probe
+```
 
 ## Design record
 

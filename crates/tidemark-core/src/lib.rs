@@ -6,9 +6,7 @@
 
 pub mod storage;
 
-pub mod providers {
-    //! One module per provider, behind a common trait. Filled in from Step 3 onward.
-}
+pub mod providers;
 
 pub mod secrets {
     //! Secret Service access for keys Tidemark owns, and the read/refresh/write-back path
