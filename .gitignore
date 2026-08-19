@@ -1,0 +1,7 @@
+/target/
+**/*.rs.bk
+*.pdb
+
+# local scratch
+/scratch/
+/.direnv/
