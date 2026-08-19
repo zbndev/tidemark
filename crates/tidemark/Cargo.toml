@@ -1,0 +1,23 @@
+[package]
+name = "tidemark"
+description = "Tidemark desktop client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# NOTE: this crate must never depend on tidemark-core, on an HTTP client, or on a
+# database driver. It talks to tidemarkd over D-Bus and speaks only tidemark-types.
+# scripts/check-layering.sh enforces this.
+[dependencies]
+adw = { version = "0.9.2", package = "libadwaita", features = ["v1_5"] }
+gtk = { version = "0.11.4", package = "gtk4", features = ["v4_14"] }
+tidemark-types = { path = "../tidemark-types" }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zbus = "5.13.2"

@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/tidemark-types",
+    "crates/tidemark-core",
+    "crates/tidemarkd",
+    "crates/tidemark",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+repository = "https://github.com/zbndev/tidemark"
+authors = ["zbndev"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+todo = "warn"
+dbg_macro = "warn"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

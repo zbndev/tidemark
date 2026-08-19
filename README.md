@@ -5,8 +5,8 @@ burned, when it resets, and whether your current pace will get you there.
 
 Native GTK4 + libadwaita. No web UI, no Electron, no embedded browser engine.
 
-> **Status: design complete, no code yet.** This repository currently holds the design
-> record. Nothing here builds.
+> **Status: early scaffolding.** The design record is complete and the workspace builds,
+> but no provider is wired up yet — the window opens empty.
 
 ## Planned for v1
 
@@ -16,6 +16,20 @@ reset times and a pace mark showing whether the current burn rate reaches the re
 
 A background daemon polls, keeps history, and sends threshold notifications; the window is
 a viewer over D-Bus.
+
+## Building
+
+Needs Rust 1.92 or newer and the development packages for GTK 4.14+, libadwaita 1.5+ and
+SQLite.
+
+```sh
+cargo build --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+./scripts/check-layering.sh
+```
+
+The last one asserts the crate layering described in `CONTEXT.md`: the interface crate
+must not reach the network or the database. Run it whenever you add a dependency.
 
 ## Design record
 

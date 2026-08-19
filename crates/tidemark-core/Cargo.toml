@@ -1,0 +1,20 @@
+[package]
+name = "tidemark-core"
+description = "Provider clients, storage and secret handling for Tidemark"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "charset", "http2", "system-proxy", "json", "gzip"] }
+rusqlite = "0.40.2"
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tidemark-types = { version = "0.1.0", path = "../tidemark-types" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "fs", "sync"] }

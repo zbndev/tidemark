@@ -1,0 +1,5 @@
+# Pinned so that every machine and every agent builds Tidemark the same way.
+# 1.92 is the floor imposed by gtk4-rs 0.11; "stable" tracks forward from there.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]

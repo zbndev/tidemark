@@ -1,0 +1,20 @@
+[package]
+name = "tidemarkd"
+description = "Tidemark polling daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tidemark-types = { path = "../tidemark-types" }
+tidemark-core = { version = "0.1.0", path = "../tidemark-core" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
+zbus = "5.13.2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

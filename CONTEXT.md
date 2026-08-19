@@ -88,6 +88,34 @@ Language is Rust; GUI is GTK4 + libadwaita. Rust was chosen for packaging above 
 turns "the provider silently changed their undocumented JSON" from a blank screen into a
 named field in an error.
 
+### Crate layout
+
+Four crates, not three. The extra one exists to make the "GUI never performs network I/O"
+rule checkable rather than aspirational.
+
+| crate | holds | must never reach |
+|---|---|---|
+| `tidemark-types` | vocabulary, identity constants, D-Bus wire shapes | anything with I/O |
+| `tidemark-core` | provider clients, history, secrets | GTK, GDK, libadwaita |
+| `tidemarkd` | scheduler, D-Bus service, notifications | — |
+| `tidemark` | the interface | `tidemark-core`, HTTP, SQLite |
+
+The GUI depends on `tidemark-types` and D-Bus only. Folding the vocabulary into
+`tidemark-core` and feature-gating the network out of it does not work: Cargo unifies
+features across a workspace build, so the moment the daemon is built the GUI links the
+HTTP stack too. A separate crate is the only form of this rule the build actually
+enforces. `scripts/check-layering.sh` asserts it against `cargo tree`.
+
+### API floor
+
+GTK **4.14** and libadwaita **1.5**, set as `gtk4/v4_14` and `libadwaita/v1_5` features.
+Not arbitrary: `AdwDialog`, which the detail view depends on, is libadwaita 1.5. That
+floor is Ubuntu 24.04 LTS, Debian 13 and Fedora 40 — raise it only for something the
+interface genuinely needs, and say so in this file when you do.
+
+TLS is rustls, and SQLite is the system library rather than a vendored copy, both so the
+`deb` and `rpm` do not carry a bundled C library that distribution policy dislikes.
+
 ## Storage
 
 - **History** — SQLite, keyed `(provider, account, window, segment)`. A point is written
