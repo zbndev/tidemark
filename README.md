@@ -19,8 +19,8 @@ a viewer over D-Bus.
 
 ## Building
 
-Needs Rust 1.92 or newer and the development packages for GTK 4.14+, libadwaita 1.5+ and
-SQLite.
+Needs Rust 1.92 or newer and the development packages for GTK 4.22+, libadwaita 1.9+ and
+SQLite. The toolkit floor tracks current releases on purpose.
 
 ```sh
 cargo build --workspace

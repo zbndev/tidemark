@@ -108,10 +108,17 @@ enforces. `scripts/check-layering.sh` asserts it against `cargo tree`.
 
 ### API floor
 
-GTK **4.14** and libadwaita **1.5**, set as `gtk4/v4_14` and `libadwaita/v1_5` features.
-Not arbitrary: `AdwDialog`, which the detail view depends on, is libadwaita 1.5. That
-floor is Ubuntu 24.04 LTS, Debian 13 and Fedora 40 — raise it only for something the
-interface genuinely needs, and say so in this file when you do.
+GTK **4.22** and libadwaita **1.9**, set as the `v4_22` and `v1_9` binding features.
+
+The floor is *the newest we can test against*, not the oldest distribution we could
+theoretically reach. Long-term-support distributions are not a design constraint here: if
+a widget or an API would make the interface better, we use it, and the packaging targets
+follow the code rather than the other way round. Raise this line whenever the toolkit
+gains something worth having — it is a floor, not a budget.
+
+The consequence is deliberate and accepted: distributions shipping older GTK do not get a
+native package. If reach ever matters more than it does now, that is a Flatpak, not a
+rewrite of the interface against an older API.
 
 TLS is rustls, and SQLite is the system library rather than a vendored copy, both so the
 `deb` and `rpm` do not carry a bundled C library that distribution policy dislikes.
