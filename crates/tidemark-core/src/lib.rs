@@ -4,12 +4,10 @@
 //! Consumed by `tidemarkd`. The GUI must never link this crate — see
 //! `scripts/check-layering.sh`.
 
+pub mod storage;
+
 pub mod providers {
     //! One module per provider, behind a common trait. Filled in from Step 3 onward.
-}
-
-pub mod storage {
-    //! SQLite history, keyed `(provider, account, window, segment)`. Filled in at Step 2.
 }
 
 pub mod secrets {

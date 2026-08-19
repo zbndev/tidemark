@@ -6,7 +6,15 @@
 //!
 //! It deliberately depends on nothing that talks to the network, the disk or the display.
 //! Anything that needs an HTTP client belongs in `tidemark-core`; anything that needs GTK
-//! belongs in `tidemark`.
+//! belongs in `tidemark`. `scripts/check-layering.sh` enforces that.
+
+pub mod snapshot;
+pub mod time;
+pub mod window;
+
+pub use snapshot::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot};
+pub use time::{AbsurdTimestamp, Timestamp};
+pub use window::{Window, WindowKey, WindowLength};
 
 /// Identity constants. Changing any of these is a breaking change for installed units,
 /// stored secrets and on-disk state, so they live in exactly one place.

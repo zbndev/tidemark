@@ -127,13 +127,33 @@ TLS is rustls, and SQLite is the system library rather than a vendored copy, bot
 
 - **History** — SQLite, keyed `(provider, account, window, segment)`. A point is written
   only when `used_percent` changes, plus an hourly anchor. Points older than 90 days are
-  thinned to one per 15 minutes; nothing is deleted outright.
-- **Segment boundaries** — `resets_at` within ±5 minutes counts as the same segment, and
-  a drop in `used_percent` independently confirms a reset. Both signals are needed: some
-  providers compute `resets_at` as "now + N" so it drifts by seconds on every poll, and a
-  drop alone can be a plan change rather than a reset. Segmenting on exact `resets_at`
-  equality produces one segment per point and destroys the history — this is observed
-  behaviour in a prior art implementation, not a hypothetical.
+  thinned to one per 15 minutes, except that the first and last point of every segment
+  always survive — without them a thinned segment loses the two things worth keeping, where
+  it started and how full it got. Nothing is deleted outright.
+- **Last seen is not last written** — the reading segmentation compares against is the last
+  one *observed*, which is not the last one *stored*. A window can roll over without
+  consumption moving, and that transition is visible only in a reading no point was written
+  for. Every poll updates the last-seen state whether or not it produces a row.
+- **Segment boundaries** — a new segment starts when consumption falls, or when
+  `resets_at` moves **further forward than the elapsed time explains**. Either signal is
+  sufficient and neither is required: a provider may omit `resets_at` entirely, and a
+  window can roll over from zero to zero without consumption moving at all.
+
+  The comparison is against elapsed time, not against a fixed tolerance, and the
+  difference is not academic. Two distinct pathologies live in the nine months of prior-art
+  history on this machine, and only one of them is jitter:
+
+  * *Jitter.* `claude.json` reports the same window as `807785940` and `807786000` a minute
+    apart. A ±5 minute tolerance absorbs this.
+  * *Drift.* Some windows are reported as "now plus what is left", so `resets_at` advances
+    by the whole poll interval — five minutes — on every single poll. No two values are
+    ever equal, and no fixed tolerance ever merges them, because the movement is exactly
+    the size of the tolerance and never stops.
+
+  Measured over that corpus, exact equality gives `opencodego primary` 1363 segments from
+  1363 readings and `antigravity secondary` 825 from 831. The elapsed-time rule gives 13
+  and 1. The tolerance still exists, at five minutes, but it absorbs jitter *on top of* the
+  elapsed time rather than standing in for it.
 - **Rejected on ingest** — points with a zero or absurd timestamp. They sort wrong and
   stretch every chart by decades.
 - **Window identity** — a window's key is derived from its **length**, never from the field
