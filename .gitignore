@@ -5,3 +5,7 @@
 # local scratch
 /scratch/
 /.direnv/
+
+# local planning, not for history
+/PLAN.md
+/plan/
