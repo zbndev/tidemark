@@ -91,10 +91,8 @@ impl Account {
 
     /// An account with its client already in hand.
     ///
-    /// Test-only for now. It is also the shape a provider needing no stored key will take
-    /// — Antigravity holds its own session in the `agy` CLI — so the step that adds one
-    /// removes this gate rather than writing it again.
-    #[cfg(test)]
+    /// This is the shape for providers that own credential discovery themselves, such as
+    /// Claude's CLI file and Antigravity's future `agy` session.
     pub fn with_client(client: Arc<dyn Provider>) -> Self {
         let (provider, account) = (client.id(), client.account());
         Self {
@@ -310,7 +308,7 @@ impl Engine {
                 account.failures = account.failures.saturating_add(1);
                 account.retry_after = error.retry_after();
                 account.set_state(state, Some(error.to_string()));
-                if state == ProviderState::CredentialRejected {
+                if state == ProviderState::CredentialRejected && account.factory.is_some() {
                     // Re-read the key next time round: the user's fix is to store a new
                     // one, and nothing else would tell us they had.
                     account.client = None;
@@ -442,12 +440,14 @@ enum Loaded {
 /// Which state a failed fetch leaves the account in.
 fn state_for(error: &ProviderError) -> ProviderState {
     match error {
+        ProviderError::NoCredential => ProviderState::NoCredential,
         ProviderError::Credential { .. } => ProviderState::CredentialRejected,
         ProviderError::RateLimited { .. } => ProviderState::RateLimited,
         ProviderError::Malformed(_) => ProviderState::Malformed,
-        ProviderError::Client(_) | ProviderError::Transport(_) | ProviderError::Http { .. } => {
-            ProviderState::Unreachable
-        }
+        ProviderError::Client(_)
+        | ProviderError::Transport(_)
+        | ProviderError::Http { .. }
+        | ProviderError::Local(_) => ProviderState::Unreachable,
     }
 }
 
@@ -484,6 +484,14 @@ mod tests {
     use std::sync::Mutex;
     use tidemark_core::providers::BoxFuture;
     use tidemark_types::{Window, WindowKey, WindowLength};
+
+    #[test]
+    fn a_missing_cli_credential_has_its_own_published_state() {
+        assert_eq!(
+            state_for(&ProviderError::NoCredential),
+            ProviderState::NoCredential
+        );
+    }
 
     /// A provider that answers whatever the test tells it to, without a network.
     #[derive(Debug)]
@@ -737,6 +745,30 @@ mod tests {
         assert!(
             harness.engine.accounts()[0].client.is_none(),
             "the client is dropped so a newly stored key is picked up"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_backed_client_survives_a_rejection_and_can_recover() {
+        let mut harness = with_provider(Fake::new(vec![
+            Err(ProviderError::Credential { status: 401 }),
+            Ok(snapshot(3.0, 3600)),
+        ]));
+
+        harness.engine.poll_due(Instant::now()).await;
+        assert_eq!(
+            harness.engine.accounts()[0].status().state(),
+            Some(ProviderState::CredentialRejected)
+        );
+        assert!(
+            harness.engine.accounts()[0].client.is_some(),
+            "a file-backed provider rereads its own credential and must stay registered"
+        );
+
+        harness.poll_again().await;
+        assert_eq!(
+            harness.engine.accounts()[0].status().state(),
+            Some(ProviderState::Ok)
         );
     }
 

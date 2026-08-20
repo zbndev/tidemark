@@ -6,6 +6,8 @@
 
 pub mod paths;
 
+pub mod oauth_file;
+
 pub mod storage;
 
 pub mod providers;

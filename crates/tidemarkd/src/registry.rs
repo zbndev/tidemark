@@ -4,21 +4,25 @@
 //! in `tidemark-core`. Nothing else in the daemon names a provider.
 //!
 //! There is no configuration file yet, and deliberately so — an account exists as far as
-//! the daemon is concerned, and reports `no-credential` until a key for it turns up in the
-//! Secret Service. That is the state the credentials UI is built to clear, and inventing a
-//! config format before there is a dialog to write it would fix the shape of one against a
-//! screen nobody has drawn.
+//! the daemon is concerned, and reports `no-credential` until its provider-owned source
+//! (the Secret Service or a vendor CLI file) supplies one. That is the state the
+//! credentials UI is built to clear, and inventing a config format before there is a
+//! dialog to write it would fix the shape of one against a screen nobody has drawn.
 
 use std::sync::Arc;
 
-use tidemark_core::providers::{Provider, zai};
+use tidemark_core::providers::{Provider, ProviderError, claude, zai};
 use tidemark_types::{AccountId, ProviderId};
 
 use crate::engine::Account;
 
 /// Every account the daemon polls.
-pub fn accounts() -> Vec<Account> {
-    vec![zai_account()]
+pub fn accounts() -> Result<Vec<Account>, ProviderError> {
+    Ok(vec![claude_account()?, zai_account()])
+}
+
+fn claude_account() -> Result<Account, ProviderError> {
+    Ok(Account::with_client(Arc::new(claude::Claude::new()?)))
 }
 
 fn zai_account() -> Account {
@@ -41,11 +45,15 @@ mod tests {
 
     #[test]
     fn every_registered_account_is_published_before_it_is_polled() {
-        let accounts = accounts();
-        assert_eq!(accounts.len(), 1);
-        let status = accounts[0].status();
-        assert_eq!(status.provider, zai::PROVIDER_ID);
-        assert_eq!(status.account, "default");
-        assert!(status.captured_at.is_none());
+        let accounts = accounts().expect("registry builds");
+        assert_eq!(accounts.len(), 2);
+        let providers: Vec<&str> = accounts
+            .iter()
+            .map(|account| account.status().provider.as_str())
+            .collect();
+        assert_eq!(providers, ["claude", zai::PROVIDER_ID]);
+        assert!(accounts.iter().all(|account| {
+            account.status().account == "default" && account.status().captured_at.is_none()
+        }));
     }
 }

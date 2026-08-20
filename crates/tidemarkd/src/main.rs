@@ -71,7 +71,7 @@ fn main() -> std::process::ExitCode {
 async fn run() -> Result<(), Box<dyn Error>> {
     let history_path = paths::history_path()?;
     let history = History::open(&history_path)?;
-    let accounts = registry::accounts();
+    let accounts = registry::accounts()?;
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),

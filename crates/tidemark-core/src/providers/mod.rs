@@ -23,6 +23,7 @@
 //! an entry of an *unrecognized* kind is skipped, because that is a quota type that did
 //! not exist when this was written, not a failure to understand one that did.
 
+pub mod claude;
 pub mod http;
 pub mod zai;
 
@@ -99,6 +100,9 @@ pub enum ProviderError {
     /// The request never completed: DNS, connection, TLS, timeout.
     #[error("request failed: {0}")]
     Transport(#[source] reqwest::Error),
+    /// No credential exists at the provider's canonical source yet.
+    #[error("no credential is available")]
+    NoCredential,
     /// The credential is missing, expired or rejected.
     #[error("the credential was rejected (HTTP {status})")]
     Credential {
@@ -118,6 +122,9 @@ pub enum ProviderError {
         /// The status.
         status: u16,
     },
+    /// A local prerequisite such as a credential file could not be accessed safely.
+    #[error("local provider state is unavailable: {0}")]
+    Local(String),
     /// The response arrived but does not mean what we expect it to mean.
     #[error("unparseable response: {0}")]
     Malformed(String),
@@ -139,7 +146,7 @@ impl ProviderError {
 
     /// True when retrying with the same credential is pointless until the user acts.
     pub fn needs_user_action(&self) -> bool {
-        matches!(self, Self::Credential { .. })
+        matches!(self, Self::NoCredential | Self::Credential { .. })
     }
 }
 
@@ -161,7 +168,8 @@ mod tests {
     }
 
     #[test]
-    fn only_a_rejected_credential_asks_the_user_for_anything() {
+    fn only_user_fixable_credential_states_ask_the_user_for_anything() {
+        assert!(ProviderError::NoCredential.needs_user_action());
         assert!(ProviderError::Credential { status: 401 }.needs_user_action());
         assert!(!ProviderError::Http { status: 503 }.needs_user_action());
         assert!(
