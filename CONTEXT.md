@@ -172,8 +172,16 @@ The consequence is deliberate and accepted: distributions shipping older GTK do 
 native package. If reach ever matters more than it does now, that is a Flatpak, not a
 rewrite of the interface against an older API.
 
-TLS is rustls, and SQLite is the system library rather than a vendored copy, both so the
-`deb` and `rpm` do not carry a bundled C library that distribution policy dislikes.
+SQLite is the system library rather than a vendored copy, so the `deb` and `rpm` do not
+carry a bundled copy of a library the distribution already ships — `ldd` on the daemon
+shows `libsqlite3.so.0` from `/usr/lib`.
+
+TLS is rustls, which keeps OpenSSL out of the link. It does **not** keep C out: rustls's
+default provider is `aws-lc-rs`, and `aws-lc-sys` vendors C and assembly compiled by the
+`cc` crate at build time. That has a packaging consequence, measured rather than predicted
+— those objects cannot be built with GCC's LTO, because `rust-lld` then fails the final
+link on hundreds of undefined `aws_lc_*` symbols. Any packaging of this project turns
+distribution-wide LTO off; `PKGBUILD` does it with `options=(!lto)`.
 
 ## Storage
 

@@ -38,6 +38,20 @@ from standard input rather than an argument, because arguments are visible in `p
 pass my/zai | cargo run -p tidemark-core --example probe
 ```
 
+## Installing on Arch
+
+`PKGBUILD` in this directory builds a release package **from the working tree**, so it can
+be reinstalled after any change rather than only at a release:
+
+```sh
+makepkg -si
+systemctl --user enable --now tidemarkd.service
+```
+
+It installs `tidemark`, `tidemarkd` and the systemd user unit. `options=(!lto)` is
+required, not preferred: rustls's default provider vendors C and assembly through
+`aws-lc-sys`, and objects built with GCC's LTO cannot be linked by `rust-lld`.
+
 ## Running the daemon
 
 `tidemarkd` polls, writes history to `$XDG_DATA_HOME/tidemark/history.db`, and publishes
@@ -52,7 +66,7 @@ secret-tool store --label='Tidemark: zai (default)' \
 The interface is usable with `busctl` alone, which is how it is meant to be checked:
 
 ```sh
-cargo run -p tidemarkd
+cargo run -p tidemarkd   # or: systemctl --user start tidemarkd.service
 busctl --user introspect io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark
 busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark \
     io.github.zbndev.Tidemark.Daemon1 GetStatus

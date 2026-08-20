@@ -2,6 +2,11 @@
 **/*.rs.bk
 *.pdb
 
+# makepkg output, from building the local PKGBUILD in place
+/pkg/
+/src/
+/*.pkg.tar.*
+
 # local scratch
 /scratch/
 /.direnv/
