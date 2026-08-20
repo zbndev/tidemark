@@ -7,6 +7,21 @@
 //! card, which `.card` deliberately does not set because it does not know what is going in
 //! it.
 //!
+//! # The hover
+//!
+//! `GtkFlowBoxChild` tints its own allocation, which is a square behind a card with rounded
+//! corners: the tint shows in the four corners as a hard edge around them. So the child's
+//! tint is switched off and the card is raised instead — two pixels and a soft shadow, the
+//! platform's own idea of an elevated surface, and nothing that repaints text.
+//!
+//! The `:hover` is matched on the child rather than on the card, deliberately: the child
+//! keeps its allocation while the card inside it moves, so a pointer resting near the lower
+//! edge does not fall outside the widget it just raised and start it flickering.
+//!
+//! It is `translateY` and not `scale` because scaling a widget resamples the text in it, and
+//! a card is mostly text. This is the one place where the interface says "you can click
+//! this" before Step 14 makes the click do anything.
+//!
 //! `alpha(currentColor, …)` is what keeps the chip theme-aware: the background is derived
 //! from whatever colour the tone class put on the label, so a warning chip and an error
 //! chip need no colours of their own.
@@ -19,6 +34,19 @@
 const STYLE: &str = "
 .quota-card {
     padding: 16px;
+    transition: transform 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+/* The grid's children are the cards themselves, so the hover belongs to the card and its
+   rounded corners; left alone, GtkFlowBoxChild tints its own square allocation and the
+   corners of the card get a visible hard edge around them. */
+.quota-grid > flowboxchild:hover {
+    background: none;
+}
+
+.quota-grid > flowboxchild:hover > .quota-card {
+    transform: translateY(-2px);
+    box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.18), 0 8px 20px 0 rgba(0, 0, 0, 0.34);
 }
 
 .quota-bar {

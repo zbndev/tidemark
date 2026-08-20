@@ -67,6 +67,7 @@ impl MainWindow {
             // Cards are not a list to pick from; the click that will matter opens a detail
             // dialog, and that is the card's own gesture rather than a selection.
             .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["quota-grid"])
             .build();
 
         let scroller = gtk::ScrolledWindow::builder()

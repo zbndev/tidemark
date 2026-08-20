@@ -281,6 +281,11 @@ calibration against history that does not exist yet.
   their colour rather than the one libadwaita would have picked. **It changes colour at 80%
   and 95% — the notification thresholds** — so the card and the notification never disagree
   about when a window became worth worrying about.
+- **A card raises on hover** — two pixels and a soft shadow — rather than taking the tint
+  `GtkFlowBoxChild` paints on its own square allocation, which shows as a hard edge around
+  the card's rounded corners. The `:hover` is matched on the child and the card is what
+  moves, so the pointer never falls off the widget it just raised. When the card becomes
+  clickable, `.card.activatable` supplies the platform's own hover and active states.
 - **The grid is homogeneous.** Every card gets the same allocation, so cards in a row share
   a height and their footers line up; the cost is a short card in a single-column window
   carrying the height of the tallest one. The last row is left ragged: a filler card would
