@@ -11,14 +11,19 @@
 
 use std::sync::Arc;
 
-use tidemark_core::providers::{Provider, ProviderError, claude, codex, zai};
+use tidemark_core::providers::{Provider, ProviderError, claude, codex, kimi, zai};
 use tidemark_types::{AccountId, ProviderId};
 
 use crate::engine::Account;
 
 /// Every account the daemon polls.
 pub fn accounts() -> Result<Vec<Account>, ProviderError> {
-    Ok(vec![claude_account()?, codex_account()?, zai_account()])
+    Ok(vec![
+        claude_account()?,
+        codex_account()?,
+        kimi_account(),
+        zai_account(),
+    ])
 }
 
 fn claude_account() -> Result<Account, ProviderError> {
@@ -29,6 +34,14 @@ fn codex_account() -> Result<Account, ProviderError> {
     // Like Claude, this one finds its own credential: the Codex CLI's `auth.json`. There
     // is nothing for the Secret Service to hold and nothing for the user to paste.
     Ok(Account::with_client(Arc::new(codex::Codex::new()?)))
+}
+
+fn kimi_account() -> Account {
+    Account::new(
+        ProviderId::new(kimi::PROVIDER_ID),
+        AccountId::default(),
+        Box::new(|credential| Ok(Arc::new(kimi::Kimi::new(credential)?) as Arc<dyn Provider>)),
+    )
 }
 
 fn zai_account() -> Account {
@@ -52,12 +65,20 @@ mod tests {
     #[test]
     fn every_registered_account_is_published_before_it_is_polled() {
         let accounts = accounts().expect("registry builds");
-        assert_eq!(accounts.len(), 3);
+        assert_eq!(accounts.len(), 4);
         let providers: Vec<&str> = accounts
             .iter()
             .map(|account| account.status().provider.as_str())
             .collect();
-        assert_eq!(providers, ["claude", codex::PROVIDER_ID, zai::PROVIDER_ID]);
+        assert_eq!(
+            providers,
+            [
+                "claude",
+                codex::PROVIDER_ID,
+                kimi::PROVIDER_ID,
+                zai::PROVIDER_ID
+            ]
+        );
         assert!(accounts.iter().all(|account| {
             account.status().account == "default" && account.status().captured_at.is_none()
         }));

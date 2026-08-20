@@ -26,13 +26,14 @@
 pub mod claude;
 pub mod codex;
 pub mod http;
+pub mod kimi;
 pub mod zai;
 
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
-use tidemark_types::{AccountId, ProviderId, Snapshot};
+use tidemark_types::{AccountId, ProviderId, Snapshot, WindowLength};
 
 /// A future returned from a trait method.
 ///
@@ -53,6 +54,53 @@ pub trait Provider: fmt::Debug + Send + Sync {
 
     /// Fetch current quota.
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>>;
+}
+
+/// What to call a window of this length, in the plainest terms that divide evenly.
+///
+/// Shared because a window's span is the provider-neutral half of its title: every
+/// adapter that derives a length rather than being handed a name for it needs the same
+/// sentence, and two of them spelling five hours differently would read as two different
+/// limits on two cards.
+pub(crate) fn length_title(length: WindowLength) -> String {
+    let seconds = length.as_secs();
+    for (unit, noun) in [(86_400, "day"), (3_600, "hour"), (60, "minute")] {
+        if seconds.is_multiple_of(unit) {
+            let count = seconds / unit;
+            let plural = if count == 1 { "" } else { "s" };
+            return format!("{count} {noun}{plural}");
+        }
+    }
+    format!("{seconds} seconds")
+}
+
+/// A provider's own enum value, in words a person reads.
+///
+/// Providers name plans, tiers and regions in spellings meant for their own code — `plus`,
+/// `pro_plus`, `LEVEL_INTERMEDIATE`, `REGION_OVERSEA`. Nothing is translated here, only
+/// re-cased: a name we do not recognise is still the provider's own word for it, which is
+/// what the card is supposed to be showing.
+///
+/// A word that shouts is quietened — `INTERMEDIATE` becomes `Intermediate` — but only when
+/// every letter of it is uppercase, so a provider that capitalises deliberately keeps its
+/// spelling instead of being flattened to `Gpt`.
+pub(crate) fn title_case(raw: &str) -> String {
+    raw.split(['_', '-', ' '])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let shouting = word.chars().all(|c| !c.is_lowercase());
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    let rest: String = chars.collect();
+                    first.to_uppercase().collect::<String>()
+                        + &if shouting { rest.to_lowercase() } else { rest }
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A secret used to authenticate to a provider.

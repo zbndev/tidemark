@@ -18,7 +18,7 @@
 //! *pools* rather than different lengths of one pool, so each keeps its own key prefix and
 //! a weekly window in one cannot collide with a weekly window in another.
 
-use super::{BoxFuture, Credential, Provider, ProviderError, http};
+use super::{BoxFuture, Credential, Provider, ProviderError, http, length_title, title_case};
 use crate::oauth_file::{
     CredentialFile, CredentialFileError, Field, LockedCredentialFile, UpdateOutcome,
 };
@@ -408,19 +408,6 @@ impl WindowSnapshot {
     }
 }
 
-/// What to call a window of this length, in the plainest terms that divide evenly.
-fn length_title(length: WindowLength) -> String {
-    let seconds = length.as_secs();
-    for (unit, noun) in [(86_400, "day"), (3_600, "hour"), (60, "minute")] {
-        if seconds.is_multiple_of(unit) {
-            let count = seconds / unit;
-            let plural = if count == 1 { "" } else { "s" };
-            return format!("{count} {noun}{plural}");
-        }
-    }
-    format!("{seconds} seconds")
-}
-
 #[derive(Debug, Deserialize)]
 struct Credits {
     #[serde(default)]
@@ -456,7 +443,7 @@ struct ResetCredits {
 fn details(envelope: &Envelope) -> Vec<DetailSection> {
     let mut sections = Vec::new();
 
-    if let Some(plan) = envelope.plan_type.as_deref().map(plan_display_name) {
+    if let Some(plan) = envelope.plan_type.as_deref().map(title_case) {
         sections.push(DetailSection {
             title: DetailSection::PLAN.to_owned(),
             rows: vec![DetailRow {
@@ -542,21 +529,6 @@ fn trim_number(value: f64) -> String {
         .trim_end_matches('0')
         .trim_end_matches('.')
         .to_owned()
-}
-
-/// The plan slug as a person spells it: `free_workspace` is "Free Workspace".
-fn plan_display_name(raw: &str) -> String {
-    raw.split(['_', '-', ' '])
-        .filter(|word| !word.is_empty())
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// The tokens as `auth.json` holds them.

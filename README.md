@@ -64,6 +64,9 @@ secret-tool store --label='Tidemark: zai (default)' \
     xdg:schema io.github.zbndev.Tidemark.ProviderKey provider zai account default
 ```
 
+The same command stores the Kimi For Coding key with `kimi` in place of `zai`. Claude and
+Codex hold no key here at all: they read the credential files their own CLIs own.
+
 The interface is usable with `busctl` alone, which is how it is meant to be checked:
 
 ```sh
