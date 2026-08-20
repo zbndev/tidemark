@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use tidemark_core::providers::{Provider, ProviderError, claude, codex, kimi, zai};
+use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex, kimi, zai};
 use tidemark_types::{AccountId, ProviderId};
 
 use crate::engine::Account;
@@ -19,11 +19,22 @@ use crate::engine::Account;
 /// Every account the daemon polls.
 pub fn accounts() -> Result<Vec<Account>, ProviderError> {
     Ok(vec![
+        antigravity_account()?,
         claude_account()?,
         codex_account()?,
         kimi_account(),
         zai_account(),
     ])
+}
+
+fn antigravity_account() -> Result<Account, ProviderError> {
+    // Its credential is neither ours to hold nor a file we read: the `agy` CLI keeps a
+    // session in the system keyring and answers on loopback. What this build owns is the
+    // process, which is why the client exists from registration and starts nothing until
+    // the first poll.
+    Ok(Account::with_client(Arc::new(
+        antigravity::Antigravity::new()?,
+    )))
 }
 
 fn claude_account() -> Result<Account, ProviderError> {
@@ -65,7 +76,7 @@ mod tests {
     #[test]
     fn every_registered_account_is_published_before_it_is_polled() {
         let accounts = accounts().expect("registry builds");
-        assert_eq!(accounts.len(), 4);
+        assert_eq!(accounts.len(), 5);
         let providers: Vec<&str> = accounts
             .iter()
             .map(|account| account.status().provider.as_str())
@@ -73,6 +84,7 @@ mod tests {
         assert_eq!(
             providers,
             [
+                antigravity::PROVIDER_ID,
                 "claude",
                 codex::PROVIDER_ID,
                 kimi::PROVIDER_ID,

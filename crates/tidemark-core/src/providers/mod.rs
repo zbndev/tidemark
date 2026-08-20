@@ -23,6 +23,7 @@
 //! an entry of an *unrecognized* kind is skipped, because that is a quota type that did
 //! not exist when this was written, not a failure to understand one that did.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod http;

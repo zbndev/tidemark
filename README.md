@@ -66,6 +66,9 @@ secret-tool store --label='Tidemark: zai (default)' \
 
 The same command stores the Kimi For Coding key with `kimi` in place of `zai`. Claude and
 Codex hold no key here at all: they read the credential files their own CLIs own.
+Antigravity holds none either — it asks the local server the `agy` CLI runs, which keeps
+its own session in the keyring. Tidemark starts that server if it is not already up, reuses
+one that is, and stops the one it started when it exits.
 
 The interface is usable with `busctl` alone, which is how it is meant to be checked:
 
