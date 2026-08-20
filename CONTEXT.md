@@ -275,6 +275,10 @@ calibration against history that does not exist yet.
 - **Card** — logo, name, plan, state chip; the shortest present window as a large number
   over a bar with a pace mark; remaining windows as thin rows. The plan is a convention
   rather than a field: the first row of the detail section a provider titles `Plan`.
+- **The logo is the provider's own mark, monochrome**, drawn as a symbolic icon and
+  recoloured by the theme — not a glyph of our invention standing in for someone else's
+  product. The marks are their owners' trademarks, used to identify the service the card is
+  about; they are not covered by this project's licence, and whatever ships them says so.
 - **The bar is drawn, not a `GtkLevelBar`**, because of the pace mark. Its colours come
   from the CSS names `@accent_bg_color`, `@warning_bg_color` and `@error_bg_color` rather
   than from `AdwStyleManager`, so that a user who has themed their accent gets a bar in
@@ -304,7 +308,9 @@ calibration against history that does not exist yet.
 
 ## Packaging
 
-`deb`, `rpm`, `PKGBUILD`. Targets need GTK4 ≥ 4.18, which rules out Ubuntu 24.04 as a
+`deb`, `rpm`, `PKGBUILD`. Distribution artwork policies can refuse third-party trademarks,
+so a build with no provider marks stays a supported configuration: a card without one is a
+state the interface already has. Targets need GTK4 ≥ 4.18, which rules out Ubuntu 24.04 as a
 target — though its glibc, being the oldest, makes it a candidate build host, since glibc
 is forward- but not backward-compatible.
 
