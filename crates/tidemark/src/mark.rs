@@ -27,9 +27,13 @@
 
 use gtk::prelude::*;
 
-/// Rendered size of a mark, in logical pixels. The prior art renders the same files at
-/// 18×18 and it is the size they survive: at 16 the Codex knot loses the chevron inside it.
-const SIZE: i32 = 18;
+/// Rendered size of a mark, in logical pixels. Well above the text beside it on purpose —
+/// the mark is what the eye finds the card by, and 18 is only the floor at which the Codex
+/// knot still shows the chevron inside it.
+///
+/// Each file is drawn to stand on the lower edge of this box, so the size is also what puts
+/// the mark on the name's baseline; see the note on framing in `docs/TRADEMARKS.md`.
+const SIZE: i32 = 28;
 
 /// The icon name a provider's mark is installed under, or `None` for a slug that cannot
 /// name one.

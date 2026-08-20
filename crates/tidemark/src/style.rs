@@ -31,9 +31,11 @@
 //! redefines when they change their accent colour, and a bar that asked libadwaita instead
 //! would stay blue in a window where everything else had turned grey.
 
-const STYLE: &str = "
+pub(crate) const STYLE: &str = "
 .quota-card {
-    padding: 16px;
+    /* Less room under the footer than over the title: the last line sits low in the card,
+       where a timestamp belongs, rather than floating in the middle of its own margin. */
+    padding: 16px 16px 10px;
     transition: transform 150ms ease-out, box-shadow 150ms ease-out;
 }
 
@@ -66,6 +68,25 @@ const STYLE: &str = "
     padding: 1px 9px;
     background-color: alpha(currentColor, 0.13);
     font-weight: bold;
+}
+
+/* The plan is the same pill without a tone: it says what the account is, not what is wrong
+   with it. `alpha(currentColor, …)` is what makes one rule serve both styles — the
+   foreground is dark on a light card and light on a dark one, so the pill comes out a step
+   darker than the surface in the first case and a step lighter in the second. */
+.quota-plan {
+    border-radius: 9999px;
+    padding: 2px 9px;
+    background-color: alpha(currentColor, 0.14);
+    opacity: 0.75;
+}
+
+/* Quieter than `.dim-label`, and a size below `.caption`. It is the only line on the card
+   that is about the reading rather than the quota, and it should be readable without being
+   read. */
+.quota-footer {
+    font-size: 0.9em;
+    opacity: 0.45;
 }
 ";
 

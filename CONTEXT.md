@@ -273,8 +273,17 @@ calibration against history that does not exist yet.
   user-defined order persisted to config. Reordering is manual `GtkDragSource` /
   `GtkDropTarget` work — `GtkFlowBox` has no reorder API.
 - **Card** — logo, name, plan, state chip; the shortest present window as a large number
-  over a bar with a pace mark; remaining windows as thin rows. The plan is a convention
-  rather than a field: the first row of the detail section a provider titles `Plan`.
+  over a bar with a pace mark; remaining windows as thin rows; and one quiet line along the
+  bottom saying when the reading was taken. The plan is a convention rather than a field:
+  the first row of the detail section a provider titles `Plan`.
+- **The mark, the name and the plan stand on one baseline**, and the mark is the largest
+  thing in the row — it is what the eye finds a card by. Bottom-aligning the widgets does
+  not achieve this: GTK aligns allocations, and a label's allocation ends at its font's
+  descent line. Each icon is drawn standing on the floor of its own square, and the row
+  lifts each part by the depth it does not use.
+- **When the next poll is due is not on the card.** It is the daemon's schedule rather than
+  news about the account, and on a window that updates itself it was one more number moving
+  for no reason the reader has to act on.
 - **The logo is the provider's own mark, monochrome**, drawn as a symbolic icon and
   recoloured by the theme — not a glyph of our invention standing in for someone else's
   product. The marks are their owners' trademarks, used to identify the service the card is

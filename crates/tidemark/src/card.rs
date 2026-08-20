@@ -3,7 +3,7 @@
 //! The shape is the one in `CONTEXT.md` § Interface: the provider's mark, name, plan and
 //! state chip along the top; the shortest present window as a large number over a bar with
 //! a pace mark; the remaining windows as thin rows; and a line along the bottom saying when
-//! the reading was taken and when the next one is due.
+//! the reading was taken.
 //!
 //! Two rules are structural here rather than remembered.
 //!
@@ -25,10 +25,20 @@ use crate::format;
 use crate::mark;
 use crate::model;
 
-/// Height of the bar under the headline number.
-const DOMINANT_BAR: i32 = 14;
+/// Height of the bar under the headline number. A third thinner than the bar this card
+/// started with: the height it lost is what the title row spends on a larger mark.
+const DOMINANT_BAR: i32 = 9;
 /// Height of the bar in a secondary window's row.
 const ROW_BAR: i32 = 6;
+/// Space between the columns of the title row.
+const TITLE_GAP: i32 = 8;
+/// Space between the mark and the name it belongs to, which is less.
+const MARK_GAP: i32 = 6;
+/// Vertical padding the `.quota-plan` pill draws inside itself, which the plan's allocation
+/// carries and its baseline therefore sits above. Kept in step with `style::STYLE` by the
+/// test below.
+const PILL_PADDING: i32 = 2;
+
 /// Narrowest a card is allowed to get. Three of these plus spacing is what "three columns"
 /// costs, and it is what stops `GtkFlowBox` from packing three unreadable columns into a
 /// window that only has room for two.
@@ -71,7 +81,8 @@ impl Card {
             .build();
         let plan = gtk::Label::builder()
             .halign(gtk::Align::Start)
-            .css_classes(["dim-label", "caption"])
+            .valign(gtk::Align::End)
+            .css_classes(["caption", "quota-plan"])
             .build();
         let chip = gtk::Label::builder()
             .halign(gtk::Align::End)
@@ -79,17 +90,26 @@ impl Card {
             .css_classes(["caption", "quota-chip"])
             .build();
 
-        // The mark and the name are one thing and are spaced as one; the plan and the chip
-        // are separate columns of the row.
+        // The mark, the name and the plan stand on one line. Aligning them to the bottom of
+        // the row is not enough to get there: GTK aligns allocations, and a label's
+        // allocation ends at its font's descent line rather than at its baseline, so a mark
+        // flush with the row's bottom hangs below the word beside it by the depth of a "y".
+        // Each is lifted by the descent it does not use — see `align_to_baseline`.
         let mark = mark::image();
-        let named = gtk::Box::builder().spacing(6).build();
-        named.append(&mark);
-        named.append(&name);
+        mark.set_valign(gtk::Align::End);
+        name.set_valign(gtk::Align::End);
 
-        let title_row = gtk::Box::builder().spacing(8).build();
-        title_row.append(&named);
+        // The mark belongs to the name more tightly than the plan does, so the row is spaced
+        // at the tighter of the two and the plan makes up the difference. GTK margins cannot
+        // be negative, which is why it is this way round.
+        let title_row = gtk::Box::builder().spacing(MARK_GAP).build();
+        title_row.append(&mark);
+        title_row.append(&name);
         title_row.append(&plan);
         title_row.append(&chip);
+        plan.set_margin_start(TITLE_GAP - MARK_GAP);
+
+        align_to_baseline(&name, &mark, &plan);
 
         let headline = gtk::Label::builder()
             .halign(gtk::Align::Start)
@@ -143,7 +163,7 @@ impl Card {
             .halign(gtk::Align::Start)
             .valign(gtk::Align::End)
             .vexpand(true)
-            .css_classes(["dim-label", "caption"])
+            .css_classes(["caption", "quota-footer"])
             .build();
 
         let root = gtk::Box::builder()
@@ -331,6 +351,34 @@ impl Card {
     }
 }
 
+/// Puts the mark, the name and the plan on one baseline, once there is a resolved font to
+/// ask about — which is at map time, not at construction.
+///
+/// All three are bottom-aligned, so each one's *allocation* ends on the row's lower edge.
+/// What has to end there instead is the baseline, and each of them carries a different
+/// amount of nothing underneath it: the name its font's descent, the plan a smaller font's
+/// descent plus the padding its pill draws, and the mark none at all. So the line is put as
+/// deep as the deepest of them needs, and each is lifted by what it does not use.
+///
+/// GTK will not take a negative margin, which is why the line is chosen this way round
+/// rather than by lifting everything to the name.
+fn align_to_baseline(name: &gtk::Label, mark: &gtk::Image, plan: &gtk::Label) {
+    let mark = mark.clone();
+    let plan = plan.clone();
+    name.connect_map(move |name| {
+        let descent = |widget: &gtk::Label| {
+            widget.pango_context().metrics(None, None).descent() / gtk::pango::SCALE
+        };
+        let under_name = descent(name);
+        let under_plan = descent(&plan) + PILL_PADDING;
+        let line = under_name.max(under_plan);
+
+        name.set_margin_bottom(line - under_name);
+        plan.set_margin_bottom(line - under_plan);
+        mark.set_margin_bottom(line);
+    });
+}
+
 /// What to say on a card that has no numbers to show.
 ///
 /// The daemon's own explanation when it gave one — it knows why, and it is more specific
@@ -346,6 +394,17 @@ fn blank_message(status: &ProviderStatus) -> String {
 mod tests {
     use super::*;
     use tidemark_types::{AccountId, ProviderId, ProviderState};
+
+    #[test]
+    fn the_pill_padding_the_baseline_maths_assumes_is_the_one_the_stylesheet_draws() {
+        // `align_to_baseline` subtracts this from the plan's lift. If the stylesheet changes
+        // the pill's padding and this constant does not follow, the plan drifts off the
+        // name's baseline by the difference — a two-pixel bug nobody would look for here.
+        assert!(
+            crate::style::STYLE.contains(&format!("padding: {PILL_PADDING}px 9px")),
+            "the .quota-plan padding and PILL_PADDING have to agree"
+        );
+    }
 
     #[test]
     fn a_card_with_nothing_to_show_says_what_the_daemon_said() {

@@ -22,11 +22,13 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset. Each was reduced to a single-colour path set, cropped to its own bounding box and
-re-framed on a square grid so that the five read at the same optical size, and stripped of
-the fills, gradients, masks and filters the originals carry — a symbolic icon is recoloured
-by the theme and cannot keep them. The shapes themselves are unchanged; the outline of each
-mark is the owner's, path for path.
+asset. Each was reduced to a single-colour path set and stripped of the fills, gradients, masks
+and filters the originals carry — a symbolic icon is recoloured by the theme and cannot keep
+them. Each was then re-framed: its own bounding box measured, its longest side scaled to the
+same fraction of a square grid so that the five read at one optical size, and the box shifted
+so that the mark stands on the grid's floor rather than floating in its middle — which is
+what puts every mark's foot on the baseline of the name beside it. The shapes themselves are
+unchanged; the outline of each mark is the owner's, path for path.
 
 ## Redistributing
 

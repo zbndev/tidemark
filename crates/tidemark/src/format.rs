@@ -154,23 +154,16 @@ pub fn ago(seconds: i64) -> String {
 /// The line along the bottom of the card: when the reading was taken, and when the daemon
 /// intends to take the next one.
 ///
-/// `None` while there is nothing true to say — an account that has never been polled and
-/// has no scheduled poll either, which is what a status looks like in the moment between
-/// the daemon starting and its first attempt.
+/// When the next poll is due is deliberately not here. It is the daemon's schedule, not
+/// news about the account, and on a card that updates itself the countdown was one more
+/// number moving for no reason the reader has to act on.
+///
+/// `None` while there is nothing true to say — an account that has never been polled, which
+/// is what a status looks like between the daemon starting and its first attempt.
 pub fn footer(status: &ProviderStatus, now: Timestamp) -> Option<String> {
-    let taken = status
+    status
         .captured_at
-        .map(|at| format!("checked {}", ago(now.as_unix() - at)));
-    let next = status.next_poll_at.map(|at| match at - now.as_unix() {
-        seconds if seconds <= 0 => "checking again now".to_owned(),
-        seconds => format!("next in {}", duration(seconds)),
-    });
-
-    match (taken, next) {
-        (Some(taken), Some(next)) => Some(format!("{taken} · {next}")),
-        (Some(only), None) | (None, Some(only)) => Some(only),
-        (None, None) => None,
-    }
+        .map(|at| format!("checked {}", ago(now.as_unix() - at)))
 }
 
 fn plural(count: i64, unit: &str) -> String {
@@ -274,22 +267,15 @@ mod tests {
         let mut status = status();
         assert_eq!(footer(&status, now), None, "nothing known, nothing claimed");
 
+        // A scheduled poll is not a reading, and the footer is about the reading.
         status.next_poll_at = Some(now.as_unix() + 120);
-        assert_eq!(footer(&status, now).as_deref(), Some("next in 2 min"));
+        assert_eq!(footer(&status, now), None, "a schedule is not news");
 
         status.captured_at = Some(now.as_unix() - 600);
         assert_eq!(
             footer(&status, now).as_deref(),
-            Some("checked 10 minutes ago · next in 2 min")
+            Some("checked 10 minutes ago")
         );
-    }
-
-    #[test]
-    fn a_poll_that_is_already_due_does_not_read_as_the_past() {
-        let now = Timestamp::from_unix(1_785_700_000).expect("plausible");
-        let mut status = status();
-        status.next_poll_at = Some(now.as_unix() - 30);
-        assert_eq!(footer(&status, now).as_deref(), Some("checking again now"));
     }
 
     #[test]
