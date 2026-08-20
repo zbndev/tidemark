@@ -52,6 +52,18 @@ package() {
     # The unit's ExecStart is /usr/bin/tidemarkd, which is where the line above puts it.
     install -Dm644 data/tidemarkd.service "$pkgdir/usr/lib/systemd/user/tidemarkd.service"
 
+    # The provider marks. They are recoloured by the theme only because GTK finds them
+    # through the icon theme as symbolic icons, which is what putting them in hicolor buys;
+    # loaded any other way they would keep the colours in the file.
+    #
+    # These five files are their owners' trademarks and are *not* under this package's
+    # licence, so TRADEMARKS.md is installed next to LICENSE where a reader checking what
+    # the licence covers will see it. A rebuild that drops both of these lines is a
+    # supported configuration: a card with no mark is a state the interface already has.
+    install -Dm644 -t "$pkgdir/usr/share/icons/hicolor/symbolic/apps" \
+        data/icons/hicolor/symbolic/apps/*.svg
+    install -Dm644 docs/TRADEMARKS.md "$pkgdir/usr/share/licenses/$pkgname/TRADEMARKS.md"
+
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

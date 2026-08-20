@@ -49,7 +49,7 @@ makepkg -sif    # -f: the version does not change between builds, so force the r
 systemctl --user enable --now tidemarkd.service
 ```
 
-It installs `tidemark`, `tidemarkd` and the systemd user unit. `options=(!lto)` is
+It installs `tidemark`, `tidemarkd`, the systemd user unit and the provider marks. `options=(!lto)` is
 required, not preferred: rustls's default provider vendors C and assembly through
 `aws-lc-sys`, and objects built with GCC's LTO cannot be linked by `rust-lld`.
 
@@ -93,11 +93,24 @@ appear on the bus, and picks up again by itself when the daemon is restarted.
 tidemark                 # or: cargo run -p tidemark
 ```
 
-Each account is a card: the shortest window it reported as a large number over a bar, the
-remaining windows as thin rows, and a mark on the bar showing how much of the window has
-elapsed — fill to the left of the mark finishes before the window resets, fill to the right
+Each account is a card: the provider's own mark and name, the shortest window it reported
+as a large number over a bar, the
+remaining windows as thin rows, and a pace mark on the bar showing how much of the window
+has elapsed — fill to the left of the mark finishes before the window resets, fill to the right
 does not. A window the provider did not report is not drawn, and a bar with no mark means
 the provider gave no reset time; neither is an error.
+
+The provider marks are symbolic icons installed into `hicolor`, which is how they take the
+theme's colour instead of the colours in the files. Running uninstalled, point GTK at the
+source tree — the layout under `data/icons` is the installed one:
+
+```sh
+XDG_DATA_DIRS="$PWD/data:$XDG_DATA_DIRS" cargo run -p tidemark
+```
+
+They are their owners' trademarks and are not covered by this project's licence; see
+[`docs/TRADEMARKS.md`](docs/TRADEMARKS.md), which also says what to drop to build without
+them. A card with no mark is a state the interface already has.
 
 Looking at more than one card without configuring more than one account:
 
@@ -121,4 +134,5 @@ popup and is not a model for this one.
 
 ## License
 
-MIT
+MIT — except the provider marks under `data/icons`, which are their owners' trademarks.
+See [`docs/TRADEMARKS.md`](docs/TRADEMARKS.md).

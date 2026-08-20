@@ -1,9 +1,9 @@
 //! One account, as a card.
 //!
-//! The shape is the one in `CONTEXT.md` § Interface: name, plan and state chip along the
-//! top; the shortest present window as a large number over a bar with a pace mark; the
-//! remaining windows as thin rows; and a line along the bottom saying when the reading was
-//! taken and when the next one is due.
+//! The shape is the one in `CONTEXT.md` § Interface: the provider's mark, name, plan and
+//! state chip along the top; the shortest present window as a large number over a bar with
+//! a pace mark; the remaining windows as thin rows; and a line along the bottom saying when
+//! the reading was taken and when the next one is due.
 //!
 //! Two rules are structural here rather than remembered.
 //!
@@ -22,6 +22,7 @@ use tidemark_types::{ProviderStatus, Timestamp, Window, provider_label};
 
 use crate::bar::QuotaBar;
 use crate::format;
+use crate::mark;
 use crate::model;
 
 /// Height of the bar under the headline number.
@@ -46,6 +47,7 @@ struct Shown {
 #[derive(Debug)]
 pub struct Card {
     holder: gtk::FlowBoxChild,
+    mark: gtk::Image,
     name: gtk::Label,
     plan: gtk::Label,
     chip: gtk::Label,
@@ -77,8 +79,15 @@ impl Card {
             .css_classes(["caption", "quota-chip"])
             .build();
 
+        // The mark and the name are one thing and are spaced as one; the plan and the chip
+        // are separate columns of the row.
+        let mark = mark::image();
+        let named = gtk::Box::builder().spacing(6).build();
+        named.append(&mark);
+        named.append(&name);
+
         let title_row = gtk::Box::builder().spacing(8).build();
-        title_row.append(&name);
+        title_row.append(&named);
         title_row.append(&plan);
         title_row.append(&chip);
 
@@ -160,6 +169,7 @@ impl Card {
 
         let card = Self {
             holder,
+            mark,
             name,
             plan,
             chip,
@@ -192,6 +202,7 @@ impl Card {
 
     /// Shows a new status for the same account.
     pub fn apply(&self, status: &ProviderStatus, now: Timestamp) {
+        mark::set(&self.mark, &status.provider);
         self.name.set_label(&provider_label(&status.provider));
 
         match status.plan() {
