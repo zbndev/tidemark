@@ -86,6 +86,29 @@ pub struct LockedCredentialFile {
     target_lock: File,
 }
 
+/// Where a field lives in a credential document.
+///
+/// Two of the five providers keep part of the credential state outside the token subtree:
+/// Codex's `last_refresh` sits at the document root beside `tokens`. Both addresses go
+/// through one guarded publish, because a rotation that landed as two writes could be
+/// interrupted between them and leave the file describing itself wrongly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field<'a> {
+    /// A field of the document root, beside the token subtree.
+    Root(&'a str),
+    /// A field inside the guarded token subtree.
+    Subtree(&'a str),
+}
+
+impl<'a> Field<'a> {
+    /// The field's own name, whichever object it lives in.
+    pub fn name(self) -> &'a str {
+        match self {
+            Self::Root(name) | Self::Subtree(name) => name,
+        }
+    }
+}
+
 /// Whether a guarded update was published or a concurrent token owner won the race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateOutcome {
@@ -106,16 +129,13 @@ impl LockedCredentialFile {
     pub fn preflight_unique_fields(
         &self,
         key: &str,
-        fields: &[&str],
+        fields: &[Field<'_>],
     ) -> Result<(), CredentialFileError> {
         let bytes = fs::read(&self.path)?;
         let _: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let object = top_level_value_span(&bytes, key)?;
-        if bytes.get(object.start) != Some(&b'{') {
-            return Err(CredentialFileError::SubtreeNotObject);
-        }
         for field in fields {
-            let _ = object_field_value_span(&bytes, object.clone(), field)?;
+            let object = enclosing_object_span(&bytes, key, *field)?;
+            let _ = object_field_value_span(&bytes, object, field.name())?;
         }
         Ok(())
     }
@@ -129,7 +149,7 @@ impl LockedCredentialFile {
         &self,
         key: &str,
         expected: (&str, &str),
-        updates: &[(&str, serde_json::Value)],
+        updates: &[(Field<'_>, serde_json::Value)],
     ) -> Result<UpdateOutcome, CredentialFileError> {
         if self.path != self.canonical {
             return Err(CredentialFileError::NotCanonical {
@@ -169,7 +189,7 @@ impl LockedCredentialFile {
 
         let mut updated = original;
         for (field, value) in updates {
-            update_object_field(&mut updated, key, field, value)?;
+            update_field(&mut updated, key, *field, value)?;
         }
         atomic_private_publish(&self.path, &updated, || {
             if let Some(vendor_lock) = _vendor_lock.as_ref() {
@@ -303,16 +323,40 @@ fn top_level_value_span(bytes: &[u8], wanted: &str) -> Result<Range<usize>, Cred
     }
 }
 
-fn update_object_field(
+/// The span of the object a field lives in: the document root, or the token subtree.
+fn enclosing_object_span(
+    bytes: &[u8],
+    top_level_key: &str,
+    field: Field<'_>,
+) -> Result<Range<usize>, CredentialFileError> {
+    let object = match field {
+        Field::Root(_) => {
+            let mut cursor = 0;
+            skip_whitespace(bytes, &mut cursor);
+            if bytes.get(cursor) != Some(&b'{') {
+                return Err(CredentialFileError::RootNotObject);
+            }
+            cursor..skip_value(bytes, cursor)?
+        }
+        Field::Subtree(_) => {
+            let object = top_level_value_span(bytes, top_level_key)?;
+            if bytes.get(object.start) != Some(&b'{') {
+                return Err(CredentialFileError::SubtreeNotObject);
+            }
+            object
+        }
+    };
+    Ok(object)
+}
+
+fn update_field(
     bytes: &mut Vec<u8>,
     top_level_key: &str,
-    field: &str,
+    field: Field<'_>,
     value: &serde_json::Value,
 ) -> Result<(), CredentialFileError> {
-    let object = top_level_value_span(bytes, top_level_key)?;
-    if bytes.get(object.start) != Some(&b'{') {
-        return Err(CredentialFileError::SubtreeNotObject);
-    }
+    let object = enclosing_object_span(bytes, top_level_key, field)?;
+    let field = field.name();
     let replacement = serde_json::to_vec(value)?;
     if let Some(span) = object_field_value_span(bytes, object.clone(), field)? {
         bytes.splice(span, replacement);

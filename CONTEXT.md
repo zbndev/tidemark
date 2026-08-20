@@ -72,11 +72,12 @@ cookies — a deliberate scope boundary, not a coincidence.
 | Kimi | `GET https://api.kimi.com/coding/v1/usages` | user-supplied key from Kimi Code Console |
 | Antigravity | local HTTPS server of the `agy` CLI, `RetrieveUserQuotaSummary` | `agy` session |
 
-Codex maps `rate_limit.primary_window` / `secondary_window` to the session and weekly
-lanes, plus named `additional_rate_limits[]`. Antigravity reports two model groups
-(Gemini, Claude+GPT) × two windows. "OpenAI" here means the ChatGPT/Codex subscription,
-not the API Platform billing dashboard — the latter has spend, not reset windows, and
-does not fit this model.
+Codex reports `rate_limit.primary_window` / `secondary_window` — slots rather than lanes,
+each declaring its own length — plus a `code_review_rate_limit` of the same shape and named
+`additional_rate_limits[]`. The three are separate pools, not lengths of one.
+Antigravity reports two model groups (Gemini, Claude+GPT) × two windows. "OpenAI" here
+means the ChatGPT/Codex subscription, not the API Platform billing dashboard — the latter
+has spend, not reset windows, and does not fit this model.
 
 Providers are a plugin point: adding one is a new implementation of the provider trait
 plus registration, not a refactor.

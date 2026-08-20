@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs4::fs_std::FileExt;
 use serde_json::json;
-use tidemark_core::oauth_file::{CredentialFile, CredentialFileError, UpdateOutcome};
+use tidemark_core::oauth_file::{CredentialFile, CredentialFileError, Field, UpdateOutcome};
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -59,11 +59,11 @@ fn replacing_the_token_subtree_preserves_every_unrelated_value() {
     });
 
     let locked = file.lock().expect("lock acquired");
-    let updates: Vec<(&str, serde_json::Value)> = replacement
+    let updates: Vec<(Field<'_>, serde_json::Value)> = replacement
         .as_object()
         .expect("replacement object")
         .iter()
-        .map(|(key, value)| (key.as_str(), value.clone()))
+        .map(|(key, value)| (Field::Subtree(key.as_str()), value.clone()))
         .collect();
     let outcome = locked
         .update_top_level(
@@ -108,7 +108,7 @@ fn a_discovered_noncanonical_copy_is_readable_but_never_writable() {
         locked.update_top_level(
             "claudeAiOauth",
             ("refreshToken", "fixture-old-refresh"),
-            &[("accessToken", json!("must-not-land"))]
+            &[(Field::Subtree("accessToken"), json!("must-not-land"))]
         ),
         Err(CredentialFileError::NotCanonical { .. })
     ));
@@ -167,8 +167,11 @@ fn a_concurrent_token_rotation_is_never_overwritten() {
             "claudeAiOauth",
             ("refreshToken", "fixture-old-refresh"),
             &[
-                ("accessToken", json!("tidemark-new-access")),
-                ("refreshToken", json!("tidemark-new-refresh")),
+                (Field::Subtree("accessToken"), json!("tidemark-new-access")),
+                (
+                    Field::Subtree("refreshToken"),
+                    json!("tidemark-new-refresh"),
+                ),
             ],
         )
         .expect("race is handled, not an I/O failure");
@@ -193,7 +196,7 @@ fn bytes_outside_the_replaced_subtree_are_unchanged() {
             .update_top_level(
                 "claudeAiOauth",
                 ("refreshToken", "old-refresh"),
-                &[("accessToken", json!("new"))],
+                &[(Field::Subtree("accessToken"), json!("new"))],
             )
             .expect("publish"),
         UpdateOutcome::Published
@@ -219,7 +222,7 @@ fn a_missing_expiry_field_is_appended_without_reformatting_existing_fields() {
             .update_top_level(
                 "claudeAiOauth",
                 ("refreshToken", "refresh"),
-                &[("expiresAt", json!(123_i64))],
+                &[(Field::Subtree("expiresAt"), json!(123_i64))],
             )
             .expect("publish"),
         UpdateOutcome::Published
@@ -267,7 +270,7 @@ fn the_vendor_write_lock_serializes_the_cas_and_publish_window() {
         locked.update_top_level(
             "claudeAiOauth",
             ("refreshToken", "fixture-old-refresh"),
-            &[("accessToken", json!("must-not-land"))],
+            &[(Field::Subtree("accessToken"), json!("must-not-land"))],
         ),
         Err(CredentialFileError::Contended)
     ));
@@ -277,7 +280,7 @@ fn the_vendor_write_lock_serializes_the_cas_and_publish_window() {
             .update_top_level(
                 "claudeAiOauth",
                 ("refreshToken", "fixture-old-refresh"),
-                &[("accessToken", json!("published"))],
+                &[(Field::Subtree("accessToken"), json!("published"))],
             )
             .expect("publish after lock release"),
         UpdateOutcome::Published
@@ -298,7 +301,13 @@ fn duplicate_oauth_keys_are_rejected_before_exchange() {
     let locked = file.lock().expect("lock acquired");
 
     assert!(matches!(
-        locked.preflight_unique_fields("claudeAiOauth", &["accessToken", "refreshToken"]),
+        locked.preflight_unique_fields(
+            "claudeAiOauth",
+            &[
+                Field::Subtree("accessToken"),
+                Field::Subtree("refreshToken")
+            ]
+        ),
         Err(CredentialFileError::DuplicateField(_))
     ));
 }
@@ -313,4 +322,83 @@ fn a_symlink_target_is_never_followed() {
     let file = CredentialFile::new(linked.clone(), linked);
 
     assert!(file.lock().is_err(), "O_NOFOLLOW must reject the target");
+}
+
+#[test]
+fn a_field_beside_the_token_subtree_is_updated_in_the_same_publish() {
+    // Codex keeps `last_refresh` at the document root while its tokens live under
+    // `tokens`. Writing new tokens and leaving that timestamp stale would misdescribe
+    // bytes we had just replaced.
+    let dir = TestDir::new();
+    let path = dir.join("auth.json");
+    let original = b"{\n  \"tokens\": {\"access_token\": \"old\", \"refresh_token\": \"old-refresh\"},\n  \"last_refresh\": \"2026-08-20T19:45:13Z\"\n}\n";
+    fs::write(&path, original).expect("fixture written");
+    let file = CredentialFile::new(path.clone(), path.clone());
+    let locked = file.lock().expect("lock acquired");
+
+    assert_eq!(
+        locked
+            .update_top_level(
+                "tokens",
+                ("refresh_token", "old-refresh"),
+                &[
+                    (Field::Subtree("access_token"), json!("new")),
+                    (Field::Root("last_refresh"), json!("2026-08-21T06:00:00Z")),
+                ],
+            )
+            .expect("publish"),
+        UpdateOutcome::Published
+    );
+
+    assert_eq!(
+        fs::read(path).expect("updated bytes"),
+        b"{\n  \"tokens\": {\"access_token\": \"new\", \"refresh_token\": \"old-refresh\"},\n  \"last_refresh\": \"2026-08-21T06:00:00Z\"\n}\n"
+    );
+}
+
+#[test]
+fn a_root_field_the_vendor_has_never_written_is_appended_rather_than_refused() {
+    let dir = TestDir::new();
+    let path = dir.join("auth.json");
+    fs::write(
+        &path,
+        b"{\"tokens\":{\"access_token\":\"old\",\"refresh_token\":\"old-refresh\"}}\n",
+    )
+    .expect("fixture written");
+    let file = CredentialFile::new(path.clone(), path.clone());
+    let locked = file.lock().expect("lock acquired");
+
+    locked
+        .update_top_level(
+            "tokens",
+            ("refresh_token", "old-refresh"),
+            &[(Field::Root("last_refresh"), json!("2026-08-21T06:00:00Z"))],
+        )
+        .expect("publish");
+
+    assert_eq!(
+        fs::read(path).expect("updated bytes"),
+        b"{\"tokens\":{\"access_token\":\"old\",\"refresh_token\":\"old-refresh\"},\"last_refresh\":\"2026-08-21T06:00:00Z\"}\n"
+    );
+}
+
+#[test]
+fn a_duplicate_root_field_is_refused_before_the_exchange_begins() {
+    let dir = TestDir::new();
+    let path = dir.join("auth.json");
+    fs::write(
+        &path,
+        b"{\"tokens\":{\"access_token\":\"old\",\"refresh_token\":\"r\"},\"last_refresh\":\"a\",\"last_refresh\":\"b\"}\n",
+    )
+    .expect("fixture written");
+    let file = CredentialFile::new(path.clone(), path.clone());
+    let locked = file.lock().expect("lock acquired");
+
+    assert!(matches!(
+        locked.preflight_unique_fields(
+            "tokens",
+            &[Field::Subtree("access_token"), Field::Root("last_refresh")],
+        ),
+        Err(CredentialFileError::DuplicateField(_))
+    ));
 }

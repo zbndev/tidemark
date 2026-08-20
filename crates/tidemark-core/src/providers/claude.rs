@@ -1,7 +1,9 @@
 //! Claude subscription quota over the OAuth credentials owned by Claude Code.
 
 use super::{BoxFuture, Credential, Provider, ProviderError, http};
-use crate::oauth_file::{CredentialFile, CredentialFileError, LockedCredentialFile, UpdateOutcome};
+use crate::oauth_file::{
+    CredentialFile, CredentialFileError, Field, LockedCredentialFile, UpdateOutcome,
+};
 use serde::Deserialize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -120,10 +122,10 @@ impl Claude {
             .preflight_unique_fields(
                 "claudeAiOauth",
                 &[
-                    "accessToken",
-                    "refreshToken",
-                    "expiresAt",
-                    "refreshTokenExpiresAt",
+                    Field::Subtree("accessToken"),
+                    Field::Subtree("refreshToken"),
+                    Field::Subtree("expiresAt"),
+                    Field::Subtree("refreshTokenExpiresAt"),
                 ],
             )
             .map_err(map_file_error)?;
@@ -502,18 +504,21 @@ impl ClaudeCredentials {
 fn refreshed_fields(
     response: RefreshResponse,
     now_ms: i64,
-) -> [(&'static str, serde_json::Value); 4] {
+) -> [(Field<'static>, serde_json::Value); 4] {
     [
-        ("accessToken", response.access_token.into()),
-        ("refreshToken", response.refresh_token.into()),
+        (Field::Subtree("accessToken"), response.access_token.into()),
         (
-            "expiresAt",
+            Field::Subtree("refreshToken"),
+            response.refresh_token.into(),
+        ),
+        (
+            Field::Subtree("expiresAt"),
             now_ms
                 .saturating_add(response.expires_in.saturating_mul(1_000))
                 .into(),
         ),
         (
-            "refreshTokenExpiresAt",
+            Field::Subtree("refreshTokenExpiresAt"),
             now_ms
                 .saturating_add(response.refresh_token_expires_in.saturating_mul(1_000))
                 .into(),
@@ -690,7 +695,7 @@ mod tests {
         let fields = refreshed_fields(response, 1_787_100_000_000);
         let fields: serde_json::Map<String, serde_json::Value> = fields
             .into_iter()
-            .map(|(key, value)| (key.to_owned(), value))
+            .map(|(field, value)| (field.name().to_owned(), value))
             .collect();
         assert_eq!(fields["accessToken"], "new-access");
         assert_eq!(fields["refreshToken"], "new-refresh");

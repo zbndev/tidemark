@@ -24,6 +24,7 @@
 //! not exist when this was written, not a failure to understand one that did.
 
 pub mod claude;
+pub mod codex;
 pub mod http;
 pub mod zai;
 
