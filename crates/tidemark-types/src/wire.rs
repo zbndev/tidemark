@@ -1,0 +1,414 @@
+//! What the daemon publishes on D-Bus, and what its clients read.
+//!
+//! # Why these are not the domain types
+//!
+//! [`Snapshot`] answers "what did the provider say". A client needs one more thing: *why
+//! there is no snapshot* — no key stored yet, keyring still locked, the provider rejected
+//! the credential, a 429. Those are states of the account, not readings of it, so the
+//! published shape is a [`ProviderStatus`] that carries a [`ProviderState`] and, when
+//! there is one, the last good reading underneath it.
+//!
+//! # Why dictionaries and not structs
+//!
+//! Every wire struct here encodes as `a{sv}`. That buys two things a fixed D-Bus struct
+//! signature cannot:
+//!
+//! * **Absent means absent.** D-Bus has no optional field, so a fixed struct would have to
+//!   put a sentinel — `0`, `-1` — where a provider said nothing. This project has one rule
+//!   it will not bend: a window with no reset time is normal, and inventing a value to fill
+//!   the slot puts a confident wrong number in front of the user. A missing dictionary key
+//!   cannot be mistaken for a real one.
+//! * **Adding a field is not a breaking change.** The interface is designed as if a CLI and
+//!   a Waybar module were already consuming it. They will be built against whatever exists
+//!   when they are written, and a new key must not stop them parsing.
+//!
+//! The same derives give serde a map, so `tidemark usage --json` is the same struct
+//! serialized to JSON rather than a second definition to keep in step.
+
+use crate::snapshot::{AccountId, DetailSection, ProviderId, Snapshot};
+use crate::time::Timestamp;
+use crate::window::{Window, WindowKey, WindowLength};
+use zvariant::{DeserializeDict, SerializeDict, Type};
+
+/// What is currently true of one account.
+///
+/// The variants exist to be acted on. The interface collapses them into three groups by
+/// what the user must do — see [`ProviderState::remedy`] — but the daemon keeps them apart,
+/// because "no key saved" and "the key was rejected" are one dialog away from each other
+/// and a log that cannot tell them apart is useless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderState {
+    /// Configured, but nothing has come back yet. The state at startup.
+    Pending,
+    /// The last poll produced a snapshot.
+    Ok,
+    /// No credential is stored for this account.
+    NoCredential,
+    /// The Secret Service is running and locked. Not a failure: the user unlocks the
+    /// keyring in their own time, and the daemon keeps asking. See `tidemark_core::secrets`.
+    WaitingForKeyring,
+    /// No Secret Service answered at all.
+    KeyringUnavailable,
+    /// The provider rejected the credential.
+    CredentialRejected,
+    /// The provider asked us to slow down.
+    RateLimited,
+    /// The request did not complete, or the provider answered with a server error.
+    Unreachable,
+    /// The response arrived and did not mean what we expect it to mean.
+    Malformed,
+}
+
+/// What the user can do about a state. `CONTEXT.md` § Interface: failure states are
+/// distinguished in the data and collapsed in the interface into these groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Remedy {
+    /// Nothing is wrong.
+    Nothing,
+    /// The user must act: store a key, replace a rejected one, run a keyring.
+    YouFixIt,
+    /// Waiting is the correct response: a rate limit expires, a network returns, a
+    /// keyring gets unlocked at login.
+    ItFixesItself,
+    /// The provider changed something under us. Only a new release fixes it.
+    TheyBrokeIt,
+}
+
+impl ProviderState {
+    /// The string this state travels as. Stable: it is matched by clients and appears in
+    /// `busctl` output.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Ok => "ok",
+            Self::NoCredential => "no-credential",
+            Self::WaitingForKeyring => "waiting-for-keyring",
+            Self::KeyringUnavailable => "keyring-unavailable",
+            Self::CredentialRejected => "credential-rejected",
+            Self::RateLimited => "rate-limited",
+            Self::Unreachable => "unreachable",
+            Self::Malformed => "malformed",
+        }
+    }
+
+    /// Parses a state off the wire. `None` for anything this build does not know, which a
+    /// client should show as an unexplained problem rather than as health.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        [
+            Self::Pending,
+            Self::Ok,
+            Self::NoCredential,
+            Self::WaitingForKeyring,
+            Self::KeyringUnavailable,
+            Self::CredentialRejected,
+            Self::RateLimited,
+            Self::Unreachable,
+            Self::Malformed,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.as_wire() == value)
+    }
+
+    /// Which of the three groups the interface shows this as.
+    pub const fn remedy(self) -> Remedy {
+        match self {
+            Self::Ok | Self::Pending => Remedy::Nothing,
+            Self::NoCredential | Self::KeyringUnavailable | Self::CredentialRejected => {
+                Remedy::YouFixIt
+            }
+            Self::WaitingForKeyring | Self::RateLimited | Self::Unreachable => {
+                Remedy::ItFixesItself
+            }
+            Self::Malformed => Remedy::TheyBrokeIt,
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire())
+    }
+}
+
+/// One rate-limit window as published.
+///
+/// `resets_at` and `length_secs` are absent from the encoded dictionary when the provider
+/// did not say — see the module docs. A client that wants a pace mark rebuilds the domain
+/// [`Window`] with [`WindowStatus::to_window`] and asks it.
+#[derive(Debug, Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct WindowStatus {
+    /// Stable identity, derived from the window's length rather than its position in the
+    /// provider's response. See [`WindowKey`].
+    pub key: String,
+    /// What to call it, in the provider's own terms.
+    pub title: String,
+    /// Consumption, 0..=100.
+    pub used_percent: f64,
+    /// Unix seconds of the next rollover, when the provider said.
+    pub resets_at: Option<i64>,
+    /// Window length in seconds, when the provider said or it could be derived.
+    pub length_secs: Option<u64>,
+}
+
+impl WindowStatus {
+    /// Publishes a domain window.
+    pub fn from_window(window: &Window) -> Self {
+        Self {
+            key: window.key.to_string(),
+            title: window.title.clone(),
+            used_percent: window.used_percent,
+            resets_at: window.resets_at.map(Timestamp::as_unix),
+            length_secs: window.length.map(WindowLength::as_secs),
+        }
+    }
+
+    /// Rebuilds the domain window, so a client gets [`Window::pace`] rather than
+    /// reimplementing it.
+    ///
+    /// A `resets_at` that fails [`Timestamp::from_unix`] is dropped rather than refused:
+    /// the rest of the window is still worth drawing, and the pace mark simply does not
+    /// appear — which is a state the interface already has to render.
+    pub fn to_window(&self) -> Window {
+        Window {
+            key: WindowKey::named(&self.key),
+            title: self.title.clone(),
+            used_percent: self.used_percent,
+            resets_at: self.resets_at.and_then(|s| Timestamp::from_unix(s).ok()),
+            length: self.length_secs.and_then(WindowLength::from_secs),
+        }
+    }
+}
+
+/// Everything the daemon currently knows about one account.
+#[derive(Debug, Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct ProviderStatus {
+    /// Provider slug.
+    pub provider: String,
+    /// Account slug.
+    pub account: String,
+    /// A [`ProviderState`] as a string.
+    pub state: String,
+    /// Human-readable detail for a state that is not `ok`. Absent when there is nothing
+    /// to add beyond the state itself.
+    pub message: Option<String>,
+    /// When the reading below was taken. Absent while the account has never been polled
+    /// successfully — a status can carry a state and no reading at all.
+    pub captured_at: Option<i64>,
+    /// When the daemon intends to poll next, so a client can say "in 4 minutes" without
+    /// having to model the scheduler.
+    pub next_poll_at: Option<i64>,
+    /// The windows of the last good reading. **These survive a failed poll**: a card that
+    /// blanked every time a request timed out would be less informative than one showing
+    /// the last known numbers next to a state chip.
+    pub windows: Vec<WindowStatus>,
+    /// Everything from the last good reading that does not fit the window model.
+    pub details: Vec<DetailSection>,
+}
+
+impl ProviderStatus {
+    /// A configured account nothing has been heard from yet.
+    pub fn pending(provider: &ProviderId, account: &AccountId) -> Self {
+        Self {
+            provider: provider.to_string(),
+            account: account.to_string(),
+            state: ProviderState::Pending.as_wire().to_owned(),
+            message: None,
+            captured_at: None,
+            next_poll_at: None,
+            windows: Vec::new(),
+            details: Vec::new(),
+        }
+    }
+
+    /// The state, or `None` if this build does not know the string a newer daemon sent.
+    pub fn state(&self) -> Option<ProviderState> {
+        ProviderState::from_wire(&self.state)
+    }
+
+    /// Replaces the state and its explanation, leaving the last good reading in place.
+    pub fn set_state(&mut self, state: ProviderState, message: Option<String>) {
+        self.state = state.as_wire().to_owned();
+        self.message = message;
+    }
+
+    /// Replaces the reading, and sets the state to [`ProviderState::Ok`].
+    pub fn set_reading(&mut self, snapshot: &Snapshot) {
+        self.captured_at = Some(snapshot.captured_at.as_unix());
+        self.windows = snapshot
+            .windows
+            .iter()
+            .map(WindowStatus::from_window)
+            .collect();
+        self.details = snapshot.details.clone();
+        self.set_state(ProviderState::Ok, None);
+    }
+
+    /// The reading as a domain [`Snapshot`], or `None` when there has never been one.
+    pub fn to_snapshot(&self) -> Option<Snapshot> {
+        let captured_at = Timestamp::from_unix(self.captured_at?).ok()?;
+        Some(Snapshot {
+            provider: ProviderId::new(self.provider.clone()),
+            account: AccountId::new(self.account.clone()),
+            captured_at,
+            windows: self.windows.iter().map(WindowStatus::to_window).collect(),
+            details: self.details.clone(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot::DetailRow;
+    use std::collections::HashMap;
+    use zvariant::serialized::{Context, Data};
+    use zvariant::{LE, OwnedValue, to_bytes};
+
+    fn window(resets_at: Option<i64>) -> Window {
+        Window {
+            key: WindowKey::named("w18000"),
+            title: "5 hours".into(),
+            used_percent: 42.5,
+            resets_at: resets_at.map(|s| Timestamp::from_unix(s).expect("plausible")),
+            length: WindowLength::from_secs(18_000),
+        }
+    }
+
+    fn status() -> ProviderStatus {
+        let mut status = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::default());
+        status.set_reading(&Snapshot {
+            provider: ProviderId::new("zai"),
+            account: AccountId::default(),
+            captured_at: Timestamp::from_unix(1_785_700_000).expect("plausible"),
+            windows: vec![window(Some(1_785_717_000)), window(None)],
+            details: vec![DetailSection {
+                title: "Plan".into(),
+                rows: vec![DetailRow {
+                    label: "Level".into(),
+                    value: "pro".into(),
+                }],
+            }],
+        });
+        status.next_poll_at = Some(1_785_700_300);
+        status
+    }
+
+    fn encode(status: &ProviderStatus) -> Data<'static, 'static> {
+        to_bytes(Context::new_dbus(LE, 0), status).expect("the published shape encodes")
+    }
+
+    #[test]
+    fn a_status_survives_the_bus() {
+        let original = status();
+        let (decoded, _): (ProviderStatus, _) =
+            encode(&original).deserialize().expect("decodes again");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn a_window_the_provider_said_nothing_about_carries_no_key_at_all() {
+        // The rule this whole encoding exists for: absent must not arrive as zero.
+        let encoded = to_bytes(
+            Context::new_dbus(LE, 0),
+            &WindowStatus::from_window(&window(None)),
+        )
+        .expect("encodes");
+        let (dict, _): (HashMap<String, OwnedValue>, _) = encoded.deserialize().expect("decodes");
+        assert!(dict.contains_key("used_percent"));
+        assert!(
+            !dict.contains_key("resets_at"),
+            "a missing reset time must be missing, not zero: {:?}",
+            dict.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_client_gets_the_pace_mark_back_rather_than_reimplementing_it() {
+        let now = Timestamp::from_unix(1_785_700_000).expect("plausible");
+        let published = WindowStatus::from_window(&window(Some(1_785_704_500)));
+        let rebuilt = published.to_window();
+        assert_eq!(rebuilt.pace(now), window(Some(1_785_704_500)).pace(now));
+        assert!(rebuilt.pace(now).is_some());
+    }
+
+    #[test]
+    fn a_window_with_no_reset_time_has_no_pace_mark_after_a_round_trip() {
+        let now = Timestamp::from_unix(1_785_700_000).expect("plausible");
+        assert_eq!(
+            WindowStatus::from_window(&window(None))
+                .to_window()
+                .pace(now),
+            None
+        );
+    }
+
+    #[test]
+    fn every_state_survives_its_own_string() {
+        for state in [
+            ProviderState::Pending,
+            ProviderState::Ok,
+            ProviderState::NoCredential,
+            ProviderState::WaitingForKeyring,
+            ProviderState::KeyringUnavailable,
+            ProviderState::CredentialRejected,
+            ProviderState::RateLimited,
+            ProviderState::Unreachable,
+            ProviderState::Malformed,
+        ] {
+            assert_eq!(ProviderState::from_wire(state.as_wire()), Some(state));
+        }
+    }
+
+    #[test]
+    fn a_state_from_a_newer_daemon_is_unknown_rather_than_healthy() {
+        assert_eq!(ProviderState::from_wire("quota-frozen"), None);
+    }
+
+    #[test]
+    fn the_three_groups_the_interface_shows() {
+        assert_eq!(ProviderState::NoCredential.remedy(), Remedy::YouFixIt);
+        assert_eq!(ProviderState::CredentialRejected.remedy(), Remedy::YouFixIt);
+        assert_eq!(ProviderState::RateLimited.remedy(), Remedy::ItFixesItself);
+        assert_eq!(
+            ProviderState::WaitingForKeyring.remedy(),
+            Remedy::ItFixesItself,
+            "a locked keyring is waited out, not reported as the user's mistake"
+        );
+        assert_eq!(ProviderState::Malformed.remedy(), Remedy::TheyBrokeIt);
+        assert_eq!(ProviderState::Ok.remedy(), Remedy::Nothing);
+    }
+
+    #[test]
+    fn a_failed_poll_keeps_the_last_good_reading_on_screen() {
+        let mut status = status();
+        status.set_state(ProviderState::Unreachable, Some("timed out".into()));
+        assert_eq!(
+            status.windows.len(),
+            2,
+            "the numbers stay while the state changes"
+        );
+        assert_eq!(status.captured_at, Some(1_785_700_000));
+        assert_eq!(status.state(), Some(ProviderState::Unreachable));
+    }
+
+    #[test]
+    fn an_account_never_polled_has_no_reading_to_offer() {
+        let pending = ProviderStatus::pending(&ProviderId::new("kimi"), &AccountId::default());
+        assert!(pending.to_snapshot().is_none());
+        assert_eq!(pending.state(), Some(ProviderState::Pending));
+    }
+
+    #[test]
+    fn a_reading_round_trips_back_into_the_domain() {
+        let status = status();
+        let snapshot = status.to_snapshot().expect("there is a reading");
+        assert_eq!(snapshot.provider.as_str(), "zai");
+        assert_eq!(snapshot.windows.len(), 2);
+        assert_eq!(
+            snapshot.dominant_window().expect("present").length,
+            WindowLength::from_secs(18_000)
+        );
+    }
+}

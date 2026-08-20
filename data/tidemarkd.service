@@ -1,0 +1,30 @@
+[Unit]
+Description=Tidemark quota daemon
+Documentation=https://github.com/zbndev/tidemark
+
+# Ordering only, not a dependency. The Secret Service holding Tidemark's API keys belongs
+# to the graphical session, so starting after it is what usually gets the daemon a keyring
+# that is already there. It is not a guarantee and is not treated as one: the keyring can
+# still be locked, or absent entirely, and the daemon reports that as a state and keeps
+# asking rather than failing. See tidemark-core::secrets.
+After=graphical-session.target
+
+# Stop with the session when there is one. Compositors that never start
+# graphical-session.target simply leave this inert, which is why the install target below
+# is not that one — a daemon nobody can start is worse than one that starts early.
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=io.github.zbndev.Tidemark.Daemon
+ExecStart=/usr/bin/tidemarkd
+Restart=on-failure
+RestartSec=5s
+
+# No filesystem sandbox on purpose. Later steps read — and, per ADR 0001, write back —
+# OAuth credentials in files owned by the Claude and Codex CLIs, so ProtectHome or a
+# strict ProtectSystem would break providers this daemon is being built to poll.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

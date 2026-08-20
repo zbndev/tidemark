@@ -13,3 +13,4 @@ workspace = true
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
+zvariant = "5.15.0"

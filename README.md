@@ -5,9 +5,8 @@ burned, when it resets, and whether your current pace will get you there.
 
 Native GTK4 + libadwaita. No web UI, no Electron, no embedded browser engine.
 
-> **Status: early.** The design record is complete, the history database works, and the
-> first provider (Z.ai) fetches and parses. Nothing is wired to the interface yet — the
-> window opens empty.
+> **Status: early.** The daemon polls Z.ai, keeps history and publishes on D-Bus; the
+> window is still empty, and the other four providers are not written yet.
 
 ## Planned for v1
 
@@ -37,6 +36,36 @@ from standard input rather than an argument, because arguments are visible in `p
 
 ```sh
 pass my/zai | cargo run -p tidemark-core --example probe
+```
+
+## Running the daemon
+
+`tidemarkd` polls, writes history to `$XDG_DATA_HOME/tidemark/history.db`, and publishes
+everything it knows on the session bus. It needs a key in the Secret Service to have
+anything to poll — until then it reports `no-credential`, which is a state, not an error:
+
+```sh
+secret-tool store --label='Tidemark: zai (default)' \
+    xdg:schema io.github.zbndev.Tidemark.ProviderKey provider zai account default
+```
+
+The interface is usable with `busctl` alone, which is how it is meant to be checked:
+
+```sh
+cargo run -p tidemarkd
+busctl --user introspect io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark
+busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark \
+    io.github.zbndev.Tidemark.Daemon1 GetStatus
+busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark \
+    io.github.zbndev.Tidemark.Daemon1 Refresh s ""
+```
+
+As a user service, once the binary is installed at `/usr/bin/tidemarkd`:
+
+```sh
+install -Dm644 data/tidemarkd.service ~/.config/systemd/user/tidemarkd.service
+systemctl --user daemon-reload
+systemctl --user enable --now tidemarkd.service
 ```
 
 ## Design record

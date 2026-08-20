@@ -30,6 +30,9 @@ forbid() {
     done
 }
 
+# zvariant is deliberately *not* on this list: the D-Bus wire shapes live in
+# tidemark-types and need its derives. zbus is, and stays — encoding a message is the
+# contract, opening a connection is an implementation.
 forbid tidemark-types 'it is the contract, not an implementation' \
     reqwest hyper rusqlite libsqlite3-sys tokio gtk4 gtk4-sys libadwaita zbus
 

@@ -11,10 +11,12 @@
 pub mod snapshot;
 pub mod time;
 pub mod window;
+pub mod wire;
 
 pub use snapshot::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot};
 pub use time::{AbsurdTimestamp, Timestamp};
 pub use window::{Window, WindowKey, WindowLength};
+pub use wire::{ProviderState, ProviderStatus, Remedy, WindowStatus};
 
 /// Identity constants. Changing any of these is a breaking change for installed units,
 /// stored secrets and on-disk state, so they live in exactly one place.
@@ -25,6 +27,13 @@ pub mod ids {
     pub const DAEMON_BUS_NAME: &str = "io.github.zbndev.Tidemark.Daemon";
     /// Object path both processes agree on.
     pub const OBJECT_PATH: &str = "/io/github/zbndev/Tidemark";
+    /// Interface the daemon serves at [`OBJECT_PATH`].
+    ///
+    /// Numbered, the way freedesktop interfaces are — `org.freedesktop.systemd1.Manager`
+    /// and friends — because the CLI and the Waybar module this is shaped for will be
+    /// built against whatever exists when they are written. A second interface is how this
+    /// ever changes incompatibly; the name is not.
+    pub const DAEMON_INTERFACE: &str = "io.github.zbndev.Tidemark.Daemon1";
     /// Secret Service schema for keys Tidemark owns.
     pub const SECRET_SCHEMA: &str = "io.github.zbndev.Tidemark.ProviderKey";
 }

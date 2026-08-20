@@ -3,6 +3,7 @@
 use crate::time::Timestamp;
 use crate::window::{Window, WindowLength};
 use serde::{Deserialize, Serialize};
+use zvariant::Type;
 
 /// One AI service. The string is a stable slug — `claude`, `codex`, `zai`, `kimi`,
 /// `antigravity` — used as a storage key and in config, so it never changes once shipped.
@@ -52,7 +53,7 @@ slug_newtype!(AccountId, "default");
 
 /// A labelled value that does not fit the window model — Kimi's absolute request counts,
 /// Codex's reset credits, a plan name.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct DetailRow {
     /// Left-hand label.
     pub label: String,
@@ -61,7 +62,7 @@ pub struct DetailRow {
 }
 
 /// A titled group of [`DetailRow`]s, shown in the detail dialog.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct DetailSection {
     /// Section heading.
     pub title: String,

@@ -19,7 +19,7 @@
 use oo7::dbus::{Collection, Service};
 use tidemark_types::{AccountId, ProviderId};
 
-use crate::providers::Credential;
+use crate::providers::{BoxFuture, Credential};
 
 /// The Secret Service schema every key Tidemark stores is filed under, matching
 /// `CONTEXT.md` § Identity. `xdg:schema` is the attribute name `libsecret` and other
@@ -55,6 +55,34 @@ fn attributes(provider: &ProviderId, account: &AccountId) -> [(&'static str, Str
         (ATTR_PROVIDER, provider.as_str().to_owned()),
         (ATTR_ACCOUNT, account.as_str().to_owned()),
     ]
+}
+
+/// Where the daemon reads the keys Tidemark owns.
+///
+/// The trait exists for one reason: the state this module is built around — a locked
+/// keyring — is the one state that cannot responsibly be produced on a developer's
+/// machine. Locking the real login collection mid-session to see what the scheduler does
+/// would throw an unlock prompt at every other application holding a secret. Behind this
+/// seam the daemon's handling of [`SecretError::Locked`] is exercised for real, with a
+/// source that simply says it is locked.
+pub trait KeySource: std::fmt::Debug + Send + Sync {
+    /// The credential stored for `(provider, account)`, if any. `Ok(None)` means no key
+    /// has been saved yet, which is a different thing from the keyring being locked.
+    fn provider_key<'a>(
+        &'a self,
+        provider: &'a ProviderId,
+        account: &'a AccountId,
+    ) -> BoxFuture<'a, Result<Option<Credential>, SecretError>>;
+}
+
+impl KeySource for Store {
+    fn provider_key<'a>(
+        &'a self,
+        provider: &'a ProviderId,
+        account: &'a AccountId,
+    ) -> BoxFuture<'a, Result<Option<Credential>, SecretError>> {
+        Box::pin(Store::provider_key(self, provider, account))
+    }
 }
 
 /// A connection to the freedesktop Secret Service, scoped to Tidemark's own keys.

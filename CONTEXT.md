@@ -21,6 +21,7 @@ below follows from that.
 | Application ID / D-Bus name | `io.github.zbndev.Tidemark` |
 | Daemon bus name | `io.github.zbndev.Tidemark.Daemon` |
 | Object path | `/io/github/zbndev/Tidemark` |
+| D-Bus interface | `io.github.zbndev.Tidemark.Daemon1` |
 | GUI binary | `tidemark` |
 | Daemon binary | `tidemarkd` |
 | systemd user unit | `tidemarkd.service` |
@@ -113,6 +114,28 @@ The GUI depends on `tidemark-types` and D-Bus only. Folding the vocabulary into
 features across a workspace build, so the moment the daemon is built the GUI links the
 HTTP stack too. A separate crate is the only form of this rule the build actually
 enforces. `scripts/check-layering.sh` asserts it against `cargo tree`.
+
+### D-Bus interface
+
+`GetStatus` returns every account at once — state, last good reading, and when the next
+poll is due — so one round trip is enough to draw the whole window, or a Waybar module, or
+a line of CLI output. `ProviderChanged` carries exactly the same shape for one account, so
+a long-running client has one parser rather than two. `Refresh(provider)` polls now, with
+an empty string meaning everything, and re-reads the credential on the way — it is what the
+settings dialog calls after storing a key. `Version` says what is on the other end.
+
+Every published structure is a dictionary (`a{sv}`), not a fixed D-Bus struct. Two reasons,
+and the first is the same rule that governs the bar: **absent must stay absent.** D-Bus has
+no optional field, so a fixed signature would put a `0` where a provider said nothing about
+a reset time — measurably wrong, and the Z.ai five-hour window does exactly this in
+practice. The second is that adding a key must not break a client compiled against the
+older shape.
+
+Failure is part of the published shape, not an absence of it: an account carries a state —
+`ok`, `pending`, `no-credential`, `waiting-for-keyring`, `keyring-unavailable`,
+`credential-rejected`, `rate-limited`, `unreachable`, `malformed` — and keeps its **last
+good reading underneath it**. A failed poll changes the chip on the card, not the numbers;
+blanking a card because one request timed out would be less honest, not more.
 
 ### Provider contract
 
@@ -208,6 +231,19 @@ to look like anything other than what we are.
 
 Adaptive: 5 minutes baseline, 60 seconds in the last 15 minutes before a reset, 30 minutes
 when no session activity is detected. Exponential backoff on 429, capped at one hour.
+
+**"No session activity" means consumption that has stopped moving.** The daemon cannot see
+the user's terminal and does not try to; the only activity signal it has is the number the
+provider reports, so an account whose `used_percent` has not moved for 30 minutes is the
+idle one. The cost is bounded and stated: after a quiet spell, the first poll of a new
+session can be up to 30 minutes late. Near a reset always wins over idle — an idle account
+is precisely the one whose rollover would otherwise be slept through, and a rollover is the
+one event history cannot reconstruct afterwards.
+
+A provider's own `Retry-After` is obeyed when it is *longer* than our backoff and never
+when it is shorter: a service failing every request while asking for one second would
+otherwise turn a backoff into a hot loop. The hour cap applies to our own guess, not to an
+explicit instruction from the provider.
 Antigravity likely needs a longer interval of its own because reaching it means bringing
 up the `agy` local HTTPS server rather than making one request — to be measured.
 
