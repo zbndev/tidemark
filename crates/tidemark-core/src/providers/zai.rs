@@ -324,7 +324,7 @@ fn details(limits: &[Parsed], level: Option<&str>) -> Vec<DetailSection> {
 
     if let Some(level) = level.map(str::trim).filter(|l| !l.is_empty()) {
         sections.push(DetailSection {
-            title: "Plan".to_owned(),
+            title: DetailSection::PLAN.to_owned(),
             rows: vec![DetailRow {
                 label: "Level".to_owned(),
                 value: level.to_owned(),

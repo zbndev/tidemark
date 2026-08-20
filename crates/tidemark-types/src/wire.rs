@@ -222,6 +222,19 @@ impl ProviderStatus {
         }
     }
 
+    /// The subscription level to show under the provider's name, when there is one.
+    ///
+    /// By convention the first row of the section a provider titles
+    /// [`DetailSection::PLAN`] — see that constant for why this is a convention rather
+    /// than a field of its own.
+    pub fn plan(&self) -> Option<&str> {
+        self.details
+            .iter()
+            .find(|section| section.title == DetailSection::PLAN)
+            .and_then(|section| section.rows.first())
+            .map(|row| row.value.as_str())
+    }
+
     /// The state, or `None` if this build does not know the string a newer daemon sent.
     pub fn state(&self) -> Option<ProviderState> {
         ProviderState::from_wire(&self.state)
@@ -391,6 +404,18 @@ mod tests {
         );
         assert_eq!(status.captured_at, Some(1_785_700_000));
         assert_eq!(status.state(), Some(ProviderState::Unreachable));
+    }
+
+    #[test]
+    fn the_card_finds_the_plan_where_the_adapters_file_it() {
+        assert_eq!(status().plan(), Some("pro"));
+    }
+
+    #[test]
+    fn a_provider_that_says_nothing_about_a_plan_leaves_the_line_off() {
+        let mut status = status();
+        status.details.retain(|s| s.title != DetailSection::PLAN);
+        assert_eq!(status.plan(), None, "an absent plan is absent, not empty");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Maintainer: zbndev <https://github.com/zbndev>
 #
 # Builds Tidemark from *this working tree* — not from a release tarball and not from a git
-# URL. That is the whole point of it: `makepkg -si` after finishing a step installs exactly
+# URL. That is the whole point of it: `makepkg -sif` after finishing a step installs exactly
 # what is on disk, so the result can be looked at in a real installation, with the systemd
 # user unit and the real XDG paths, rather than through `cargo run`.
 #

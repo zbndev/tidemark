@@ -51,6 +51,13 @@ macro_rules! slug_newtype {
 slug_newtype!(ProviderId, "unknown");
 slug_newtype!(AccountId, "default");
 
+impl ProviderId {
+    /// What to call this provider in front of a person. See [`provider_label`].
+    pub fn label(&self) -> String {
+        provider_label(&self.0)
+    }
+}
+
 /// A labelled value that does not fit the window model — Kimi's absolute request counts,
 /// Codex's reset credits, a plan name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -68,6 +75,39 @@ pub struct DetailSection {
     pub title: String,
     /// Rows, in the order they should be shown.
     pub rows: Vec<DetailRow>,
+}
+
+impl DetailSection {
+    /// The heading a provider files its subscription level under.
+    ///
+    /// A convention rather than a field, because "plan" means something different at every
+    /// provider — a level, a tier, a seat, a credit balance — and the adapters already
+    /// phrase it in the provider's own words. What a client needs is only *which section*
+    /// to lift onto the card, so that is all this pins down. See [`crate::ProviderStatus::plan`].
+    pub const PLAN: &'static str = "Plan";
+}
+
+/// What to call a provider in front of a person.
+///
+/// Presentation, but shared: the card, the tray menu and the notification text must all
+/// say "Z.ai" rather than `zai`, and they run in two different processes. An unknown slug
+/// is capitalised rather than refused — a newer daemon may watch a provider this build has
+/// never heard of, and its card is still worth drawing.
+pub fn provider_label(slug: &str) -> String {
+    match slug {
+        "claude" => "Claude".to_owned(),
+        "codex" => "Codex".to_owned(),
+        "zai" => "Z.ai".to_owned(),
+        "kimi" => "Kimi".to_owned(),
+        "antigravity" => "Antigravity".to_owned(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => "Unknown".to_owned(),
+            }
+        }
+    }
 }
 
 /// Everything one poll of one account produced.
@@ -154,6 +194,20 @@ mod tests {
     fn unknown_lengths_still_yield_a_dominant_window_when_they_are_all_there_is() {
         let s = snapshot(&[None, None]);
         assert!(s.dominant_window().is_some());
+    }
+
+    #[test]
+    fn known_providers_are_spelled_the_way_they_spell_themselves() {
+        assert_eq!(ProviderId::new("zai").label(), "Z.ai");
+        assert_eq!(provider_label("antigravity"), "Antigravity");
+    }
+
+    #[test]
+    fn a_provider_this_build_has_never_heard_of_still_gets_a_name() {
+        // A newer daemon may publish a slug we do not know. Capitalising it beats
+        // showing the raw slug, and beats refusing to draw the card at all.
+        assert_eq!(provider_label("mistral"), "Mistral");
+        assert_eq!(provider_label(""), "Unknown");
     }
 
     #[test]

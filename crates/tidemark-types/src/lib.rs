@@ -13,7 +13,7 @@ pub mod time;
 pub mod window;
 pub mod wire;
 
-pub use snapshot::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot};
+pub use snapshot::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, provider_label};
 pub use time::{AbsurdTimestamp, Timestamp};
 pub use window::{Window, WindowKey, WindowLength};
 pub use wire::{ProviderState, ProviderStatus, Remedy, WindowStatus};

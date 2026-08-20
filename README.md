@@ -5,8 +5,9 @@ burned, when it resets, and whether your current pace will get you there.
 
 Native GTK4 + libadwaita. No web UI, no Electron, no embedded browser engine.
 
-> **Status: early.** The daemon polls Z.ai, keeps history and publishes on D-Bus; the
-> window is still empty, and the other four providers are not written yet.
+> **Status: early.** The daemon polls Z.ai, keeps history and publishes on D-Bus, and the
+> window shows it: a grid of provider cards that updates on its own. The other four
+> providers are not written yet.
 
 ## Planned for v1
 
@@ -44,7 +45,7 @@ pass my/zai | cargo run -p tidemark-core --example probe
 be reinstalled after any change rather than only at a release:
 
 ```sh
-makepkg -si
+makepkg -sif    # -f: the version does not change between builds, so force the rebuild
 systemctl --user enable --now tidemarkd.service
 ```
 
@@ -80,6 +81,29 @@ As a user service, once the binary is installed at `/usr/bin/tidemarkd`:
 install -Dm644 data/tidemarkd.service ~/.config/systemd/user/tidemarkd.service
 systemctl --user daemon-reload
 systemctl --user enable --now tidemarkd.service
+```
+
+## The window
+
+`tidemark` is a viewer: it shows what `tidemarkd` publishes and never talks to a provider
+itself. Start the daemon first, or leave the window open — it waits for the daemon to
+appear on the bus, and picks up again by itself when the daemon is restarted.
+
+```sh
+tidemark                 # or: cargo run -p tidemark
+```
+
+Each account is a card: the shortest window it reported as a large number over a bar, the
+remaining windows as thin rows, and a mark on the bar showing how much of the window has
+elapsed — fill to the left of the mark finishes before the window resets, fill to the right
+does not. A window the provider did not report is not drawn, and a bar with no mark means
+the provider gave no reset time; neither is an error.
+
+Looking at more than one card without configuring more than one account:
+
+```sh
+systemctl --user stop tidemarkd
+cargo run -p tidemark --example mock-daemon
 ```
 
 ## Design record

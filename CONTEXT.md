@@ -273,7 +273,18 @@ calibration against history that does not exist yet.
   user-defined order persisted to config. Reordering is manual `GtkDragSource` /
   `GtkDropTarget` work — `GtkFlowBox` has no reorder API.
 - **Card** — logo, name, plan, state chip; the shortest present window as a large number
-  over a bar with a pace mark; remaining windows as thin rows.
+  over a bar with a pace mark; remaining windows as thin rows. The plan is a convention
+  rather than a field: the first row of the detail section a provider titles `Plan`.
+- **The bar is drawn, not a `GtkLevelBar`**, because of the pace mark. Its colours come
+  from the CSS names `@accent_bg_color`, `@warning_bg_color` and `@error_bg_color` rather
+  than from `AdwStyleManager`, so that a user who has themed their accent gets a bar in
+  their colour rather than the one libadwaita would have picked. **It changes colour at 80%
+  and 95% — the notification thresholds** — so the card and the notification never disagree
+  about when a window became worth worrying about.
+- **The grid is homogeneous.** Every card gets the same allocation, so cards in a row share
+  a height and their footers line up; the cost is a short card in a single-column window
+  carrying the height of the tallest one. The last row is left ragged: a filler card would
+  be something to click on that does nothing.
 - **A window the provider did not send is not drawn.** No placeholder, no explanation. The
   window set is whatever arrived; the card rearranges silently when it changes. Needs
   hysteresis in the daemon so a single malformed response does not make a window blink.

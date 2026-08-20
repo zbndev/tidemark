@@ -1,12 +1,27 @@
 //! Tidemark's desktop client.
 //!
-//! Scaffolding only: this opens an empty libadwaita window so that the toolchain, the
-//! GTK 4 / libadwaita bindings and the runtime initialisation are all proven before the
-//! interface described in `CONTEXT.md` is built on top of them.
+//! A viewer, and nothing else. It holds no credentials, makes no network request and opens
+//! no database: everything on screen arrived from `tidemarkd` over the session bus, and
+//! `scripts/check-layering.sh` is what keeps that true as the program grows.
+//!
+//! The pieces: `bus` talks to the daemon, `window` owns the grid, `card` draws one account,
+//! `bar` draws the quota bar and its pace mark, `model` decides what order things go in,
+//! `format` decides what they say, and `style` adds the handful of CSS rules libadwaita
+//! does not already provide.
+
+mod bar;
+mod bus;
+mod card;
+mod format;
+mod model;
+mod style;
+mod window;
 
 use adw::prelude::*;
 use gtk::glib;
 use tidemark_types::ids;
+
+use crate::window::MainWindow;
 
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()
@@ -24,27 +39,21 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder()
         .application_id(ids::APP_ID)
         .build();
-    app.connect_activate(build_window);
+
+    app.connect_startup(|_| style::load());
+    app.connect_activate(|app| {
+        // A second `tidemark` on an already-running instance raises the window it has
+        // rather than opening another one onto the same daemon.
+        if let Some(existing) = app.active_window() {
+            existing.present();
+            return;
+        }
+        tracing::info!(app_id = ids::APP_ID, "presenting main window");
+        MainWindow::present(app);
+    });
+
+    // GTK's own argument parsing is not wanted: the only flag this program has is handled
+    // above, and anything else on the command line is a mistake worth ignoring rather than
+    // a reason to refuse to start.
     app.run_with_args::<&str>(&[])
-}
-
-fn build_window(app: &adw::Application) {
-    let page = adw::StatusPage::builder()
-        .title("Tidemark")
-        .description("No providers configured yet.")
-        .build();
-
-    let view = adw::ToolbarView::builder().content(&page).build();
-    view.add_top_bar(&adw::HeaderBar::new());
-
-    let window = adw::ApplicationWindow::builder()
-        .application(app)
-        .title("Tidemark")
-        .default_width(900)
-        .default_height(600)
-        .content(&view)
-        .build();
-
-    tracing::info!(app_id = ids::APP_ID, "presenting main window");
-    window.present();
 }
