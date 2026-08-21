@@ -82,6 +82,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let config = Config::at(config_path.clone())?;
     let secrets: Arc<dyn Secrets> = Arc::new(keyring::Keyring::default());
     let accounts = registry::accounts(&secrets, &config)?;
+    let configured = accounts
+        .iter()
+        .map(|account| {
+            (
+                account.status().provider.clone(),
+                account.status().account.clone(),
+            )
+        })
+        .collect();
     let catalog = registry::catalog(&config);
 
     tracing::info!(
@@ -105,6 +114,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             Daemon::new(
                 published.clone(),
                 catalog,
+                configured,
                 commands.clone(),
                 Arc::clone(&secrets),
             ),

@@ -31,7 +31,7 @@
 //! before the session had a display, and asking it to guess how to reach one is how a
 //! login silently fails on a machine with an unusual desktop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tidemark_core::oauth::Login;
@@ -39,12 +39,15 @@ use tidemark_core::providers::Credential;
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_types::{AccountId, CredentialKind, ProviderDefinition, ProviderId, ProviderStatus};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
 
 use crate::engine::{Command, stored_kind};
 use crate::registry;
+
+type AccountKey = (String, String);
+type AccountMutation = Arc<Mutex<()>>;
 
 /// The statuses clients read, in the order the accounts were registered.
 ///
@@ -81,15 +84,6 @@ impl Published {
         self.0.read().await.clone()
     }
 
-    /// Whether any account is filed under this provider slug.
-    pub async fn knows(&self, provider: &str) -> bool {
-        self.0
-            .read()
-            .await
-            .iter()
-            .any(|held| held.provider == provider)
-    }
-
     /// One account, by the pair that identifies it.
     pub async fn find(&self, provider: &str, account: &str) -> Option<ProviderStatus> {
         self.0
@@ -107,7 +101,19 @@ impl Published {
 /// wait on it and `CancelLogin` uses to let the port go.
 #[derive(Debug)]
 struct Pending {
-    task: JoinHandle<Result<(), String>>,
+    task: Option<JoinHandle<Result<(), String>>>,
+    abort: AbortHandle,
+    identity: Arc<()>,
+}
+
+impl Pending {
+    fn new(task: JoinHandle<Result<(), String>>) -> Self {
+        Self {
+            abort: task.abort_handle(),
+            task: Some(task),
+            identity: Arc::new(()),
+        }
+    }
 }
 
 /// The object served at `/io/github/zbndev/Tidemark`.
@@ -115,9 +121,11 @@ struct Pending {
 pub struct Daemon {
     statuses: Published,
     catalog: Vec<ProviderDefinition>,
+    configured: RwLock<HashSet<AccountKey>>,
     commands: mpsc::Sender<Command>,
     secrets: Arc<dyn Secrets>,
-    logins: Mutex<HashMap<(String, String), Pending>>,
+    logins: Mutex<HashMap<AccountKey, Pending>>,
+    mutations: Mutex<HashMap<AccountKey, AccountMutation>>,
 }
 
 impl Daemon {
@@ -125,24 +133,62 @@ impl Daemon {
     pub fn new(
         statuses: Published,
         catalog: Vec<ProviderDefinition>,
+        configured: Vec<AccountKey>,
         commands: mpsc::Sender<Command>,
         secrets: Arc<dyn Secrets>,
     ) -> Self {
         Self {
             statuses,
             catalog,
+            configured: RwLock::new(configured.into_iter().collect()),
             commands,
             secrets,
             logins: Mutex::new(HashMap::new()),
+            mutations: Mutex::new(HashMap::new()),
         }
     }
 
     /// The account named by a call, or the error a client gets for naming one that is not
     /// there — a typo must be visible rather than silently doing nothing.
     async fn account(&self, provider: &str, account: &str) -> fdo::Result<ProviderStatus> {
-        self.statuses.find(provider, account).await.ok_or_else(|| {
-            fdo::Error::InvalidArgs(format!("no account {account} is configured for {provider}"))
-        })
+        if !self
+            .configured
+            .read()
+            .await
+            .contains(&key(provider, account))
+        {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "no account {account} is configured for {provider}"
+            )));
+        }
+        if let Some(status) = self.statuses.find(provider, account).await {
+            return Ok(status);
+        }
+
+        let definition = self
+            .catalog
+            .iter()
+            .find(|definition| definition.provider == provider)
+            .ok_or_else(|| {
+                fdo::Error::InvalidArgs(format!(
+                    "provider {provider} is not supported by this build"
+                ))
+            })?;
+        let mut status =
+            ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account));
+        status.credential = Some(definition.credential.clone());
+        status.credential_hint = Some(definition.credential_hint.clone());
+        status.options = definition.options.clone();
+        Ok(status)
+    }
+
+    /// Whether loaded topology contains any account for this provider.
+    async fn configured_provider(&self, provider: &str) -> bool {
+        self.configured
+            .read()
+            .await
+            .iter()
+            .any(|(configured, _)| configured == provider)
     }
 
     /// Tells the poll loop that a credential or a setting changed.
@@ -171,10 +217,28 @@ impl Daemon {
             .map_err(fdo::Error::Failed)
     }
 
+    /// The lock serializing credential and topology mutations for one account.
+    async fn mutation(&self, provider: &str, account: &str) -> AccountMutation {
+        Arc::clone(
+            self.mutations
+                .lock()
+                .await
+                .entry(key(provider, account))
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
     /// Removes and aborts a pending login, if one exists.
     async fn cancel_pending_login(&self, provider: &str, account: &str) {
-        if let Some(pending) = self.logins.lock().await.remove(&key(provider, account)) {
-            pending.task.abort();
+        if let Some(mut pending) = self.logins.lock().await.remove(&key(provider, account)) {
+            pending.abort.abort();
+            if let Some(task) = pending.task.take() {
+                let _ = task.await;
+            } else {
+                while !pending.abort.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            }
             tracing::info!(provider, account, "login cancelled");
         }
     }
@@ -202,6 +266,8 @@ impl Daemon {
 
     /// Adds a compiled-in provider's default account and waits for it to be persisted.
     async fn add_provider(&self, provider: &str) -> fdo::Result<()> {
+        let mutation = self.mutation(provider, AccountId::default().as_str()).await;
+        let _guard = mutation.lock().await;
         if !self
             .catalog
             .iter()
@@ -215,11 +281,18 @@ impl Daemon {
             provider: provider.to_owned(),
             reply,
         })
-        .await
+        .await?;
+        self.configured
+            .write()
+            .await
+            .insert(key(provider, AccountId::default().as_str()));
+        Ok(())
     }
 
     /// Removes one configured account after clearing every credential Tidemark owns.
     async fn remove_provider(&self, provider: &str, account: &str) -> fdo::Result<()> {
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
         self.account(provider, account).await?;
         self.cancel_pending_login(provider, account).await;
 
@@ -239,7 +312,12 @@ impl Daemon {
             account: account.to_owned(),
             reply,
         })
-        .await
+        .await?;
+        self.configured
+            .write()
+            .await
+            .remove(&key(provider, account));
+        Ok(())
     }
 
     /// Every account the daemon watches, with its current state and last good reading.
@@ -257,7 +335,7 @@ impl Daemon {
     async fn refresh(&self, provider: &str) -> fdo::Result<()> {
         let target = (!provider.is_empty()).then(|| provider.to_owned());
         if let Some(slug) = target.as_deref()
-            && !self.statuses.knows(slug).await
+            && !self.configured_provider(slug).await
         {
             return Err(fdo::Error::InvalidArgs(format!(
                 "no account is configured for provider {slug}"
@@ -275,6 +353,8 @@ impl Daemon {
     /// a key works is the provider, and the poll this triggers is what asks it. A bad key
     /// arrives back as `credential-rejected`, which is a state the interface already draws.
     async fn set_key(&self, provider: &str, account: &str, key: &str) -> fdo::Result<()> {
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
         let status = self.account(provider, account).await?;
         if status.credential_kind() != Some(CredentialKind::Key) {
             return Err(fdo::Error::InvalidArgs(format!(
@@ -306,6 +386,8 @@ impl Daemon {
     /// there is one, which is why it is "sign out of Tidemark" rather than "sign out": the
     /// card may well go on working, from the credential it was reading before.
     async fn sign_out(&self, provider: &str, account: &str) -> fdo::Result<()> {
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
         let status = self.account(provider, account).await?;
         let Some(kind) = status.credential_kind().and_then(stored_kind) else {
             return Err(fdo::Error::InvalidArgs(format!(
@@ -327,6 +409,8 @@ impl Daemon {
     /// account is replaced, so a user who abandoned a browser tab is not locked out of
     /// starting again.
     async fn begin_login(&self, provider: &str, account: &str) -> fdo::Result<String> {
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
         let status = self.account(provider, account).await?;
         if status.credential_kind() != Some(CredentialKind::OAuth) {
             return Err(fdo::Error::InvalidArgs(format!(
@@ -337,10 +421,7 @@ impl Daemon {
             fdo::Error::Failed(format!("this build has no OAuth client for {provider}"))
         })?;
 
-        let mut logins = self.logins.lock().await;
-        if let Some(previous) = logins.remove(&key(provider, account)) {
-            previous.task.abort();
-        }
+        self.cancel_pending_login(provider, account).await;
 
         let login = Login::begin(client)
             .await
@@ -351,6 +432,7 @@ impl Daemon {
         let commands = self.commands.clone();
         let provider_name = provider.to_owned();
         let account_name = account.to_owned();
+        let credential_mutation = Arc::clone(&mutation);
         let task = tokio::spawn(async move {
             let http = tidemark_core::oauth::client().map_err(|error| error.to_string())?;
             let response = login
@@ -362,6 +444,7 @@ impl Daemon {
                 .saturating_mul(1_000);
             let document = registry::login_document(&provider_name, &response, now_ms)
                 .map_err(|error| error.to_string())?;
+            let _guard = credential_mutation.lock().await;
             secrets
                 .set(
                     Kind::Token,
@@ -379,7 +462,10 @@ impl Daemon {
                 .await;
             Ok(())
         });
-        logins.insert(key(provider, account), Pending { task });
+        self.logins
+            .lock()
+            .await
+            .insert(key(provider, account), Pending::new(task));
         Ok(url)
     }
 
@@ -389,20 +475,34 @@ impl Daemon {
     /// on our side to shorten it. Returns when the tokens are stored, or an error saying
     /// what went wrong instead.
     async fn await_login(&self, provider: &str, account: &str) -> fdo::Result<()> {
-        let pending = self
-            .logins
-            .lock()
-            .await
-            .remove(&key(provider, account))
-            .ok_or_else(|| fdo::Error::Failed("no login is in progress".into()))?;
-        match pending.task.await {
+        let (task, identity) = {
+            let mut logins = self.logins.lock().await;
+            let pending = logins
+                .get_mut(&key(provider, account))
+                .ok_or_else(|| fdo::Error::Failed("no login is in progress".into()))?;
+            let task = pending
+                .task
+                .take()
+                .ok_or_else(|| fdo::Error::Failed("the login is already being awaited".into()))?;
+            (task, Arc::clone(&pending.identity))
+        };
+        let result = match task.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(reason)) => Err(fdo::Error::Failed(reason)),
             Err(error) if error.is_cancelled() => {
                 Err(fdo::Error::Failed("the login was cancelled".into()))
             }
             Err(error) => Err(fdo::Error::Failed(error.to_string())),
+        };
+        let login_key = key(provider, account);
+        let mut logins = self.logins.lock().await;
+        if logins
+            .get(&login_key)
+            .is_some_and(|pending| Arc::ptr_eq(&pending.identity, &identity))
+        {
+            logins.remove(&login_key);
         }
+        result
     }
 
     /// Abandons a login in progress and gives the callback port back.
@@ -410,6 +510,8 @@ impl Daemon {
     /// Not an error when there is nothing to cancel: a client that closed its dialog should
     /// not have to know whether the login had already finished.
     async fn cancel_login(&self, provider: &str, account: &str) -> fdo::Result<()> {
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
         self.cancel_pending_login(provider, account).await;
         Ok(())
     }
@@ -425,6 +527,8 @@ impl Daemon {
         name: &str,
         value: &str,
     ) -> fdo::Result<()> {
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
         let status = self.account(provider, account).await?;
         let option = status
             .options
@@ -474,7 +578,7 @@ impl Daemon {
 }
 
 /// The pair an in-progress login is filed under.
-fn key(provider: &str, account: &str) -> (String, String) {
+fn key(provider: &str, account: &str) -> AccountKey {
     (provider.to_owned(), account.to_owned())
 }
 
@@ -635,6 +739,10 @@ mod tests {
         accounts: Vec<ProviderStatus>,
         catalog: Vec<ProviderDefinition>,
     ) -> (Daemon, Arc<FakeSecrets>, mpsc::Receiver<Command>) {
+        let configured = accounts
+            .iter()
+            .map(|account| (account.provider.clone(), account.account.clone()))
+            .collect();
         let published = Published::default();
         for account in accounts {
             published.upsert(account).await;
@@ -645,6 +753,7 @@ mod tests {
             Daemon::new(
                 published,
                 catalog,
+                configured,
                 tx,
                 Arc::clone(&secrets) as Arc<dyn Secrets>,
             ),
@@ -667,6 +776,48 @@ mod tests {
             daemon_over_catalog(Vec::new(), vec![definition.clone()]).await;
 
         assert_eq!(daemon.list_providers().await, vec![definition]);
+    }
+
+    #[tokio::test]
+    async fn a_configured_account_validates_before_first_status_publication() {
+        let published = Published::default();
+        let secrets = Arc::new(FakeSecrets::default());
+        let (commands, mut command_queue) = mpsc::channel(4);
+        let daemon = Daemon::new(
+            published,
+            catalog(),
+            vec![("zai".into(), "default".into())],
+            commands,
+            Arc::clone(&secrets) as Arc<dyn Secrets>,
+        );
+
+        daemon
+            .refresh("zai")
+            .await
+            .expect("loaded identity refreshes before publication");
+        assert!(matches!(
+            command_queue.try_recv().expect("the loop was told"),
+            Command::Refresh(Some(provider)) if provider == "zai"
+        ));
+
+        daemon
+            .set_key("zai", "default", "startup-key")
+            .await
+            .expect("loaded configuration is authoritative before publication");
+
+        assert_eq!(
+            secrets.held(),
+            vec![(
+                "key".into(),
+                "zai".into(),
+                "default".into(),
+                "startup-key".into()
+            )]
+        );
+        assert!(matches!(
+            command_queue.try_recv().expect("the loop was told"),
+            Command::Reload { provider: Some(provider) } if provider == "zai"
+        ));
     }
 
     #[tokio::test]
@@ -766,6 +917,64 @@ mod tests {
         responder.await.expect("responder finished");
     }
 
+    #[tokio::test]
+    async fn a_credential_mutation_cannot_overlap_successful_removal() {
+        let (daemon, secrets, mut commands) =
+            daemon_over_catalog(vec![key_account("zai")], catalog()).await;
+        let daemon = Arc::new(daemon);
+        let (remove_seen, removal_reached_engine) = tokio::sync::oneshot::channel();
+        let (finish_removal, release_engine_reply) = tokio::sync::oneshot::channel();
+        let responder = tokio::spawn(async move {
+            let Command::RemoveProvider { reply, .. } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            remove_seen.send(()).expect("test is waiting");
+            let _ = release_engine_reply.await;
+            reply.send(Ok(())).expect("caller waits");
+            commands
+        });
+        let removing = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.remove_provider("zai", "default").await }
+        });
+        removal_reached_engine
+            .await
+            .expect("removal reached the engine after deleting secrets");
+
+        let setting = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.set_key("zai", "default", "too-late").await }
+        });
+        for _ in 0..10 {
+            if setting.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !setting.is_finished(),
+            "credential mutation must wait for removal to finish"
+        );
+
+        finish_removal.send(()).expect("responder waits");
+        removing
+            .await
+            .expect("removal task did not panic")
+            .expect("engine accepted removal");
+        let error = setting
+            .await
+            .expect("credential task did not panic")
+            .expect_err("the account is no longer configured");
+        assert!(matches!(error, fdo::Error::InvalidArgs(_)));
+        assert!(secrets.held().is_empty());
+        let mut commands = responder.await.expect("responder finished");
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
     #[derive(Debug, Default)]
     struct FailingDeleteSecrets;
 
@@ -808,6 +1017,7 @@ mod tests {
         let daemon = Daemon::new(
             published,
             catalog(),
+            vec![("zai".into(), "default".into())],
             commands,
             Arc::new(FailingDeleteSecrets),
         );
@@ -862,7 +1072,7 @@ mod tests {
             .logins
             .lock()
             .await
-            .insert(key("zai", "default"), Pending { task });
+            .insert(key("zai", "default"), Pending::new(task));
         let responder = tokio::spawn(async move {
             let Command::RemoveProvider { reply, .. } = commands.recv().await.expect("command")
             else {
@@ -1031,7 +1241,13 @@ mod tests {
         let published = Published::default();
         published.upsert(status("zai")).await;
         let (tx, mut rx) = mpsc::channel(4);
-        let daemon = Daemon::new(published, Vec::new(), tx, Arc::new(FakeSecrets::default()));
+        let daemon = Daemon::new(
+            published,
+            Vec::new(),
+            vec![("zai".into(), "default".into())],
+            tx,
+            Arc::new(FakeSecrets::default()),
+        );
 
         assert!(
             daemon.refresh("codex").await.is_err(),
@@ -1072,6 +1288,7 @@ mod tests {
         let Ok(server) = serve(Daemon::new(
             published,
             Vec::new(),
+            vec![("zai".into(), "default".into())],
             commands,
             Arc::new(FakeSecrets::default()),
         ))

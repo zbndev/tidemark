@@ -207,10 +207,6 @@ impl Account {
 
     /// The status as last published. Read by the registry's tests, which check that every
     /// account describes its own credentials before anything has polled it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read only by the registry's tests")
-    )]
     pub fn status(&self) -> &ProviderStatus {
         &self.status
     }
