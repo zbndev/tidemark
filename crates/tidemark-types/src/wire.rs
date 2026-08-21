@@ -202,6 +202,24 @@ pub struct ProviderOption {
     pub choices: Vec<OptionChoice>,
 }
 
+/// Presentation metadata for one provider in the daemon's catalog.
+#[derive(Debug, Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct ProviderDefinition {
+    pub provider: String,
+    pub title: String,
+    pub credential: String,
+    pub credential_hint: String,
+    pub external_fallback: Option<String>,
+    pub options: Vec<ProviderOption>,
+}
+
+impl ProviderDefinition {
+    pub fn credential_kind(&self) -> Option<CredentialKind> {
+        CredentialKind::from_wire(&self.credential)
+    }
+}
+
 /// One rate-limit window as published.
 ///
 /// `resets_at` and `length_secs` are absent from the encoded dictionary when the provider
@@ -404,6 +422,22 @@ mod tests {
 
     fn encode(status: &ProviderStatus) -> Data<'static, 'static> {
         to_bytes(Context::new_dbus(LE, 0), status).expect("the published shape encodes")
+    }
+
+    #[test]
+    fn a_provider_definition_survives_the_bus() {
+        let original = ProviderDefinition {
+            provider: "antigravity".into(),
+            title: "Antigravity".into(),
+            credential: CredentialKind::OAuth.as_wire().into(),
+            credential_hint: "Sign in with Google.".into(),
+            external_fallback: Some("agy session".into()),
+            options: Vec::new(),
+        };
+        let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
+        let (decoded, _): (ProviderDefinition, _) = encoded.deserialize().expect("decodes");
+        assert_eq!(decoded, original);
+        assert_eq!(decoded.credential_kind(), Some(CredentialKind::OAuth));
     }
 
     #[test]

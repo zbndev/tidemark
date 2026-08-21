@@ -17,8 +17,8 @@ pub use snapshot::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, pr
 pub use time::{AbsurdTimestamp, Timestamp};
 pub use window::{Window, WindowKey, WindowLength};
 pub use wire::{
-    CredentialKind, OptionChoice, ProviderOption, ProviderState, ProviderStatus, Remedy,
-    WindowStatus,
+    CredentialKind, OptionChoice, ProviderDefinition, ProviderOption, ProviderState,
+    ProviderStatus, Remedy, WindowStatus,
 };
 
 /// Identity constants. Changing any of these is a breaking change for installed units,
