@@ -317,18 +317,18 @@ impl Card {
             .map(|snapshot| model::ordered_windows(&snapshot))
             .unwrap_or_default();
 
+        self.set_absolutes(absolutes_for(status).as_deref());
+
         let secondary = match windows.split_first() {
             Some((dominant, rest)) => {
                 self.reading.set_visible(true);
                 self.blank.set_visible(false);
                 self.dominant_title.set_label(&dominant.title);
-                self.set_absolutes(dominant.subtitle.as_deref());
                 self.rebuild_rows(rest)
             }
             None => {
                 self.reading.set_visible(false);
                 self.blank.set_visible(true);
-                self.set_absolutes(None);
                 self.blank.set_label(&blank_message(status));
                 self.rebuild_rows(&[])
             }
@@ -435,6 +435,18 @@ impl Card {
             })
             .collect()
     }
+}
+
+/// The absolutes the card leads with: the dominant window's subtitle, when there is one.
+///
+/// A decision about the data rather than about the drawing — which window's absolutes
+/// belong on the card — and therefore a free function, testable without a windowing
+/// system. [`Card::set_absolutes`] only renders what this decides.
+fn absolutes_for(status: &ProviderStatus) -> Option<String> {
+    let snapshot = status.to_snapshot()?;
+    model::ordered_windows(&snapshot)
+        .first()
+        .and_then(|window| window.subtitle.clone())
 }
 
 /// Puts the mark, the name and the plan on one baseline, once there is a resolved font to
@@ -551,14 +563,28 @@ mod tests {
         five_hour.subtitle = Some("420 / 1000 prompts".to_owned());
         let status = status_with(vec![weekly, five_hour]);
 
-        let snapshot = status.to_snapshot().expect("a reading");
-        let windows = model::ordered_windows(&snapshot);
         assert_eq!(
-            windows
-                .first()
-                .and_then(|window| window.subtitle.as_deref()),
+            absolutes_for(&status).as_deref(),
             Some("420 / 1000 prompts"),
             "the card leads with the shortest window, so it must lead with its absolutes"
+        );
+    }
+
+    #[test]
+    fn a_reading_without_absolutes_decides_on_none_rather_than_an_empty_line() {
+        let status = status_with(vec![window(Some(18_000), 42.0)]);
+        assert_eq!(
+            absolutes_for(&status),
+            None,
+            "a provider that reports only a percentage must not grow a blank line"
+        );
+
+        let mut pending = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::default());
+        pending.captured_at = None;
+        assert_eq!(
+            absolutes_for(&pending),
+            None,
+            "no reading means no absolutes"
         );
     }
 }
