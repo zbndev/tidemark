@@ -201,8 +201,8 @@ impl Daemon {
             .map_err(|_| fdo::Error::Failed("the poll loop has stopped".into()))
     }
 
-    /// Sends a topology mutation and returns only after the poll loop has persisted it.
-    async fn topology_request(
+    /// Sends a configuration mutation and waits until the poll loop has persisted it.
+    async fn config_request(
         &self,
         make: impl FnOnce(oneshot::Sender<Result<(), String>>) -> Command,
     ) -> fdo::Result<()> {
@@ -297,7 +297,7 @@ impl Daemon {
                 "provider {provider} is not supported by this build"
             )));
         }
-        self.topology_request(|reply| Command::AddProvider {
+        self.config_request(|reply| Command::AddProvider {
             provider: provider.to_owned(),
             reply,
         })
@@ -327,7 +327,7 @@ impl Daemon {
             .await
             .map_err(keyring_error)?;
 
-        self.topology_request(|reply| Command::RemoveProvider {
+        self.config_request(|reply| Command::RemoveProvider {
             provider: provider.to_owned(),
             account: account.to_owned(),
             reply,
@@ -563,15 +563,16 @@ impl Daemon {
             )));
         }
 
-        // Loaded fresh rather than held open: the file is the user's, and between two
-        // settings changes they may well have edited it.
-        let mut config = tidemark_core::config::Config::load()
-            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
-        config
-            .set_option(provider, name, value)
-            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        self.config_request(|reply| Command::SetOption {
+            provider: provider.to_owned(),
+            account: account.to_owned(),
+            name: name.to_owned(),
+            value: value.to_owned(),
+            reply,
+        })
+        .await?;
         tracing::info!(provider, name, value, "setting changed");
-        self.reload(provider).await
+        Ok(())
     }
 
     /// The daemon's version, so a client can tell what it is talking to.
@@ -1412,6 +1413,63 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn a_valid_setting_is_serialized_through_the_engine() {
+        let mut zai = key_account("zai");
+        zai.options = vec![tidemark_types::ProviderOption {
+            name: "region".into(),
+            title: "Region".into(),
+            description: None,
+            value: "global".into(),
+            choices: vec![
+                tidemark_types::OptionChoice {
+                    value: "global".into(),
+                    title: "Global".into(),
+                },
+                tidemark_types::OptionChoice {
+                    value: "bigmodel-cn".into(),
+                    title: "Mainland China".into(),
+                },
+            ],
+        }];
+        let (daemon, _secrets, mut commands) = daemon_over(vec![zai]).await;
+        let daemon = Arc::new(daemon);
+        let setting = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move {
+                daemon
+                    .set_option("zai", "default", "region", "bigmodel-cn")
+                    .await
+            }
+        });
+
+        let Command::SetOption {
+            provider,
+            account,
+            name,
+            value,
+            reply,
+        } = commands.recv().await.expect("setting reaches engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(
+            (provider, account, name, value),
+            (
+                "zai".to_owned(),
+                "default".to_owned(),
+                "region".to_owned(),
+                "bigmodel-cn".to_owned()
+            )
+        );
+        assert!(!setting.is_finished(), "D-Bus waits for persistence");
+        reply.send(Ok(())).expect("caller waits for reply");
+        setting
+            .await
+            .expect("setting task did not panic")
+            .expect("engine accepted setting");
     }
 
     #[tokio::test]

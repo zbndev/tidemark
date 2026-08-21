@@ -103,6 +103,44 @@ impl<T> DetailCache<T> {
     }
 }
 
+#[derive(Debug, Default)]
+struct ActiveDetail(Option<(String, String)>);
+
+impl ActiveDetail {
+    fn show(&mut self, provider: &str, account: &str) {
+        self.0 = Some((provider.into(), account.into()));
+    }
+
+    fn hide(&mut self, provider: &str, account: &str) {
+        if self
+            .0
+            .as_ref()
+            .is_some_and(|identity| identity.0 == provider && identity.1 == account)
+        {
+            self.0 = None;
+        }
+    }
+
+    fn take_if_missing(&mut self, statuses: &[ProviderStatus]) -> bool {
+        let missing = self.0.as_ref().is_some_and(|(provider, account)| {
+            !statuses
+                .iter()
+                .any(|status| status.provider == *provider && status.account == *account)
+        });
+        if missing {
+            self.0 = None;
+        }
+        missing
+    }
+
+    #[cfg(test)]
+    fn identity(&self) -> Option<(&str, &str)> {
+        self.0
+            .as_ref()
+            .map(|(provider, account)| (provider.as_str(), account.as_str()))
+    }
+}
+
 fn remove_local_provider<T>(
     statuses: &mut Vec<ProviderStatus>,
     local_added: &mut HashSet<String>,
@@ -126,6 +164,7 @@ pub struct ProviderSettings {
     configured: ConfiguredList,
     picker: Rc<Picker>,
     details: RefCell<DetailCache<Rc<ProviderDetail>>>,
+    active_detail: RefCell<ActiveDetail>,
     pending: Rc<PendingLogins>,
     self_weak: RefCell<Weak<ProviderSettings>>,
 }
@@ -174,6 +213,7 @@ impl ProviderSettings {
             configured,
             picker,
             details: RefCell::new(DetailCache::default()),
+            active_detail: RefCell::new(ActiveDetail::default()),
             pending: Rc::new(PendingLogins::default()),
             self_weak: RefCell::new(Weak::new()),
         });
@@ -206,6 +246,7 @@ impl ProviderSettings {
         self.local_added
             .borrow_mut()
             .retain(|provider| !statuses.iter().any(|status| status.provider == *provider));
+        let return_to_list = self.active_detail.borrow_mut().take_if_missing(&merged);
         *self.statuses.borrow_mut() = merged;
         self.details.borrow_mut().retain(|provider, account| {
             self.statuses
@@ -213,6 +254,9 @@ impl ProviderSettings {
                 .iter()
                 .any(|status| status.provider == provider && status.account == account)
         });
+        if return_to_list {
+            self.dialog.pop_subpage();
+        }
         self.refresh_views();
 
         let statuses = self.statuses.borrow();
@@ -294,6 +338,7 @@ impl ProviderSettings {
 
     fn open_detail(self: &Rc<Self>, provider: String, account: String) {
         if let Some(existing) = self.details.borrow().get(&provider, &account).cloned() {
+            self.active_detail.borrow_mut().show(&provider, &account);
             self.dialog.push_subpage(existing.page());
             return;
         }
@@ -329,6 +374,20 @@ impl ProviderSettings {
                 accepted
             })
         });
+        detail.page().connect_hidden({
+            let weak = self.self_weak.borrow().clone();
+            let provider = provider.clone();
+            let account = account.clone();
+            move |_| {
+                if let Some(settings) = weak.upgrade() {
+                    settings
+                        .active_detail
+                        .borrow_mut()
+                        .hide(&provider, &account);
+                }
+            }
+        });
+        self.active_detail.borrow_mut().show(&provider, &account);
         self.dialog.push_subpage(detail.page());
         self.details
             .borrow_mut()
@@ -418,7 +477,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::detail::{AfterBeginAction, after_begin_action};
-    use super::{DetailCache, PendingLogins, remove_local_provider};
+    use super::{ActiveDetail, DetailCache, PendingLogins, remove_local_provider};
 
     #[test]
     fn pending_logins_are_taken_once_for_cancellation() {
@@ -486,5 +545,14 @@ mod tests {
         assert_eq!(details.get("zai", "default"), Some(&"fresh pending page"));
         assert_eq!(details.values().count(), 1);
         assert!(!local_added.contains("zai"));
+    }
+
+    #[test]
+    fn an_externally_removed_active_detail_requests_a_return_to_the_configured_list() {
+        let mut active = ActiveDetail::default();
+        active.show("zai", "default");
+
+        assert!(active.take_if_missing(&[]));
+        assert_eq!(active.identity(), None);
     }
 }

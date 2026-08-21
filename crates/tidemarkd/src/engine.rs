@@ -82,6 +82,19 @@ pub enum Command {
         /// Completion sent after persistence and in-memory mutation finish.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Validate and persist one provider setting in the same queue as topology writes.
+    SetOption {
+        /// Stable provider slug.
+        provider: String,
+        /// Stable account name.
+        account: String,
+        /// Provider-declared option name.
+        name: String,
+        /// One of the option's declared values.
+        value: String,
+        /// Completion sent after persistence and in-memory state agree.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Stop the loop.
     Shutdown,
 }
@@ -323,6 +336,44 @@ impl Engine {
         Ok(())
     }
 
+    /// Changes one provider option as a serialized configuration transaction.
+    pub async fn set_option(
+        &mut self,
+        provider: &str,
+        account: &str,
+        name: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        let Some(index) = self.accounts.iter().position(|configured| {
+            configured.provider.as_str() == provider && configured.account.as_str() == account
+        }) else {
+            return Err(format!("account {provider}/{account} is not configured"));
+        };
+        let option = self.accounts[index]
+            .status
+            .options
+            .iter()
+            .find(|option| option.name == name)
+            .ok_or_else(|| format!("{provider} has no setting called {name}"))?;
+        if !option.choices.iter().any(|choice| choice.value == value) {
+            return Err(format!("{value} is not one of the values {name} can take"));
+        }
+
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        config
+            .set_option(provider, name, value)
+            .map_err(|error| error.to_string())?;
+        self.accounts[index].status.options = crate::registry::options(provider, &config);
+        if self.accounts[index].factory.is_some() {
+            self.accounts[index].client = None;
+        }
+        self.accounts[index].failures = 0;
+        self.accounts[index].retry_after = None;
+        self.accounts[index].due = Instant::now();
+        self.probe_credentials(Some(provider)).await;
+        Ok(())
+    }
+
     /// Runs until a [`Command::Shutdown`] arrives or the command channel closes.
     pub async fn run(&mut self, commands: &mut mpsc::Receiver<Command>) {
         loop {
@@ -344,6 +395,10 @@ impl Engine {
                     }
                     Some(Command::RemoveProvider { provider, account, reply }) => {
                         let result = self.remove_provider(&provider, &account).await;
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::SetOption { provider, account, name, value, reply }) => {
+                        let result = self.set_option(&provider, &account, &name, &value).await;
                         let _ = reply.send(result);
                     }
                     Some(Command::Shutdown) | None => return,
@@ -977,6 +1032,109 @@ mod tests {
         ));
         let config = Config::at(harness.config_path.clone()).expect("parses");
         assert!(config.providers().expect("readable").is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_option_and_topology_commands_preserve_both_mutations() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-serialized-config-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let mut config = Config::at(config_path.clone()).expect("empty config parses");
+        config.add_provider("zai").expect("Z.ai configured");
+        config
+            .set_option("zai", "region", "global")
+            .expect("initial option written");
+        let secrets: Arc<dyn Secrets> = Arc::new(Keyring(|| Ok(None)));
+        let accounts = crate::registry::accounts(&secrets, &config).expect("accounts build");
+        let (updates, _published) = mpsc::channel(64);
+        let mut engine = Engine::new(
+            accounts,
+            History::in_memory().expect("an in-memory database opens"),
+            secrets,
+            updates,
+            config_path.clone(),
+        );
+        let (commands, mut command_queue) = mpsc::channel(4);
+        let running = tokio::spawn(async move {
+            engine.run(&mut command_queue).await;
+            engine
+        });
+        let start = Arc::new(tokio::sync::Barrier::new(3));
+
+        let setting = tokio::spawn({
+            let commands = commands.clone();
+            let start = Arc::clone(&start);
+            async move {
+                let (reply, answer) = oneshot::channel();
+                start.wait().await;
+                commands
+                    .send(Command::SetOption {
+                        provider: "zai".into(),
+                        account: "default".into(),
+                        name: "region".into(),
+                        value: "bigmodel-cn".into(),
+                        reply,
+                    })
+                    .await
+                    .expect("engine is running");
+                answer.await.expect("engine replied")
+            }
+        });
+        let adding = tokio::spawn({
+            let commands = commands.clone();
+            let start = Arc::clone(&start);
+            async move {
+                let (reply, answer) = oneshot::channel();
+                start.wait().await;
+                commands
+                    .send(Command::AddProvider {
+                        provider: "kimi".into(),
+                        reply,
+                    })
+                    .await
+                    .expect("engine is running");
+                answer.await.expect("engine replied")
+            }
+        });
+        start.wait().await;
+        let (setting, adding) = tokio::join!(setting, adding);
+        setting
+            .expect("setting task did not panic")
+            .expect("setting persisted");
+        adding
+            .expect("add task did not panic")
+            .expect("provider persisted");
+
+        commands
+            .send(Command::Shutdown)
+            .await
+            .expect("engine is running");
+        let engine = running.await.expect("engine task did not panic");
+        let written = Config::at(config_path.clone()).expect("written config parses");
+        assert_eq!(written.providers().expect("readable"), ["zai", "kimi"]);
+        assert_eq!(written.option("zai", "region"), Some("bigmodel-cn"));
+        let zai = engine
+            .accounts()
+            .iter()
+            .find(|account| account.provider().as_str() == "zai")
+            .expect("Z.ai remains configured");
+        assert_eq!(
+            zai.status()
+                .options
+                .iter()
+                .find(|option| option.name == "region")
+                .map(|option| option.value.as_str()),
+            Some("bigmodel-cn")
+        );
+        assert!(
+            engine
+                .accounts()
+                .iter()
+                .any(|account| account.provider().as_str() == "kimi")
+        );
+        let _ = std::fs::remove_file(config_path);
     }
 
     #[tokio::test]

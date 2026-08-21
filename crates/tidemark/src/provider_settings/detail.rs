@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -40,6 +41,7 @@ pub(super) struct ProviderDetail {
     key: RefCell<Option<KeyRows>>,
     sign_in: RefCell<Option<SignInRow>>,
     external: RefCell<Option<adw::ActionRow>>,
+    options: RefCell<BTreeMap<String, Rc<OptionRow>>>,
     waiting: Cell<bool>,
     on_waiting: WaitingCallback,
 }
@@ -57,6 +59,84 @@ struct SignInRow {
     button: gtk::Button,
     stack: gtk::Stack,
     url: Rc<RefCell<String>>,
+}
+
+#[derive(Debug)]
+struct OptionRow {
+    row: adw::ComboRow,
+    selection: OptionSelection,
+}
+
+#[derive(Debug)]
+struct OptionSelection {
+    values: Vec<String>,
+    authoritative: RefCell<String>,
+    displayed: Cell<u32>,
+    suppress: Cell<bool>,
+}
+
+impl OptionSelection {
+    fn new(values: Vec<String>, authoritative: String, displayed: u32) -> Self {
+        Self {
+            values,
+            authoritative: RefCell::new(authoritative),
+            displayed: Cell::new(displayed),
+            suppress: Cell::new(false),
+        }
+    }
+
+    fn selection_changed(&self, selected: u32) -> Option<String> {
+        self.displayed.set(selected);
+        let chosen = self.values.get(selected as usize)?;
+        (!self.suppress.get() && *self.authoritative.borrow() != *chosen).then(|| chosen.clone())
+    }
+
+    fn apply_authoritative(&self, value: &str, select: impl FnOnce(u32)) {
+        let Some(index) = self.values.iter().position(|candidate| candidate == value) else {
+            return;
+        };
+        *self.authoritative.borrow_mut() = value.to_owned();
+        self.select_without_signal(index as u32, select);
+    }
+
+    fn rollback(&self, select: impl FnOnce(u32)) {
+        let authoritative = self.authoritative.borrow();
+        let Some(index) = self
+            .values
+            .iter()
+            .position(|candidate| candidate == authoritative.as_str())
+        else {
+            return;
+        };
+        drop(authoritative);
+        self.select_without_signal(index as u32, select);
+    }
+
+    fn select_without_signal(&self, selected: u32, select: impl FnOnce(u32)) {
+        self.suppress.set(true);
+        self.displayed.set(selected);
+        select(selected);
+        self.suppress.set(false);
+    }
+
+    #[cfg(test)]
+    fn displayed_value(&self) -> Option<&str> {
+        self.values
+            .get(self.displayed.get() as usize)
+            .map(String::as_str)
+    }
+}
+
+impl OptionRow {
+    fn apply_authoritative(&self, value: &str) {
+        self.selection
+            .apply_authoritative(value, |selected| self.row.set_selected(selected));
+    }
+
+    fn rollback(&self) {
+        self.selection
+            .rollback(|selected| self.row.set_selected(selected));
+    }
 }
 
 impl std::fmt::Debug for ProviderDetail {
@@ -113,6 +193,7 @@ impl ProviderDetail {
             key: RefCell::new(None),
             sign_in: RefCell::new(None),
             external: RefCell::new(None),
+            options: RefCell::new(BTreeMap::new()),
             waiting: Cell::new(false),
             on_waiting,
         });
@@ -163,6 +244,12 @@ impl ProviderDetail {
         }
         if let Some(external) = self.external.borrow().as_ref() {
             external.set_title(&model::connection_text(&self.definition, status));
+        }
+        let rows = self.options.borrow();
+        for option in &status.options {
+            if let Some(row) = rows.get(&option.name) {
+                row.apply_authoritative(&option.value);
+            }
         }
     }
 
@@ -370,14 +457,18 @@ impl ProviderDetail {
         };
         group.set_visible(!options.is_empty());
         for option in options {
-            group.add(&self.build_option_row(option));
+            let row = self.build_option_row(option);
+            group.add(&row.row);
+            self.options
+                .borrow_mut()
+                .insert(option.name.clone(), Rc::clone(&row));
             if let Some(description) = &option.description {
                 group.add(&caption(description));
             }
         }
     }
 
-    fn build_option_row(self: &Rc<Self>, option: &ProviderOption) -> adw::ComboRow {
+    fn build_option_row(self: &Rc<Self>, option: &ProviderOption) -> Rc<OptionRow> {
         let titles: Vec<&str> = option
             .choices
             .iter()
@@ -405,18 +496,18 @@ impl ProviderDetail {
             .iter()
             .map(|choice| choice.value.clone())
             .collect();
-        let current = RefCell::new(option.value.clone());
-        row.connect_selected_notify({
+        let option_row = Rc::new(OptionRow {
+            row,
+            selection: OptionSelection::new(values, option.value.clone(), selected),
+        });
+        let watched = Rc::clone(&option_row);
+        option_row.row.connect_selected_notify({
             let weak = Rc::downgrade(self);
             let name = option.name.clone();
             move |row| {
-                let Some(chosen) = values.get(row.selected() as usize).cloned() else {
+                let Some(chosen) = watched.selection.selection_changed(row.selected()) else {
                     return;
                 };
-                if *current.borrow() == chosen {
-                    return;
-                }
-                *current.borrow_mut() = chosen.clone();
                 let Some(detail) = weak.upgrade() else {
                     return;
                 };
@@ -425,18 +516,20 @@ impl ProviderDetail {
                 let account = status.account.clone();
                 drop(status);
                 let name = name.clone();
+                let option_row = Rc::clone(&watched);
                 glib::spawn_future_local(async move {
                     if let Err(error) = detail
                         .proxy
                         .set_option(&provider, &account, &name, &chosen)
                         .await
                     {
+                        option_row.rollback();
                         detail.toast(&reason(&error));
                     }
                 });
             }
         });
-        row
+        option_row
     }
 
     async fn sign_in(self: Rc<Self>, provider: String, account: String) {
@@ -594,5 +687,44 @@ mod tests {
             "{}",
             describe(&definition, &unknown)
         );
+    }
+
+    #[test]
+    fn an_authoritative_option_update_changes_the_display_without_requesting_a_write() {
+        let selection = OptionSelection::new(
+            vec!["global".into(), "bigmodel-cn".into()],
+            "global".into(),
+            0,
+        );
+        let requested = RefCell::new(None);
+
+        selection.apply_authoritative("bigmodel-cn", |index| {
+            *requested.borrow_mut() = selection.selection_changed(index);
+        });
+
+        assert_eq!(selection.displayed_value(), Some("bigmodel-cn"));
+        assert_eq!(*requested.borrow(), None);
+    }
+
+    #[test]
+    fn a_rejected_option_write_restores_the_last_authoritative_selection() {
+        let selection = OptionSelection::new(
+            vec!["global".into(), "bigmodel-cn".into()],
+            "global".into(),
+            0,
+        );
+        assert_eq!(
+            selection.selection_changed(1),
+            Some("bigmodel-cn".to_owned())
+        );
+        assert_eq!(selection.displayed_value(), Some("bigmodel-cn"));
+        let requested = RefCell::new(None);
+
+        selection.rollback(|index| {
+            *requested.borrow_mut() = selection.selection_changed(index);
+        });
+
+        assert_eq!(selection.displayed_value(), Some("global"));
+        assert_eq!(*requested.borrow(), None);
     }
 }

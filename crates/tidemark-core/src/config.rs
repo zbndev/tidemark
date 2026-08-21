@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use toml_edit::{Array, DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 use crate::paths;
 
@@ -139,12 +139,13 @@ impl Config {
         Ok(providers)
     }
 
-    /// Adds a provider to the configured set, writing only when it was absent.
+    /// Adds a provider to the configured set and normalizes any existing duplicates.
     pub fn add_provider(&mut self, provider: &str) -> Result<bool, ConfigError> {
-        let providers = self.providers()?;
-        if providers.iter().any(|configured| configured == provider) {
-            return Ok(false);
-        }
+        let normalized = self.normalize_providers(None)?;
+        let already_configured = self
+            .providers()?
+            .iter()
+            .any(|configured| configured == provider);
         let item = self
             .document
             .entry(PROVIDERS_KEY)
@@ -155,26 +156,21 @@ impl Config {
                 path: self.path.clone(),
                 reason: "providers must be an array of strings".to_owned(),
             })?;
-        array.push(provider);
-        self.write()?;
-        Ok(true)
+        if !already_configured {
+            push_provider(array, provider);
+        }
+        if normalized || !already_configured {
+            self.write()?;
+        }
+        Ok(!already_configured)
     }
 
-    /// Removes a provider and its provider-specific settings, writing only when present.
+    /// Removes a provider and its settings while normalizing any survivor duplicates.
     pub fn remove_provider(&mut self, provider: &str) -> Result<bool, ConfigError> {
         let providers = self.providers()?;
-        if !providers.iter().any(|configured| configured == provider) {
-            return Ok(false);
-        }
-        let mut array = Array::new();
-        for configured in providers {
-            if configured != provider {
-                array.push(configured);
-            }
-        }
-        self.document[PROVIDERS_KEY] = value(array);
+        let configured = providers.iter().any(|candidate| candidate == provider);
 
-        if let Some(item) = self.document.get_mut(PROVIDER_TABLE) {
+        if configured && let Some(item) = self.document.get_mut(PROVIDER_TABLE) {
             let table = item
                 .as_table_like_mut()
                 .ok_or_else(|| ConfigError::NotATable {
@@ -183,8 +179,11 @@ impl Config {
                 })?;
             table.remove(provider);
         }
-        self.write()?;
-        Ok(true)
+        let normalized = self.normalize_providers(Some(provider))?;
+        if configured || normalized {
+            self.write()?;
+        }
+        Ok(configured)
     }
 
     /// Sets one provider setting and writes the file.
@@ -197,6 +196,7 @@ impl Config {
         name: &str,
         setting: &str,
     ) -> Result<(), ConfigError> {
+        self.normalize_providers(None)?;
         let providers = self
             .document
             .entry(PROVIDER_TABLE)
@@ -220,6 +220,52 @@ impl Config {
         self.write()
     }
 
+    /// Normalizes the editable provider array without replacing it, retaining every
+    /// surviving value's decoration and the array's own prefix and suffix.
+    ///
+    /// When `remove` is present, every occurrence of that slug is removed as part of the
+    /// same index pass. All entries are validated before the first edit, so an
+    /// array containing a non-string is still refused rather than partly repaired.
+    fn normalize_providers(&mut self, remove: Option<&str>) -> Result<bool, ConfigError> {
+        let Some(item) = self.document.get_mut(PROVIDERS_KEY) else {
+            return Ok(false);
+        };
+        let array = item
+            .as_array_mut()
+            .ok_or_else(|| ConfigError::InvalidProviders {
+                path: self.path.clone(),
+                reason: "providers must be an array of strings".to_owned(),
+            })?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut remove_indices = Vec::new();
+        for (index, item) in array.iter().enumerate() {
+            let slug = item.as_str().ok_or_else(|| ConfigError::InvalidProviders {
+                path: self.path.clone(),
+                reason: "every providers entry must be a string".to_owned(),
+            })?;
+            if remove == Some(slug) || !seen.insert(slug.to_owned()) {
+                remove_indices.push(index);
+            }
+        }
+        let changed = !remove_indices.is_empty();
+        for (removed, index) in remove_indices.into_iter().enumerate() {
+            let index = index - removed;
+            let prefix = array
+                .get(index)
+                .and_then(|value| value.decor().prefix())
+                .cloned();
+            array.remove(index);
+            if let Some(prefix) = prefix {
+                if let Some(next) = array.get_mut(index) {
+                    next.decor_mut().set_prefix(prefix);
+                } else {
+                    array.set_trailing(prefix);
+                }
+            }
+        }
+        Ok(changed)
+    }
+
     fn write(&self) -> Result<(), ConfigError> {
         let parent = self.path.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
@@ -236,6 +282,40 @@ impl Config {
             source,
         })
     }
+}
+
+/// Appends without moving the previous last element's inline comment onto the new value.
+fn push_provider(array: &mut Array, provider: &str) {
+    let trailing = array.trailing().as_str().map(str::to_owned);
+    let item_indent = array
+        .get(array.len().saturating_sub(1))
+        .and_then(|value| value.decor().prefix())
+        .and_then(|prefix| prefix.as_str())
+        .and_then(|prefix| prefix.rsplit_once('\n').map(|(_, indent)| indent))
+        .map(str::to_owned);
+    let Some((before_closing_indent, closing_indent)) = trailing
+        .as_deref()
+        .and_then(|trailing| trailing.rsplit_once('\n'))
+    else {
+        array.push(provider);
+        return;
+    };
+
+    let line_ending = if before_closing_indent.ends_with('\r') {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let before_newline = before_closing_indent
+        .strip_suffix('\r')
+        .unwrap_or(before_closing_indent);
+    let mut value = Value::from(provider);
+    value.decor_mut().set_prefix(format!(
+        "{before_newline}{line_ending}{}",
+        item_indent.as_deref().unwrap_or(closing_indent)
+    ));
+    array.set_trailing(format!("{line_ending}{closing_indent}"));
+    array.push_formatted(value);
 }
 
 /// A `[provider]` header that only appears once something is filed under it, so a config
@@ -276,6 +356,106 @@ mod tests {
         std::fs::write(&path, "providers = [\"claude\", \"zai\", \"claude\"]\n").expect("seed");
         let config = Config::at(path.clone()).expect("parses");
         assert_eq!(config.providers().expect("readable"), ["claude", "zai"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn adding_normalizes_duplicate_providers_without_losing_array_comments() {
+        let path = scratch("providers-add-normalizes");
+        std::fs::write(
+            &path,
+            "# root comment\n\
+             providers = [ # array heading\n\
+                 \"claude\", # first survivor\n\
+                 \"zai\", # second survivor\n\
+                 \"claude\", # duplicate\n\
+             ] # array tail\n",
+        )
+        .expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        assert!(config.add_provider("kimi").expect("added"));
+
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert_eq!(text.matches("\"claude\"").count(), 1, "{text}");
+        assert!(text.contains("# root comment"), "{text}");
+        assert!(text.contains("# array heading"), "{text}");
+        assert!(text.contains("\"claude\", # first survivor"), "{text}");
+        assert!(text.contains("\"zai\", # second survivor"), "{text}");
+        assert!(text.contains("# array tail"), "{text}");
+        assert!(text.contains("\"kimi\""), "{text}");
+        let reread = Config::at(path.clone()).expect("parses again");
+        assert_eq!(
+            reread.providers().expect("readable"),
+            ["claude", "zai", "kimi"]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn removing_normalizes_in_place_and_preserves_survivor_comments() {
+        let path = scratch("providers-remove-normalizes");
+        std::fs::write(
+            &path,
+            "providers = [ # array heading\n\
+                 \"claude\", # first survivor\n\
+                 \"zai\", # removed target\n\
+                 \"claude\", # duplicate\n\
+                 \"future\", # unknown survivor\n\
+                 \"zai\", # duplicate target\n\
+             ] # array tail\n\
+             \n\
+             [provider.zai]\n\
+             region = \"global\"\n",
+        )
+        .expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        assert!(config.remove_provider("zai").expect("removed"));
+
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert_eq!(text.matches("\"claude\"").count(), 1, "{text}");
+        assert!(!text.contains("\"zai\""), "{text}");
+        assert!(text.contains("# array heading"), "{text}");
+        assert!(text.contains("\"claude\", # first survivor"), "{text}");
+        assert!(text.contains("\"future\", # unknown survivor"), "{text}");
+        assert!(text.contains("# array tail"), "{text}");
+        assert!(!text.contains("[provider.zai]"), "{text}");
+        let reread = Config::at(path.clone()).expect("parses again");
+        assert_eq!(reread.providers().expect("readable"), ["claude", "future"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn setting_an_option_normalizes_providers_without_losing_array_comments() {
+        let path = scratch("providers-option-normalizes");
+        std::fs::write(
+            &path,
+            "providers = [ # array heading\n\
+                 \"zai\", # first survivor\n\
+                 \"claude\", # other survivor\n\
+                 \"zai\", # duplicate\n\
+             ] # array tail\n\
+             \n\
+             [provider.zai]\n\
+             region = \"global\"\n",
+        )
+        .expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        config
+            .set_option("zai", "region", "bigmodel-cn")
+            .expect("setting written");
+
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert_eq!(text.matches("\"zai\"").count(), 1, "{text}");
+        assert!(text.contains("# array heading"), "{text}");
+        assert!(text.contains("\"zai\", # first survivor"), "{text}");
+        assert!(text.contains("\"claude\", # other survivor"), "{text}");
+        assert!(text.contains("# array tail"), "{text}");
+        assert!(text.contains("region = \"bigmodel-cn\""), "{text}");
+        let reread = Config::at(path.clone()).expect("parses again");
+        assert_eq!(reread.providers().expect("readable"), ["zai", "claude"]);
         let _ = std::fs::remove_file(path);
     }
 
