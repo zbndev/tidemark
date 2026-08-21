@@ -14,7 +14,7 @@
 //! account straight back to the CLI file. The stored document has the *same shape* as the
 //! CLI's, which is why one parser reads both.
 
-use super::{BoxFuture, Credential, Provider, ProviderError, http};
+use super::{BoxFuture, Credential, Provider, ProviderError, http, parse_rfc3339};
 use crate::oauth;
 use crate::oauth_file::{
     CredentialFile, CredentialFileError, Field, LockedCredentialFile, UpdateOutcome,
@@ -28,7 +28,6 @@ use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
     WindowLength,
 };
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// The slug this provider's history is filed under. Never changes once shipped.
 pub const PROVIDER_ID: &str = "claude";
@@ -505,7 +504,7 @@ impl Kind {
         };
         let resets_at = match limit.resets_at.as_deref() {
             None => None,
-            Some(raw) => Some(parse_timestamp(raw).ok_or_else(|| {
+            Some(raw) => Some(parse_rfc3339(raw).ok_or_else(|| {
                 ProviderError::malformed(format!("{self:?} limit has invalid resets_at"))
             })?),
         };
@@ -636,11 +635,6 @@ fn spend_details(spend: Option<&Spend>) -> Vec<DetailSection> {
             ),
         }],
     }]
-}
-
-fn parse_timestamp(raw: &str) -> Option<Timestamp> {
-    let seconds = OffsetDateTime::parse(raw, &Rfc3339).ok()?.unix_timestamp();
-    Timestamp::from_unix(seconds).ok()
 }
 
 struct ClaudeCredentials {

@@ -35,7 +35,8 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
-use tidemark_types::{AccountId, ProviderId, Snapshot, WindowLength};
+use tidemark_types::{AccountId, ProviderId, Snapshot, Timestamp, WindowLength};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// A future returned from a trait method.
 ///
@@ -103,6 +104,17 @@ pub(crate) fn title_case(raw: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Parses an RFC-3339 timestamp — the spelling most providers state a reset time in.
+///
+/// `None` when the string is not RFC-3339 or is not a plausible instant; the two are not
+/// worth distinguishing because either way the caller drops the value or fails the fetch,
+/// and it knows which. Lives here rather than on `Timestamp` so that `tidemark-types`
+/// stays free of a parsing dependency; `time` is already what the adapters parse with.
+pub(crate) fn parse_rfc3339(raw: &str) -> Option<Timestamp> {
+    let parsed = OffsetDateTime::parse(raw, &Rfc3339).ok()?;
+    Timestamp::from_unix(parsed.unix_timestamp()).ok()
 }
 
 /// A secret used to authenticate to a provider.
@@ -256,5 +268,44 @@ mod tests {
             retry_after: Some(90),
         };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(90)));
+    }
+
+    #[test]
+    fn rfc3339_reads_both_spellings_providers_send() {
+        // Z.ai's millisecond epochs are not this shape; the twenty-six keyed ports state
+        // their resets as ISO-8601, with or without an offset.
+        assert_eq!(
+            parse_rfc3339("2026-08-21T12:00:00Z").map(Timestamp::as_unix),
+            Some(1_787_313_600)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-08-21T17:30:00+05:30").map(Timestamp::as_unix),
+            Some(1_787_313_600)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-08-21T12:00:00.123Z").map(Timestamp::as_unix),
+            Some(1_787_313_600),
+            "fractional seconds do not move a whole-second timestamp"
+        );
+    }
+
+    #[test]
+    fn rfc3339_refuses_what_a_provider_might_send_instead() {
+        assert_eq!(
+            parse_rfc3339("1969-07-20T20:17:40Z"),
+            None,
+            "before the plausible range"
+        );
+        assert_eq!(
+            parse_rfc3339("9999-01-01T00:00:00Z"),
+            None,
+            "beyond the plausible range"
+        );
+        assert_eq!(
+            parse_rfc3339("1787313600"),
+            None,
+            "a bare epoch is not RFC-3339"
+        );
+        assert_eq!(parse_rfc3339(""), None);
     }
 }

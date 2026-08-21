@@ -40,13 +40,12 @@
 //! plan's own history.
 
 use super::keyed::{Auth, Method, Spec};
-use super::{ProviderError, length_title, title_case};
+use super::{ProviderError, length_title, parse_rfc3339, title_case};
 use serde::{Deserialize, Deserializer, de};
 use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
     WindowLength,
 };
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// The slug this provider's history is filed under. Never changes once shipped.
 pub const PROVIDER_ID: &str = "kimi";
@@ -239,9 +238,7 @@ fn resets_at(raw: Option<&str>, what: &str) -> Result<Option<Timestamp>, Provide
     let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
         return Ok(None);
     };
-    OffsetDateTime::parse(raw, &Rfc3339)
-        .ok()
-        .and_then(|parsed| Timestamp::from_unix(parsed.unix_timestamp()).ok())
+    parse_rfc3339(raw)
         .map(Some)
         .ok_or_else(|| ProviderError::malformed(format!("{what} has an unreadable resetTime")))
 }
