@@ -23,6 +23,7 @@ pub mod clawrouter;
 pub mod clinepass;
 pub mod crof;
 pub mod kimi;
+pub mod neuralwatt;
 pub mod sub2api;
 pub mod synthetic;
 pub mod venice;
@@ -314,6 +315,7 @@ pub static CATALOG: &[&Spec] = &[
     &clinepass::SPEC,
     &crof::SPEC,
     &kimi::SPEC,
+    &neuralwatt::SPEC,
     &sub2api::SPEC,
     &synthetic::SPEC,
     &venice::SPEC,
