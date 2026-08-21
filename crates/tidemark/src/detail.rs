@@ -367,8 +367,19 @@ impl DetailDialog {
     }
 }
 
+/// The one line under a window's title: how much is gone, the absolute quantities behind
+/// that percentage when the provider sent them, and when the window resets.
+///
+/// The absolutes sit next to the percentage they qualify rather than at the end, and they
+/// are the provider's own words — set, never parsed and never reformatted. Each piece after
+/// the percentage is omitted when it is absent, so a provider that reports only a
+/// percentage produces the same line it always did.
 fn window_summary(window: &WindowStatus, now: Timestamp) -> String {
     let mut summary = format::percent(window.used_percent);
+    if let Some(subtitle) = window.subtitle.as_deref() {
+        summary.push_str(" · ");
+        summary.push_str(subtitle);
+    }
     if let Some(reset) = window
         .resets_at
         .and_then(|seconds| Timestamp::from_unix(seconds).ok())
@@ -388,9 +399,9 @@ fn schedule_text(window: &WindowStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use tidemark_types::{AccountId, ProviderId, ProviderStatus, WindowStatus};
+    use tidemark_types::{AccountId, ProviderId, ProviderStatus, Timestamp, WindowStatus};
 
-    use super::{RequestGeneration, Selection};
+    use super::{RequestGeneration, Selection, window_summary};
 
     fn status(windows: &[(&str, Option<u64>)]) -> ProviderStatus {
         let mut status = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::default());
@@ -466,5 +477,27 @@ mod tests {
 
         assert!(!requests.accepts(&old, Some("weekly")));
         assert!(requests.accepts(&current, Some("weekly")));
+    }
+
+    #[test]
+    fn a_windows_line_carries_the_absolutes_the_provider_sent_beside_its_percentage() {
+        let now = Timestamp::from_unix(1_785_700_000).expect("plausible");
+        let mut window = status(&[("five-hour", Some(18_000))]).windows.remove(0);
+        assert_eq!(window_summary(&window, now), "42% · resets in 5 h");
+
+        window.subtitle = Some("420 / 1000 credits".to_owned());
+        assert_eq!(
+            window_summary(&window, now),
+            "42% · 420 / 1000 credits · resets in 5 h"
+        );
+    }
+
+    #[test]
+    fn a_window_reporting_only_a_percentage_keeps_the_line_it_always_had() {
+        let now = Timestamp::from_unix(1_785_700_000).expect("plausible");
+        let mut window = status(&[("five-hour", Some(18_000))]).windows.remove(0);
+        window.resets_at = None;
+
+        assert_eq!(window_summary(&window, now), "42%");
     }
 }

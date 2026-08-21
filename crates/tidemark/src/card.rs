@@ -90,6 +90,7 @@ pub struct Card {
     dominant_title: gtk::Label,
     bar: QuotaBar,
     reset: gtk::Label,
+    absolutes: gtk::Label,
     rows: gtk::Box,
     footer: gtk::Label,
     shown: RefCell<Shown>,
@@ -161,6 +162,15 @@ impl Card {
             .css_classes(["dim-label", "caption"])
             .build();
 
+        // The absolute quantities behind the percentage, exactly as the provider phrased
+        // them. Presentation the provider owns: it is set, never parsed and never
+        // reformatted. A provider that reports only a percentage leaves it hidden, so the
+        // card keeps the height it has always had.
+        let absolutes = gtk::Label::builder()
+            .halign(gtk::Align::Start)
+            .css_classes(["caption", "dim-label"])
+            .build();
+
         let reading = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(6)
@@ -168,6 +178,7 @@ impl Card {
         reading.append(&headline_row);
         reading.append(bar.widget());
         reading.append(&reset);
+        reading.append(&absolutes);
 
         // Shown in place of the reading, never alongside it: an account that has never
         // answered has nothing to put a number on.
@@ -254,6 +265,7 @@ impl Card {
             dominant_title,
             bar,
             reset,
+            absolutes,
             rows,
             footer,
             shown: RefCell::new(Shown {
@@ -310,11 +322,13 @@ impl Card {
                 self.reading.set_visible(true);
                 self.blank.set_visible(false);
                 self.dominant_title.set_label(&dominant.title);
+                self.set_absolutes(dominant.subtitle.as_deref());
                 self.rebuild_rows(rest)
             }
             None => {
                 self.reading.set_visible(false);
                 self.blank.set_visible(true);
+                self.set_absolutes(None);
                 self.blank.set_label(&blank_message(status));
                 self.rebuild_rows(&[])
             }
@@ -363,6 +377,23 @@ impl Card {
 
         for (bar, window) in shown.secondary.iter().zip(rest) {
             bar.set(window.used_percent, window.pace(now));
+        }
+    }
+
+    /// Shows the dominant window's absolutes, or removes the line when there are none.
+    ///
+    /// The label is emptied as well as hidden so that a card whose provider stops sending
+    /// absolutes cannot flash the previous account's numbers if the line is shown again.
+    fn set_absolutes(&self, subtitle: Option<&str>) {
+        match subtitle {
+            Some(text) => {
+                self.absolutes.set_label(text);
+                self.absolutes.set_visible(true);
+            }
+            None => {
+                self.absolutes.set_label("");
+                self.absolutes.set_visible(false);
+            }
         }
     }
 
@@ -451,7 +482,29 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use tidemark_types::{AccountId, ProviderId, ProviderState};
+    use tidemark_types::{AccountId, ProviderId, ProviderState, WindowStatus};
+
+    /// When the readings below were taken. Fixed so that nothing here depends on the wall
+    /// clock.
+    const CAPTURED_AT: i64 = 1_785_700_000;
+
+    fn window(length_secs: Option<u64>, used_percent: f64) -> WindowStatus {
+        WindowStatus {
+            key: format!("w{length_secs:?}"),
+            title: format!("{length_secs:?}"),
+            subtitle: None,
+            used_percent,
+            resets_at: Some(CAPTURED_AT + 3_600),
+            length_secs,
+        }
+    }
+
+    fn status_with(windows: Vec<WindowStatus>) -> ProviderStatus {
+        let mut status = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::default());
+        status.captured_at = Some(CAPTURED_AT);
+        status.windows = windows;
+        status
+    }
 
     #[test]
     fn the_pill_padding_the_baseline_maths_assumes_is_the_one_the_stylesheet_draws() {
@@ -488,5 +541,24 @@ mod tests {
 
         identity.activate(activate.as_ref());
         assert_eq!(calls.borrow().as_slice(), [("zai".into(), "work".into())]);
+    }
+
+    #[test]
+    fn the_absolutes_come_from_the_dominant_window_and_not_from_whichever_arrived_first() {
+        let mut weekly = window(Some(604_800), 22.0);
+        weekly.subtitle = Some("220 / 1000 weekly prompts".to_owned());
+        let mut five_hour = window(Some(18_000), 42.0);
+        five_hour.subtitle = Some("420 / 1000 prompts".to_owned());
+        let status = status_with(vec![weekly, five_hour]);
+
+        let snapshot = status.to_snapshot().expect("a reading");
+        let windows = model::ordered_windows(&snapshot);
+        assert_eq!(
+            windows
+                .first()
+                .and_then(|window| window.subtitle.as_deref()),
+            Some("420 / 1000 prompts"),
+            "the card leads with the shortest window, so it must lead with its absolutes"
+        );
     }
 }

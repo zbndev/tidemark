@@ -20,8 +20,8 @@
 //! It is a development aid, not a test fixture: nothing in the suite depends on it.
 
 use tidemark_types::{
-    AccountId, DetailRow, DetailSection, ProviderId, ProviderState, ProviderStatus, Snapshot,
-    Timestamp, Window, WindowKey, WindowLength, ids,
+    AccountId, DetailRow, DetailSection, ProviderDefinition, ProviderId, ProviderState,
+    ProviderStatus, Snapshot, Timestamp, Window, WindowKey, WindowLength, ids, provider_label,
 };
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
@@ -32,6 +32,24 @@ struct MockDaemon {
 
 #[interface(name = "io.github.zbndev.Tidemark.Daemon1")]
 impl MockDaemon {
+    // The window asks for the catalog before it asks for readings, and shows "the daemon is
+    // not running" if either fails — so a mock that answered only `GetStatus` drew no cards
+    // at all. The entries are the accounts served below, with the least metadata the
+    // settings panes will accept; this mock exists to be looked at, not to be configured.
+    async fn list_providers(&self) -> Vec<ProviderDefinition> {
+        self.statuses
+            .iter()
+            .map(|status| ProviderDefinition {
+                provider: status.provider.clone(),
+                title: provider_label(&status.provider).to_owned(),
+                credential: "key".to_owned(),
+                credential_hint: "Paste a key.".to_owned(),
+                external_fallback: None,
+                options: Vec::new(),
+            })
+            .collect()
+    }
+
     async fn get_status(&self) -> Vec<ProviderStatus> {
         self.statuses.clone()
     }
@@ -128,11 +146,17 @@ fn statuses() -> Vec<ProviderStatus> {
         Some("Sign in to Antigravity to see its quota.".into()),
     );
 
+    // The account that reports a fixed balance rather than only a percentage: the absolutes
+    // behind the 41% are drawn under the bar, in the provider's own words. No live provider
+    // fills this in yet, so the mock is the only place the case can be looked at.
+    let mut zai_five_hour = window("5 hours", 18_000, 41.0, Some(9_000));
+    zai_five_hour.subtitle = Some("410 / 1,000 prompts".to_owned());
+
     let zai = account(
         "zai",
         "pro",
         vec![
-            window("5 hours", 18_000, 41.0, Some(9_000)),
+            zai_five_hour,
             window("1 week", 604_800, 22.0, Some(5 * 86_400)),
             window("MCP", 2_592_000, 3.0, Some(19 * 86_400)),
         ],
