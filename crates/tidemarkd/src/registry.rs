@@ -306,12 +306,12 @@ fn kimi_account() -> Account {
     Account::new(
         ProviderId::new(kimi::PROVIDER_ID),
         AccountId::default(),
-        Box::new(|credential, _options| {
-            Ok(Arc::new(kimi::Kimi::new(credential)?) as Arc<dyn Provider>)
+        Box::new(|credential, options| {
+            Ok(Arc::new(keyed::Keyed::new(&kimi::SPEC, credential, options)?) as Arc<dyn Provider>)
         }),
     )
     .with_credential(CredentialKind::Key)
-    .with_hint("Kimi Code Console → API keys. This is Kimi For Coding, not the Open Platform.")
+    .with_hint(kimi::SPEC.credential_hint)
 }
 
 fn zai_account() -> Account {

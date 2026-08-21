@@ -39,7 +39,8 @@
 //! a rate limit that one day arrives with a seven-day window cannot land on top of the
 //! plan's own history.
 
-use super::{BoxFuture, Credential, Provider, ProviderError, http, length_title, title_case};
+use super::keyed::{Auth, Method, Spec};
+use super::{ProviderError, length_title, title_case};
 use serde::{Deserialize, Deserializer, de};
 use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
@@ -67,68 +68,18 @@ const PLAN_WINDOW_SECS: u64 = 7 * 86_400;
 /// Key prefix for the burst limits in `limits[]`, keeping them clear of the plan pool.
 const RATE_POOL: &str = "rate";
 
-/// A Kimi For Coding account.
-#[derive(Debug)]
-pub struct Kimi {
-    client: reqwest::Client,
-    credential: Credential,
-    base_url: String,
-}
-
-impl Kimi {
-    /// Builds a client for one key.
-    pub fn new(credential: Credential) -> Result<Self, ProviderError> {
-        Self::with_base_url(credential, BASE_URL.to_owned())
-    }
-
-    fn with_base_url(credential: Credential, base_url: String) -> Result<Self, ProviderError> {
-        Ok(Self {
-            client: http::client()?,
-            credential,
-            base_url,
-        })
-    }
-
-    /// The URL this instance polls.
-    pub fn usages_url(&self) -> String {
-        format!("{}{USAGES_PATH}", self.base_url.trim_end_matches('/'))
-    }
-
-    async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
-        if self.credential.is_blank() {
-            return Err(ProviderError::Credential { status: 401 });
-        }
-        let response = self
-            .client
-            .get(self.usages_url())
-            .bearer_auth(self.credential.expose())
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await
-            .map_err(ProviderError::Transport)?;
-
-        let status = response.status();
-        let retry_after = http::retry_after_header(&response).map(str::to_owned);
-        http::check(status, retry_after.as_deref())?;
-
-        let body = response.text().await.map_err(ProviderError::Transport)?;
-        parse(&body, Timestamp::now())
-    }
-}
-
-impl Provider for Kimi {
-    fn id(&self) -> ProviderId {
-        ProviderId::new(PROVIDER_ID)
-    }
-
-    fn account(&self) -> AccountId {
-        AccountId::default()
-    }
-
-    fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
-        Box::pin(self.fetch_inner())
-    }
-}
+/// Kimi For Coding as the keyed mechanism sees it.
+pub static SPEC: Spec = Spec {
+    id: PROVIDER_ID,
+    title: "Kimi",
+    endpoint: |_| format!("{BASE_URL}{USAGES_PATH}"),
+    method: Method::Get,
+    auth: Auth::Bearer,
+    headers: &[],
+    parse,
+    credential_hint: "Kimi Code Console → API keys. This is Kimi For Coding, not the Open Platform.",
+    options: &[],
+};
 
 /// Turns a response body into a snapshot. Pure: every trap above is reachable from a test.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
@@ -739,30 +690,17 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_key_is_refused_before_a_request_is_spent() {
-        let kimi = Kimi::new(Credential::new("  ")).expect("client builds");
-        let err = block_on(kimi.fetch_inner());
-        assert!(err.expect_err("must refuse").needs_user_action());
-    }
+    fn the_spec_polls_the_coding_api_with_a_bearer_key() {
+        use crate::providers::keyed::{Auth, Method, Options};
 
-    #[test]
-    fn the_endpoint_is_the_coding_product_and_not_the_open_platform() {
-        let kimi = Kimi::new(Credential::new("sk-1")).expect("builds");
-        assert_eq!(kimi.usages_url(), "https://api.kimi.com/coding/v1/usages");
-        let overridden =
-            Kimi::with_base_url(Credential::new("sk-1"), "http://127.0.0.1:9/".to_owned())
-                .expect("builds");
         assert_eq!(
-            overridden.usages_url(),
-            "http://127.0.0.1:9/coding/v1/usages"
+            (SPEC.endpoint)(&Options::new()),
+            "https://api.kimi.com/coding/v1/usages",
+            "not www.kimi.com, which wants a session cookie rather than a key"
         );
-    }
-
-    /// The one place this module needs to drive a future to completion in a test.
-    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("runtime")
-            .block_on(future)
+        assert_eq!(SPEC.id, PROVIDER_ID);
+        assert_eq!(SPEC.auth, Auth::Bearer);
+        assert_eq!(SPEC.method, Method::Get);
+        assert!(SPEC.options.is_empty(), "Kimi has nothing to choose");
     }
 }
