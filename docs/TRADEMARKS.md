@@ -7,6 +7,7 @@ whose services the cards are about:
 
 | File | Mark of |
 | --- | --- |
+| `tidemark-amp-symbolic.svg` | Amp (ampcode.com) |
 | `tidemark-antigravity-symbolic.svg` | Google LLC (Antigravity) |
 | `tidemark-chutes-symbolic.svg` | Chutes AI (Chutes) |
 | `tidemark-claude-symbolic.svg` | Anthropic PBC (Claude) |
@@ -21,6 +22,7 @@ whose services the cards are about:
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
 | `tidemark-venice-symbolic.svg` | Venice AI |
+| `tidemark-warp-symbolic.svg` | Warp (warp.dev) |
 | `tidemark-zai-symbolic.svg` | Z.ai (Zhipu AI) |
 | `tidemark-zenmux-symbolic.svg` | ZenMux |
 
@@ -33,9 +35,9 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the eleven marks that CodexBar records as the provider icons of Chutes,
-ClawRouter, ClinePass, Crof, ElevenLabs, LLM Proxy, Neuralwatt, sub2api, Synthetic,
-Venice and ZenMux — the
+asset, and except the thirteen marks that CodexBar records as the provider icons of Amp,
+Chutes, ClawRouter, ClinePass, Crof, ElevenLabs, LLM Proxy, Neuralwatt, sub2api,
+Synthetic, Venice, Warp and ZenMux — the
 ClinePass one, its file notes, is
 Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand). Each was reduced to a
 single-colour path set and stripped of the fills, gradients, masks
