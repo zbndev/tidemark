@@ -109,11 +109,22 @@ pub type Factory = Box<
         + Sync,
 >;
 
+/// Rebuilds a provider client that finds its own credential, from its settings alone.
+///
+/// The counterpart of [`Factory`] for a provider registered with [`Account::with_client`].
+/// Such a provider has no stored key for the engine to hand it, but it can still have
+/// settings — and a setting that never reached the built client would take effect only on
+/// the next daemon restart.
+pub type Rebuild = Box<
+    dyn Fn(&BTreeMap<String, String>) -> Result<Arc<dyn Provider>, ProviderError> + Send + Sync,
+>;
+
 /// One account the daemon watches.
 pub struct Account {
     provider: ProviderId,
     account: AccountId,
     factory: Option<Factory>,
+    rebuild: Option<Rebuild>,
     client: Option<Arc<dyn Provider>>,
     status: ProviderStatus,
     failures: u32,
@@ -152,6 +163,7 @@ impl Account {
             provider,
             account,
             factory: Some(factory),
+            rebuild: None,
             client: None,
             failures: 0,
             retry_after: None,
@@ -173,12 +185,27 @@ impl Account {
             provider,
             account,
             factory: None,
+            rebuild: None,
             client: Some(client),
             failures: 0,
             retry_after: None,
             last_change_at: None,
             due: Instant::now(),
         }
+    }
+
+    /// How to build this account's client again when its settings change.
+    ///
+    /// Only for [`Account::with_client`] accounts: one built by a [`Factory`] is already
+    /// rebuilt from its stored key whenever the engine drops it.
+    pub fn with_rebuild(mut self, rebuild: Rebuild) -> Self {
+        self.rebuild = Some(rebuild);
+        self
+    }
+
+    /// Whether dropping this account's client is safe, because it can be built again.
+    fn rebuildable(&self) -> bool {
+        self.factory.is_some() || self.rebuild.is_some()
     }
 
     /// Says how this account is authenticated, and therefore what a credentials dialog
@@ -364,7 +391,7 @@ impl Engine {
             .set_option(provider, name, value)
             .map_err(|error| error.to_string())?;
         self.accounts[index].status.options = crate::registry::options(provider, &config);
-        if self.accounts[index].factory.is_some() {
+        if self.accounts[index].rebuildable() {
             self.accounts[index].client = None;
         }
         self.accounts[index].failures = 0;
@@ -452,6 +479,20 @@ impl Engine {
     /// Loads the credential and builds the client, unless one is already in hand.
     async fn ensure_client(&mut self, index: usize) {
         if self.accounts[index].client.is_some() {
+            return;
+        }
+        if let Some(rebuild) = self.accounts[index].rebuild.as_ref() {
+            // Owns its credential discovery: there is no stored key to read, so the
+            // settings are the whole of what the replacement is built from.
+            let options = self.accounts[index].option_values();
+            match rebuild(&options) {
+                Ok(client) => self.accounts[index].client = Some(client),
+                Err(error) => {
+                    self.accounts[index].failures = self.accounts[index].failures.saturating_add(1);
+                    self.accounts[index]
+                        .set_state(ProviderState::Unreachable, Some(error.to_string()));
+                }
+            }
             return;
         }
         if self.accounts[index].factory.is_none() {
@@ -661,7 +702,7 @@ impl Engine {
                 account.status.options =
                     crate::registry::options(account.provider.as_str(), config);
             }
-            if account.factory.is_some() {
+            if account.rebuildable() {
                 account.client = None;
             }
             account.failures = 0;
@@ -1032,6 +1073,51 @@ mod tests {
         ));
         let config = Config::at(harness.config_path.clone()).expect("parses");
         assert!(config.providers().expect("readable").is_empty());
+    }
+
+    #[tokio::test]
+    async fn changing_antigravity_usage_source_rebuilds_its_client() {
+        // Antigravity owns its credential discovery, so it is registered with a client
+        // rather than a factory — and a setting that only reached the client on the next
+        // daemon restart would look like the choice had not been taken.
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-antigravity-source-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let mut config = Config::at(config_path.clone()).expect("empty config parses");
+        config.add_provider("antigravity").expect("configured");
+        let secrets: Arc<dyn Secrets> = Arc::new(Keyring(|| Ok(None)));
+        let accounts = crate::registry::accounts(&secrets, &config).expect("accounts build");
+        let (updates, _published) = mpsc::channel(64);
+        let mut engine = Engine::new(
+            accounts,
+            History::in_memory().expect("an in-memory database opens"),
+            secrets,
+            updates,
+            config_path.clone(),
+        );
+        assert!(
+            engine.accounts[0].client.is_some(),
+            "registered with a client"
+        );
+
+        engine
+            .set_option("antigravity", "default", "source", "cli")
+            .await
+            .expect("the usage source is settable");
+
+        assert!(
+            engine.accounts[0].client.is_none(),
+            "the old client is dropped so the new setting is built into its replacement"
+        );
+        engine.ensure_client(0).await;
+        assert!(
+            engine.accounts[0].client.is_some(),
+            "and a replacement is built without a stored key to read"
+        );
+
+        let _ = std::fs::remove_file(&config_path);
     }
 
     #[tokio::test]

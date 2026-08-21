@@ -106,7 +106,48 @@ impl LocalQuota for AgyQuota {
     }
 }
 
-/// An Antigravity account, preferring an owned Google OAuth login over local `agy`.
+/// Which of Antigravity's two quota sources this account reads.
+///
+/// Two sources rather than a source and a fallback, because neither subsumes the other.
+/// The local `agy` server is the vendor's own live session and needs `agy` installed and
+/// logged in; the login is Tidemark's own and works on a machine with no `agy` at all —
+/// but only for an account Google entitles to the Cloud Code quota RPCs, which it answers
+/// `RESOURCE_EXHAUSTED` for accounts it does not. Neither is the right default everywhere,
+/// so the choice is the user's and [`Source::Auto`] is what it does when they have not made
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Source {
+    /// The local server first, the login when it cannot answer.
+    #[default]
+    Auto,
+    /// Only the login Tidemark performed.
+    OAuth,
+    /// Only the local `agy` server.
+    Cli,
+}
+
+impl Source {
+    /// The mode a stored setting names, defaulting to [`Source::Auto`].
+    ///
+    /// An unrecognised value is the default rather than an error: the settings file is
+    /// hand-editable, and a typo should cost the default rather than the account.
+    pub fn from_value(value: Option<&str>) -> Self {
+        match value {
+            Some(OAUTH_SOURCE) => Self::OAuth,
+            Some(CLI_SOURCE) => Self::Cli,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// The stored spelling of [`Source::Auto`].
+pub const AUTO_SOURCE: &str = "auto";
+/// The stored spelling of [`Source::OAuth`].
+pub const OAUTH_SOURCE: &str = "oauth";
+/// The stored spelling of [`Source::Cli`].
+pub const CLI_SOURCE: &str = "cli";
+
+/// An Antigravity account, reading whichever of its two sources [`Source`] selects.
 #[derive(Debug)]
 pub struct Antigravity {
     client: reqwest::Client,
@@ -114,17 +155,19 @@ pub struct Antigravity {
     direct_endpoint: String,
     token_endpoint: String,
     local: Box<dyn LocalQuota>,
+    source: Source,
 }
 
 impl Antigravity {
-    /// Builds the provider. The local fallback starts no process until it is selected.
-    pub fn new(own: Option<Arc<dyn Secrets>>) -> Result<Self, ProviderError> {
+    /// Builds the provider. The local source starts no process until it is selected.
+    pub fn new(own: Option<Arc<dyn Secrets>>, source: Source) -> Result<Self, ProviderError> {
         Ok(Self {
             client: http::client()?,
             own,
             direct_endpoint: oauth::API_ENDPOINTS[0].to_owned(),
             token_endpoint: oauth::TOKEN_URL.to_owned(),
             local: Box::new(AgyQuota::new()?),
+            source,
         })
     }
 
@@ -134,6 +177,7 @@ impl Antigravity {
         direct_endpoint: String,
         token_endpoint: String,
         local: Box<dyn LocalQuota>,
+        source: Source,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
             client: http::client()?,
@@ -141,14 +185,48 @@ impl Antigravity {
             direct_endpoint,
             token_endpoint,
             local,
+            source,
         })
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
+        match self.source {
+            Source::Cli => self.fetch_local().await,
+            Source::OAuth => {
+                let credentials = self.own_token().await?.ok_or(ProviderError::NoCredential)?;
+                self.fetch_direct(&credentials).await
+            }
+            Source::Auto => self.fetch_auto().await,
+        }
+    }
+
+    /// The local server first, the login when the local server cannot answer.
+    ///
+    /// Ordered this way because the local server is the session the user is actually
+    /// working in, and asking Google first spends a request to learn what `agy` already
+    /// knows. Its failure is not reported when there is a login to try: "`agy` is not
+    /// running" is not news to a user whose account also has a login.
+    async fn fetch_auto(&self) -> Result<Snapshot, ProviderError> {
+        let local = if self.local.available() {
+            match self.local.fetch().await {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(error) => Some(error),
+            }
+        } else {
+            None
+        };
         match self.own_token().await? {
             Some(credentials) => self.fetch_direct(&credentials).await,
-            None if self.local.available() => self.local.fetch().await,
-            None => Err(ProviderError::NoCredential),
+            None => Err(local.unwrap_or(ProviderError::NoCredential)),
+        }
+    }
+
+    /// The local server, or the reason there is nothing to read.
+    async fn fetch_local(&self) -> Result<Snapshot, ProviderError> {
+        if self.local.available() {
+            self.local.fetch().await
+        } else {
+            Err(ProviderError::NoCredential)
         }
     }
 
@@ -1135,6 +1213,178 @@ mod tests {
         include_str!("../../../tests/fixtures/antigravity-available-models.json");
 
     #[test]
+    fn auto_asks_the_local_server_before_the_login() {
+        // The order CodexBar's "Auto" uses: the local server is the vendor's own live
+        // session, and asking Google first spends a request to learn what `agy` already
+        // knows. A token being present must not take the local source out of the picture.
+        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+            // Unroutable: reaching for it at all is the failure this test describes.
+            "http://127.0.0.1:9".into(),
+            "http://127.0.0.1:9/token".into(),
+            fake_local(true, &local_calls),
+            Source::Auto,
+        )
+        .expect("provider");
+
+        let snapshot = block_on(provider.fetch_inner()).expect("the local server answers");
+
+        assert_eq!(snapshot.provider.as_str(), PROVIDER_ID);
+        assert_eq!(local_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn auto_uses_the_login_when_there_is_no_local_server() {
+        // The case the login was built for: no `agy` on the machine at all.
+        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let (base, _requests, _server) = local_server(vec![(200, DIRECT_QUOTA)]);
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+            base.clone(),
+            format!("{base}/token"),
+            fake_local(false, &local_calls),
+            Source::Auto,
+        )
+        .expect("provider");
+
+        let snapshot = block_on(provider.fetch_inner()).expect("the login answers");
+
+        assert_eq!(snapshot.provider.as_str(), PROVIDER_ID);
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn oauth_only_never_asks_the_local_server() {
+        // Pinned to the login: a user who chose this wants to know their login is broken,
+        // not to be quietly served from a source they excluded.
+        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let refused = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}"#;
+        let (base, _requests, _server) = local_server(vec![(429, refused)]);
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+            base.clone(),
+            format!("{base}/token"),
+            fake_local(true, &local_calls),
+            Source::OAuth,
+        )
+        .expect("provider");
+
+        let error = block_on(provider.fetch_inner()).expect_err("the login is the only source");
+        assert!(
+            matches!(error, ProviderError::RateLimited { .. }),
+            "{error:?}"
+        );
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn cli_only_never_reads_the_login() {
+        // Pinned to `agy`: the stored login is not consulted even though there is one.
+        let secrets = FakeSecrets::holding(owned_document("owned", 0));
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+            "http://127.0.0.1:9".into(),
+            "http://127.0.0.1:9/token".into(),
+            fake_local(true, &local_calls),
+            Source::Cli,
+        )
+        .expect("provider");
+
+        let snapshot = block_on(provider.fetch_inner()).expect("the local server answers");
+
+        assert_eq!(snapshot.provider.as_str(), PROVIDER_ID);
+        assert_eq!(local_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cli_only_without_a_local_server_says_so_rather_than_using_the_login() {
+        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+            "http://127.0.0.1:9".into(),
+            "http://127.0.0.1:9/token".into(),
+            fake_local(false, &local_calls),
+            Source::Cli,
+        )
+        .expect("provider");
+
+        let error = block_on(provider.fetch_inner()).expect_err("nothing to ask");
+        assert!(matches!(error, ProviderError::NoCredential), "{error:?}");
+    }
+
+    #[test]
+    fn a_source_is_read_from_its_stored_spelling_and_an_unknown_one_is_auto() {
+        assert_eq!(Source::from_value(Some("oauth")), Source::OAuth);
+        assert_eq!(Source::from_value(Some("cli")), Source::Cli);
+        assert_eq!(Source::from_value(Some("auto")), Source::Auto);
+        // Hand-editable file: a typo costs the default, not a card that will not start.
+        assert_eq!(Source::from_value(Some("nonsense")), Source::Auto);
+        assert_eq!(Source::from_value(None), Source::Auto);
+    }
+
+    #[test]
+    fn auto_falls_forward_to_the_login_when_the_local_server_fails() {
+        // `agy` is installed and running but has nobody logged into it. The login is the
+        // whole reason this account has a second source, so it is asked rather than the
+        // card being failed on the first source's word.
+        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let (base, requests, server) = local_server(vec![(200, DIRECT_QUOTA)]);
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let local = Box::new(FakeLocal::new(
+            true,
+            Arc::clone(&local_calls),
+            Err(ProviderError::Local("agy is not logged in".into())),
+        ));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+            base.clone(),
+            format!("{base}/token"),
+            local,
+            Source::Auto,
+        )
+        .expect("provider");
+
+        let snapshot = block_on(provider.fetch_inner())
+            .expect("the login answers what the local server could not");
+
+        assert_eq!(snapshot.provider.as_str(), PROVIDER_ID);
+        assert_eq!(local_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.into_iter().count(), 1);
+        server.join().expect("server stopped");
+    }
+
+    #[test]
+    fn a_direct_failure_with_no_local_server_is_reported_rather_than_hidden() {
+        // The fallback exists because there is somewhere better to look, not to swallow
+        // the reason. With nothing local running, the direct refusal is the answer.
+        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let refused = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}"#;
+        let (base, _requests, _server) = local_server(vec![(429, refused)]);
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+            base.clone(),
+            format!("{base}/token"),
+            fake_local(false, &local_calls),
+            Source::Auto,
+        )
+        .expect("provider");
+
+        let error = block_on(provider.fetch_inner()).expect_err("nothing else to ask");
+        assert!(
+            matches!(error, ProviderError::RateLimited { .. }),
+            "{error:?}"
+        );
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn a_stored_login_without_a_project_is_still_usable() {
         // Google hands some accounts no Cloud AI Companion project at all. Their tokens are
         // real, and rejecting the credential over the missing field signs them out.
@@ -1160,6 +1410,7 @@ mod tests {
             base.clone(),
             format!("{base}/token"),
             fake_local(true, &local_calls),
+            Source::OAuth,
         )
         .expect("provider");
 
@@ -1204,6 +1455,7 @@ mod tests {
             base.clone(),
             format!("{base}/token"),
             fake_local(true, &local_calls),
+            Source::OAuth,
         )
         .expect("provider");
 
@@ -1235,6 +1487,7 @@ mod tests {
             base.clone(),
             format!("{base}/token"),
             fake_local(true, &local_calls),
+            Source::OAuth,
         )
         .expect("provider");
 
@@ -1260,6 +1513,7 @@ mod tests {
                 barrier.base.clone(),
                 format!("{}/token", barrier.base),
                 fake_local(true, &local_calls),
+                Source::OAuth,
             )
             .expect("provider"),
         );
@@ -1296,6 +1550,7 @@ mod tests {
                 barrier.base.clone(),
                 format!("{}/token", barrier.base),
                 fake_local(true, &local_calls),
+                Source::OAuth,
             )
             .expect("provider"),
         );
@@ -1337,6 +1592,7 @@ mod tests {
                 barrier.base.clone(),
                 format!("{}/token", barrier.base),
                 fake_local(true, &local_calls),
+                Source::OAuth,
             )
             .expect("provider"),
         );
@@ -1370,7 +1626,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_oauth_wins_over_local() {
+    fn oauth_only_reads_the_login_and_nothing_else() {
         let secrets = FakeSecrets::holding(owned_document("owned-access", i64::MAX));
         let (base, direct_requests, server) = local_server(vec![(200, DIRECT_QUOTA)]);
         let local_calls = Arc::new(AtomicUsize::new(0));
@@ -1379,6 +1635,7 @@ mod tests {
             base,
             "http://127.0.0.1:9/token".into(),
             fake_local(true, &local_calls),
+            Source::OAuth,
         )
         .expect("provider");
 
@@ -1390,7 +1647,7 @@ mod tests {
     }
 
     #[test]
-    fn local_is_used_only_without_an_owned_token() {
+    fn auto_reads_the_local_server_when_there_is_no_login_at_all() {
         let secrets = Arc::new(FakeSecrets::default());
         let local_calls = Arc::new(AtomicUsize::new(0));
         let provider = Antigravity::with_endpoints_and_local(
@@ -1398,6 +1655,7 @@ mod tests {
             "http://127.0.0.1:9".into(),
             "http://127.0.0.1:9/token".into(),
             fake_local(true, &local_calls),
+            Source::Auto,
         )
         .expect("provider");
 
@@ -1415,6 +1673,7 @@ mod tests {
             "http://127.0.0.1:9".into(),
             "http://127.0.0.1:9/token".into(),
             fake_local(false, &local_calls),
+            Source::Auto,
         )
         .expect("provider");
 
@@ -1425,22 +1684,34 @@ mod tests {
     }
 
     #[test]
-    fn rejected_owned_oauth_does_not_fall_back() {
+    fn a_rejected_login_is_reported_even_when_the_local_server_also_failed() {
+        // Two dead sources, and only one of them is the user's to fix. The reason that
+        // reaches the card has to be the login it is being asked to renew, rather than
+        // whichever source happened to be consulted first.
         let secrets = FakeSecrets::holding(owned_document("rejected", i64::MAX));
         let (base, direct_requests, server) = local_server(vec![(401, "{}")]);
         let local_calls = Arc::new(AtomicUsize::new(0));
+        let local = Box::new(FakeLocal::new(
+            true,
+            Arc::clone(&local_calls),
+            Err(ProviderError::Local("agy is not logged in".into())),
+        ));
         let provider = Antigravity::with_endpoints_and_local(
             Some(secrets as Arc<dyn Secrets>),
             base,
             "http://127.0.0.1:9/token".into(),
-            fake_local(true, &local_calls),
+            local,
+            Source::Auto,
         )
         .expect("provider");
 
         let error = block_on(provider.fetch_inner()).expect_err("owned token is rejected");
 
-        assert!(matches!(error, ProviderError::Credential { status: 401 }));
-        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            matches!(error, ProviderError::Credential { status: 401 }),
+            "{error:?}"
+        );
+        assert_eq!(local_calls.load(Ordering::SeqCst), 1);
         assert_eq!(direct_requests.into_iter().count(), 1);
         server.join().expect("server stopped");
     }

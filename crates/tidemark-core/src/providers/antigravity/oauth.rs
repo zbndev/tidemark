@@ -13,9 +13,15 @@ const CLIENT_SECRET: &str = "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";
 const REDIRECT_PORT: u16 = 51_121;
 const REDIRECT_PATH: &str = "/oauth-callback";
 const SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs";
+/// Cloud Code hosts, production first.
+///
+/// `daily-` is a staging host and stays only as a second chance for a login that
+/// production refused. The order is load-bearing beyond the login: the direct quota fetch
+/// reads `API_ENDPOINTS[0]` outright, so a staging host in front would have production
+/// quota read from it every poll.
 pub(super) const API_ENDPOINTS: &[&str] = &[
-    "https://daily-cloudcode-pa.googleapis.com",
     "https://cloudcode-pa.googleapis.com",
+    "https://daily-cloudcode-pa.googleapis.com",
 ];
 /// How many times `loadCodeAssist` is re-asked for a project after onboarding.
 const PROJECT_POLLS: usize = 5;
@@ -389,6 +395,20 @@ mod tests {
                 .contains(&("include_granted_scopes", "true"))
         );
         assert!(client.client_secret.is_some());
+    }
+
+    #[test]
+    fn the_production_host_is_tried_before_the_daily_one() {
+        // `daily-` is a staging host. It is kept as a second chance rather than removed,
+        // but production quota must not be read from it while production answers — and
+        // `API_ENDPOINTS[0]` is also the host the direct quota fetch uses outright.
+        assert_eq!(API_ENDPOINTS[0], "https://cloudcode-pa.googleapis.com");
+        assert!(
+            API_ENDPOINTS
+                .iter()
+                .any(|endpoint| endpoint.contains("daily-"))
+        );
+        assert!(!API_ENDPOINTS[0].contains("daily-"));
     }
 
     #[test]

@@ -27,6 +27,9 @@ use tidemark_types::{
 
 use crate::engine::Account;
 
+/// Name of Antigravity's usage-source setting under `[provider.antigravity]`.
+pub const ANTIGRAVITY_SOURCE: &str = "source";
+
 /// Name of Z.ai's region setting under `[provider.zai]`.
 pub const ZAI_REGION: &str = "region";
 const ZAI_GLOBAL: &str = "global";
@@ -89,7 +92,7 @@ pub fn account(
     config: &Config,
 ) -> Result<Option<Account>, ProviderError> {
     let account = match provider {
-        antigravity::PROVIDER_ID => Some(antigravity_account(secrets)?),
+        antigravity::PROVIDER_ID => Some(antigravity_account(secrets, config)?),
         "claude" => Some(claude_account(secrets)?),
         codex::PROVIDER_ID => Some(codex_account(secrets)?),
         kimi::PROVIDER_ID => Some(kimi_account()),
@@ -122,6 +125,9 @@ pub fn accounts(
 /// Called again whenever the file changes, so a provider's published options are always
 /// what is on disk rather than what was on disk when the daemon started.
 pub fn options(provider: &str, config: &Config) -> Vec<ProviderOption> {
+    if provider == antigravity::PROVIDER_ID {
+        return vec![antigravity_source_option(config)];
+    }
     if provider != zai::PROVIDER_ID {
         return Vec::new();
     }
@@ -144,6 +150,48 @@ pub fn options(provider: &str, config: &Config) -> Vec<ProviderOption> {
         value: region(config).0.to_owned(),
         choices,
     }]
+}
+
+/// Antigravity's two quota sources, and letting the user say which one this account reads.
+///
+/// Published as a choice rather than decided here because neither source is right
+/// everywhere: `agy` is the vendor's own live session but has to be installed and logged
+/// in, while the login works on a machine with no `agy` and only for an account Google
+/// entitles to the Cloud Code quota RPCs.
+fn antigravity_source_option(config: &Config) -> ProviderOption {
+    let choices = vec![
+        OptionChoice {
+            value: antigravity::AUTO_SOURCE.to_owned(),
+            title: "Automatic".to_owned(),
+        },
+        OptionChoice {
+            value: antigravity::OAUTH_SOURCE.to_owned(),
+            title: "Google sign-in".to_owned(),
+        },
+        OptionChoice {
+            value: antigravity::CLI_SOURCE.to_owned(),
+            title: "Local agy session".to_owned(),
+        },
+    ];
+    ProviderOption {
+        name: ANTIGRAVITY_SOURCE.to_owned(),
+        title: "Usage source".to_owned(),
+        description: Some(
+            "Automatic reads the local agy session and falls back to the Google sign-in."
+                .to_owned(),
+        ),
+        value: source_value(config).0.to_owned(),
+        choices,
+    }
+}
+
+/// The stored usage source, and the client's own enum for it.
+fn source_value(config: &Config) -> (&'static str, antigravity::Source) {
+    match config.option(antigravity::PROVIDER_ID, ANTIGRAVITY_SOURCE) {
+        Some(antigravity::OAUTH_SOURCE) => (antigravity::OAUTH_SOURCE, antigravity::Source::OAuth),
+        Some(antigravity::CLI_SOURCE) => (antigravity::CLI_SOURCE, antigravity::Source::Cli),
+        _ => (antigravity::AUTO_SOURCE, antigravity::Source::Auto),
+    }
 }
 
 /// The stored region, and the client's own enum for it.
@@ -188,14 +236,28 @@ pub async fn login_document(
     }
 }
 
-fn antigravity_account(secrets: &Arc<dyn Secrets>) -> Result<Account, ProviderError> {
-    Ok(
-        Account::with_client(Arc::new(antigravity::Antigravity::new(Some(Arc::clone(
-            secrets,
-        )))?))
-        .with_credential(CredentialKind::OAuth)
-        .with_hint("Sign in with Google through Tidemark, or use an existing agy session."),
-    )
+fn antigravity_account(
+    secrets: &Arc<dyn Secrets>,
+    config: &Config,
+) -> Result<Account, ProviderError> {
+    Ok(Account::with_client(Arc::new(antigravity::Antigravity::new(
+        Some(Arc::clone(secrets)),
+        source_value(config).1,
+    )?))
+    .with_rebuild({
+        let secrets = Arc::clone(secrets);
+        Box::new(move |options| {
+            let source = antigravity::Source::from_value(
+                options.get(ANTIGRAVITY_SOURCE).map(String::as_str),
+            );
+            Ok(Arc::new(antigravity::Antigravity::new(
+                Some(Arc::clone(&secrets)),
+                source,
+            )?) as Arc<dyn Provider>)
+        })
+    })
+    .with_credential(CredentialKind::OAuth)
+    .with_hint("Sign in with Google through Tidemark, or use an existing agy session."))
 }
 
 fn claude_account(secrets: &Arc<dyn Secrets>) -> Result<Account, ProviderError> {
@@ -318,6 +380,38 @@ mod tests {
         ));
         std::fs::write(&path, contents).expect("seeds config");
         path
+    }
+
+    #[test]
+    fn antigravity_publishes_its_three_usage_sources() {
+        let config = empty_config();
+        let published = options(antigravity::PROVIDER_ID, &config);
+        let source = published
+            .iter()
+            .find(|option| option.name == ANTIGRAVITY_SOURCE)
+            .expect("the usage source is published");
+        let values: Vec<&str> = source
+            .choices
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect();
+        assert_eq!(values, ["auto", "oauth", "cli"]);
+        assert_eq!(source.value, "auto", "auto is what an unset file means");
+    }
+
+    #[test]
+    fn a_configured_usage_source_is_what_the_option_reports() {
+        let path = scratch_config(
+            "antigravity-source",
+            "providers = [\"antigravity\"]\n\n[provider.antigravity]\nsource = \"cli\"\n",
+        );
+        let config = Config::at(path).expect("config reads");
+        let published = options(antigravity::PROVIDER_ID, &config);
+        let source = published
+            .iter()
+            .find(|option| option.name == ANTIGRAVITY_SOURCE)
+            .expect("the usage source is published");
+        assert_eq!(source.value, "cli");
     }
 
     #[test]
