@@ -1,7 +1,9 @@
 //! Which accounts this build watches, and how each of them is signed in to.
 //!
-//! Registration is the whole of "adding a provider": one entry here, and the client itself
-//! in `tidemark-core`. Nothing else in the daemon names a provider.
+//! Registration is a spec in `keyed::CATALOG`, for every key-authenticated provider. Only
+//! the three OAuth providers — Antigravity, Claude and Codex — are registered by hand here,
+//! because each of them acquires its credential its own way. Nothing else in the daemon
+//! names a key-authenticated provider.
 //!
 //! An entry says three things beyond how to build a client. **How the account is
 //! authenticated** decides what the credentials dialog offers — a key field, a sign-in
@@ -19,9 +21,7 @@ use std::sync::Arc;
 
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
-use tidemark_core::providers::{
-    Provider, ProviderError, antigravity, claude, codex, keyed, kimi, zai,
-};
+use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex, keyed};
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
     AccountId, CredentialKind, OptionChoice, ProviderDefinition, ProviderId, ProviderOption,
@@ -32,14 +32,14 @@ use crate::engine::Account;
 /// Name of Antigravity's usage-source setting under `[provider.antigravity]`.
 pub const ANTIGRAVITY_SOURCE: &str = "source";
 
-/// Name of Z.ai's region setting under `[provider.zai]`.
-pub const ZAI_REGION: &str = "region";
-const ZAI_GLOBAL: &str = "global";
-const ZAI_BIGMODEL_CN: &str = "bigmodel-cn";
-
 /// Every provider this build can configure, in stable display order.
+///
+/// The three OAuth providers come first, written out by hand because each of them
+/// acquires its credential its own way. Every key-authenticated provider follows, one
+/// entry per spec in `keyed::CATALOG` — so adding one is a file beside `keyed.rs` and a
+/// line in that table, not a new stanza here.
 pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
-    vec![
+    let mut definitions = vec![
         ProviderDefinition {
             provider: antigravity::PROVIDER_ID.into(),
             title: "Antigravity".into(),
@@ -65,26 +65,16 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
             external_fallback: Some("Codex CLI login".into()),
             options: options(codex::PROVIDER_ID, config),
         },
-        ProviderDefinition {
-            provider: kimi::PROVIDER_ID.into(),
-            title: "Kimi".into(),
-            credential: CredentialKind::Key.as_wire().into(),
-            credential_hint:
-                "Kimi Code Console → API keys. This is Kimi For Coding, not the Open Platform."
-                    .into(),
-            external_fallback: None,
-            options: options(kimi::PROVIDER_ID, config),
-        },
-        ProviderDefinition {
-            provider: zai::PROVIDER_ID.into(),
-            title: "Z.ai".into(),
-            credential: CredentialKind::Key.as_wire().into(),
-            credential_hint: "Z.ai dashboard → API keys, on whichever region your account is on."
-                .into(),
-            external_fallback: None,
-            options: options(zai::PROVIDER_ID, config),
-        },
-    ]
+    ];
+    definitions.extend(keyed::CATALOG.iter().map(|spec| ProviderDefinition {
+        provider: spec.id.to_owned(),
+        title: spec.title.to_owned(),
+        credential: CredentialKind::Key.as_wire().to_owned(),
+        credential_hint: spec.credential_hint.to_owned(),
+        external_fallback: None,
+        options: options(spec.id, config),
+    }));
+    definitions
 }
 
 /// Builds one configured account, or returns `None` for a slug this build does not support.
@@ -97,9 +87,10 @@ pub fn account(
         antigravity::PROVIDER_ID => Some(antigravity_account(secrets, config)?),
         "claude" => Some(claude_account(secrets)?),
         codex::PROVIDER_ID => Some(codex_account(secrets)?),
-        kimi::PROVIDER_ID => Some(kimi_account()),
-        zai::PROVIDER_ID => Some(zai_account()),
-        _ => None,
+        other => keyed::CATALOG
+            .iter()
+            .find(|spec| spec.id == other)
+            .map(|spec| keyed_account(spec)),
     };
     Ok(account.map(|account| {
         account
@@ -150,28 +141,29 @@ pub fn options(provider: &str, config: &Config) -> Vec<ProviderOption> {
     if provider == antigravity::PROVIDER_ID {
         return vec![antigravity_source_option(config)];
     }
-    if provider != zai::PROVIDER_ID {
+    let Some(spec) = keyed::CATALOG.iter().find(|spec| spec.id == provider) else {
         return Vec::new();
-    }
-    let choices = vec![
-        OptionChoice {
-            value: ZAI_GLOBAL.to_owned(),
-            title: "Global (api.z.ai)".to_owned(),
-        },
-        OptionChoice {
-            value: ZAI_BIGMODEL_CN.to_owned(),
-            title: "China (open.bigmodel.cn)".to_owned(),
-        },
-    ];
-    vec![ProviderOption {
-        name: ZAI_REGION.to_owned(),
-        title: "Region".to_owned(),
-        description: Some(
-            "The same API on two hosts. A key issued for one is rejected by the other.".to_owned(),
-        ),
-        value: region(config).0.to_owned(),
-        choices,
-    }]
+    };
+    spec.options
+        .iter()
+        .map(|schema| ProviderOption {
+            name: schema.name.to_owned(),
+            title: schema.title.to_owned(),
+            description: schema.description.map(str::to_owned),
+            value: config
+                .option(provider, schema.name)
+                .unwrap_or(schema.default)
+                .to_owned(),
+            choices: schema
+                .choices
+                .iter()
+                .map(|(value, label)| OptionChoice {
+                    value: (*value).to_owned(),
+                    title: (*label).to_owned(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Antigravity's two quota sources, and letting the user say which one this account reads.
@@ -213,18 +205,6 @@ fn source_value(config: &Config) -> (&'static str, antigravity::Source) {
         Some(antigravity::OAUTH_SOURCE) => (antigravity::OAUTH_SOURCE, antigravity::Source::OAuth),
         Some(antigravity::CLI_SOURCE) => (antigravity::CLI_SOURCE, antigravity::Source::Cli),
         _ => (antigravity::AUTO_SOURCE, antigravity::Source::Auto),
-    }
-}
-
-/// The stored region, and the client's own enum for it.
-///
-/// An unrecognised value falls back to Global rather than failing the account: the file is
-/// hand-editable, and a typo in it should cost a wrong host rather than a card that will
-/// not start.
-fn region(config: &Config) -> (&'static str, zai::Region) {
-    match config.option(zai::PROVIDER_ID, ZAI_REGION) {
-        Some(ZAI_BIGMODEL_CN) => (ZAI_BIGMODEL_CN, zai::Region::BigModelCn),
-        _ => (ZAI_GLOBAL, zai::Region::Global),
     }
 }
 
@@ -302,36 +282,27 @@ fn codex_account(secrets: &Arc<dyn Secrets>) -> Result<Account, ProviderError> {
     )
 }
 
-fn kimi_account() -> Account {
+/// Every key-authenticated account is built the same way: the engine hands over the stored
+/// key and the account's settings, and the spec says what to do with them.
+fn keyed_account(spec: &'static keyed::Spec) -> Account {
     Account::new(
-        ProviderId::new(kimi::PROVIDER_ID),
+        ProviderId::new(spec.id),
         AccountId::default(),
-        Box::new(|credential, options| {
-            Ok(Arc::new(keyed::Keyed::new(&kimi::SPEC, credential, options)?) as Arc<dyn Provider>)
+        Box::new(move |credential, options| {
+            // The URL is resolved at build time, which is why storing a key or changing a
+            // setting drops the client: either may change which host this account talks to.
+            Ok(Arc::new(keyed::Keyed::new(spec, credential, options)?) as Arc<dyn Provider>)
         }),
     )
     .with_credential(CredentialKind::Key)
-    .with_hint(kimi::SPEC.credential_hint)
-}
-
-fn zai_account() -> Account {
-    Account::new(
-        ProviderId::new(zai::PROVIDER_ID),
-        AccountId::default(),
-        Box::new(|credential, options| {
-            // The URL is resolved at build time, which is why storing a key or changing
-            // the region drops the client: both change which host this account talks to.
-            Ok(Arc::new(keyed::Keyed::new(&zai::SPEC, credential, options)?) as Arc<dyn Provider>)
-        }),
-    )
-    .with_credential(CredentialKind::Key)
-    .with_hint(zai::SPEC.credential_hint)
+    .with_hint(spec.credential_hint)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidemark_core::providers::{BoxFuture, Credential};
+    use std::collections::BTreeMap;
+    use tidemark_core::providers::{BoxFuture, Credential, zai};
     use tidemark_core::secrets::{Kind, SecretError};
 
     #[derive(Debug)]
@@ -513,7 +484,10 @@ mod tests {
 
     #[test]
     fn the_region_defaults_to_global_and_follows_the_file_when_it_says_otherwise() {
-        assert_eq!(region(&empty_config()).1, zai::Region::Global);
+        assert_eq!(
+            options(zai::PROVIDER_ID, &empty_config())[0].value,
+            "global"
+        );
 
         let path = std::env::temp_dir().join(format!(
             "tidemark-registry-region-{}.toml",
@@ -521,16 +495,80 @@ mod tests {
         ));
         std::fs::write(&path, "[provider.zai]\nregion = \"bigmodel-cn\"\n").expect("seed");
         let config = Config::at(path.clone()).expect("parses");
-        assert_eq!(region(&config).1, zai::Region::BigModelCn);
         assert_eq!(options(zai::PROVIDER_ID, &config)[0].value, "bigmodel-cn");
 
+        // A published option shows what is on disk verbatim; the spec's own `endpoint`
+        // is what keeps an unrecognised value from reaching the wrong host, so an
+        // unrecognised value on disk is not silently rewritten here.
         std::fs::write(&path, "[provider.zai]\nregion = \"mars\"\n").expect("seed");
         let config = Config::at(path.clone()).expect("parses");
+        assert_eq!(options(zai::PROVIDER_ID, &config)[0].value, "mars");
         assert_eq!(
-            region(&config).1,
-            zai::Region::Global,
-            "a typo in a hand-edited file costs the wrong host, not a dead card"
+            (zai::SPEC.endpoint)(&BTreeMap::from([("region".to_owned(), "mars".to_owned())])),
+            (zai::SPEC.endpoint)(&BTreeMap::new()),
+            "a typo in a hand-edited file costs the wrong host at request time, not a dead card"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn every_keyed_spec_reaches_the_published_catalog() {
+        let config = empty_config();
+        let published = catalog(&config);
+        for spec in keyed::CATALOG {
+            let entry = published
+                .iter()
+                .find(|definition| definition.provider == spec.id)
+                .unwrap_or_else(|| panic!("{} is in the catalog but not published", spec.id));
+            assert_eq!(entry.title, spec.title);
+            assert_eq!(entry.credential, CredentialKind::Key.as_wire());
+            assert_eq!(entry.credential_hint, spec.credential_hint);
+            assert_eq!(entry.options.len(), spec.options.len());
+        }
+    }
+
+    #[test]
+    fn the_oauth_providers_keep_the_head_of_the_catalog() {
+        let published = catalog(&empty_config());
+        let slugs: Vec<&str> = published
+            .iter()
+            .map(|definition| definition.provider.as_str())
+            .collect();
+        assert_eq!(&slugs[..3], &["antigravity", "claude", "codex"]);
+    }
+
+    #[test]
+    fn a_keyed_spec_builds_a_configured_account() {
+        let built = account("zai", &secrets(), &empty_config()).expect("no error");
+        assert!(built.is_some(), "a slug in keyed::CATALOG must build");
+    }
+
+    #[test]
+    fn a_slug_no_build_supports_is_still_not_an_account() {
+        assert!(
+            account("nonesuch", &secrets(), &empty_config())
+                .expect("no error")
+                .is_none(),
+            "an unknown slug is warned about, not turned into an account"
+        );
+    }
+
+    #[test]
+    fn a_published_option_carries_the_users_current_value() {
+        let path = scratch_config("zai-region", "[provider.zai]\nregion = \"bigmodel-cn\"\n");
+        let config = Config::at(path.clone()).expect("parses");
+        let published = catalog(&config);
+        let zai = published
+            .iter()
+            .find(|definition| definition.provider == "zai")
+            .expect("published");
+        let region = zai
+            .options
+            .iter()
+            .find(|option| option.name == "region")
+            .expect("published");
+        assert_eq!(region.value, "bigmodel-cn");
+        assert_eq!(region.choices.len(), 2);
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -198,7 +198,8 @@ pub struct ProviderOption {
     pub description: Option<String>,
     /// What it is currently set to.
     pub value: String,
-    /// Everything it may be set to. Never empty.
+    /// Everything it may be set to. Empty means free text — a base URL has no menu to
+    /// offer.
     pub choices: Vec<OptionChoice>,
 }
 
