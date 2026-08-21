@@ -8,16 +8,19 @@ whose services the cards are about:
 | File | Mark of |
 | --- | --- |
 | `tidemark-antigravity-symbolic.svg` | Google LLC (Antigravity) |
+| `tidemark-chutes-symbolic.svg` | Chutes AI (Chutes) |
 | `tidemark-claude-symbolic.svg` | Anthropic PBC (Claude) |
 | `tidemark-clawrouter-symbolic.svg` | The OpenClaw project (ClawRouter) |
 | `tidemark-clinepass-symbolic.svg` | Cline (ClinePass) |
 | `tidemark-codex-symbolic.svg` | OpenAI (Codex) |
 | `tidemark-crof-symbolic.svg` | Crof |
 | `tidemark-kimi-symbolic.svg` | Moonshot AI (Kimi) |
+| `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
 | `tidemark-venice-symbolic.svg` | Venice AI |
 | `tidemark-zai-symbolic.svg` | Z.ai (Zhipu AI) |
+| `tidemark-zenmux-symbolic.svg` | ZenMux |
 
 They are used nominatively — to identify which service a card is reporting on — and for no
 other purpose. Tidemark is not affiliated with, endorsed by, or sponsored by any of them.
@@ -28,8 +31,9 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the six marks that CodexBar records as the provider icons of ClawRouter,
-ClinePass, Crof, sub2api, Synthetic and Venice — the ClinePass one, its file notes, is
+asset, and except the nine marks that CodexBar records as the provider icons of Chutes,
+ClawRouter, ClinePass, Crof, Neuralwatt, sub2api, Synthetic, Venice and ZenMux — the
+ClinePass one, its file notes, is
 Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand). Each was reduced to a
 single-colour path set and stripped of the fills, gradients, masks
 and filters the originals carry — a symbolic icon is recoloured by the theme and cannot keep

@@ -1,0 +1,7 @@
+<!-- The Neuralwatt mark belongs to Neuralwatt. Not covered by Tidemark's MIT licence; used nominatively
+     to identify the service a card reports on. See docs/TRADEMARKS.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
+  <g transform="translate(1.2857 1.5714) scale(0.71429)">
+    <path d="M18 2 6 19h7l-3 11 14-19h-7z"/>
+  </g>
+</svg>
