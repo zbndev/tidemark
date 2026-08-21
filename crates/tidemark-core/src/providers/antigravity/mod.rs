@@ -36,6 +36,7 @@
 //! module's [`logged_in`] is the predicate that gate is built on.
 
 pub mod agy;
+pub mod direct;
 
 use serde::Deserialize;
 use tidemark_types::{

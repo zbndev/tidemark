@@ -1,0 +1,53 @@
+{
+  "models": {
+    "gemini-3-pro-high": {
+      "displayName": "Gemini 3 Pro",
+      "modelProvider": "MODEL_PROVIDER_GOOGLE",
+      "weeklyQuotaInfo": {
+        "remainingFraction": 0.75,
+        "resetTime": "2026-08-28T00:00:00Z",
+        "windowId": "weekly",
+        "windowLabel": "Weekly"
+      }
+    },
+    "gemini-3-pro-low": {
+      "displayName": "Gemini 3 Pro",
+      "modelProvider": "MODEL_PROVIDER_GOOGLE",
+      "weeklyQuotaInfo": {
+        "remainingFraction": 0.50,
+        "resetTime": "2026-08-28T00:00:00Z",
+        "windowId": "weekly",
+        "windowLabel": "Weekly"
+      }
+    },
+    "gemini-3-flash": {
+      "displayName": "Gemini 3 Flash",
+      "modelProvider": "MODEL_PROVIDER_GOOGLE",
+      "dailyQuotaInfo": {
+        "remainingFraction": 0.90,
+        "resetTime": "2026-08-22T00:00:00Z",
+        "windowId": "daily",
+        "windowLabel": "Daily"
+      }
+    },
+    "claude-sonnet": {
+      "displayName": "Claude Sonnet",
+      "modelProvider": "MODEL_PROVIDER_ANTHROPIC",
+      "weeklyQuotaInfo": {
+        "remainingFraction": 0.20,
+        "resetTime": "2026-08-28T00:00:00Z",
+        "windowId": "weekly",
+        "windowLabel": "Weekly"
+      }
+    },
+    "gpt-oss": {
+      "displayName": "GPT OSS",
+      "modelProvider": "MODEL_PROVIDER_OPENAI",
+      "quotaInfo": {
+        "resetTime": "2026-08-28T00:00:00Z",
+        "windowId": "weekly",
+        "windowLabel": "Weekly"
+      }
+    }
+  }
+}
