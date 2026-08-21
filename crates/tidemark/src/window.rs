@@ -222,8 +222,17 @@ impl MainWindow {
     /// Tells the panel what the window now knows.
     fn update_tray(&self) {
         if let Some(tray) = self.tray.borrow().as_ref() {
-            tray.show(&self.statuses(), self.daemon.borrow().is_some());
+            tray.show(
+                &self.statuses(),
+                &self.titles(),
+                self.daemon.borrow().is_some(),
+            );
         }
+    }
+
+    /// The catalog's spelling of every provider's name, as this client received it.
+    fn titles(&self) -> model::Titles {
+        model::titles(&self.definitions.borrow())
     }
 
     /// Replaces everything on screen with what the daemon just said it knows.
@@ -337,9 +346,11 @@ impl MainWindow {
     /// Builds a card whose activation is owned by this window, not by the card itself.
     fn make_card(self: &Rc<Self>, status: &ProviderStatus, now: Timestamp) -> Rc<Card> {
         let weak = Rc::downgrade(self);
+        let provider_name = model::name(&self.titles(), &status.provider);
         Rc::new(Card::new(
             status,
             now,
+            provider_name,
             Rc::new(move |provider, account| {
                 if let Some(main) = weak.upgrade() {
                     main.open_detail(&provider, &account);
@@ -366,7 +377,8 @@ impl MainWindow {
             return;
         };
         let weak = Rc::downgrade(self);
-        let dialog = DetailDialog::present(&self.window, proxy, status, move || {
+        let provider_name = model::name(&self.titles(), &status.provider);
+        let dialog = DetailDialog::present(&self.window, proxy, status, provider_name, move || {
             if let Some(main) = weak.upgrade() {
                 main.detail_dialog.clear();
             }

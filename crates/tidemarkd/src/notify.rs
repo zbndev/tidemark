@@ -189,7 +189,7 @@ pub fn compose(provider: &str, window: &Window, kind: Kind, now: Timestamp) -> N
     };
 
     Notice {
-        summary: format!("{event} — {} · {}", provider_label(provider), window.title),
+        summary: format!("{event} — {} · {}", display_name(provider), window.title),
         body,
         icon: present::icon_name(provider),
         urgency: match kind {
@@ -198,6 +198,18 @@ pub fn compose(provider: &str, window: &Window, kind: Kind, now: Timestamp) -> N
         },
         about: format!("{provider}/{}", window.key),
     }
+}
+
+/// What the notification calls the provider: the catalog's own spelling of its name when
+/// this build knows it, the capitalised slug otherwise.
+///
+/// The settings dialog already shows the catalog's title — "ClinePass", not "Clinepass" —
+/// and a notification that spelled the same provider differently would read as two
+/// services.
+fn display_name(provider: &str) -> String {
+    crate::registry::title(provider)
+        .map(str::to_owned)
+        .unwrap_or_else(|| provider_label(provider))
 }
 
 /// Why a notification did not reach the user.

@@ -31,7 +31,7 @@
 
 use gtk::glib;
 use ksni::TrayMethods;
-use tidemark_types::{DANGER_AT, ProviderStatus, ids, present, provider_label};
+use tidemark_types::{DANGER_AT, ProviderStatus, ids, present};
 
 use crate::format;
 use crate::model;
@@ -82,14 +82,14 @@ impl Entry {
 ///
 /// An account whose last poll did not produce a reading says what [`format::chip`] says on
 /// its card, so the two never spell one situation two ways.
-pub fn entries(statuses: &[ProviderStatus]) -> Vec<Entry> {
+pub fn entries(statuses: &[ProviderStatus], titles: &model::Titles) -> Vec<Entry> {
     let mut ordered: Vec<&ProviderStatus> = statuses.iter().collect();
     ordered.sort_by(|left, right| model::compare(left, right));
 
     ordered
         .iter()
         .map(|status| Entry {
-            label: label(statuses, status),
+            label: label(statuses, status, titles),
             value: value(status),
         })
         .collect()
@@ -111,8 +111,8 @@ pub fn needs_attention(statuses: &[ProviderStatus]) -> bool {
 /// The provider's name, with the account after it only when it is needed to tell two rows
 /// apart. One account per provider is the ordinary case and `Claude (default)` would be a
 /// word of noise on every line of the menu.
-fn label(all: &[ProviderStatus], status: &ProviderStatus) -> String {
-    let name = provider_label(&status.provider);
+fn label(all: &[ProviderStatus], status: &ProviderStatus, titles: &model::Titles) -> String {
+    let name = model::name(titles, &status.provider);
     let shared = all
         .iter()
         .filter(|other| other.provider == status.provider)
@@ -157,9 +157,9 @@ pub struct State {
 
 impl State {
     /// What the interface currently knows, as the tray needs it.
-    pub fn of(statuses: &[ProviderStatus], connected: bool) -> Self {
+    pub fn of(statuses: &[ProviderStatus], titles: &model::Titles, connected: bool) -> Self {
         Self {
-            entries: entries(statuses),
+            entries: entries(statuses, titles),
             attention: needs_attention(statuses),
             connected,
         }
@@ -369,10 +369,10 @@ impl Tray {
     }
 
     /// Tells the panel what the interface now knows. Never blocks.
-    pub fn show(&self, statuses: &[ProviderStatus], connected: bool) {
+    pub fn show(&self, statuses: &[ProviderStatus], titles: &model::Titles, connected: bool) {
         if self
             .outbox
-            .try_send(State::of(statuses, connected))
+            .try_send(State::of(statuses, titles, connected))
             .is_err()
         {
             tracing::debug!("the tray is no longer accepting updates");
@@ -384,7 +384,8 @@ impl Tray {
 mod tests {
     use super::*;
     use tidemark_types::{
-        AccountId, ProviderId, Snapshot, Timestamp, Window, WindowKey, WindowLength,
+        AccountId, ProviderDefinition, ProviderId, Snapshot, Timestamp, Window, WindowKey,
+        WindowLength,
     };
 
     fn window(seconds: u64, used: f64) -> Window {
@@ -422,7 +423,7 @@ mod tests {
             "default",
             vec![window(604_800, 91.0), window(18_000, 12.0)],
         );
-        let rows = entries(&[status]);
+        let rows = entries(&[status], &model::Titles::new());
         assert_eq!(
             rows[0].value, "12%",
             "the five-hour window is the one the card leads with"
@@ -435,7 +436,7 @@ mod tests {
             reading("kimi", "default", vec![window(18_000, 10.0)]),
             reading("zai", "default", vec![window(18_000, 90.0)]),
         ];
-        let rows = entries(&statuses);
+        let rows = entries(&statuses, &model::Titles::new());
         assert_eq!(rows[0].line(), "Z.ai — 90%");
         assert_eq!(rows[1].line(), "Kimi — 10%");
     }
@@ -444,7 +445,7 @@ mod tests {
     fn an_account_with_no_reading_says_why_rather_than_showing_a_number() {
         let mut status = pending("codex");
         status.set_state(tidemark_types::ProviderState::NoCredential, None);
-        let rows = entries(&[status]);
+        let rows = entries(&[status], &model::Titles::new());
         assert_eq!(rows[0].line(), "Codex — no key");
     }
 
@@ -452,7 +453,7 @@ mod tests {
     fn an_account_that_kept_its_last_reading_still_shows_it() {
         let mut status = reading("zai", "default", vec![window(18_000, 44.0)]);
         status.set_state(tidemark_types::ProviderState::RateLimited, None);
-        let rows = entries(&[status]);
+        let rows = entries(&[status], &model::Titles::new());
         assert_eq!(
             rows[0].line(),
             "Z.ai — 44%",
@@ -467,7 +468,7 @@ mod tests {
             reading("zai", "home", vec![window(18_000, 10.0)]),
             reading("kimi", "default", vec![window(18_000, 50.0)]),
         ];
-        let rows = entries(&statuses);
+        let rows = entries(&statuses, &model::Titles::new());
         let lines: Vec<String> = rows.iter().map(Entry::line).collect();
         assert_eq!(
             lines,
@@ -477,7 +478,27 @@ mod tests {
 
     #[test]
     fn nothing_configured_is_an_empty_list_rather_than_a_placeholder_row() {
-        assert!(entries(&[]).is_empty());
+        assert!(entries(&[], &model::Titles::new()).is_empty());
+    }
+
+    #[test]
+    fn a_row_says_the_catalogs_spelling_of_the_providers_name() {
+        // The panel and the settings dialog must not spell one provider two ways — the
+        // catalog says "ClinePass", and capitalising the slug would say "Clinepass".
+        let status = reading("clinepass", "default", vec![window(18_000, 50.0)]);
+        let titles = model::titles(&[ProviderDefinition {
+            provider: "clinepass".to_owned(),
+            title: "ClinePass".to_owned(),
+            credential: "key".to_owned(),
+            credential_hint: "ClinePass console.".to_owned(),
+            external_fallback: None,
+            options: Vec::new(),
+        }]);
+        assert_eq!(
+            entries(&[status], &titles)[0].line(),
+            "ClinePass — 50%",
+            "a slug this client has no title for keeps its capitalised spelling"
+        );
     }
 
     #[test]

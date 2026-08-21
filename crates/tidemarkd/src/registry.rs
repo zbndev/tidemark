@@ -32,40 +32,68 @@ use crate::engine::Account;
 /// Name of Antigravity's usage-source setting under `[provider.antigravity]`.
 pub const ANTIGRAVITY_SOURCE: &str = "source";
 
+/// The three OAuth providers: slug, title, credential hint, external fallback. Written out
+/// because each acquires its credential its own way; everything that varies beyond these
+/// four strings is decided where they are used.
+static OAUTH: &[(&str, &str, &str, &str)] = &[
+    (
+        antigravity::PROVIDER_ID,
+        "Antigravity",
+        "Sign in with Google through Tidemark, or use an existing agy session.",
+        "agy session",
+    ),
+    (
+        "claude",
+        "Claude",
+        "Sign in through Tidemark or use Claude Code's login.",
+        "Claude Code login",
+    ),
+    (
+        codex::PROVIDER_ID,
+        "Codex",
+        "Sign in through Tidemark or use the Codex CLI's login.",
+        "Codex CLI login",
+    ),
+];
+
+/// The catalog's own spelling of a provider's name, for the places the daemon speaks to a
+/// person outside the settings dialog: notification text, and anything else that has only a
+/// slug in hand.
+///
+/// Static, like the catalog itself, so a notification never depends on the settings file.
+/// `None` for a slug this build knows nothing about; the caller falls back to capitalising
+/// the slug, which is all an unknown slug can honestly be called.
+pub fn title(provider: &str) -> Option<&'static str> {
+    OAUTH
+        .iter()
+        .find(|(slug, ..)| *slug == provider)
+        .map(|(_, title, ..)| *title)
+        .or_else(|| {
+            keyed::CATALOG
+                .iter()
+                .find(|spec| spec.id == provider)
+                .map(|spec| spec.title)
+        })
+}
+
 /// Every provider this build can configure, in stable display order.
 ///
-/// The three OAuth providers come first, written out by hand because each of them
+/// The three OAuth providers come first, written out because each of them
 /// acquires its credential its own way. Every key-authenticated provider follows, one
 /// entry per spec in `keyed::CATALOG` — so adding one is a file beside `keyed.rs` and a
 /// line in that table, not a new stanza here.
 pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
-    let mut definitions = vec![
-        ProviderDefinition {
-            provider: antigravity::PROVIDER_ID.into(),
-            title: "Antigravity".into(),
+    let mut definitions: Vec<ProviderDefinition> = OAUTH
+        .iter()
+        .map(|(provider, title, hint, fallback)| ProviderDefinition {
+            provider: (*provider).to_owned(),
+            title: (*title).to_owned(),
             credential: CredentialKind::OAuth.as_wire().into(),
-            credential_hint:
-                "Sign in with Google through Tidemark, or use an existing agy session.".into(),
-            external_fallback: Some("agy session".into()),
-            options: options(antigravity::PROVIDER_ID, config),
-        },
-        ProviderDefinition {
-            provider: "claude".into(),
-            title: "Claude".into(),
-            credential: CredentialKind::OAuth.as_wire().into(),
-            credential_hint: "Sign in through Tidemark or use Claude Code's login.".into(),
-            external_fallback: Some("Claude Code login".into()),
-            options: options("claude", config),
-        },
-        ProviderDefinition {
-            provider: codex::PROVIDER_ID.into(),
-            title: "Codex".into(),
-            credential: CredentialKind::OAuth.as_wire().into(),
-            credential_hint: "Sign in through Tidemark or use the Codex CLI's login.".into(),
-            external_fallback: Some("Codex CLI login".into()),
-            options: options(codex::PROVIDER_ID, config),
-        },
-    ];
+            credential_hint: (*hint).to_owned(),
+            external_fallback: Some((*fallback).to_owned()),
+            options: options(provider, config),
+        })
+        .collect();
     definitions.extend(keyed::CATALOG.iter().map(|spec| ProviderDefinition {
         provider: spec.id.to_owned(),
         title: spec.title.to_owned(),
@@ -559,6 +587,22 @@ mod tests {
         let count = slugs.len();
         slugs.dedup();
         assert_eq!(slugs.len(), count, "every slug must name one provider");
+    }
+
+    #[test]
+    fn the_title_lookup_agrees_with_the_published_catalog() {
+        // Notifications name providers through `title()`; the settings dialog through
+        // `catalog()`. If the two disagreed, a provider's card and its notification would
+        // spell its name differently on the same desktop.
+        for definition in catalog(&empty_config()) {
+            assert_eq!(
+                title(&definition.provider),
+                Some(definition.title.as_str()),
+                "{} must have one spelling everywhere",
+                definition.provider
+            );
+        }
+        assert_eq!(title("nonesuch"), None);
     }
 
     #[test]

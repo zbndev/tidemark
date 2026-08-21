@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
-use tidemark_types::{ProviderStatus, Timestamp, WindowStatus, provider_label};
+use tidemark_types::{ProviderStatus, Timestamp, WindowStatus};
 
 use crate::bus::DaemonProxy;
 use crate::chart::Chart;
@@ -90,13 +90,14 @@ impl DetailDialog {
         parent: &impl IsA<gtk::Widget>,
         proxy: DaemonProxy<'static>,
         status: ProviderStatus,
+        provider_name: String,
         on_closed: impl Fn() + 'static,
     ) -> Rc<Self> {
         let mark = mark::image();
         mark.set_pixel_size(32);
         mark::set(&mark, &status.provider);
         let name = gtk::Label::builder()
-            .label(provider_label(&status.provider))
+            .label(provider_name.clone())
             .css_classes(["title-2"])
             .halign(gtk::Align::Start)
             .build();
@@ -168,7 +169,7 @@ impl DetailDialog {
         let view = adw::ToolbarView::builder().content(&scroller).build();
         view.add_top_bar(&header);
         let dialog = adw::Dialog::builder()
-            .title(format!("{} details", provider_label(&status.provider)))
+            .title(format!("{provider_name} details"))
             .content_width(720)
             .content_height(680)
             .child(&view)

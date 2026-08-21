@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use tidemark_types::{ProviderStatus, Timestamp, Window, provider_label};
+use tidemark_types::{ProviderStatus, Timestamp, Window};
 
 use crate::bar::QuotaBar;
 use crate::format;
@@ -82,6 +82,10 @@ pub struct Card {
     holder: gtk::FlowBoxChild,
     mark: gtk::Image,
     name: gtk::Label,
+    /// The provider's name as the catalog spells it, resolved once at construction: slugs
+    /// never change and neither do the titles this build ships, so a status update has
+    /// nothing to re-resolve.
+    provider_name: String,
     plan: gtk::Label,
     chip: gtk::Label,
     reading: gtk::Box,
@@ -101,6 +105,7 @@ impl Card {
     pub fn new(
         status: &ProviderStatus,
         now: Timestamp,
+        provider_name: String,
         on_activate: Rc<dyn Fn(String, String)>,
     ) -> Self {
         let name = gtk::Label::builder()
@@ -257,6 +262,7 @@ impl Card {
             holder,
             mark,
             name,
+            provider_name,
             plan,
             chip,
             reading,
@@ -290,7 +296,7 @@ impl Card {
     /// Shows a new status for the same account.
     pub fn apply(&self, status: &ProviderStatus, now: Timestamp) {
         mark::set(&self.mark, &status.provider);
-        self.name.set_label(&provider_label(&status.provider));
+        self.name.set_label(&self.provider_name);
 
         match status.plan() {
             Some(plan) => {

@@ -1,10 +1,36 @@
 //! The decisions about *what* to show, kept away from the widgets that show it.
 //!
-//! Two of them: the order the windows appear in on a card, and the order the cards appear
-//! in on the grid. Both are pure functions over published statuses, so both are tested
-//! without a display.
+//! Three of them: the order the windows appear in on a card, the order the cards appear
+//! in on the grid, and what a provider is called. All pure functions over published data,
+//! so all tested without a display.
 
-use tidemark_types::{ProviderStatus, Snapshot, Window, WindowLength};
+use std::collections::BTreeMap;
+
+use tidemark_types::{ProviderDefinition, ProviderStatus, Snapshot, Window, WindowLength};
+
+/// The catalog's spelling of each provider's name, by slug.
+pub type Titles = BTreeMap<String, String>;
+
+/// Indexes the published definitions by slug, for the name lookups below.
+pub fn titles(definitions: &[ProviderDefinition]) -> Titles {
+    definitions
+        .iter()
+        .map(|definition| (definition.provider.clone(), definition.title.clone()))
+        .collect()
+}
+
+/// What to call a provider on screen.
+///
+/// The catalog's title when this client has it — "ClinePass", not the capitalised slug
+/// "Clinepass" — and [`tidemark_types::provider_label`]'s capitalisation when it does not,
+/// because a daemon newer than this client may publish a provider this build has never
+/// heard of and its card is still worth drawing with something close to its name.
+pub fn name(titles: &Titles, slug: &str) -> String {
+    titles
+        .get(slug)
+        .cloned()
+        .unwrap_or_else(|| tidemark_types::provider_label(slug))
+}
 
 /// The windows of a reading, in the order the card draws them.
 ///
@@ -83,6 +109,25 @@ mod tests {
         let mut status = ProviderStatus::pending(&ProviderId::new(provider), &AccountId::default());
         status.set_reading(&snapshot(windows));
         status
+    }
+
+    #[test]
+    fn a_provider_is_called_what_the_catalog_calls_it() {
+        let definitions = [ProviderDefinition {
+            provider: "clinepass".to_owned(),
+            title: "ClinePass".to_owned(),
+            credential: "key".to_owned(),
+            credential_hint: "ClinePass console.".to_owned(),
+            external_fallback: None,
+            options: Vec::new(),
+        }];
+        let titles = titles(&definitions);
+        assert_eq!(name(&titles, "clinepass"), "ClinePass");
+        assert_eq!(
+            name(&titles, "mistral"),
+            "Mistral",
+            "a daemon newer than this client still gets its cards named"
+        );
     }
 
     #[test]
