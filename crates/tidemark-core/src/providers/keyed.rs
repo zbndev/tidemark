@@ -32,7 +32,9 @@ pub enum Auth {
     Bearer,
     /// A header the provider names itself — `x-api-key`, `api-key`.
     Header(&'static str),
-    /// A query parameter. Rare, and always worse: it reaches access logs.
+    /// A query parameter. Rare, and always worse: the key rides the URL into the
+    /// provider's access logs. [`redact_query`] keeps it out of ours — no error this
+    /// module lets escape carries a query string.
     Query(&'static str),
 }
 
@@ -138,7 +140,9 @@ impl Keyed {
             Auth::Header(name) => builder.header(name, self.credential.expose()),
             Auth::Query(name) => builder.query(&[(name, self.credential.expose())]),
         };
-        builder.build().map_err(ProviderError::Client)
+        builder
+            .build()
+            .map_err(|error| ProviderError::Client(redact_query(error)))
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
@@ -149,15 +153,33 @@ impl Keyed {
             .client
             .execute(self.build_request()?)
             .await
-            .map_err(ProviderError::Transport)?;
+            .map_err(|error| ProviderError::Transport(redact_query(error)))?;
 
         let status = response.status();
         let retry_after = http::retry_after_header(&response).map(str::to_owned);
         http::check(status, retry_after.as_deref())?;
 
-        let body = response.text().await.map_err(ProviderError::Transport)?;
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ProviderError::Transport(redact_query(error)))?;
         (self.spec.parse)(&body, Timestamp::now())
     }
+}
+
+/// Strips the query string — where [`Auth::Query`] carries the credential — off every
+/// `reqwest::Error` before it can be rendered.
+///
+/// Both `Display` and `Debug` on a `reqwest::Error` print the whole request URL, query
+/// included, and these errors reach two places a secret must not: the daemon's log and the
+/// status message published over D-Bus. Applied to every error leaving this module, so no
+/// auth variant added later can reintroduce the leak. The host and path stay, because they
+/// are what makes a transport failure diagnosable.
+fn redact_query(mut error: reqwest::Error) -> reqwest::Error {
+    if let Some(url) = error.url_mut() {
+        url.set_query(None);
+    }
+    error
 }
 
 impl fmt::Debug for Keyed {
@@ -371,6 +393,37 @@ mod tests {
             keyed.fetch().await,
             Err(ProviderError::Credential { status: 401 })
         ));
+    }
+
+    #[tokio::test]
+    async fn a_query_key_never_reaches_an_error_message() {
+        // Port 9 (discard) has nothing listening on a development machine, so the request
+        // fails at transport — the exact shape whose `reqwest::Error` prints the whole URL,
+        // query string and key included. Whatever renders the error, Display or Debug, the
+        // key must not be in it; the host must be, or the failure stops being diagnosable.
+        static QUERY_LEAK: Spec = Spec {
+            id: "test",
+            title: "Test",
+            endpoint: |_| "http://127.0.0.1:9/usage".to_owned(),
+            method: Method::Get,
+            auth: Auth::Query("key"),
+            headers: &[],
+            parse: parse_ok,
+            credential_hint: "Test console.",
+            options: &[],
+        };
+        let keyed = Keyed::new(
+            &QUERY_LEAK,
+            Credential::new("sk-query-secret"),
+            &options(&[]),
+        )
+        .expect("builds");
+        let error = keyed.fetch().await.expect_err("nothing listens on port 9");
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(!rendered.contains("sk-query-secret"), "{rendered}");
+            assert!(!rendered.contains("key="), "{rendered}");
+            assert!(rendered.contains("http://127.0.0.1:9/usage"), "{rendered}");
+        }
     }
 
     #[test]
