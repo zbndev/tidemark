@@ -288,7 +288,7 @@ Expected: FAIL to compile — the module does not exist.
 //! 140% of itself.
 
 use super::{Auth, Method, Spec};
-use crate::providers::ProviderError;
+use crate::providers::{ProviderError, parse_rfc3339};
 use serde::Deserialize;
 use tidemark_types::{
     AccountId, ProviderId, Snapshot, Timestamp, Window, WindowKey, WindowLength,
@@ -358,9 +358,9 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
         let length = WindowLength::from_secs(seconds)
             .expect("length_of never yields zero seconds");
         let resets_at = match limit.resets_at.as_deref() {
-            Some(raw) => Some(Timestamp::from_rfc3339(raw).map_err(|e| {
-                ProviderError::malformed(format!("unreadable reset time {raw}: {e}"))
-            })?),
+            Some(raw) => parse_rfc3339(raw).map(Some).ok_or_else(|| {
+                ProviderError::malformed(format!("unreadable reset time {raw}"))
+            })?,
             None => None,
         };
         windows.push(Window {
@@ -396,9 +396,11 @@ pub static SPEC: Spec = Spec {
 };
 ```
 
-If `Timestamp` has no `from_rfc3339`, add one to `crates/tidemark-types/src/time.rs` in
-this task, with its own tests for a `Z` suffix, an offset, and an unparseable string — most
-of the remaining providers state resets as ISO-8601 and will all need it.
+The reset-time parser already exists: `crate::providers::parse_rfc3339(&str) ->
+Option<Timestamp>`, added on the mechanism branch with its own tests for a `Z` suffix, an
+offset, fractional seconds and the implausible ranges. It lives in `tidemark-core` on the
+`time` dependency the adapters already use — `tidemark-types` stays dependency-free — so
+most of the remaining providers, which state resets as ISO-8601, need no new code for it.
 
 Register it in `keyed/mod.rs`: `pub mod clinepass;` and `&clinepass::SPEC` in `CATALOG`.
 
@@ -411,7 +413,7 @@ Expected: PASS, 7 tests.
 
 ```bash
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && ./scripts/check-layering.sh
-git add crates/tidemark-core/src/providers/keyed/clinepass.rs crates/tidemark-core/src/providers/keyed/mod.rs crates/tidemark-types/src/time.rs
+git add crates/tidemark-core/src/providers/keyed/clinepass.rs crates/tidemark-core/src/providers/keyed/mod.rs
 git commit -m "Add the ClinePass provider"
 ```
 
@@ -430,6 +432,13 @@ own passing tests.
 - Reports a credit figure and a daily request allowance that resets at midnight
   `America/Chicago`. The daily reset is computed, not returned — carry that computation into
   `parse` and test it against a fixed `captured_at`, including the day it rolls over.
+- **Decide the timezone question before writing any Rust.** Midnight `America/Chicago` moves
+  twice a year, and the workspace has no timezone database: `time` is pulled in with only
+  formatting and parsing, `local-offset` cannot be used from a multithreaded daemon, and a
+  hard-coded offset puts the pace mark in the wrong place for half the year — exactly the
+  failure the Kimi module doc warns against. Either add a tz-carrying dependency deliberately
+  in this task (and say so in the commit), or draw the daily window with `resets_at: None`.
+  Default to the second: a window with no pace mark is honest, and a wrong one is not.
 
 - [ ] **A: read the contract** — the sources named above, before writing any Rust
 - [ ] **B: harvest the fixtures** — recorded bodies copied verbatim into the test module
@@ -480,8 +489,11 @@ own passing tests.
 - Amounts are in micros — `budget.limitMicros` and the spent figure — so the subtitle is
   formatted from micros to dollars. The window is monthly, and its reset is derived from a
   `windowKey`. Test a micros value that would lose precision as `f64` dollars.
-- The `base_url` option is a free-text `OptionSchema` with empty `choices`. Reject a
-  non-HTTPS value in `endpoint` by falling back to the default host, and test that.
+- The `base_url` option is a free-text `OptionSchema` with empty `choices`. Read it through
+  `keyed::base_url(options, "base_url", "https://clawrouter.openclaw.ai")`, which trims the
+  trailing slash and refuses plain HTTP to a remote host; this provider's friendlier policy —
+  a bad value falls back to the default host rather than failing the card — stays in the
+  endpoint as `base_url(...).unwrap_or_else(|_| DEFAULT_HOST.to_owned())`. Test that.
 
 - [ ] **A: read the contract** — the sources named above, before writing any Rust
 - [ ] **B: harvest the fixtures** — recorded bodies copied verbatim into the test module
@@ -495,11 +507,10 @@ own passing tests.
 - Create: `keyed/sub2api.rs`, slug `sub2api`
 - Source: `Resources/Plugins/sub2api.js`; fixtures in `Sub2APIUsageFetcherTests.swift`, `Sub2APIPluginGoldenTests.swift`, `Sub2APIMenuCardModelTests.swift`
 - Bearer. **The base URL is required**, not optional — CodexBar has no default host. Publish
-  it as a free-text option and return an endpoint that fails the fetch cleanly when unset:
-  `parse` cannot help here, so `Keyed::new` must produce a URL that `reqwest` rejects, and
-  the task adds a test that an unset base URL yields `ProviderError::Client` rather than a
-  request to nowhere. If that reads badly, add `endpoint: fn(&Options) -> Result<String, ProviderError>`
-  to `Spec` in this task and update the six existing specs — say which you chose in the commit.
+  it as a free-text `OptionSchema` with `required: true`; `Keyed::new` already refuses to
+  build when a required option is unset, naming the setting in the message ("Base URL is not
+  set for this account"), and the mechanism's own test covers that path. The endpoint reads
+  the value through `keyed::base_url`, which cannot be reached unset.
 - `quota` is `{limit, used, remaining, unit}` with a unit that may be absent and defaults to
   USD: a balance window with a subtitle. `subscription` adds daily and weekly limits.
 
@@ -620,7 +631,9 @@ the porting procedure.
 - [ ] **F: pass, verify, commit** — the full verification command, then one commit
 
 ### Task 16: LiteLLM
-- Slug `litellm`. `GET <base>/key/info`, bearer. Self-hosted: base URL is a required free-text option.
+- Slug `litellm`. `GET <base>/key/info`, bearer. Self-hosted: base URL is a required free-text
+  option — publish it with `required: true` and read it through `keyed::base_url`, which also
+  accepts the `http://localhost` a self-hosted instance sits on.
 - Source: `Providers/LiteLLM/`. Fixtures: `LiteLLMUsageFetcherTests.swift`, `LiteLLMMenuCardModelTests.swift`.
 
 - [ ] **A: read the contract** — the sources named above, before writing any Rust
@@ -631,7 +644,9 @@ the porting procedure.
 - [ ] **F: pass, verify, commit** — the full verification command, then one commit
 
 ### Task 17: LLMProxy
-- Slug `llmproxy`. `GET <base>/v1/quota-stats`, bearer. Self-hosted: base URL is a required free-text option.
+- Slug `llmproxy`. `GET <base>/v1/quota-stats`, bearer. Self-hosted: base URL is a required
+  free-text option — publish it with `required: true` and read it through `keyed::base_url`,
+  as in Task 16.
 - Source: `Providers/LLMProxy/`. Fixtures: `LLMProxyUsageFetcherTests.swift`.
 
 - [ ] **A: read the contract** — the sources named above, before writing any Rust
@@ -678,7 +693,10 @@ the porting procedure.
 - [ ] **F: pass, verify, commit** — the full verification command, then one commit
 
 ### Task 21: Ollama
-- Slug `ollama`. Bearer. Self-hosted or `https://ollama.com`; the base URL is an option with `https://ollama.com` as the default.
+- Slug `ollama`. Bearer. Self-hosted or `https://ollama.com`; the base URL is an option with
+  `https://ollama.com` as the default. Read it through `keyed::base_url`, which accepts
+  `http://localhost:11434` — that is how a self-hosted Ollama is reached — and refuses plain
+  HTTP to any remote host.
 - Source: `Providers/Ollama/OllamaUsageParser.swift` is the contract. Fixtures: `OllamaUsageParserTests.swift`, `OllamaUsageFetcherTests.swift`, `OllamaUsageFetcherRetryMappingTests.swift` — the last of those tells you how it signals rate limiting, which must map onto `ProviderError::RateLimited`.
 
 - [ ] **A: read the contract** — the sources named above, before writing any Rust
@@ -737,9 +755,14 @@ the porting procedure.
 
 **Known members:** Poe, OpenRouter, xAI, plus anything demoted from Tasks 3–24.
 
-Each keeps its own `impl Provider`, reuses `providers::http::{client, check,
-retry_after_header}`, and splits every response body into a pure `parse_*` function so the
-same three tests from the porting procedure still apply. Facts gathered so far:
+Each keeps its own `impl Provider` and sends each of its requests through
+`keyed::request(&client, request)`, extracted on the mechanism branch for exactly this
+group: it reads `Retry-After` before the body consumes the headers, maps non-success
+statuses through `http::check`, refuses an empty body, and strips the query string off any
+`reqwest` error before the message can reach a log. Build each request with
+`providers::http::client()` and the provider's own auth, and split every response body into
+a pure `parse_*` function so the same three tests from the porting procedure still apply.
+Facts gathered so far:
 
 - **Poe** (`Plugins/poe.js`, `PoeUsageFetcherTests.swift`): `GET https://api.poe.com/usage/current_balance`,
   then up to five pages of `/usage/points_history?limit=100&starting_after=<cursor>`, 30-day
@@ -751,7 +774,8 @@ same three tests from the porting procedure still apply. Facts gathered so far:
   `usage`, `usage_daily/weekly/monthly` and a `rate_limit` object; `limit_reset` is a string.
   A key with a limit is a balance window; a key without one is details only.
 - **xAI** (`Plugins/xai.js`, `XAIProviderTests.swift`): needs a **team ID** as well as a key —
-  publish it as a required free-text option and reject `/`, `.` and `..` as the plugin does.
+  publish it as a required free-text option (`required: true`, the shape Task 7 settles) and
+  reject `/`, `.` and `..` as the plugin does.
   `GET https://management-api.x.ai/v1/billing/teams/<team>/prepaid/balance` returns
   `total.val` as a **string of cents, negated** — the balance is `-Number(val)/100`. A
   second POST fetches 30 days of spend for the chart. Prepaid credits have no limit: details
