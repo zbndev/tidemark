@@ -23,6 +23,7 @@ use tidemark_types::{ProviderDefinition, ProviderStatus, Timestamp};
 
 use crate::bus::{self, DaemonProxy, Update};
 use crate::card::Card;
+use crate::detail::DetailDialog;
 use crate::model;
 use crate::provider_settings::ProviderSettings;
 use crate::tray::{self, Tray};
@@ -88,6 +89,8 @@ pub struct MainWindow {
     daemon: RefCell<Option<DaemonProxy<'static>>>,
     /// The provider dialog while it is open, so live catalog and status changes reach it.
     provider_settings: DialogSlot<ProviderSettings>,
+    /// The account detail dialog while it is open, so its chart follows daemon updates.
+    detail_dialog: DialogSlot<DetailDialog>,
     /// The panel icon, once a status-notifier host has accepted it. `None` in a session
     /// that has none, which is also what leaves the close button closing the program.
     tray: RefCell<Option<Tray>>,
@@ -172,6 +175,7 @@ impl MainWindow {
             definitions: RefCell::new(Vec::new()),
             daemon: RefCell::new(None),
             provider_settings: DialogSlot::default(),
+            detail_dialog: DialogSlot::default(),
             tray: RefCell::new(None),
         });
 
@@ -191,7 +195,7 @@ impl MainWindow {
     }
 
     /// Acts on one message from the daemon.
-    fn handle(&self, update: Update) {
+    fn handle(self: &Rc<Self>, update: Update) {
         match update {
             Update::Connected(proxy, definitions, statuses) => {
                 *self.daemon.borrow_mut() = Some(proxy);
@@ -223,7 +227,7 @@ impl MainWindow {
     }
 
     /// Replaces everything on screen with what the daemon just said it knows.
-    fn show_all(&self, statuses: Vec<ProviderStatus>) {
+    fn show_all(self: &Rc<Self>, statuses: Vec<ProviderStatus>) {
         if statuses.is_empty() {
             // Connected, and there is genuinely nothing to draw. Distinguished from a
             // missing daemon on purpose: one of them is fixed by configuring an account
@@ -236,13 +240,14 @@ impl MainWindow {
             self.cards.borrow_mut().clear();
             self.grid.remove_all();
             self.update_provider_settings();
+            self.update_detail_from_statuses(&[]);
             return;
         }
 
         let now = Timestamp::now();
         let cards: Vec<Rc<Card>> = statuses
             .iter()
-            .map(|status| Rc::new(Card::new(status, now)))
+            .map(|status| self.make_card(status, now))
             .collect();
 
         self.grid.remove_all();
@@ -253,10 +258,17 @@ impl MainWindow {
         self.grid.invalidate_sort();
         self.stack.set_visible_child_name(PAGE_GRID);
         self.update_provider_settings();
+        self.update_detail_from_statuses(&statuses);
     }
 
     /// Removes one account's card after the daemon confirms it is no longer configured.
     fn show_removed(&self, provider: &str, account: &str) {
+        if let Some(dialog) = self.detail_dialog.get()
+            && dialog.matches(provider, account)
+        {
+            dialog.close();
+            self.detail_dialog.clear();
+        }
         let index = account_index(&self.statuses(), provider, account);
         let Some(index) = index else {
             return;
@@ -275,7 +287,7 @@ impl MainWindow {
     }
 
     /// Applies one account's update, adding a card for an account seen for the first time.
-    fn show_one(&self, status: ProviderStatus) {
+    fn show_one(self: &Rc<Self>, status: ProviderStatus) {
         let now = Timestamp::now();
         let existing = self.cards.borrow().iter().position(|card| {
             let held = card.status();
@@ -288,7 +300,7 @@ impl MainWindow {
                 card.apply(&status, now);
             }
             None => {
-                let card = Rc::new(Card::new(&status, now));
+                let card = self.make_card(&status, now);
                 self.cards.borrow_mut().push(Rc::clone(&card));
                 self.grid.append(card.widget());
             }
@@ -299,6 +311,11 @@ impl MainWindow {
         self.grid.invalidate_sort();
         self.stack.set_visible_child_name(PAGE_GRID);
         self.update_provider_settings();
+        if let Some(dialog) = self.detail_dialog.get()
+            && dialog.matches(&status.provider, &status.account)
+        {
+            dialog.apply(&status);
+        }
     }
 
     /// Everything the daemon has said, in the order the cards were built.
@@ -314,6 +331,62 @@ impl MainWindow {
     fn update_provider_settings(&self) {
         if let Some(dialog) = self.provider_settings.get() {
             dialog.apply(&self.definitions.borrow(), &self.statuses());
+        }
+    }
+
+    /// Builds a card whose activation is owned by this window, not by the card itself.
+    fn make_card(self: &Rc<Self>, status: &ProviderStatus, now: Timestamp) -> Rc<Card> {
+        let weak = Rc::downgrade(self);
+        Rc::new(Card::new(
+            status,
+            now,
+            Rc::new(move |provider, account| {
+                if let Some(main) = weak.upgrade() {
+                    main.open_detail(&provider, &account);
+                }
+            }),
+        ))
+    }
+
+    /// Opens one dimmed detail dialog and refuses a second until the first closes.
+    fn open_detail(self: &Rc<Self>, provider: &str, account: &str) {
+        if !self.detail_dialog.is_empty() {
+            return;
+        }
+        let Some(proxy) = self.daemon.borrow().clone() else {
+            return;
+        };
+        let Some(status) = self
+            .cards
+            .borrow()
+            .iter()
+            .map(|card| card.status())
+            .find(|status| status.provider == provider && status.account == account)
+        else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        let dialog = DetailDialog::present(&self.window, proxy, status, move || {
+            if let Some(main) = weak.upgrade() {
+                main.detail_dialog.clear();
+            }
+        });
+        assert!(self.detail_dialog.insert_if_empty(dialog));
+    }
+
+    /// Keeps the detail dialog honest after a full status reload, including daemon restart.
+    fn update_detail_from_statuses(&self, statuses: &[ProviderStatus]) {
+        let Some(dialog) = self.detail_dialog.get() else {
+            return;
+        };
+        if let Some(status) = statuses
+            .iter()
+            .find(|status| dialog.matches(&status.provider, &status.account))
+        {
+            dialog.apply(status);
+        } else {
+            dialog.close();
+            self.detail_dialog.clear();
         }
     }
 

@@ -16,6 +16,7 @@
 //! and one that starts reporting a new one gains it the same way.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use gtk::prelude::*;
 use tidemark_types::{ProviderStatus, Timestamp, Window, provider_label};
@@ -43,6 +44,28 @@ const PILL_PADDING: i32 = 2;
 /// costs, and it is what stops `GtkFlowBox` from packing three unreadable columns into a
 /// window that only has room for two.
 const MIN_WIDTH: i32 = 300;
+
+/// The account a card opens, retained separately from the readings that update in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CardIdentity {
+    provider: String,
+    account: String,
+}
+
+impl From<&ProviderStatus> for CardIdentity {
+    fn from(status: &ProviderStatus) -> Self {
+        Self {
+            provider: status.provider.clone(),
+            account: status.account.clone(),
+        }
+    }
+}
+
+impl CardIdentity {
+    fn activate(&self, on_activate: &dyn Fn(String, String)) {
+        on_activate(self.provider.clone(), self.account.clone());
+    }
+}
 
 /// What the card is currently showing, kept so that the clock-dependent parts can be
 /// redrawn without another D-Bus round trip.
@@ -74,7 +97,11 @@ pub struct Card {
 
 impl Card {
     /// Builds an empty card and fills it with `status`.
-    pub fn new(status: &ProviderStatus, now: Timestamp) -> Self {
+    pub fn new(
+        status: &ProviderStatus,
+        now: Timestamp,
+        on_activate: Rc<dyn Fn(String, String)>,
+    ) -> Self {
         let name = gtk::Label::builder()
             .halign(gtk::Align::Start)
             .css_classes(["heading"])
@@ -170,7 +197,7 @@ impl Card {
             .orientation(gtk::Orientation::Vertical)
             .spacing(12)
             .width_request(MIN_WIDTH)
-            .css_classes(["card", "quota-card"])
+            .css_classes(["card", "quota-card", "activatable"])
             .build();
         root.append(&title_row);
         root.append(&reading);
@@ -184,8 +211,34 @@ impl Card {
         // holds is a `Gtk-CRITICAL`, and it costs the focus and the pointer besides.
         let holder = gtk::FlowBoxChild::builder()
             .child(&root)
-            .focusable(false)
+            .focusable(true)
             .build();
+        holder.set_cursor_from_name(Some("pointer"));
+        let identity = CardIdentity::from(status);
+        let invoke: Rc<dyn Fn()> = Rc::new({
+            let on_activate = Rc::clone(&on_activate);
+            move || identity.activate(on_activate.as_ref())
+        });
+        let click = gtk::GestureClick::new();
+        click.connect_released({
+            let invoke = Rc::clone(&invoke);
+            move |_, _, _, _| invoke()
+        });
+        holder.add_controller(click);
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed({
+            let invoke = Rc::clone(&invoke);
+            move |_, key, _, _| {
+                if matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::space)
+                {
+                    invoke();
+                    gtk::glib::Propagation::Stop
+                } else {
+                    gtk::glib::Propagation::Proceed
+                }
+            }
+        });
+        holder.add_controller(keys);
 
         let card = Self {
             holder,
@@ -392,6 +445,9 @@ fn blank_message(status: &ProviderStatus) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
     use tidemark_types::{AccountId, ProviderId, ProviderState};
 
@@ -416,5 +472,19 @@ mod tests {
             Some("No key is stored for zai.".into()),
         );
         assert_eq!(blank_message(&status), "No key is stored for zai.");
+    }
+
+    #[test]
+    fn activating_a_card_keeps_its_provider_and_account_identity() {
+        let status = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::new("work"));
+        let identity = CardIdentity::from(&status);
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&calls);
+        let activate = Rc::new(move |provider: String, account: String| {
+            observed.borrow_mut().push((provider, account));
+        });
+
+        identity.activate(activate.as_ref());
+        assert_eq!(calls.borrow().as_slice(), [("zai".into(), "work".into())]);
     }
 }

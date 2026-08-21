@@ -4,6 +4,11 @@
 //! clamped points. Keeping the schedule maths here makes a missing reset time an explicit
 //! no-diagonal state rather than a rendering accident.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use gtk::cairo;
+use gtk::prelude::*;
 use tidemark_types::{HistoryPoint, WindowStatus};
 
 /// One coordinate in a drawing area, measured from its top-left corner.
@@ -22,6 +27,148 @@ pub struct Geometry {
     pub diagonal: Option<[Coord; 2]>,
     /// A single observation deserves a visible dot rather than a line with an invented end.
     pub marker: Option<Coord>,
+}
+
+#[derive(Debug, Clone)]
+struct Data {
+    window: WindowStatus,
+    points: Vec<HistoryPoint>,
+}
+
+/// A GTK drawing surface for current-segment consumption.
+///
+/// Its geometry lives above, where unit tests can exercise it without a display. This small
+/// widget only selects the visible state and turns that geometry into Cairo paths.
+#[derive(Debug, Clone)]
+pub struct Chart {
+    stack: gtk::Stack,
+    area: gtk::DrawingArea,
+    message: gtk::Label,
+    data: Rc<RefCell<Option<Data>>>,
+}
+
+impl Chart {
+    pub fn new() -> Self {
+        let area = gtk::DrawingArea::builder()
+            .content_height(220)
+            .hexpand(true)
+            .css_classes(["quota-chart"])
+            .build();
+        let message = gtk::Label::builder()
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .css_classes(["dim-label"])
+            .margin_top(36)
+            .margin_bottom(36)
+            .margin_start(24)
+            .margin_end(24)
+            .build();
+        let stack = gtk::Stack::new();
+        stack.add_named(&area, Some("chart"));
+        stack.add_named(&message, Some("message"));
+        let data = Rc::new(RefCell::new(None));
+        area.set_draw_func({
+            let data = Rc::clone(&data);
+            move |area, context, width, height| {
+                if let Some(data) = data.borrow().as_ref() {
+                    draw(area, context, f64::from(width), f64::from(height), data);
+                }
+            }
+        });
+
+        let chart = Self {
+            stack,
+            area,
+            message,
+            data,
+        };
+        chart.set_loading();
+        chart
+    }
+
+    pub fn widget(&self) -> &gtk::Stack {
+        &self.stack
+    }
+
+    pub fn set_loading(&self) {
+        self.data.borrow_mut().take();
+        self.message.set_label("Loading current segment…");
+        self.stack.set_visible_child_name("message");
+    }
+
+    pub fn set_empty(&self, message: &str) {
+        self.data.borrow_mut().take();
+        self.message.set_label(message);
+        self.stack.set_visible_child_name("message");
+    }
+
+    pub fn set_error(&self, message: &str) {
+        self.data.borrow_mut().take();
+        self.message.set_label(message);
+        self.stack.set_visible_child_name("message");
+    }
+
+    pub fn set_data(&self, window: WindowStatus, points: Vec<HistoryPoint>) {
+        if points.is_empty() {
+            self.set_empty("No stored readings in this segment yet.");
+            return;
+        }
+        *self.data.borrow_mut() = Some(Data { window, points });
+        self.stack.set_visible_child_name("chart");
+        self.area.queue_draw();
+    }
+}
+
+fn draw(area: &gtk::DrawingArea, context: &cairo::Context, width: f64, height: f64, data: &Data) {
+    let geometry = geometry(&data.window, &data.points, width, height);
+    let ink = area.color();
+
+    if let Some([start, end]) = geometry.diagonal {
+        context.set_dash(&[5.0, 5.0], 0.0);
+        context.set_line_width(1.5);
+        context.move_to(start.x, start.y);
+        context.line_to(end.x, end.y);
+        set_source(context, ink, 0.38);
+        stroke(context);
+        context.set_dash(&[], 0.0);
+    }
+
+    if let Some((first, rest)) = geometry.actual.split_first() {
+        context.set_line_width(2.5);
+        context.move_to(first.x, first.y);
+        for point in rest {
+            context.line_to(point.x, point.y);
+        }
+        set_source(context, ink, 1.0);
+        stroke(context);
+    }
+
+    if let Some(point) = geometry.marker {
+        context.arc(point.x, point.y, 4.0, 0.0, std::f64::consts::TAU);
+        set_source(context, ink, 1.0);
+        fill(context);
+    }
+}
+
+fn set_source(context: &cairo::Context, colour: gtk::gdk::RGBA, alpha: f64) {
+    context.set_source_rgba(
+        f64::from(colour.red()),
+        f64::from(colour.green()),
+        f64::from(colour.blue()),
+        f64::from(colour.alpha()) * alpha,
+    );
+}
+
+fn stroke(context: &cairo::Context) {
+    if let Err(error) = context.stroke() {
+        tracing::debug!(%error, "dropping a burn-down chart frame");
+    }
+}
+
+fn fill(context: &cairo::Context) {
+    if let Err(error) = context.fill() {
+        tracing::debug!(%error, "dropping a burn-down chart frame");
+    }
 }
 
 /// Maps actual consumption and, when possible, even pace into the plot rectangle.

@@ -12,9 +12,9 @@
 
 mod bar;
 mod bus;
-#[cfg(test)]
 mod chart;
 mod card;
+mod detail;
 mod format;
 mod mark;
 mod model;
