@@ -25,6 +25,7 @@ use crate::bus::{self, DaemonProxy, Update};
 use crate::card::Card;
 use crate::model;
 use crate::provider_settings::ProviderSettings;
+use crate::tray::{self, Tray};
 
 /// How often the clock-dependent parts of every card are redrawn. Half a minute is well
 /// inside the resolution of everything shown — the coarsest unit on a card is a minute —
@@ -87,6 +88,9 @@ pub struct MainWindow {
     daemon: RefCell<Option<DaemonProxy<'static>>>,
     /// The provider dialog while it is open, so live catalog and status changes reach it.
     provider_settings: DialogSlot<ProviderSettings>,
+    /// The panel icon, once a status-notifier host has accepted it. `None` in a session
+    /// that has none, which is also what leaves the close button closing the program.
+    tray: RefCell<Option<Tray>>,
 }
 
 impl MainWindow {
@@ -168,12 +172,14 @@ impl MainWindow {
             definitions: RefCell::new(Vec::new()),
             daemon: RefCell::new(None),
             provider_settings: DialogSlot::default(),
+            tray: RefCell::new(None),
         });
 
         main.install_sort();
         main.connect_refresh_button();
         main.connect_providers_button();
         main.start_clock();
+        main.start_tray();
         main.window.present();
 
         // The strong reference lives here, in the closure the bus watcher keeps for the
@@ -202,6 +208,17 @@ impl MainWindow {
                 self.providers.set_sensitive(false);
                 self.show_message("network-offline-symbolic", "Waiting for Tidemark", &reason);
             }
+        }
+        // Every path above changed either the readings or whether there are any, and the
+        // panel is showing the same thing the grid is. Done here rather than in each arm so
+        // that a case added later cannot forget it.
+        self.update_tray();
+    }
+
+    /// Tells the panel what the window now knows.
+    fn update_tray(&self) {
+        if let Some(tray) = self.tray.borrow().as_ref() {
+            tray.show(&self.statuses(), self.daemon.borrow().is_some());
         }
     }
 
@@ -364,21 +381,92 @@ impl MainWindow {
     fn connect_refresh_button(self: &Rc<Self>) {
         let weak: Weak<Self> = Rc::downgrade(self);
         self.refresh.connect_clicked(move |_| {
+            if let Some(main) = weak.upgrade() {
+                main.refresh_now();
+            }
+        });
+    }
+
+    /// Polls every account now. The header button and the tray menu both mean this, and
+    /// they call it rather than each building the request, so the two cannot come to mean
+    /// different things.
+    fn refresh_now(&self) {
+        let Some(proxy) = self.daemon.borrow().clone() else {
+            return;
+        };
+        glib::spawn_future_local(async move {
+            // An empty slug means every account. The daemon re-reads the credentials as
+            // part of this, which is why the button is worth having at all: it is the
+            // recovery path after unlocking a keyring or storing a key.
+            if let Err(error) = proxy.refresh("").await {
+                tracing::warn!(%error, "the daemon refused a refresh");
+            }
+        });
+    }
+
+    /// Puts the icon on the panel, and — only if that worked — makes the close button
+    /// hide the window instead of ending the program.
+    ///
+    /// The order matters and is the whole reason this is one function. Closing to a tray
+    /// that is not there leaves a running process with no window and no way to ask for one
+    /// back, so the close handler is connected inside the success branch and nowhere else.
+    /// A session with no status-notifier host therefore behaves exactly as it did before
+    /// this existed: the close button closes.
+    fn start_tray(self: &Rc<Self>) {
+        let weak: Weak<Self> = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let (commands, inbox) = async_channel::unbounded::<tray::Command>();
+            let tray = match Tray::spawn(commands).await {
+                Ok(tray) => tray,
+                Err(error) => {
+                    tracing::info!(
+                        %error,
+                        "no status-notifier host took the icon; the close button still closes"
+                    );
+                    return;
+                }
+            };
+
             let Some(main) = weak.upgrade() else {
                 return;
             };
-            let Some(proxy) = main.daemon.borrow().clone() else {
-                return;
-            };
-            glib::spawn_future_local(async move {
-                // An empty slug means every account. The daemon re-reads the credentials as
-                // part of this, which is why the button is worth having at all: it is the
-                // recovery path after unlocking a keyring or storing a key.
-                if let Err(error) = proxy.refresh("").await {
-                    tracing::warn!(%error, "the daemon refused a refresh");
-                }
-            });
+            *main.tray.borrow_mut() = Some(tray);
+            main.update_tray();
+            main.close_to_tray();
+            drop(main);
+
+            while let Ok(command) = inbox.recv().await {
+                let Some(main) = weak.upgrade() else {
+                    return;
+                };
+                main.obey(command);
+            }
         });
+    }
+
+    /// Turns the close button into a hide, now that there is an icon to get back from.
+    fn close_to_tray(&self) {
+        self.window.connect_close_request(|window| {
+            window.set_visible(false);
+            // The window stays in the application's window list while it is merely hidden,
+            // which is what keeps the process alive with nothing on screen. `Quit` in the
+            // tray menu is the way out, and the only one.
+            glib::Propagation::Stop
+        });
+    }
+
+    /// Does what the panel asked for. Runs on the main thread; the tray's own thread only
+    /// ever put a value on a channel.
+    fn obey(&self, command: tray::Command) {
+        match command {
+            tray::Command::Present => self.window.present(),
+            tray::Command::Refresh => self.refresh_now(),
+            tray::Command::Quit => {
+                if let Some(app) = self.window.application() {
+                    app.quit();
+                }
+            }
+        }
     }
 
     /// Starts the redraw that keeps "resets in 3 h" and the pace marks honest.

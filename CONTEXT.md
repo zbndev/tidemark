@@ -382,9 +382,20 @@ history that does not exist yet.
   a new one. Removal is destructive and confirmed: it deletes Tidemark-owned credentials,
   provider settings and the current card, but keeps quota history. Closing the preferences
   dialog cancels pending OAuth work, and the dialog can then be opened again.
-- **Tray** — static SNI icon, spoken directly over GDBus. Left click lists providers with
-  the percentage of their shortest window. `libayatana-appindicator-glib` is GPL-3 and
-  cannot be linked into an MIT project.
+- **Tray** — a static StatusNotifierItem, owned by the interface process rather than by the
+  daemon. Left click shows the window; the menu lists the configured accounts with the
+  percentage of their shortest window, in the order the grid uses, and ends with Open,
+  Refresh and Quit. The icon takes the `NeedsAttention` status at the same threshold the
+  bar changes colour at and the notification fires at, so the panel cannot become a third
+  opinion about when a window got worrying.
+- **Closing the window hides it; the tray is what the program minimises to.** The process
+  stays, the readings keep arriving, and Quit in the tray menu is the only way out. This is
+  conditional on the icon actually being accepted: when no status-notifier host answers, the
+  close button closes the program exactly as it did before, because hiding a window with
+  nothing left to bring it back is worse than having no tray.
+- **`libayatana-appindicator-glib` is GPL-3** and cannot be linked into an MIT project. The
+  protocol is spoken through `ksni`, which is Unlicense — public domain, so compatible —
+  and which is built on the same zbus the interface already reaches the daemon over.
 
 ## Packaging
 

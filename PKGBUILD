@@ -52,6 +52,15 @@ package() {
     # The unit's ExecStart is /usr/bin/tidemarkd, which is where the line above puts it.
     install -Dm644 data/tidemarkd.service "$pkgdir/usr/lib/systemd/user/tidemarkd.service"
 
+    # Tidemark's own icon, in both the forms something asks for it: the symbolic one is
+    # what the tray hands the panel, and the full-colour one is for anything that will not
+    # take a `-symbolic` name. Ours, MIT, and installed separately from the provider marks
+    # below on purpose — the licence note that follows them does not apply to these two.
+    install -Dm644 data/icons/hicolor/symbolic/apps/io.github.zbndev.Tidemark-symbolic.svg \
+        "$pkgdir/usr/share/icons/hicolor/symbolic/apps/io.github.zbndev.Tidemark-symbolic.svg"
+    install -Dm644 data/icons/hicolor/scalable/apps/io.github.zbndev.Tidemark.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.zbndev.Tidemark.svg"
+
     # The provider marks. They are recoloured by the theme only because GTK finds them
     # through the icon theme as symbolic icons, which is what putting them in hicolor buys;
     # loaded any other way they would keep the colours in the file.
@@ -61,7 +70,7 @@ package() {
     # the licence covers will see it. A rebuild that drops both of these lines is a
     # supported configuration: a card with no mark is a state the interface already has.
     install -Dm644 -t "$pkgdir/usr/share/icons/hicolor/symbolic/apps" \
-        data/icons/hicolor/symbolic/apps/*.svg
+        data/icons/hicolor/symbolic/apps/tidemark-*-symbolic.svg
     install -Dm644 docs/TRADEMARKS.md "$pkgdir/usr/share/licenses/$pkgname/TRADEMARKS.md"
 
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

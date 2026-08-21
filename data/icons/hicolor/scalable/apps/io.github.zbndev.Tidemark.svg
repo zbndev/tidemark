@@ -1,0 +1,19 @@
+<!-- The full-colour application icon. Part of the project, MIT like the rest of it.
+
+     The same drawing as the symbolic one at eight times the scale, on a ground of its own,
+     for the places that want an icon rather than a glyph: the window's own icon, the
+     desktop entry, and any status-notifier host that will not take a `-symbolic` name. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="tide" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d94b8"/>
+      <stop offset="1" stop-color="#175a76"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#tide)"/>
+  <g fill="#fff" transform="translate(16 16) scale(6)">
+    <rect x="1.2" y="3.2" width="13.6" height="1.4" rx="0.7"/>
+    <path d="M1.8,8.1 q1.55,-1.9 3.1,0 t3.1,0 t3.1,0 t3.1,0 v1.25 q-1.55,1.9 -3.1,0 t-3.1,0 t-3.1,0 t-3.1,0 Z"/>
+    <path d="M1.8,11.6 q1.55,-1.9 3.1,0 t3.1,0 t3.1,0 t3.1,0 v1.25 q-1.55,1.9 -3.1,0 t-3.1,0 t-3.1,0 t-3.1,0 Z"/>
+  </g>
+</svg>

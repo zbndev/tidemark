@@ -16,7 +16,14 @@ workspace = true
 # scripts/check-layering.sh enforces this.
 [dependencies]
 adw = { version = "0.9.2", package = "libadwaita", features = ["v1_9", "gtk_v4_22"] }
+# The tray's channel from ksni's thread to the GTK one. Already in the tree under zbus's
+# async-io backend; named here because this crate uses it directly.
+async-channel = "2.5.0"
 gtk = { version = "0.11.4", package = "gtk4", features = ["v4_22"] }
+# StatusNotifierItem and com.canonical.dbusmenu. Unlicense (public domain), so unlike
+# libayatana-appindicator-glib it can be linked into an MIT project; and it is built on the
+# same zbus 5 with the same async-io backend this crate already talks to the daemon over.
+ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
 tidemark-types = { path = "../tidemark-types" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

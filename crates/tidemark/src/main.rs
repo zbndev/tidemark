@@ -18,6 +18,7 @@ mod mark;
 mod model;
 mod provider_settings;
 mod style;
+mod tray;
 mod window;
 
 use adw::prelude::*;
