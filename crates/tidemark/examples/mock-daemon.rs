@@ -20,8 +20,9 @@
 //! It is a development aid, not a test fixture: nothing in the suite depends on it.
 
 use tidemark_types::{
-    AccountId, DetailRow, DetailSection, ProviderDefinition, ProviderId, ProviderState,
-    ProviderStatus, Snapshot, Timestamp, Window, WindowKey, WindowLength, ids, provider_label,
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderDefinition, ProviderId,
+    ProviderState, ProviderStatus, Snapshot, Timestamp, Window, WindowKey, WindowLength, ids,
+    provider_label,
 };
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
@@ -42,7 +43,14 @@ impl MockDaemon {
             .map(|status| ProviderDefinition {
                 provider: status.provider.clone(),
                 title: provider_label(&status.provider).to_owned(),
-                credential: "key".to_owned(),
+                // The invented accounts include the three OAuth providers; a key field
+                // offered for those would mislead whoever is looking at the panes.
+                credential: match status.provider.as_str() {
+                    "antigravity" | "claude" | "codex" => CredentialKind::OAuth,
+                    _ => CredentialKind::Key,
+                }
+                .as_wire()
+                .to_owned(),
                 credential_hint: "Paste a key.".to_owned(),
                 external_fallback: None,
                 options: Vec::new(),

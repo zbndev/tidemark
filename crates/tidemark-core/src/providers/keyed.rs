@@ -13,9 +13,10 @@
 //! # The rule this module makes structural
 //!
 //! `providers::mod` states that transport and meaning are separate functions. Here that
-//! stops being a convention: [`Spec::parse`] is a plain `fn` with no client, no
-//! credential and no `async` in its signature. A parser physically cannot make a request,
-//! so every trap in a response is reachable from a test that needs no network.
+//! stops being a convention: [`Spec::parse`] is a plain `fn` whose only inputs are the
+//! body and the clock — no client, no credential, no status, no headers in scope — so
+//! every trap in a response is reachable from a test that needs no network, and the
+//! accidental path to a request from inside a parser does not exist.
 
 use super::{BoxFuture, Credential, Provider, ProviderError, http};
 use std::collections::BTreeMap;
@@ -197,10 +198,18 @@ pub async fn request(
     let retry_after = http::retry_after_header(&response).map(str::to_owned);
     http::check(status, retry_after.as_deref())?;
 
-    response
+    let body = response
         .text()
         .await
-        .map_err(|error| ProviderError::Transport(redact_query(error)))
+        .map_err(|error| ProviderError::Transport(redact_query(error)))?;
+    if body.trim().is_empty() {
+        // An empty body is its own error rather than serde's "EOF while parsing a value":
+        // the one says the provider answered nothing, the other says we read it wrong.
+        return Err(ProviderError::malformed(
+            "the provider answered an empty body",
+        ));
+    }
+    Ok(body)
 }
 
 /// Reads a free-text base-URL option the way every self-hosted provider needs it read:
