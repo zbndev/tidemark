@@ -5,9 +5,9 @@ burned, when it resets, and whether your current pace will get you there.
 
 Native GTK4 + libadwaita. No web UI, no Electron, no embedded browser engine.
 
-> **Status: early.** The daemon polls Z.ai, keeps history and publishes on D-Bus, and the
-> window shows it: a grid of provider cards that updates on its own. The other four
-> providers are not written yet.
+> **Status: early.** The daemon has a compiled catalog of five providers, polls only the
+> providers the user adds, keeps history, and publishes live topology and quota updates on
+> D-Bus. The window renders the configured accounts as a grid of provider cards.
 
 ## Planned for v1
 
@@ -56,8 +56,14 @@ required, not preferred: rustls's default provider vendors C and assembly throug
 ## Running the daemon
 
 `tidemarkd` polls, writes history to `$XDG_DATA_HOME/tidemark/history.db`, and publishes
-everything it knows on the session bus. It needs a key in the Secret Service to have
-anything to poll — until then it reports `no-credential`, which is a state, not an error:
+everything it knows on the session bus. A missing config file has the same meaning as
+`providers = []`: a fresh installation has no configured providers. The compiled catalog
+and configured accounts are separate D-Bus concepts. `ListProviders` returns the catalog;
+`GetStatus` returns only accounts the user has added. `AddProvider`, `RemoveProvider`, and
+the `ProviderRemoved` signal let every D-Bus client manage and follow that topology.
+
+API-key accounts read their secrets from the Secret Service. Until a configured account
+has usable credentials, it reports `no-credential`, which is a state, not an error:
 
 ```sh
 secret-tool store --label='Tidemark: zai (default)' \
@@ -65,16 +71,21 @@ secret-tool store --label='Tidemark: zai (default)' \
 ```
 
 The same command stores the Kimi For Coding key with `kimi` in place of `zai`. Claude and
-Codex hold no key here at all: they read the credential files their own CLIs own.
-Antigravity holds none either — it asks the local server the `agy` CLI runs, which keeps
-its own session in the keyring. Tidemark starts that server if it is not already up, reuses
-one that is, and stops the one it started when it exits.
+Codex use a Tidemark-owned OAuth login when present and otherwise read the credential files
+their own CLIs own. Antigravity prefers Tidemark's Google OAuth login and calls Cloud Code
+Assist directly. If no Tidemark token exists, an existing `agy` session is an optional
+fallback; Tidemark may start its local server, reuse one already running, and stops only
+the server it started.
 
 The interface is usable with `busctl` alone, which is how it is meant to be checked:
 
 ```sh
 cargo run -p tidemarkd   # or: systemctl --user start tidemarkd.service
 busctl --user introspect io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark
+busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark \
+    io.github.zbndev.Tidemark.Daemon1 ListProviders
+busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark \
+    io.github.zbndev.Tidemark.Daemon1 AddProvider s zai
 busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark \
     io.github.zbndev.Tidemark.Daemon1 GetStatus
 busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark \
@@ -98,6 +109,12 @@ appear on the bus, and picks up again by itself when the daemon is restarted.
 ```sh
 tidemark                 # or: cargo run -p tidemark
 ```
+
+With no configured providers, the window says `Welcome to Tidemark` and
+`Add a provider to start tracking your quota.` Open provider settings to see the configured
+list, use `+` to reach the searchable catalog picker, then add a provider and configure it
+on its detail page. Edit returns to the same page. Removing a provider deletes its
+Tidemark-owned credentials, provider settings, and card, but retains its quota history.
 
 Each account is a card: the provider's own mark and name, the shortest window it reported
 as a large number over a bar, the

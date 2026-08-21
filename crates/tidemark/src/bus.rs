@@ -97,10 +97,6 @@ pub trait Daemon {
 /// status — and that is deliberate rather than an oversight worth boxing away: this value
 /// is constructed a handful of times a minute and consumed immediately.
 #[derive(Debug)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "constructed a few times a minute"
-)]
 pub enum Update {
     /// The daemon answered. Carries everything it knows, and the handle to ask it for more.
     Connected(

@@ -36,6 +36,11 @@ conventional fallback and is what desktop files, D-Bus, and Flatpak all expect t
 ## Vocabulary
 
 - **Provider** — one AI service (Claude, Codex, Z.ai, Kimi, Antigravity).
+- **Provider definition** — one entry in the catalog compiled into this build: its stable
+  slug, display metadata, authentication kind, and declared settings. The catalog says
+  what can be added; it does not say what the daemon currently polls.
+- **Configured account** — a catalog provider the user has added. v1 creates its single
+  `default` account and persists the provider slug in `config.toml`.
 - **Account** — one set of credentials for a provider. v1 shows exactly one per provider,
   but every key in storage carries an account id so multi-account is a UI change, not a
   migration.
@@ -71,7 +76,7 @@ cookies — a deliberate scope boundary, not a coincidence.
 | Codex | `GET https://chatgpt.com/backend-api/wham/usage`, Bearer | `~/.codex/auth.json` (`tokens.access_token`), or our own login |
 | Z.ai / GLM | API token, Global or BigModel CN region | user-supplied key |
 | Kimi | `GET https://api.kimi.com/coding/v1/usages` | user-supplied key from Kimi Code Console |
-| Antigravity | local HTTPS server of the `agy` CLI, `RetrieveUserQuotaSummary` | `agy` session |
+| Antigravity | Cloud Code Assist `fetchAvailableModels`; optional local `agy` fallback | Tidemark Google OAuth, or an existing `agy` session |
 
 Codex reports `rate_limit.primary_window` / `secondary_window` — slots rather than lanes,
 each declaring its own length — plus a `code_review_rate_limit` of the same shape and named
@@ -119,12 +124,17 @@ enforces. `scripts/check-layering.sh` asserts it against `cargo tree`.
 
 ### D-Bus interface
 
-`GetStatus` returns every account at once — state, last good reading, how the account is
+The compiled provider catalog and configured accounts are separate D-Bus concepts.
+`ListProviders` returns every provider definition supported by this build. `GetStatus`
+returns only configured accounts — state, last good reading, how the account is
 authenticated, and when the next poll is due — so one round trip is enough to draw the
-whole window, or a Waybar module, or a line of CLI output. `ProviderChanged` carries exactly
-the same shape for one account, so a long-running client has one parser rather than two.
-`Refresh(provider)` polls now, with an empty string meaning everything, and re-reads the
-credential on the way. `Version` says what is on the other end.
+whole window, or a Waybar module, or a line of CLI output. `AddProvider(provider)` creates
+and persists the provider's `default` account; `RemoveProvider(provider, account)` removes
+one. `ProviderChanged` carries the same status shape as `GetStatus` for an account that was
+added or updated, while `ProviderRemoved(provider, account)` tells long-running clients to
+drop its settings row and card. `Refresh(provider)` polls now, with an empty string meaning
+everything, and re-reads the credential on the way. `Version` says what is on the other
+end.
 
 Credentials are the daemon's, so changing them is the daemon's too: `SetKey`, `SignOut`,
 `SetOption`, and the two halves of a login. Nothing there is specific to the GUI — a
@@ -245,9 +255,14 @@ distribution-wide LTO off; `PKGBUILD` does it with `options=(!lto)`.
   sources. It wins over the CLI's file when it is there, because it exists only because
   the user explicitly signed in here; signing out removes it and hands the account back.
 - **Settings** — `config.toml` holds what is neither a secret nor a reading: Z.ai's region
-  today, card order later. It is edited rather than rewritten, so comments, ordering and
-  keys a newer build added all survive a change made from the interface. A file that does
-  not parse is an error, never silently replaced with defaults.
+  and the ordered `providers` array today, card order later. A missing file or missing
+  array has the same meaning as `providers = []`: a fresh installation has no configured
+  accounts. It is edited rather than rewritten, so comments, ordering and keys a newer
+  build added all survive a change made from the interface. A file that does not parse is
+  an error, never silently replaced with defaults. Removing a provider deletes its
+  provider-specific settings and both kinds of Tidemark-owned credential, then removes its
+  account and card; quota history and vendor-owned credential files or `agy` sessions are
+  retained.
 
 ## Networking
 
@@ -294,6 +309,9 @@ calibration against history that does not exist yet.
 - **Grid of provider cards** (`GtkFlowBox`, 1–3 columns by width), sorted by urgency, with
   user-defined order persisted to config. Reordering is manual `GtkDragSource` /
   `GtkDropTarget` work — `GtkFlowBox` has no reorder API.
+- **Empty state** — when there are no configured providers, the main window says
+  `Welcome to Tidemark` and `Add a provider to start tracking your quota.` The providers
+  button remains available while the daemon is connected.
 - **Card** — logo, name, plan, state chip; the shortest present window as a large number
   over a bar with a pace mark; remaining windows as thin rows; and one quiet line along the
   bottom saying when the reading was taken. The plan is a convention rather than a field:
@@ -333,13 +351,15 @@ calibration against history that does not exist yet.
   current segment.
 - **Failure states** are distinguished in data but collapsed in the UI into three groups by
   what the user must do: *you fix it* / *it fixes itself* / *they broke it*. The first group
-  has somewhere to go: the credentials dialog.
-- **The credentials dialog** is one group per account, drawn from what the daemon
-  published — a key field, a sign-in button, or neither, plus whatever settings the
-  provider declares. It knows the difference between pasting a key and signing in; it does
-  not know what a provider is, so adding one adds a group to it and changes no code here.
-  A stored key is never shown back: the row says whether there is one, and the way to
-  replace it is to type a new one.
+  has somewhere to go: the provider's settings detail page.
+- **Provider settings** opens on a list of configured accounts. Its add button pushes a
+  searchable picker containing catalog entries that have not been configured; choosing
+  one adds it and opens that provider's detail page. Edit reaches the same detail page,
+  which is drawn from the daemon's authentication and settings declarations. A stored key
+  is never shown back: the row says whether there is one, and replacement requires typing
+  a new one. Removal is destructive and confirmed: it deletes Tidemark-owned credentials,
+  provider settings and the current card, but keeps quota history. Closing the preferences
+  dialog cancels pending OAuth work, and the dialog can then be opened again.
 - **Tray** — static SNI icon, spoken directly over GDBus. Left click lists providers with
   the percentage of their shortest window. `libayatana-appindicator-glib` is GPL-3 and
   cannot be linked into an MIT project.
