@@ -27,6 +27,7 @@ pub mod sub2api;
 pub mod synthetic;
 pub mod venice;
 pub mod zai;
+pub mod zenmux;
 
 use super::{BoxFuture, Credential, Provider, ProviderError, http};
 use std::collections::BTreeMap;
@@ -317,6 +318,7 @@ pub static CATALOG: &[&Spec] = &[
     &synthetic::SPEC,
     &venice::SPEC,
     &zai::SPEC,
+    &zenmux::SPEC,
 ];
 
 #[cfg(test)]
