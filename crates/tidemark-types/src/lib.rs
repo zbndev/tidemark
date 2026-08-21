@@ -16,7 +16,10 @@ pub mod wire;
 pub use snapshot::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, provider_label};
 pub use time::{AbsurdTimestamp, Timestamp};
 pub use window::{Window, WindowKey, WindowLength};
-pub use wire::{ProviderState, ProviderStatus, Remedy, WindowStatus};
+pub use wire::{
+    CredentialKind, OptionChoice, ProviderOption, ProviderState, ProviderStatus, Remedy,
+    WindowStatus,
+};
 
 /// Identity constants. Changing any of these is a breaking change for installed units,
 /// stored secrets and on-disk state, so they live in exactly one place.

@@ -109,6 +109,34 @@ impl<'a> Field<'a> {
     }
 }
 
+/// Applies field updates to a document held in memory.
+///
+/// The counterpart of [`LockedCredentialFile::update_top_level`] for a credential Tidemark
+/// owns outright — a login performed from the interface, kept in the Secret Service. None
+/// of the file protocol applies to those bytes: no vendor process writes them, so there is
+/// nothing to compare-and-swap against and nothing to preserve a backup of. What survives
+/// the move is the [`Field`] addressing, so a provider describes a rotation once and both
+/// stores understand it.
+pub fn apply_fields(
+    document: &mut serde_json::Value,
+    subtree: &str,
+    updates: &[(Field<'_>, serde_json::Value)],
+) -> Result<(), CredentialFileError> {
+    for (field, value) in updates {
+        let object = match field {
+            Field::Root(_) => document
+                .as_object_mut()
+                .ok_or(CredentialFileError::RootNotObject),
+            Field::Subtree(_) => document
+                .get_mut(subtree)
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or(CredentialFileError::SubtreeNotObject),
+        }?;
+        object.insert(field.name().to_owned(), value.clone());
+    }
+    Ok(())
+}
+
 /// Whether a guarded update was published or a concurrent token owner won the race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateOutcome {

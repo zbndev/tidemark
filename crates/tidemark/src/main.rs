@@ -5,6 +5,7 @@
 //! `scripts/check-layering.sh` is what keeps that true as the program grows.
 //!
 //! The pieces: `bus` talks to the daemon, `window` owns the grid, `card` draws one account,
+//! `credentials` is the dialog that adds and removes them,
 //! `bar` draws the quota bar and its pace mark, `mark` finds the provider's own logo,
 //! `model` decides what order things go in, `format` decides what they say, and `style`
 //! adds the handful of CSS rules libadwaita does not already provide.
@@ -12,6 +13,7 @@
 mod bar;
 mod bus;
 mod card;
+mod credentials;
 mod format;
 mod mark;
 mod model;

@@ -130,6 +130,78 @@ impl std::fmt::Display for ProviderState {
     }
 }
 
+/// How an account is authenticated, and therefore what the interface offers.
+///
+/// Published rather than inferred by the client: the credentials dialog is the one place
+/// where "paste a key" and "sign in" are genuinely different screens, and a client that
+/// guessed from the provider slug would have to be taught every new provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialKind {
+    /// The user pastes a key, which Tidemark keeps in the Secret Service.
+    Key,
+    /// The user signs in through the browser, and Tidemark keeps the tokens.
+    OAuth,
+    /// Neither: the credential belongs to something else on the machine, and Tidemark
+    /// reads it where that thing keeps it. Nothing to enter and nothing to sign out of.
+    External,
+}
+
+impl CredentialKind {
+    /// The string this kind travels as.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Key => "key",
+            Self::OAuth => "oauth",
+            Self::External => "external",
+        }
+    }
+
+    /// Parses a kind off the wire. `None` for anything this build does not know, which a
+    /// client should treat as "no credential interface" rather than guessing at one.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        [Self::Key, Self::OAuth, Self::External]
+            .into_iter()
+            .find(|candidate| candidate.as_wire() == value)
+    }
+}
+
+impl std::fmt::Display for CredentialKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire())
+    }
+}
+
+/// One value a provider setting can take.
+#[derive(Debug, Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct OptionChoice {
+    /// What it is called on the wire and in `config.toml`.
+    pub value: String,
+    /// What it is called on screen.
+    pub title: String,
+}
+
+/// A setting of a provider that is neither a secret nor a reading.
+///
+/// Z.ai is the reason this exists: the same API answers on two hosts, a key for one is a
+/// 401 on the other, and nothing in the key says which. The choice is published with its
+/// alternatives so that a client can draw the control without knowing what a region is —
+/// the same reason the states are published as strings with a documented set.
+#[derive(Debug, Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct ProviderOption {
+    /// Key under `[provider.<slug>]` in `config.toml`.
+    pub name: String,
+    /// What to call it on screen.
+    pub title: String,
+    /// A sentence under the control, when it needs one.
+    pub description: Option<String>,
+    /// What it is currently set to.
+    pub value: String,
+    /// Everything it may be set to. Never empty.
+    pub choices: Vec<OptionChoice>,
+}
+
 /// One rate-limit window as published.
 ///
 /// `resets_at` and `length_secs` are absent from the encoded dictionary when the provider
@@ -205,6 +277,18 @@ pub struct ProviderStatus {
     pub windows: Vec<WindowStatus>,
     /// Everything from the last good reading that does not fit the window model.
     pub details: Vec<DetailSection>,
+    /// A [`CredentialKind`] as a string, saying what the credentials dialog should offer
+    /// for this account. Absent from a daemon older than the credentials interface.
+    pub credential: Option<String>,
+    /// Whether Tidemark itself holds a credential for this account — a stored key, or the
+    /// tokens of a login performed here. **Not** whether the account works: a Claude
+    /// account reading the CLI's own file is `false` and perfectly healthy.
+    pub has_credential: Option<bool>,
+    /// Where the user gets the credential from, in one sentence. Absent when the answer is
+    /// obvious enough not to need one.
+    pub credential_hint: Option<String>,
+    /// The provider's own settings, with their current values and alternatives.
+    pub options: Vec<ProviderOption>,
 }
 
 impl ProviderStatus {
@@ -219,7 +303,17 @@ impl ProviderStatus {
             next_poll_at: None,
             windows: Vec::new(),
             details: Vec::new(),
+            credential: None,
+            has_credential: None,
+            credential_hint: None,
+            options: Vec::new(),
         }
+    }
+
+    /// What the credentials dialog should offer, or `None` where this build does not know
+    /// what the daemon is describing.
+    pub fn credential_kind(&self) -> Option<CredentialKind> {
+        CredentialKind::from_wire(self.credential.as_deref()?)
     }
 
     /// The subscription level to show under the provider's name, when there is one.

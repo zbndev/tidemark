@@ -1,11 +1,28 @@
-//! Claude subscription quota over the OAuth credentials owned by Claude Code.
+//! Claude subscription quota, over one of two credentials.
+//!
+//! # Two sources, and which one wins
+//!
+//! Normally the account is Claude Code's: `~/.claude/.credentials.json`, read in place and
+//! refreshed back into it under the CLI's own lock protocol, per ADR 0001. That file is
+//! never created here and never replaced wholesale — Tidemark only ever updates the token
+//! fields of a file the CLI already owns.
+//!
+//! The other source is a login the user performed **from Tidemark**, whose tokens live in
+//! the Secret Service under [`crate::secrets::Kind::Token`]. It is checked first, and the
+//! order is deliberate: it exists only because the user explicitly signed in here, so it
+//! is the more recent statement of intent, and signing out removes it and hands the
+//! account straight back to the CLI file. The stored document has the *same shape* as the
+//! CLI's, which is why one parser reads both.
 
 use super::{BoxFuture, Credential, Provider, ProviderError, http};
+use crate::oauth;
 use crate::oauth_file::{
     CredentialFile, CredentialFileError, Field, LockedCredentialFile, UpdateOutcome,
 };
+use crate::secrets::{self, Secrets};
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
@@ -21,18 +38,97 @@ const REFRESH_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const BETA_HEADER: &str = "oauth-2025-04-20";
 
+const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
+/// The scopes the usage endpoint answers to. `user:inference` is what makes the token a
+/// subscription token rather than a profile one, and without it `/api/oauth/usage` has
+/// nothing to report.
+const OAUTH_SCOPES: &str = "org:create_api_key user:profile user:inference";
+/// Fixed, because the client is registered with exactly this redirect. See ADR 0003.
+const REDIRECT_PORT: u16 = 54_545;
+const REDIRECT_PATH: &str = "/callback";
+
+/// The subtree both the CLI file and a Tidemark login are stored under.
+const TOKEN_SUBTREE: &str = "claudeAiOauth";
+
+/// This provider's OAuth client, for the loopback flow in [`crate::oauth`].
+pub fn oauth_client() -> oauth::Client {
+    oauth::Client {
+        authorize_url: AUTHORIZE_URL,
+        token_url: REFRESH_URL,
+        client_id: OAUTH_CLIENT_ID,
+        redirect_port: REDIRECT_PORT,
+        redirect_path: REDIRECT_PATH,
+        scopes: OAUTH_SCOPES,
+        // Anthropic's authorize page uses this to decide it is talking to a client that
+        // will exchange a code rather than one expecting a token in the fragment.
+        authorize_extras: &[("code", "true")],
+        encoding: oauth::Encoding::Form,
+    }
+}
+
+/// The credential document to store after a successful login.
+///
+/// Deliberately the *same shape the CLI writes*, so that everything downstream — the
+/// parser, the expiry rule, the plan line — is one implementation rather than two. What is
+/// not carried over is anything the token response did not say: an absent
+/// `subscriptionType` stays absent, and the card simply shows no plan.
+pub fn document_from_login(
+    response: &serde_json::Value,
+    now_ms: i64,
+) -> Result<serde_json::Value, ProviderError> {
+    let tokens: RefreshResponse = serde_json::from_value(response.clone()).map_err(|error| {
+        ProviderError::malformed(format!(
+            "the Claude login response is not readable: {error}"
+        ))
+    })?;
+    if tokens.access_token.trim().is_empty() || tokens.refresh_token.trim().is_empty() {
+        return Err(ProviderError::malformed(
+            "the Claude login response carried a blank token",
+        ));
+    }
+    let subscription = response
+        .get("subscription_type")
+        .or_else(|| response.get("subscriptionType"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let mut subtree = serde_json::Map::new();
+    subtree.insert("accessToken".into(), tokens.access_token.into());
+    subtree.insert("refreshToken".into(), tokens.refresh_token.into());
+    subtree.insert(
+        "expiresAt".into(),
+        now_ms
+            .saturating_add(tokens.expires_in.saturating_mul(1_000))
+            .into(),
+    );
+    if tokens.refresh_token_expires_in > 0 {
+        subtree.insert(
+            "refreshTokenExpiresAt".into(),
+            now_ms
+                .saturating_add(tokens.refresh_token_expires_in.saturating_mul(1_000))
+                .into(),
+        );
+    }
+    if let Some(subscription) = subscription {
+        subtree.insert("subscriptionType".into(), subscription.into());
+    }
+    Ok(serde_json::json!({ TOKEN_SUBTREE: subtree }))
+}
+
 #[derive(Debug)]
 /// One Claude Code account.
 pub struct Claude {
     client: reqwest::Client,
     credentials: CredentialFile,
+    /// Where a login performed from Tidemark is kept, when the caller has somewhere to
+    /// keep one. `None` in tests that only exercise the CLI file.
+    own: Option<Arc<dyn Secrets>>,
     usage_url: String,
     refresh_url: String,
 }
 
 impl Claude {
     /// Builds the canonical Claude Code account at `~/.claude/.credentials.json`.
-    pub fn new() -> Result<Self, ProviderError> {
+    pub fn new(own: Option<Arc<dyn Secrets>>) -> Result<Self, ProviderError> {
         let home = std::env::var_os("HOME")
             .filter(|home| Path::new(home).is_absolute())
             .ok_or_else(|| {
@@ -40,11 +136,13 @@ impl Claude {
             })?;
         let path = Path::new(&home).join(".claude/.credentials.json");
         let write_lock = Path::new(&home).join(".claude/.storage-write.lock");
-        Self::with_endpoints(
+        let mut claude = Self::with_endpoints(
             CredentialFile::new(path.clone(), path).coordinated_by(write_lock),
             USAGE_URL.to_owned(),
             REFRESH_URL.to_owned(),
-        )
+        )?;
+        claude.own = own;
+        Ok(claude)
     }
 
     fn with_endpoints(
@@ -55,22 +153,14 @@ impl Claude {
         Ok(Self {
             client: http::client()?,
             credentials,
+            own: None,
             usage_url,
             refresh_url,
         })
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
-        let locked = self.credentials.lock().map_err(map_file_error)?;
-        let document = locked.read_json().map_err(map_file_error)?;
-        let mut credentials = ClaudeCredentials::from_document(&document)?;
-        let now_ms = now_millis();
-        if credentials.is_expired_at(now_ms) {
-            credentials = self.refresh(&locked, credentials, now_ms).await?;
-        }
-        let access_token = credentials.access_token.clone();
-        let plan = credentials.subscription_type().map(str::to_owned);
-        drop(locked);
+        let (access_token, plan) = self.credential().await?;
 
         let response = self
             .client
@@ -101,12 +191,68 @@ impl Claude {
         Ok(snapshot)
     }
 
-    async fn refresh(
+    /// The access token to spend, and the plan to put on the card.
+    ///
+    /// A Tidemark login wins over the CLI file when there is one — see the module docs.
+    /// Neither source is consulted for the other's failures: a keyring that is locked
+    /// reports itself as locked rather than silently falling through to a file that may
+    /// hold a different account.
+    async fn credential(&self) -> Result<(Credential, Option<String>), ProviderError> {
+        if let Some(own) = &self.own {
+            let provider = ProviderId::new(PROVIDER_ID);
+            let account = AccountId::default();
+            let stored = own
+                .get(secrets::Kind::Token, &provider, &account)
+                .await
+                .map_err(ProviderError::from_secret_error)?;
+            if let Some(stored) = stored {
+                return self.own_login_credential(own.as_ref(), stored).await;
+            }
+        }
+        self.cli_file_credential().await
+    }
+
+    /// The CLI's file, refreshed in place if the token in it is spent.
+    async fn cli_file_credential(&self) -> Result<(Credential, Option<String>), ProviderError> {
+        let locked = self.credentials.lock().map_err(map_file_error)?;
+        let document = locked.read_json().map_err(map_file_error)?;
+        let mut credentials = ClaudeCredentials::from_document(&document)?;
+        let now_ms = now_millis();
+        if credentials.is_expired_at(now_ms) {
+            credentials = self.refresh(&locked, credentials, now_ms).await?;
+        }
+        Ok((
+            credentials.access_token.clone(),
+            credentials.subscription_type().map(str::to_owned),
+        ))
+    }
+
+    /// Tidemark's own login, refreshed straight back into the Secret Service.
+    ///
+    /// None of the file protocol applies here and none of it is performed: there is no
+    /// vendor process racing us for these bytes, nothing else reads them, and the backup
+    /// the file path takes before an irreversible rotation exists to protect a credential
+    /// this one *is* the only copy of. What replaces it is the ordering — the new document
+    /// is stored before it is used, so a refresh that succeeds at the provider and then
+    /// fails locally has still recorded the token that rotation just made the live one.
+    async fn own_login_credential(
         &self,
-        locked: &LockedCredentialFile,
-        credentials: ClaudeCredentials,
-        now_ms: i64,
-    ) -> Result<ClaudeCredentials, ProviderError> {
+        own: &dyn Secrets,
+        stored: Credential,
+    ) -> Result<(Credential, Option<String>), ProviderError> {
+        let document: serde_json::Value =
+            serde_json::from_str(stored.expose()).map_err(|error| {
+                ProviderError::malformed(format!("the stored Claude login is not JSON: {error}"))
+            })?;
+        let credentials = ClaudeCredentials::from_document(&document)?;
+        let now_ms = now_millis();
+        if !credentials.is_expired_at(now_ms) {
+            return Ok((
+                credentials.access_token.clone(),
+                credentials.subscription_type().map(str::to_owned),
+            ));
+        }
+
         let refresh_token = credentials
             .refresh_token
             .as_ref()
@@ -115,29 +261,46 @@ impl Claude {
             .refresh_token_expires_at
             .is_some_and(|expires_at| now_ms >= expires_at)
         {
+            // The one-time token is past its own expiry, so there is nothing left to
+            // exchange. The user signs in again; that is the `credential-rejected` state.
             return Err(ProviderError::Credential { status: 401 });
         }
-        let expected_refresh_token = refresh_token.expose().to_owned();
-        locked
-            .preflight_unique_fields(
-                "claudeAiOauth",
-                &[
-                    Field::Subtree("accessToken"),
-                    Field::Subtree("refreshToken"),
-                    Field::Subtree("expiresAt"),
-                    Field::Subtree("refreshTokenExpiresAt"),
-                ],
-            )
-            .map_err(map_file_error)?;
-        // A successful refresh rotates the one-time token. Preserve the exact CLI-owned
-        // bytes before crossing that irreversible boundary.
-        locked.backup().map_err(map_file_error)?;
+        let refreshed = self.exchange_refresh(refresh_token.expose()).await?;
+        let mut document = document;
+        let subtree = document
+            .get_mut(TOKEN_SUBTREE)
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| ProviderError::malformed("the stored Claude login lost its subtree"))?;
+        for (field, value) in refreshed_fields(refreshed, now_ms) {
+            subtree.insert(field.name().to_owned(), value);
+        }
+        own.set(
+            secrets::Kind::Token,
+            &ProviderId::new(PROVIDER_ID),
+            &AccountId::default(),
+            &Credential::new(document.to_string()),
+        )
+        .await
+        .map_err(ProviderError::from_secret_error)?;
+
+        let credentials = ClaudeCredentials::from_document(&document)?;
+        Ok((
+            credentials.access_token.clone(),
+            credentials.subscription_type().map(str::to_owned),
+        ))
+    }
+
+    /// The refresh grant itself, shared by both credential sources.
+    async fn exchange_refresh(
+        &self,
+        refresh_token: &str,
+    ) -> Result<RefreshResponse, ProviderError> {
         let response = self
             .client
             .post(&self.refresh_url)
             .form(&[
                 ("grant_type", "refresh_token"),
-                ("refresh_token", expected_refresh_token.as_str()),
+                ("refresh_token", refresh_token),
                 ("client_id", OAUTH_CLIENT_ID),
             ])
             .send()
@@ -167,10 +330,45 @@ impl Claude {
                 "Claude refresh response carried a non-positive expiry",
             ));
         }
+        Ok(refreshed)
+    }
+
+    async fn refresh(
+        &self,
+        locked: &LockedCredentialFile,
+        credentials: ClaudeCredentials,
+        now_ms: i64,
+    ) -> Result<ClaudeCredentials, ProviderError> {
+        let refresh_token = credentials
+            .refresh_token
+            .as_ref()
+            .ok_or(ProviderError::Credential { status: 401 })?;
+        if credentials
+            .refresh_token_expires_at
+            .is_some_and(|expires_at| now_ms >= expires_at)
+        {
+            return Err(ProviderError::Credential { status: 401 });
+        }
+        let expected_refresh_token = refresh_token.expose().to_owned();
+        locked
+            .preflight_unique_fields(
+                TOKEN_SUBTREE,
+                &[
+                    Field::Subtree("accessToken"),
+                    Field::Subtree("refreshToken"),
+                    Field::Subtree("expiresAt"),
+                    Field::Subtree("refreshTokenExpiresAt"),
+                ],
+            )
+            .map_err(map_file_error)?;
+        // A successful refresh rotates the one-time token. Preserve the exact CLI-owned
+        // bytes before crossing that irreversible boundary.
+        locked.backup().map_err(map_file_error)?;
+        let refreshed = self.exchange_refresh(&expected_refresh_token).await?;
         let updates = refreshed_fields(refreshed, now_ms);
         let outcome = locked
             .update_top_level(
-                "claudeAiOauth",
+                TOKEN_SUBTREE,
                 ("refreshToken", &expected_refresh_token),
                 &updates,
             )
@@ -466,7 +664,7 @@ impl std::fmt::Debug for ClaudeCredentials {
 impl ClaudeCredentials {
     fn from_document(document: &serde_json::Value) -> Result<Self, ProviderError> {
         let subtree = document
-            .get("claudeAiOauth")
+            .get(TOKEN_SUBTREE)
             .cloned()
             .ok_or_else(|| ProviderError::malformed("missing claudeAiOauth"))?;
         let raw: RawCredentials = serde_json::from_value(subtree.clone()).map_err(|error| {
@@ -587,8 +785,12 @@ mod tests {
 
     impl TestCredentials {
         fn expired() -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("tidemark-claude-test-{}", std::process::id()));
+            // Unique per call, not merely per process: more than one test in this module
+            // wants an expired credential file, and they run on the same process.
+            static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let nth = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("tidemark-claude-test-{}-{nth}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir(&dir).expect("test directory");
             let path = dir.join(".credentials.json");
@@ -609,6 +811,63 @@ mod tests {
     impl Drop for TestCredentials {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A Secret Service that is one string, held in memory.
+    ///
+    /// The real one is exercised in `crate::secrets`; what these tests need from it is the
+    /// two things that decide the provider's behaviour — whether a Tidemark login exists,
+    /// and what it says after a refresh has been written back.
+    #[derive(Debug, Default)]
+    struct FakeSecrets(std::sync::Mutex<Option<String>>);
+
+    impl FakeSecrets {
+        fn holding(document: serde_json::Value) -> Arc<Self> {
+            Arc::new(Self(std::sync::Mutex::new(Some(document.to_string()))))
+        }
+
+        fn stored(&self) -> serde_json::Value {
+            let held = self.0.lock().expect("no test panics holding this");
+            serde_json::from_str(held.as_deref().expect("something stored")).expect("JSON")
+        }
+    }
+
+    impl crate::secrets::Secrets for FakeSecrets {
+        fn get<'a>(
+            &'a self,
+            _kind: crate::secrets::Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<Option<Credential>, crate::secrets::SecretError>> {
+            let held = self
+                .0
+                .lock()
+                .expect("no test panics holding this")
+                .clone()
+                .map(Credential::new);
+            Box::pin(async move { Ok(held) })
+        }
+
+        fn set<'a>(
+            &'a self,
+            _kind: crate::secrets::Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            secret: &'a Credential,
+        ) -> BoxFuture<'a, Result<(), crate::secrets::SecretError>> {
+            *self.0.lock().expect("no test panics holding this") = Some(secret.expose().to_owned());
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _kind: crate::secrets::Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<(), crate::secrets::SecretError>> {
+            *self.0.lock().expect("no test panics holding this") = None;
+            Box::pin(async { Ok(()) })
         }
     }
 
@@ -821,5 +1080,142 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+    #[test]
+    fn a_login_performed_here_is_used_ahead_of_the_cli_file() {
+        const USAGE: &str = r#"{
+          "limits":[
+            {"kind":"session","group":"session","percent":12,"severity":"normal",
+             "resets_at":"2026-08-20T21:50:00Z","scope":null,"is_active":true}
+          ],
+          "spend":null,"extra_usage":null
+        }"#;
+        // The CLI file on disk is expired and would demand a refresh; the Tidemark login
+        // is live. Exactly one request must leave, and it must carry the login's token.
+        let credentials = TestCredentials::expired();
+        let secrets = FakeSecrets::holding(json!({"claudeAiOauth": {
+            "accessToken": "from-the-tidemark-login",
+            "refreshToken": "own-refresh",
+            "expiresAt": 4_102_444_800_000_i64,
+            "subscriptionType": "max"
+        }}));
+        let (base, requests, server) = local_server(vec![USAGE]);
+        let mut provider = Claude::with_endpoints(
+            CredentialFile::new(credentials.path.clone(), credentials.path.clone()),
+            format!("{base}/usage"),
+            format!("{base}/token"),
+        )
+        .expect("provider builds");
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+
+        let snapshot = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect("the stored login is enough");
+
+        assert_eq!(snapshot.windows[0].used_percent, 12.0);
+        assert_eq!(snapshot.details[0].rows[0].value, "max");
+        let usage_request = requests.recv().expect("one request");
+        assert!(
+            usage_request.contains("authorization: Bearer from-the-tidemark-login"),
+            "{usage_request}"
+        );
+        server.join().expect("server stopped");
+        assert!(
+            requests.try_recv().is_err(),
+            "the CLI file must not have been touched"
+        );
+    }
+
+    #[test]
+    fn an_expired_login_is_rotated_back_into_the_keyring_not_onto_disk() {
+        const REFRESH: &str = r#"{
+          "access_token":"rotated","refresh_token":"rotated-refresh",
+          "expires_in":28800,"refresh_token_expires_in":2419200,"token_type":"bearer"
+        }"#;
+        const USAGE: &str = r#"{
+          "limits":[
+            {"kind":"session","group":"session","percent":7,"severity":"normal",
+             "resets_at":"2026-08-20T21:50:00Z","scope":null,"is_active":true}
+          ],
+          "spend":null,"extra_usage":null
+        }"#;
+        let credentials = TestCredentials::expired();
+        let before = fs::read(&credentials.path).expect("fixture readable");
+        let secrets = FakeSecrets::holding(json!({"claudeAiOauth": {
+            "accessToken": "spent",
+            "refreshToken": "own-refresh",
+            "expiresAt": 1_i64,
+            "subscriptionType": "max"
+        }}));
+        let (base, requests, server) = local_server(vec![REFRESH, USAGE]);
+        let mut provider = Claude::with_endpoints(
+            CredentialFile::new(credentials.path.clone(), credentials.path.clone()),
+            format!("{base}/usage"),
+            format!("{base}/token"),
+        )
+        .expect("provider builds");
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+
+        let snapshot = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect("refresh and fetch succeed");
+        assert_eq!(snapshot.windows[0].used_percent, 7.0);
+
+        let refresh_request = requests.recv().expect("refresh request");
+        assert!(
+            refresh_request.contains("refresh_token=own-refresh"),
+            "{refresh_request}"
+        );
+        let usage_request = requests.recv().expect("usage request");
+        assert!(
+            usage_request.contains("authorization: Bearer rotated"),
+            "{usage_request}"
+        );
+        server.join().expect("server stopped");
+
+        let stored = secrets.stored();
+        assert_eq!(stored["claudeAiOauth"]["accessToken"], "rotated");
+        assert_eq!(stored["claudeAiOauth"]["refreshToken"], "rotated-refresh");
+        assert_eq!(
+            stored["claudeAiOauth"]["subscriptionType"], "max",
+            "a rotation replaces the tokens and nothing else"
+        );
+        assert_eq!(
+            fs::read(&credentials.path).expect("still there"),
+            before,
+            "a login of our own must never write to the CLI's file"
+        );
+    }
+
+    #[test]
+    fn a_login_response_becomes_the_document_the_same_parser_reads() {
+        let response = json!({
+            "access_token": "fresh", "refresh_token": "fresh-refresh",
+            "expires_in": 28_800, "refresh_token_expires_in": 2_419_200,
+            "token_type": "bearer", "scope": "user:inference user:profile"
+        });
+        let document =
+            document_from_login(&response, 1_787_100_000_000).expect("a usable response");
+        let credentials = ClaudeCredentials::from_document(&document).expect("parses");
+        assert_eq!(credentials.access_token.expose(), "fresh");
+        assert!(!credentials.is_expired_at(1_787_100_000_000));
+        assert!(credentials.is_expired_at(1_787_128_800_000));
+        assert_eq!(
+            credentials.subscription_type(),
+            None,
+            "a plan the response did not name is absent, not invented"
+        );
+    }
+
+    #[test]
+    fn a_login_response_with_no_token_in_it_is_refused_rather_than_stored() {
+        let error = document_from_login(&json!({"access_token": "", "refresh_token": "r", "expires_in": 1, "refresh_token_expires_in": 1}), 0)
+            .expect_err("blank");
+        assert!(matches!(error, ProviderError::Malformed(_)), "{error}");
+        let error =
+            document_from_login(&json!({"token_type": "bearer"}), 0).expect_err("no tokens");
+        assert!(matches!(error, ProviderError::Malformed(_)), "{error}");
     }
 }

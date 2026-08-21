@@ -153,6 +153,13 @@ pub enum ProviderError {
     /// No credential exists at the provider's canonical source yet.
     #[error("no credential is available")]
     NoCredential,
+    /// The credential is in the Secret Service and the collection is locked. Waited out,
+    /// not reported as the user's mistake — see `crate::secrets`.
+    #[error("the keyring is locked")]
+    KeyringLocked,
+    /// The credential is in the Secret Service and nothing answered on the bus.
+    #[error("the keyring is unavailable: {0}")]
+    KeyringUnavailable(String),
     /// The credential is missing, expired or rejected.
     #[error("the credential was rejected (HTTP {status})")]
     Credential {
@@ -197,6 +204,20 @@ impl ProviderError {
     /// True when retrying with the same credential is pointless until the user acts.
     pub fn needs_user_action(&self) -> bool {
         matches!(self, Self::NoCredential | Self::Credential { .. })
+    }
+
+    /// The provider-neutral translation of a Secret Service failure.
+    ///
+    /// Lives here rather than in `crate::secrets` so that the two providers which may read
+    /// their credential out of the keyring reach the same three states as the two which
+    /// always do — a locked keyring must mean the same thing on every card.
+    pub fn from_secret_error(error: crate::secrets::SecretError) -> Self {
+        use crate::secrets::SecretError;
+        match error {
+            SecretError::Locked => Self::KeyringLocked,
+            SecretError::NotUtf8 => Self::malformed("the stored credential is not text"),
+            SecretError::Dbus(error) => Self::KeyringUnavailable(error.to_string()),
+        }
     }
 }
 

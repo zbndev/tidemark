@@ -45,6 +45,30 @@ pub trait Daemon {
     /// Polls now: one provider by slug, or everything when given an empty string.
     fn refresh(&self, provider: &str) -> zbus::Result<()>;
 
+    /// Stores an API key for an account.
+    fn set_key(&self, provider: &str, account: &str, key: &str) -> zbus::Result<()>;
+
+    /// Removes whatever credential Tidemark holds for an account.
+    fn sign_out(&self, provider: &str, account: &str) -> zbus::Result<()>;
+
+    /// Starts a login and returns the URL to open. Nothing is waited for yet.
+    fn begin_login(&self, provider: &str, account: &str) -> zbus::Result<String>;
+
+    /// Waits for a started login to finish. Long-running: up to the browser timeout.
+    fn await_login(&self, provider: &str, account: &str) -> zbus::Result<()>;
+
+    /// Abandons a login in progress. Not an error when there is none.
+    fn cancel_login(&self, provider: &str, account: &str) -> zbus::Result<()>;
+
+    /// Changes one of a provider's own settings.
+    fn set_option(
+        &self,
+        provider: &str,
+        account: &str,
+        name: &str,
+        value: &str,
+    ) -> zbus::Result<()>;
+
     /// What the daemon on the other end is.
     #[zbus(property)]
     fn version(&self) -> zbus::Result<String>;
@@ -55,7 +79,15 @@ pub trait Daemon {
 }
 
 /// What the window is told.
+///
+/// The variants differ in size — one carries a proxy and every status, another carries one
+/// status — and that is deliberate rather than an oversight worth boxing away: this value
+/// is constructed a handful of times a minute and consumed immediately.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "constructed a few times a minute"
+)]
 pub enum Update {
     /// The daemon answered. Carries everything it knows, and the handle to ask it for more.
     Connected(DaemonProxy<'static>, Vec<ProviderStatus>),

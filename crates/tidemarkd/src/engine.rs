@@ -8,14 +8,17 @@
 //! is what keeps this module testable without a bus: the tests below run the real loop with
 //! a fake provider and a fake keyring and read the same updates the daemon publishes.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tidemark_core::config::Config;
 use tidemark_core::providers::{Credential, Provider, ProviderError};
-use tidemark_core::secrets::{KeySource, SecretError};
+use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::History;
 use tidemark_types::{
-    AccountId, ProviderId, ProviderState, ProviderStatus, Snapshot, Timestamp, WindowStatus,
+    AccountId, CredentialKind, ProviderId, ProviderOption, ProviderState, ProviderStatus, Snapshot,
+    Timestamp, WindowStatus,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -35,6 +38,16 @@ const CHANGE_EPSILON: f64 = 0.01;
 pub enum Command {
     /// Poll now: one provider by slug, or every account when `None`.
     Refresh(Option<String>),
+    /// A stored credential or a setting changed. Re-reads the settings file, drops the
+    /// built client so the new credential is picked up, and polls now.
+    ///
+    /// Separate from [`Command::Refresh`] because it is the only thing that must survive a
+    /// provider currently backing off: a user who has just pasted a key is owed an answer
+    /// now, not in fifty minutes.
+    Reload {
+        /// Provider slug, or `None` for every account.
+        provider: Option<String>,
+    },
     /// Stop the loop.
     Shutdown,
 }
@@ -43,8 +56,11 @@ pub enum Command {
 ///
 /// A closure rather than a trait because that is all it is: the five providers are
 /// constructed five different ways, and only the daemon knows which one it is holding.
-pub type Factory =
-    Box<dyn Fn(Credential) -> Result<Arc<dyn Provider>, ProviderError> + Send + Sync>;
+pub type Factory = Box<
+    dyn Fn(Credential, &BTreeMap<String, String>) -> Result<Arc<dyn Provider>, ProviderError>
+        + Send
+        + Sync,
+>;
 
 /// One account the daemon watches.
 pub struct Account {
@@ -57,6 +73,12 @@ pub struct Account {
     retry_after: Option<Duration>,
     last_change_at: Option<Timestamp>,
     due: Instant,
+}
+
+/// Everything about an account that is fixed at registration, kept together so both
+/// constructors fill it the same way.
+fn describe(status: &mut ProviderStatus, kind: CredentialKind) {
+    status.credential = Some(kind.as_wire().to_owned());
 }
 
 impl std::fmt::Debug for Account {
@@ -76,8 +98,10 @@ impl std::fmt::Debug for Account {
 impl Account {
     /// An account whose client is built from a stored key the first time it is polled.
     pub fn new(provider: ProviderId, account: AccountId, factory: Factory) -> Self {
+        let mut status = ProviderStatus::pending(&provider, &account);
+        describe(&mut status, CredentialKind::Key);
         Self {
-            status: ProviderStatus::pending(&provider, &account),
+            status,
             provider,
             account,
             factory: Some(factory),
@@ -95,8 +119,10 @@ impl Account {
     /// Claude's CLI file and Antigravity's future `agy` session.
     pub fn with_client(client: Arc<dyn Provider>) -> Self {
         let (provider, account) = (client.id(), client.account());
+        let mut status = ProviderStatus::pending(&provider, &account);
+        describe(&mut status, CredentialKind::External);
         Self {
-            status: ProviderStatus::pending(&provider, &account),
+            status,
             provider,
             account,
             factory: None,
@@ -108,8 +134,45 @@ impl Account {
         }
     }
 
-    /// The status as last published.
-    #[cfg(test)]
+    /// Says how this account is authenticated, and therefore what a credentials dialog
+    /// should offer for it.
+    pub fn with_credential(mut self, kind: CredentialKind) -> Self {
+        self.status.credential = Some(kind.as_wire().to_owned());
+        self
+    }
+
+    /// One sentence on where the credential comes from.
+    pub fn with_hint(mut self, hint: &str) -> Self {
+        self.status.credential_hint = Some(hint.to_owned());
+        self
+    }
+
+    /// Replaces the published settings of this provider.
+    pub fn with_options(mut self, options: Vec<ProviderOption>) -> Self {
+        self.status.options = options;
+        self
+    }
+
+    /// Which provider this account belongs to.
+    pub fn provider(&self) -> &ProviderId {
+        &self.provider
+    }
+
+    /// The settings as a plain map, which is what a [`Factory`] is handed.
+    fn option_values(&self) -> BTreeMap<String, String> {
+        self.status
+            .options
+            .iter()
+            .map(|option| (option.name.clone(), option.value.clone()))
+            .collect()
+    }
+
+    /// The status as last published. Read by the registry's tests, which check that every
+    /// account describes its own credentials before anything has polled it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the registry's tests")
+    )]
     pub fn status(&self) -> &ProviderStatus {
         &self.status
     }
@@ -128,8 +191,11 @@ impl Account {
 pub struct Engine {
     accounts: Vec<Account>,
     history: History,
-    keys: Arc<dyn KeySource>,
+    secrets: Arc<dyn Secrets>,
     updates: mpsc::Sender<ProviderStatus>,
+    /// Where the settings are read from on a reload. Held rather than resolved from the
+    /// environment each time, so the loop can be run over a settings file of a test's own.
+    config_path: std::path::PathBuf,
     last_thin: Option<Instant>,
 }
 
@@ -138,14 +204,16 @@ impl Engine {
     pub fn new(
         accounts: Vec<Account>,
         history: History,
-        keys: Arc<dyn KeySource>,
+        secrets: Arc<dyn Secrets>,
         updates: mpsc::Sender<ProviderStatus>,
+        config_path: std::path::PathBuf,
     ) -> Self {
         Self {
             accounts,
             history,
-            keys,
+            secrets,
             updates,
+            config_path,
             last_thin: None,
         }
     }
@@ -175,6 +243,7 @@ impl Engine {
                 _ = tokio::time::sleep_until(next_due.into()) => {}
                 command = commands.recv() => match command {
                     Some(Command::Refresh(target)) => self.mark_due(target.as_deref()),
+                    Some(Command::Reload { provider }) => self.reload(provider.as_deref()).await,
                     Some(Command::Shutdown) | None => return,
                 },
             }
@@ -238,20 +307,21 @@ impl Engine {
             return;
         }
 
-        let keys = Arc::clone(&self.keys);
+        let secrets = Arc::clone(&self.secrets);
         let provider = self.accounts[index].provider.clone();
         let account = self.accounts[index].account.clone();
-        let found = keys.provider_key(&provider, &account).await;
+        let found = secrets.get(Kind::Key, &provider, &account).await;
 
         // Resolved before the account is borrowed mutably, because building the client
         // reads the factory off the very account the outcome is written back to.
         let loaded = match found {
             Ok(Some(credential)) => {
+                let options = self.accounts[index].option_values();
                 let factory = self.accounts[index]
                     .factory
                     .as_ref()
                     .expect("checked just above");
-                match factory(credential) {
+                match factory(credential, &options) {
                     Ok(client) => {
                         tracing::debug!(provider = %provider, "credential loaded");
                         Loaded::Client(client)
@@ -407,6 +477,71 @@ impl Engine {
         }
     }
 
+    /// Acts on a credential or setting having changed.
+    ///
+    /// The settings file is read again rather than remembered, so the published options
+    /// and the client that is about to be built agree with what is on disk. The backoff is
+    /// cleared with the client: the failures that earned it were the old credential's.
+    pub async fn reload(&mut self, target: Option<&str>) {
+        let config = match Config::at(self.config_path.clone()) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                // A file the user has broken is left alone and reported. The accounts keep
+                // the settings they were built with rather than silently reverting to the
+                // defaults, which would look like the edit had been undone.
+                tracing::warn!(%error, "could not read the settings file");
+                None
+            }
+        };
+        for account in &mut self.accounts {
+            if !target.is_none_or(|slug| account.provider.as_str() == slug) {
+                continue;
+            }
+            if let Some(config) = &config {
+                account.status.options =
+                    crate::registry::options(account.provider.as_str(), config);
+            }
+            account.client = None;
+            account.failures = 0;
+            account.retry_after = None;
+            account.due = Instant::now();
+        }
+        self.probe_credentials(target).await;
+    }
+
+    /// Records, for each account, whether Tidemark itself holds a credential for it.
+    ///
+    /// Asked rather than inferred, and asked rarely — at startup and whenever a credential
+    /// changes — because the answer only moves when the user moves it. A locked keyring
+    /// leaves the answer unknown rather than answering "no": the dialog would otherwise
+    /// offer to replace a key that is there and simply out of reach.
+    pub async fn probe_credentials(&mut self, target: Option<&str>) {
+        for index in 0..self.accounts.len() {
+            let account = &self.accounts[index];
+            if !target.is_none_or(|slug| account.provider.as_str() == slug) {
+                continue;
+            }
+            let Some(kind) = account.status.credential_kind().and_then(stored_kind) else {
+                // Nothing of ours to look for: the credential belongs to something else on
+                // the machine.
+                self.accounts[index].status.has_credential = None;
+                continue;
+            };
+            let provider = account.provider.clone();
+            let name = account.account.clone();
+            let found = self.secrets.get(kind, &provider, &name).await;
+            let held = match found {
+                Ok(found) => Some(found.is_some()),
+                Err(SecretError::Locked) => None,
+                Err(error) => {
+                    tracing::debug!(provider = %provider, %error, "cannot see stored credentials");
+                    None
+                }
+            };
+            self.accounts[index].status.has_credential = held;
+        }
+    }
+
     fn thin_if_due(&mut self) {
         if self
             .last_thin
@@ -429,6 +564,16 @@ impl Engine {
     }
 }
 
+/// Which schema a credential of this kind is stored under, or `None` where Tidemark stores
+/// nothing of its own.
+pub fn stored_kind(credential: CredentialKind) -> Option<Kind> {
+    match credential {
+        CredentialKind::Key => Some(Kind::Key),
+        CredentialKind::OAuth => Some(Kind::Token),
+        CredentialKind::External => None,
+    }
+}
+
 /// What asking the keyring for a credential produced.
 enum Loaded {
     /// A client, ready to poll.
@@ -441,6 +586,8 @@ enum Loaded {
 fn state_for(error: &ProviderError) -> ProviderState {
     match error {
         ProviderError::NoCredential => ProviderState::NoCredential,
+        ProviderError::KeyringLocked => ProviderState::WaitingForKeyring,
+        ProviderError::KeyringUnavailable(_) => ProviderState::KeyringUnavailable,
         ProviderError::Credential { .. } => ProviderState::CredentialRejected,
         ProviderError::RateLimited { .. } => ProviderState::RateLimited,
         ProviderError::Malformed(_) => ProviderState::Malformed,
@@ -531,14 +678,34 @@ mod tests {
     #[derive(Debug)]
     struct Keyring(fn() -> Result<Option<Credential>, SecretError>);
 
-    impl KeySource for Keyring {
-        fn provider_key<'a>(
+    impl Secrets for Keyring {
+        fn get<'a>(
             &'a self,
+            _kind: Kind,
             _provider: &'a ProviderId,
             _account: &'a AccountId,
         ) -> BoxFuture<'a, Result<Option<Credential>, SecretError>> {
             let answer = (self.0)();
             Box::pin(async move { answer })
+        }
+
+        fn set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            _secret: &'a Credential,
+        ) -> BoxFuture<'a, Result<(), SecretError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<(), SecretError>> {
+            Box::pin(async { Ok(()) })
         }
     }
 
@@ -565,14 +732,15 @@ mod tests {
     }
 
     impl Harness {
-        fn new(accounts: Vec<Account>, keys: Arc<dyn KeySource>) -> Self {
+        fn new(accounts: Vec<Account>, secrets: Arc<dyn Secrets>) -> Self {
             let (tx, rx) = mpsc::channel(64);
             Self {
                 engine: Engine::new(
                     accounts,
                     History::in_memory().expect("an in-memory database opens"),
-                    keys,
+                    secrets,
                     tx,
+                    std::env::temp_dir().join("tidemark-engine-tests-absent.toml"),
                 ),
                 updates: rx,
             }
@@ -603,8 +771,97 @@ mod tests {
         }
     }
 
-    fn unlocked() -> Arc<dyn KeySource> {
+    fn unlocked() -> Arc<dyn Secrets> {
         Arc::new(Keyring(|| Ok(Some(Credential::new("sk-test")))))
+    }
+
+    /// The engine over a settings file of the test's own, so a reload reads that and not
+    /// whatever the developer running the suite happens to have configured.
+    fn harness_with_config(accounts: Vec<Account>, config: std::path::PathBuf) -> Harness {
+        let (tx, rx) = mpsc::channel(64);
+        Harness {
+            engine: Engine::new(
+                accounts,
+                History::in_memory().expect("an in-memory database opens"),
+                unlocked(),
+                tx,
+                config,
+            ),
+            updates: rx,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_changed_setting_rebuilds_the_client_with_it() {
+        // The whole reason a settings change drops the client rather than only polling
+        // again: Z.ai's region decides which host the client was built to talk to, and a
+        // poll with the old client would answer the new setting with the old answer.
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let recorder = Arc::clone(&seen);
+        let account = Account::new(
+            ProviderId::new("zai"),
+            AccountId::default(),
+            Box::new(move |_credential, options| {
+                recorder
+                    .lock()
+                    .expect("no test panics holding this")
+                    .push(options.get("region").cloned().unwrap_or_default());
+                Ok(Fake::new(vec![Ok(snapshot(1.0, 3600))]) as Arc<dyn Provider>)
+            }),
+        )
+        .with_credential(CredentialKind::Key)
+        .with_options(vec![ProviderOption {
+            name: "region".into(),
+            title: "Region".into(),
+            description: None,
+            value: "global".into(),
+            choices: Vec::new(),
+        }]);
+
+        let path = std::env::temp_dir().join(format!(
+            "tidemark-engine-reload-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut harness = harness_with_config(vec![account], path.clone());
+        harness.engine.poll_due(Instant::now()).await;
+        assert_eq!(
+            seen.lock().expect("no panic").as_slice(),
+            ["global"],
+            "the first client is built from the published setting"
+        );
+
+        std::fs::write(&path, "[provider.zai]\nregion = \"bigmodel-cn\"\n").expect("seed");
+        harness.engine.reload(Some("zai")).await;
+        harness.engine.poll_due(Instant::now()).await;
+        assert_eq!(
+            seen.lock().expect("no panic").as_slice(),
+            ["global", "bigmodel-cn"],
+            "the second client is built from what the file now says"
+        );
+        assert_eq!(
+            harness.engine.accounts()[0].status().options[0].value,
+            "bigmodel-cn",
+            "and the published setting agrees with the file"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_reload_clears_the_backoff_the_old_credential_earned() {
+        let mut harness = with_provider(Fake::new(vec![
+            Err(ProviderError::Credential { status: 401 }),
+            Ok(snapshot(3.0, 3600)),
+        ]));
+        harness.engine.poll_due(Instant::now()).await;
+        assert!(harness.wait_secs() > 60, "a rejection backs off");
+
+        harness.engine.reload(None).await;
+        assert_eq!(
+            harness.wait_secs(),
+            0,
+            "a user who has just fixed the credential is owed an answer now"
+        );
     }
 
     fn with_provider(provider: Arc<dyn Provider>) -> Harness {
@@ -685,7 +942,7 @@ mod tests {
             vec![Account::new(
                 ProviderId::new("fake"),
                 AccountId::default(),
-                Box::new(|_| Ok(Fake::new(vec![Ok(snapshot(1.0, 3600))]) as Arc<dyn Provider>)),
+                Box::new(|_, _| Ok(Fake::new(vec![Ok(snapshot(1.0, 3600))]) as Arc<dyn Provider>)),
             )],
             Arc::new(Keyring(|| Err(SecretError::Locked))),
         );
@@ -711,7 +968,7 @@ mod tests {
             vec![Account::new(
                 ProviderId::new("fake"),
                 AccountId::default(),
-                Box::new(|_| Ok(Fake::new(vec![]) as Arc<dyn Provider>)),
+                Box::new(|_, _| Ok(Fake::new(vec![]) as Arc<dyn Provider>)),
             )],
             Arc::new(Keyring(|| Ok(None))),
         );
@@ -728,7 +985,7 @@ mod tests {
             vec![Account::new(
                 ProviderId::new("fake"),
                 AccountId::default(),
-                Box::new(|_| {
+                Box::new(|_, _| {
                     Ok(Fake::new(vec![
                         Err(ProviderError::Credential { status: 401 }),
                         Ok(snapshot(3.0, 3600)),

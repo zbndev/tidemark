@@ -18,7 +18,9 @@ mod service;
 use std::error::Error;
 use std::sync::Arc;
 
+use tidemark_core::config::Config;
 use tidemark_core::paths;
+use tidemark_core::secrets::Secrets;
 use tidemark_core::storage::History;
 use tidemark_types::{ProviderStatus, ids};
 use tokio::signal::unix::{SignalKind, signal};
@@ -71,7 +73,14 @@ fn main() -> std::process::ExitCode {
 async fn run() -> Result<(), Box<dyn Error>> {
     let history_path = paths::history_path()?;
     let history = History::open(&history_path)?;
-    let accounts = registry::accounts()?;
+    let config_path = paths::config_path()?;
+    // A settings file that does not parse is fatal at startup and only at startup. Coming
+    // up with the defaults instead would look like the user's edit had been thrown away,
+    // and the first thing this daemon would do with the wrong region is report a rejected
+    // key. Once running, a later bad edit is reported and the previous settings stand.
+    let config = Config::at(config_path.clone())?;
+    let secrets: Arc<dyn Secrets> = Arc::new(keyring::Keyring::default());
+    let accounts = registry::accounts(&secrets, &config)?;
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -79,6 +88,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         user_agent = tidemark_types::user_agent(),
         accounts = accounts.len(),
         history = %history_path.display(),
+        config = %config_path.display(),
         "tidemarkd started"
     );
 
@@ -90,7 +100,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .name(ids::DAEMON_BUS_NAME)?
         .serve_at(
             ids::OBJECT_PATH,
-            Daemon::new(published.clone(), commands.clone()),
+            Daemon::new(published.clone(), commands.clone(), Arc::clone(&secrets)),
         )?
         .build()
         .await
@@ -133,12 +143,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let mut engine = Engine::new(
-        accounts,
-        history,
-        Arc::new(keyring::Keyring::default()),
-        updates,
-    );
+    let mut engine = Engine::new(accounts, history, secrets, updates, config_path);
+    // Before the first announcement, so a client connecting immediately is told whether
+    // each account has a credential rather than having to wait a poll to find out.
+    engine.probe_credentials(None).await;
     engine.announce().await;
     engine.run(&mut command_queue).await;
 

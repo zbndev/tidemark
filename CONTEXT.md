@@ -27,7 +27,8 @@ below follows from that.
 | systemd user unit | `tidemarkd.service` |
 | Config | `$XDG_CONFIG_HOME/tidemark/config.toml` |
 | History | `$XDG_DATA_HOME/tidemark/history.db` |
-| Secret Service schema | `io.github.zbndev.Tidemark.ProviderKey` |
+| Secret Service schema, API keys | `io.github.zbndev.Tidemark.ProviderKey` |
+| Secret Service schema, our own logins | `io.github.zbndev.Tidemark.ProviderToken` |
 
 Reverse-DNS uses `io.github.zbndev` because there is no owned domain. It is the
 conventional fallback and is what desktop files, D-Bus, and Flatpak all expect to match.
@@ -66,8 +67,8 @@ cookies — a deliberate scope boundary, not a coincidence.
 
 | Provider | Path | Credential |
 |---|---|---|
-| Claude | OAuth token → usage API | `~/.claude/.credentials.json` (`claudeAiOauth`) |
-| Codex | `GET https://chatgpt.com/backend-api/wham/usage`, Bearer | `~/.codex/auth.json` (`tokens.access_token`) |
+| Claude | OAuth token → usage API | `~/.claude/.credentials.json` (`claudeAiOauth`), or our own login |
+| Codex | `GET https://chatgpt.com/backend-api/wham/usage`, Bearer | `~/.codex/auth.json` (`tokens.access_token`), or our own login |
 | Z.ai / GLM | API token, Global or BigModel CN region | user-supplied key |
 | Kimi | `GET https://api.kimi.com/coding/v1/usages` | user-supplied key from Kimi Code Console |
 | Antigravity | local HTTPS server of the `agy` CLI, `RetrieveUserQuotaSummary` | `agy` session |
@@ -118,12 +119,21 @@ enforces. `scripts/check-layering.sh` asserts it against `cargo tree`.
 
 ### D-Bus interface
 
-`GetStatus` returns every account at once — state, last good reading, and when the next
-poll is due — so one round trip is enough to draw the whole window, or a Waybar module, or
-a line of CLI output. `ProviderChanged` carries exactly the same shape for one account, so
-a long-running client has one parser rather than two. `Refresh(provider)` polls now, with
-an empty string meaning everything, and re-reads the credential on the way — it is what the
-settings dialog calls after storing a key. `Version` says what is on the other end.
+`GetStatus` returns every account at once — state, last good reading, how the account is
+authenticated, and when the next poll is due — so one round trip is enough to draw the
+whole window, or a Waybar module, or a line of CLI output. `ProviderChanged` carries exactly
+the same shape for one account, so a long-running client has one parser rather than two.
+`Refresh(provider)` polls now, with an empty string meaning everything, and re-reads the
+credential on the way. `Version` says what is on the other end.
+
+Credentials are the daemon's, so changing them is the daemon's too: `SetKey`, `SignOut`,
+`SetOption`, and the two halves of a login. Nothing there is specific to the GUI — a
+`busctl` line does the same thing — which is why it is on the interface rather than inside
+a dialog. **A login is two calls, because the work spans two processes.** `BeginLogin`
+takes the callback port, builds the authorize URL and returns it without waiting; the client
+opens that URL however its platform opens URLs; `AwaitLogin` blocks until the browser has
+come back and the tokens are stored. The daemon never opens a browser itself:
+it is a background service that may have started before the session had a display.
 
 Every published structure is a dictionary (`a{sv}`), not a fixed D-Bus struct. Two reasons,
 and the first is the same rule that governs the bar: **absent must stay absent.** D-Bus has
@@ -226,7 +236,18 @@ distribution-wide LTO off; `PKGBUILD` does it with `options=(!lto)`.
 - **Secrets** — our own API keys go to the Secret Service (`org.freedesktop.secrets`).
   The daemon must handle "keyring still locked" as an explicit state rather than a crash;
   the unit orders itself after `graphical-session.target`.
-- **Third-party credential files** stay where they are. See ADR 0001.
+- **Third-party credential files** stay where they are, and are never *created* by us. See
+  ADR 0001. Tidemark updates the token fields of a file its vendor CLI already owns; it
+  does not write one into existence, so a sign-in performed here can never overwrite or
+  invent somebody else's session.
+- **A login performed from Tidemark** is stored under the token schema above, in the same
+  document shape the vendor CLI uses — so one parser and one expiry rule serve both
+  sources. It wins over the CLI's file when it is there, because it exists only because
+  the user explicitly signed in here; signing out removes it and hands the account back.
+- **Settings** — `config.toml` holds what is neither a secret nor a reading: Z.ai's region
+  today, card order later. It is edited rather than rewritten, so comments, ordering and
+  keys a newer build added all survive a change made from the interface. A file that does
+  not parse is an error, never silently replaced with defaults.
 
 ## Networking
 
@@ -311,7 +332,14 @@ calibration against history that does not exist yet.
   `gtk_snapshot_push_blur()` is possible and deferred) with the burn-down chart for the
   current segment.
 - **Failure states** are distinguished in data but collapsed in the UI into three groups by
-  what the user must do: *you fix it* / *it fixes itself* / *they broke it*.
+  what the user must do: *you fix it* / *it fixes itself* / *they broke it*. The first group
+  has somewhere to go: the credentials dialog.
+- **The credentials dialog** is one group per account, drawn from what the daemon
+  published — a key field, a sign-in button, or neither, plus whatever settings the
+  provider declares. It knows the difference between pasting a key and signing in; it does
+  not know what a provider is, so adding one adds a group to it and changes no code here.
+  A stored key is never shown back: the row says whether there is one, and the way to
+  replace it is to type a new one.
 - **Tray** — static SNI icon, spoken directly over GDBus. Left click lists providers with
   the percentage of their shortest window. `libayatana-appindicator-glib` is GPL-3 and
   cannot be linked into an MIT project.
@@ -326,7 +354,7 @@ is forward- but not backward-compatible.
 
 ## Non-goals
 
-- No web UI, no Electron, no embedded browser engine. See ADR 0002.
+- No web UI, no Electron, no embedded browser engine. See ADR 0002 and ADR 0003.
 - No browser-cookie scraping, and therefore no providers that require it.
 - No API Platform spend dashboards. Different metric, different product.
 - No forecast-driven notifications until there is history to calibrate them on.

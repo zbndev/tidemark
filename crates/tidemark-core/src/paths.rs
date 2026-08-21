@@ -14,6 +14,9 @@ pub const APP_DIR: &str = "tidemark";
 /// File name of the history database, per `CONTEXT.md` § Identity.
 pub const HISTORY_FILE: &str = "history.db";
 
+/// File name of the settings the user owns, per `CONTEXT.md` § Identity.
+pub const CONFIG_FILE: &str = "config.toml";
+
 /// Why a path could not be resolved.
 #[derive(Debug, thiserror::Error)]
 #[error("neither {variable} nor HOME names an absolute directory")]
@@ -32,9 +35,26 @@ pub fn data_dir() -> Result<PathBuf, NoBaseDirectory> {
     )
 }
 
+/// `$XDG_CONFIG_HOME/tidemark`, or `$HOME/.config/tidemark`.
+pub fn config_dir() -> Result<PathBuf, NoBaseDirectory> {
+    resolve(
+        "XDG_CONFIG_HOME",
+        std::env::var_os("XDG_CONFIG_HOME")
+            .as_deref()
+            .map(Path::new),
+        std::env::var_os("HOME").as_deref().map(Path::new),
+        ".config",
+    )
+}
+
 /// Full path of the history database.
 pub fn history_path() -> Result<PathBuf, NoBaseDirectory> {
     Ok(data_dir()?.join(HISTORY_FILE))
+}
+
+/// Full path of the settings file.
+pub fn config_path() -> Result<PathBuf, NoBaseDirectory> {
+    Ok(config_dir()?.join(CONFIG_FILE))
 }
 
 /// The resolution rule, with the environment passed in so it is testable without mutating
@@ -97,6 +117,24 @@ mod tests {
     fn with_nothing_to_go_on_the_daemon_is_told_rather_than_guessing() {
         let err = data(None, None).expect_err("nowhere to write");
         assert!(err.to_string().contains("XDG_DATA_HOME"), "{err}");
+    }
+
+    #[test]
+    fn the_settings_and_the_history_live_under_different_bases() {
+        // Two XDG variables, and the one a step confuses is the one that moves a file the
+        // user hand-edits out from under them.
+        let config = resolve(
+            "XDG_CONFIG_HOME",
+            None,
+            Some(Path::new("/home/u")),
+            ".config",
+        )
+        .expect("resolvable")
+        .join(CONFIG_FILE);
+        assert_eq!(
+            config,
+            PathBuf::from("/home/u/.config/tidemark/config.toml")
+        );
     }
 
     #[test]

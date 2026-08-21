@@ -23,6 +23,7 @@ use tidemark_types::{ProviderStatus, Timestamp};
 
 use crate::bus::{self, DaemonProxy, Update};
 use crate::card::Card;
+use crate::credentials::Credentials;
 use crate::model;
 
 /// How often the clock-dependent parts of every card are redrawn. Half a minute is well
@@ -42,8 +43,13 @@ pub struct MainWindow {
     message: adw::StatusPage,
     grid: gtk::FlowBox,
     refresh: gtk::Button,
+    providers: gtk::Button,
     cards: RefCell<Vec<Rc<Card>>>,
     daemon: RefCell<Option<DaemonProxy<'static>>>,
+    /// The credentials dialog while it is on screen, so the statuses arriving on the
+    /// signal reach it too. A dialog that went on saying "no key" after the key was
+    /// accepted would be the one place in the program that lied about the daemon.
+    credentials: RefCell<Option<Rc<Credentials>>>,
 }
 
 impl MainWindow {
@@ -93,9 +99,15 @@ impl MainWindow {
             .tooltip_text("Check every provider now")
             .sensitive(false)
             .build();
+        let providers = gtk::Button::builder()
+            .icon_name("dialog-password-symbolic")
+            .tooltip_text("Providers and credentials")
+            .sensitive(false)
+            .build();
 
         let header = adw::HeaderBar::new();
         header.pack_end(&refresh);
+        header.pack_start(&providers);
 
         let view = adw::ToolbarView::builder().content(&stack).build();
         view.add_top_bar(&header);
@@ -114,12 +126,15 @@ impl MainWindow {
             message,
             grid,
             refresh,
+            providers,
             cards: RefCell::new(Vec::new()),
             daemon: RefCell::new(None),
+            credentials: RefCell::new(None),
         });
 
         main.install_sort();
         main.connect_refresh_button();
+        main.connect_providers_button();
         main.start_clock();
         main.window.present();
 
@@ -137,12 +152,14 @@ impl MainWindow {
             Update::Connected(proxy, statuses) => {
                 *self.daemon.borrow_mut() = Some(proxy);
                 self.refresh.set_sensitive(true);
+                self.providers.set_sensitive(true);
                 self.show_all(statuses);
             }
             Update::Changed(status) => self.show_one(status),
             Update::Waiting(reason) => {
                 *self.daemon.borrow_mut() = None;
                 self.refresh.set_sensitive(false);
+                self.providers.set_sensitive(false);
                 self.show_message("network-offline-symbolic", "Waiting for Tidemark", &reason);
             }
         }
@@ -177,6 +194,7 @@ impl MainWindow {
         }
         self.grid.invalidate_sort();
         self.stack.set_visible_child_name(PAGE_GRID);
+        self.update_credentials();
     }
 
     /// Applies one account's update, adding a card for an account seen for the first time.
@@ -203,6 +221,47 @@ impl MainWindow {
         // holds rather than being rebuilt.
         self.grid.invalidate_sort();
         self.stack.set_visible_child_name(PAGE_GRID);
+        self.update_credentials();
+    }
+
+    /// Everything the daemon has said, in the order the cards were built.
+    fn statuses(&self) -> Vec<ProviderStatus> {
+        self.cards
+            .borrow()
+            .iter()
+            .map(|card| card.status())
+            .collect()
+    }
+
+    /// Feeds the open credentials dialog, and lets go of one the user has closed.
+    fn update_credentials(&self) {
+        let mut held = self.credentials.borrow_mut();
+        match held.as_ref() {
+            Some(dialog) if dialog.is_open() => dialog.apply(&self.statuses()),
+            Some(_) => *held = None,
+            None => {}
+        }
+    }
+
+    fn connect_providers_button(self: &Rc<Self>) {
+        let weak: Weak<Self> = Rc::downgrade(self);
+        self.providers.connect_clicked(move |_| {
+            let Some(main) = weak.upgrade() else {
+                return;
+            };
+            // Already open: present it again rather than stacking a second copy on top of
+            // a key somebody is halfway through typing.
+            if let Some(dialog) = main.credentials.borrow().as_ref()
+                && dialog.is_open()
+            {
+                return;
+            }
+            let Some(proxy) = main.daemon.borrow().clone() else {
+                return;
+            };
+            let dialog = Credentials::present(&main.window, proxy, &main.statuses());
+            *main.credentials.borrow_mut() = Some(dialog);
+        });
     }
 
     /// Teaches the grid the order the cards go in, once.

@@ -19,12 +19,15 @@
 //! a weekly window in one cannot collide with a weekly window in another.
 
 use super::{BoxFuture, Credential, Provider, ProviderError, http, length_title, title_case};
+use crate::oauth;
 use crate::oauth_file::{
     CredentialFile, CredentialFileError, Field, LockedCredentialFile, UpdateOutcome,
 };
+use crate::secrets::{self, Secrets};
 use base64::Engine;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
     WindowLength,
@@ -39,6 +42,62 @@ const REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const REFRESH_SCOPE: &str = "openid profile email";
 
+const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+/// `offline_access` is what makes the response carry a refresh token; without it a login
+/// works once and then expires with nothing to renew it.
+const OAUTH_SCOPES: &str = "openid profile email offline_access";
+/// Fixed, because the client is registered with exactly this redirect. See ADR 0003.
+const REDIRECT_PORT: u16 = 1_455;
+const REDIRECT_PATH: &str = "/auth/callback";
+
+/// This provider's OAuth client, for the loopback flow in [`crate::oauth`].
+pub fn oauth_client() -> oauth::Client {
+    oauth::Client {
+        authorize_url: AUTHORIZE_URL,
+        token_url: REFRESH_URL,
+        client_id: OAUTH_CLIENT_ID,
+        redirect_port: REDIRECT_PORT,
+        redirect_path: REDIRECT_PATH,
+        scopes: OAUTH_SCOPES,
+        // Puts the organisation and account claims in the id token, which is where the
+        // `chatgpt-account-id` this provider sends on every request comes from.
+        authorize_extras: &[("id_token_add_organizations", "true")],
+        // The code exchange is form-encoded even though the refresh grant beside it is
+        // JSON. Two spellings at one endpoint; see [`Encoding`].
+        encoding: oauth::Encoding::Form,
+    }
+}
+
+/// The credential document to store after a successful login, in the shape the CLI writes.
+pub fn document_from_login(
+    response: &serde_json::Value,
+) -> Result<serde_json::Value, ProviderError> {
+    let tokens: RefreshResponse = serde_json::from_value(response.clone()).map_err(|error| {
+        ProviderError::malformed(format!("the Codex login response is not readable: {error}"))
+    })?;
+    if tokens.access_token.trim().is_empty() {
+        return Err(ProviderError::malformed(
+            "the Codex login response carried a blank access token",
+        ));
+    }
+    let mut subtree = serde_json::Map::new();
+    subtree.insert("access_token".into(), tokens.access_token.into());
+    if let Some(refresh_token) = nonblank(tokens.refresh_token.as_deref()) {
+        subtree.insert("refresh_token".into(), refresh_token.into());
+    }
+    if let Some(id_token) = nonblank(tokens.id_token.as_deref()) {
+        subtree.insert("id_token".into(), id_token.into());
+    }
+    Ok(serde_json::json!({
+        TOKEN_SUBTREE: subtree,
+        "last_refresh": now_rfc3339(),
+    }))
+}
+
+fn nonblank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 /// How close to its own expiry an access token is refreshed rather than spent.
 const EXPIRY_MARGIN_SECS: i64 = 60;
 
@@ -50,19 +109,24 @@ const TOKEN_SUBTREE: &str = "tokens";
 pub struct Codex {
     client: reqwest::Client,
     credentials: CredentialFile,
+    /// Where a login performed from Tidemark is kept, when the caller has somewhere to
+    /// keep one.
+    own: Option<Arc<dyn Secrets>>,
     usage_url: String,
     refresh_url: String,
 }
 
 impl Codex {
     /// Builds the canonical Codex account at `$CODEX_HOME/auth.json`, or `~/.codex`.
-    pub fn new() -> Result<Self, ProviderError> {
+    pub fn new(own: Option<Arc<dyn Secrets>>) -> Result<Self, ProviderError> {
         let path = auth_path()?;
-        Self::with_endpoints(
+        let mut codex = Self::with_endpoints(
             CredentialFile::new(path.clone(), path),
             USAGE_URL.to_owned(),
             REFRESH_URL.to_owned(),
-        )
+        )?;
+        codex.own = own;
+        Ok(codex)
     }
 
     fn with_endpoints(
@@ -73,6 +137,7 @@ impl Codex {
         Ok(Self {
             client: http::client()?,
             credentials,
+            own: None,
             usage_url,
             refresh_url,
         })
@@ -114,8 +179,13 @@ impl Codex {
         }
     }
 
-    /// Reads the credential file, refreshing first when the token says it is spent.
+    /// Reads the credential, refreshing first when the token says it is spent.
+    ///
+    /// A Tidemark login wins over the CLI file when there is one; see the module docs.
     async fn load(&self, now: i64) -> Result<CodexCredentials, ProviderError> {
+        if let Some(stored) = self.own_document().await? {
+            return self.own_credentials(stored, now, false).await;
+        }
         let locked = self.credentials.lock().map_err(map_file_error)?;
         let document = locked.read_json().map_err(map_file_error)?;
         let credentials = CodexCredentials::from_document(&document)?;
@@ -125,43 +195,101 @@ impl Codex {
         Ok(credentials)
     }
 
-    /// Refreshes whatever is currently on disk, regardless of what its expiry claims.
+    /// Refreshes whatever is currently stored, regardless of what its expiry claims.
+    ///
+    /// This is the path an opaque access token takes: nothing local could have predicted
+    /// its death, so the provider's 401 is the announcement and this is the response.
     async fn force_refresh(&self) -> Result<CodexCredentials, ProviderError> {
+        if let Some(stored) = self.own_document().await? {
+            return self
+                .own_credentials(stored, Timestamp::now().as_unix(), true)
+                .await;
+        }
         let locked = self.credentials.lock().map_err(map_file_error)?;
         let document = locked.read_json().map_err(map_file_error)?;
         let credentials = CodexCredentials::from_document(&document)?;
         self.refresh(&locked, credentials).await
     }
 
-    async fn refresh(
+    /// The document of a login performed from Tidemark, if there is one.
+    async fn own_document(&self) -> Result<Option<serde_json::Value>, ProviderError> {
+        let Some(own) = &self.own else {
+            return Ok(None);
+        };
+        let stored = own
+            .get(
+                secrets::Kind::Token,
+                &ProviderId::new(PROVIDER_ID),
+                &AccountId::default(),
+            )
+            .await
+            .map_err(ProviderError::from_secret_error)?;
+        stored
+            .map(|stored| {
+                serde_json::from_str(stored.expose()).map_err(|error| {
+                    ProviderError::malformed(format!("the stored Codex login is not JSON: {error}"))
+                })
+            })
+            .transpose()
+    }
+
+    /// A Tidemark login, refreshed straight back into the Secret Service when it is spent.
+    ///
+    /// None of the file protocol applies and none of it is performed: nothing else writes
+    /// these bytes. The new document is stored before it is used, so a rotation that
+    /// succeeded at the provider is never lost to a failure on the way back.
+    async fn own_credentials(
         &self,
-        locked: &LockedCredentialFile,
-        credentials: CodexCredentials,
+        mut document: serde_json::Value,
+        now: i64,
+        force: bool,
     ) -> Result<CodexCredentials, ProviderError> {
+        let credentials = CodexCredentials::from_document(&document)?;
+        if !force && !credentials.is_expired_at(now) {
+            return Ok(credentials);
+        }
         let refresh_token = credentials
             .refresh_token
             .as_ref()
-            .ok_or(ProviderError::Credential { status: 401 })?;
-        let expected_refresh_token = refresh_token.expose().to_owned();
-        locked
-            .preflight_unique_fields(
-                TOKEN_SUBTREE,
-                &[
-                    Field::Subtree("access_token"),
-                    Field::Subtree("refresh_token"),
-                ],
-            )
-            .map_err(map_file_error)?;
-        // OpenAI rotates the refresh token, so this exchange is one-way. Preserve the
-        // exact CLI-owned bytes before crossing it. See ADR 0001.
-        locked.backup().map_err(map_file_error)?;
+            .ok_or(ProviderError::Credential { status: 401 })?
+            .expose()
+            .to_owned();
+        let refreshed = self.exchange_refresh(&refresh_token).await?;
+        crate::oauth_file::apply_fields(
+            &mut document,
+            TOKEN_SUBTREE,
+            &refreshed_fields(&refreshed, &refresh_token),
+        )
+        .map_err(map_file_error)?;
+        let own = self
+            .own
+            .as_ref()
+            .expect("only reached with a store in hand");
+        own.set(
+            secrets::Kind::Token,
+            &ProviderId::new(PROVIDER_ID),
+            &AccountId::default(),
+            &Credential::new(document.to_string()),
+        )
+        .await
+        .map_err(ProviderError::from_secret_error)?;
+        let mut current = CodexCredentials::from_document(&document)?;
+        current.was_refreshed = true;
+        Ok(current)
+    }
+
+    /// The refresh grant itself, shared by both credential sources.
+    async fn exchange_refresh(
+        &self,
+        refresh_token: &str,
+    ) -> Result<RefreshResponse, ProviderError> {
         let response = self
             .client
             .post(&self.refresh_url)
             .json(&serde_json::json!({
                 "client_id": OAUTH_CLIENT_ID,
                 "grant_type": "refresh_token",
-                "refresh_token": expected_refresh_token,
+                "refresh_token": refresh_token,
                 "scope": REFRESH_SCOPE,
             }))
             .send()
@@ -186,6 +314,32 @@ impl Codex {
                 "Codex refresh response carried a blank access token",
             ));
         }
+        Ok(refreshed)
+    }
+
+    async fn refresh(
+        &self,
+        locked: &LockedCredentialFile,
+        credentials: CodexCredentials,
+    ) -> Result<CodexCredentials, ProviderError> {
+        let refresh_token = credentials
+            .refresh_token
+            .as_ref()
+            .ok_or(ProviderError::Credential { status: 401 })?;
+        let expected_refresh_token = refresh_token.expose().to_owned();
+        locked
+            .preflight_unique_fields(
+                TOKEN_SUBTREE,
+                &[
+                    Field::Subtree("access_token"),
+                    Field::Subtree("refresh_token"),
+                ],
+            )
+            .map_err(map_file_error)?;
+        // OpenAI rotates the refresh token, so this exchange is one-way. Preserve the
+        // exact CLI-owned bytes before crossing it. See ADR 0001.
+        locked.backup().map_err(map_file_error)?;
+        let refreshed = self.exchange_refresh(&expected_refresh_token).await?;
 
         let outcome = locked
             .update_top_level(
@@ -753,6 +907,60 @@ mod tests {
         }
     }
 
+    /// A Secret Service that is one string, held in memory. See the twin in
+    /// `crate::providers::claude`.
+    #[derive(Debug, Default)]
+    struct FakeSecrets(std::sync::Mutex<Option<String>>);
+
+    impl FakeSecrets {
+        fn holding(document: serde_json::Value) -> Arc<Self> {
+            Arc::new(Self(std::sync::Mutex::new(Some(document.to_string()))))
+        }
+
+        fn stored(&self) -> serde_json::Value {
+            let held = self.0.lock().expect("no test panics holding this");
+            serde_json::from_str(held.as_deref().expect("something stored")).expect("JSON")
+        }
+    }
+
+    impl crate::secrets::Secrets for FakeSecrets {
+        fn get<'a>(
+            &'a self,
+            _kind: crate::secrets::Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<Option<Credential>, crate::secrets::SecretError>> {
+            let held = self
+                .0
+                .lock()
+                .expect("no test panics holding this")
+                .clone()
+                .map(Credential::new);
+            Box::pin(async move { Ok(held) })
+        }
+
+        fn set<'a>(
+            &'a self,
+            _kind: crate::secrets::Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            secret: &'a Credential,
+        ) -> BoxFuture<'a, Result<(), crate::secrets::SecretError>> {
+            *self.0.lock().expect("no test panics holding this") = Some(secret.expose().to_owned());
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _kind: crate::secrets::Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<(), crate::secrets::SecretError>> {
+            *self.0.lock().expect("no test panics holding this") = None;
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     /// A loopback server answering a fixed script of `(status, body)` in order.
     fn local_server(
         responses: Vec<(u16, &'static str)>,
@@ -1027,5 +1235,112 @@ mod tests {
                 .map(|(_, value)| value.is_string()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn a_login_performed_here_is_used_ahead_of_the_cli_file() {
+        // An access token whose `exp` claim is in 2286, so nothing wants refreshing.
+        const LIVE: &str = "eyJhbGciOiJub25lIn0.eyJleHAiOjk5OTk5OTk5OTl9.";
+        let home = TestHome::expired();
+        let before = fs::read(&home.path).expect("fixture readable");
+        let secrets = FakeSecrets::holding(json!({
+            "tokens": {"access_token": LIVE, "refresh_token": "own-refresh", "account_id": "acct-own"},
+            "last_refresh": "2026-08-21T00:00:00Z"
+        }));
+        let (base, requests, server) = local_server(vec![USAGE]);
+        let mut provider = home.provider(&base);
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+
+        let snapshot = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect("the stored login is enough");
+        assert_eq!(snapshot.windows.len(), 1);
+
+        let usage_request = requests.recv().expect("one request");
+        assert!(
+            usage_request.contains(&format!("authorization: Bearer {LIVE}")),
+            "{usage_request}"
+        );
+        assert!(
+            usage_request.contains("chatgpt-account-id: acct-own"),
+            "{usage_request}"
+        );
+        server.join().expect("server stopped");
+        assert_eq!(
+            fs::read(&home.path).expect("still there"),
+            before,
+            "the CLI's file is not read from and not written to"
+        );
+    }
+
+    #[test]
+    fn an_expired_login_is_rotated_back_into_the_keyring_not_onto_disk() {
+        const ROTATION: (u16, &str) = (
+            200,
+            r#"{"access_token":"rotated","refresh_token":"rotated-refresh"}"#,
+        );
+        let home = TestHome::expired();
+        let before = fs::read(&home.path).expect("fixture readable");
+        // No `exp` a claim reader can find, and no `id_token`: the expiry is unknown, so
+        // the 401 retry is the only thing that can trigger the rotation.
+        let secrets = FakeSecrets::holding(json!({
+            "tokens": {"access_token": "opaque", "refresh_token": "own-refresh", "account_id": "acct-own"}
+        }));
+        let (base, requests, server) = local_server(vec![(401, "{}"), ROTATION, USAGE]);
+        let mut provider = home.provider(&base);
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+
+        let snapshot = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect("one refresh, one retry");
+        assert_eq!(snapshot.windows.len(), 1);
+
+        let _rejected = requests.recv().expect("the first usage request");
+        let refresh_request = requests.recv().expect("refresh request");
+        assert!(
+            refresh_request.contains("\"refresh_token\":\"own-refresh\""),
+            "{refresh_request}"
+        );
+        let retried = requests.recv().expect("the retried usage request");
+        assert!(
+            retried.contains("authorization: Bearer rotated"),
+            "{retried}"
+        );
+        server.join().expect("server stopped");
+
+        let stored = secrets.stored();
+        assert_eq!(stored["tokens"]["access_token"], "rotated");
+        assert_eq!(stored["tokens"]["refresh_token"], "rotated-refresh");
+        assert_eq!(
+            stored["tokens"]["account_id"], "acct-own",
+            "a rotation replaces the tokens and nothing else"
+        );
+        assert!(
+            stored["last_refresh"].is_string(),
+            "the timestamp of the credential material is written beside it: {stored}"
+        );
+        assert_eq!(
+            fs::read(&home.path).expect("still there"),
+            before,
+            "a login of our own must never write to the CLI's file"
+        );
+    }
+
+    #[test]
+    fn a_login_response_becomes_the_document_the_same_parser_reads() {
+        let document = document_from_login(&json!({
+            "access_token": "fresh", "refresh_token": "fresh-refresh",
+            "id_token": "an-id-token", "token_type": "Bearer"
+        }))
+        .expect("a usable response");
+        let credentials = CodexCredentials::from_document(&document).expect("parses");
+        assert_eq!(credentials.access_token.expose(), "fresh");
+        assert!(credentials.refresh_token.is_some());
+        assert!(document["last_refresh"].is_string());
+
+        let error = document_from_login(&json!({"access_token": "  "})).expect_err("blank");
+        assert!(matches!(error, ProviderError::Malformed(_)), "{error}");
     }
 }
