@@ -19,6 +19,7 @@
 //! accidental path to a request from inside a parser does not exist.
 
 pub mod clinepass;
+pub mod crof;
 pub mod kimi;
 pub mod zai;
 
@@ -301,7 +302,7 @@ impl Provider for Keyed {
 ///
 /// Adding a provider is a file beside this one and a line here. Nothing else in the
 /// workspace names it.
-pub static CATALOG: &[&Spec] = &[&clinepass::SPEC, &kimi::SPEC, &zai::SPEC];
+pub static CATALOG: &[&Spec] = &[&clinepass::SPEC, &crof::SPEC, &kimi::SPEC, &zai::SPEC];
 
 #[cfg(test)]
 mod tests {
