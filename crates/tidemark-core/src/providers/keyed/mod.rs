@@ -18,6 +18,7 @@
 //! every trap in a response is reachable from a test that needs no network, and the
 //! accidental path to a request from inside a parser does not exist.
 
+pub mod amp;
 pub mod chutes;
 pub mod clawrouter;
 pub mod clinepass;
@@ -312,6 +313,7 @@ impl Provider for Keyed {
 /// Adding a provider is a file beside this one and a line here. Nothing else in the
 /// workspace names it.
 pub static CATALOG: &[&Spec] = &[
+    &amp::SPEC,
     &chutes::SPEC,
     &clawrouter::SPEC,
     &clinepass::SPEC,
