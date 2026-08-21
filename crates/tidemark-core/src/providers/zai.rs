@@ -31,7 +31,8 @@
 //!
 //! `nextResetTime` is Unix **milliseconds**.
 
-use super::{BoxFuture, Credential, Provider, ProviderError, http};
+use super::ProviderError;
+use super::keyed::{Auth, Method, OptionSchema, Spec};
 use serde::Deserialize;
 use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
@@ -62,65 +63,52 @@ impl Region {
             Self::BigModelCn => "https://open.bigmodel.cn",
         }
     }
-}
 
-/// A Z.ai account.
-#[derive(Debug)]
-pub struct Zai {
-    client: reqwest::Client,
-    credential: Credential,
-    region: Region,
-}
-
-impl Zai {
-    /// Builds a client for one key.
-    pub fn new(credential: Credential, region: Region) -> Result<Self, ProviderError> {
-        Ok(Self {
-            client: http::client()?,
-            credential,
-            region,
-        })
-    }
-
-    /// The URL this instance polls.
-    pub fn quota_url(&self) -> String {
-        format!("{}{QUOTA_PATH}", self.region.base_url())
-    }
-
-    async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
-        if self.credential.is_blank() {
-            return Err(ProviderError::Credential { status: 401 });
+    /// The value this region is stored as in `config.toml`.
+    pub fn as_value(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::BigModelCn => "bigmodel-cn",
         }
-        let response = self
-            .client
-            .get(self.quota_url())
-            .bearer_auth(self.credential.expose())
-            .send()
-            .await
-            .map_err(ProviderError::Transport)?;
+    }
 
-        let status = response.status();
-        let retry_after = http::retry_after_header(&response).map(str::to_owned);
-        http::check(status, retry_after.as_deref())?;
-
-        let body = response.text().await.map_err(ProviderError::Transport)?;
-        parse(&body, Timestamp::now())
+    /// The region a stored value names. An unrecognised value is the default rather than
+    /// an error: a typo in `config.toml` must not take the account off the air.
+    pub fn from_value(raw: Option<&str>) -> Self {
+        match raw {
+            Some("bigmodel-cn") => Self::BigModelCn,
+            _ => Self::Global,
+        }
     }
 }
 
-impl Provider for Zai {
-    fn id(&self) -> ProviderId {
-        ProviderId::new(PROVIDER_ID)
-    }
+/// Name of the region setting under `[provider.zai]`.
+pub const REGION: &str = "region";
 
-    fn account(&self) -> AccountId {
-        AccountId::default()
-    }
-
-    fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
-        Box::pin(self.fetch_inner())
-    }
-}
+/// Z.ai as the keyed mechanism sees it.
+pub static SPEC: Spec = Spec {
+    id: PROVIDER_ID,
+    title: "Z.ai",
+    endpoint: |options| {
+        let region = Region::from_value(options.get(REGION).map(String::as_str));
+        format!("{}{QUOTA_PATH}", region.base_url())
+    },
+    method: Method::Get,
+    auth: Auth::Bearer,
+    headers: &[],
+    parse,
+    credential_hint: "Z.ai dashboard → API keys, on whichever region your account is on.",
+    options: &[OptionSchema {
+        name: REGION,
+        title: "Region",
+        description: Some("Two hosts for one API. Pick the one your account is on."),
+        default: "global",
+        choices: &[
+            ("global", "Global (api.z.ai)"),
+            ("bigmodel-cn", "China (open.bigmodel.cn)"),
+        ],
+    }],
+};
 
 /// Turns a response body into a snapshot. Pure: every trap above is reachable from a test.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
@@ -648,33 +636,50 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_key_is_refused_before_a_request_is_spent() {
-        let zai = Zai::new(Credential::new("  "), Region::Global).expect("client builds");
-        let err = futures_lite_block_on(zai.fetch_inner());
-        assert!(err.expect_err("must refuse").needs_user_action());
-    }
+    fn the_spec_carries_the_region_to_the_endpoint() {
+        use crate::providers::keyed::{Auth, Method, Options};
 
-    /// The one place this crate needs to drive a future to completion in a test. Building a
-    /// Tokio runtime per test would work too; this keeps the failure obvious if the check
-    /// ever stops being synchronous.
-    fn futures_lite_block_on<T>(future: impl std::future::Future<Output = T>) -> T {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("runtime")
-            .block_on(future)
-    }
+        let global = Options::new();
+        let cn: Options = [("region".to_owned(), "bigmodel-cn".to_owned())]
+            .into_iter()
+            .collect();
 
-    #[test]
-    fn the_region_decides_the_host_and_nothing_else() {
-        let global = Zai::new(Credential::new("k"), Region::Global).expect("builds");
-        let cn = Zai::new(Credential::new("k"), Region::BigModelCn).expect("builds");
         assert_eq!(
-            global.quota_url(),
+            (SPEC.endpoint)(&global),
             "https://api.z.ai/api/monitor/usage/quota/limit"
         );
         assert_eq!(
-            cn.quota_url(),
+            (SPEC.endpoint)(&cn),
             "https://open.bigmodel.cn/api/monitor/usage/quota/limit"
         );
+        assert_eq!(SPEC.id, PROVIDER_ID);
+        assert_eq!(SPEC.auth, Auth::Bearer);
+        assert_eq!(SPEC.method, Method::Get);
+    }
+
+    #[test]
+    fn an_unknown_region_falls_back_to_global_rather_than_refusing_to_poll() {
+        use crate::providers::keyed::Options;
+
+        let nonsense: Options = [("region".to_owned(), "atlantis".to_owned())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            (SPEC.endpoint)(&nonsense),
+            "https://api.z.ai/api/monitor/usage/quota/limit",
+            "a typo in config.toml must not take the account off the air"
+        );
+    }
+
+    #[test]
+    fn the_region_option_is_published_with_both_hosts() {
+        let region = SPEC
+            .options
+            .iter()
+            .find(|option| option.name == REGION)
+            .expect("the region is published");
+        let values: Vec<&str> = region.choices.iter().map(|(value, _)| *value).collect();
+        assert_eq!(values, ["global", "bigmodel-cn"]);
+        assert_eq!(region.default, "global");
     }
 }

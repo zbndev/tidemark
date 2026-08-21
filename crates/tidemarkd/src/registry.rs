@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
-use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex, kimi, zai};
+use tidemark_core::providers::{
+    Provider, ProviderError, antigravity, claude, codex, keyed, kimi, zai,
+};
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
     AccountId, CredentialKind, OptionChoice, ProviderDefinition, ProviderId, ProviderOption,
@@ -317,17 +319,13 @@ fn zai_account() -> Account {
         ProviderId::new(zai::PROVIDER_ID),
         AccountId::default(),
         Box::new(|credential, options| {
-            // The region is read at build time, which is why storing a key or changing the
-            // region drops the client: both change which host this account talks to.
-            let region = match options.get(ZAI_REGION).map(String::as_str) {
-                Some(ZAI_BIGMODEL_CN) => zai::Region::BigModelCn,
-                _ => zai::Region::Global,
-            };
-            Ok(Arc::new(zai::Zai::new(credential, region)?) as Arc<dyn Provider>)
+            // The URL is resolved at build time, which is why storing a key or changing
+            // the region drops the client: both change which host this account talks to.
+            Ok(Arc::new(keyed::Keyed::new(&zai::SPEC, credential, options)?) as Arc<dyn Provider>)
         }),
     )
     .with_credential(CredentialKind::Key)
-    .with_hint("Z.ai dashboard → API keys, on whichever region your account is on.")
+    .with_hint(zai::SPEC.credential_hint)
 }
 
 #[cfg(test)]

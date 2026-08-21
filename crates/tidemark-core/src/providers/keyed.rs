@@ -189,7 +189,7 @@ impl Provider for Keyed {
 ///
 /// Adding a provider is a file beside this one and a line here. Nothing else in the
 /// workspace names it.
-pub static CATALOG: &[&Spec] = &[];
+pub static CATALOG: &[&Spec] = &[&super::zai::SPEC];
 
 #[cfg(test)]
 mod tests {
