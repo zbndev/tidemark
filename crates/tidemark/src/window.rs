@@ -19,7 +19,7 @@ use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use gtk::glib;
-use tidemark_types::{ProviderStatus, Timestamp};
+use tidemark_types::{ProviderDefinition, ProviderStatus, Timestamp};
 
 use crate::bus::{self, DaemonProxy, Update};
 use crate::card::Card;
@@ -35,6 +35,12 @@ const TICK_SECONDS: u32 = 30;
 const PAGE_GRID: &str = "grid";
 const PAGE_MESSAGE: &str = "message";
 
+fn account_index(statuses: &[ProviderStatus], provider: &str, account: &str) -> Option<usize> {
+    statuses
+        .iter()
+        .position(|status| status.provider == provider && status.account == account)
+}
+
 /// The main window and everything it is currently showing.
 #[derive(Debug)]
 pub struct MainWindow {
@@ -45,6 +51,7 @@ pub struct MainWindow {
     refresh: gtk::Button,
     providers: gtk::Button,
     cards: RefCell<Vec<Rc<Card>>>,
+    definitions: RefCell<Vec<ProviderDefinition>>,
     daemon: RefCell<Option<DaemonProxy<'static>>>,
     /// The credentials dialog while it is on screen, so the statuses arriving on the
     /// signal reach it too. A dialog that went on saying "no key" after the key was
@@ -128,6 +135,7 @@ impl MainWindow {
             refresh,
             providers,
             cards: RefCell::new(Vec::new()),
+            definitions: RefCell::new(Vec::new()),
             daemon: RefCell::new(None),
             credentials: RefCell::new(None),
         });
@@ -149,13 +157,15 @@ impl MainWindow {
     /// Acts on one message from the daemon.
     fn handle(&self, update: Update) {
         match update {
-            Update::Connected(proxy, statuses) => {
+            Update::Connected(proxy, definitions, statuses) => {
                 *self.daemon.borrow_mut() = Some(proxy);
+                *self.definitions.borrow_mut() = definitions;
                 self.refresh.set_sensitive(true);
                 self.providers.set_sensitive(true);
                 self.show_all(statuses);
             }
             Update::Changed(status) => self.show_one(status),
+            Update::Removed { provider, account } => self.show_removed(&provider, &account),
             Update::Waiting(reason) => {
                 *self.daemon.borrow_mut() = None;
                 self.refresh.set_sensitive(false);
@@ -173,11 +183,12 @@ impl MainWindow {
             // and the other by starting a service.
             self.show_message(
                 "view-grid-symbolic",
-                "No providers yet",
-                "Tidemark is running, but no account is configured.",
+                "Welcome to Tidemark",
+                "Add a provider to start tracking your quota.",
             );
             self.cards.borrow_mut().clear();
             self.grid.remove_all();
+            self.update_credentials();
             return;
         }
 
@@ -194,6 +205,25 @@ impl MainWindow {
         }
         self.grid.invalidate_sort();
         self.stack.set_visible_child_name(PAGE_GRID);
+        self.update_credentials();
+    }
+
+    /// Removes one account's card after the daemon confirms it is no longer configured.
+    fn show_removed(&self, provider: &str, account: &str) {
+        let index = account_index(&self.statuses(), provider, account);
+        let Some(index) = index else {
+            return;
+        };
+
+        let card = self.cards.borrow_mut().remove(index);
+        self.grid.remove(card.widget());
+        if self.cards.borrow().is_empty() {
+            self.show_message(
+                "view-grid-symbolic",
+                "Welcome to Tidemark",
+                "Add a provider to start tracking your quota.",
+            );
+        }
         self.update_credentials();
     }
 
@@ -327,5 +357,23 @@ impl MainWindow {
             }
             glib::ControlFlow::Continue
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tidemark_types::{AccountId, ProviderId, ProviderStatus};
+
+    use super::account_index;
+
+    fn status(provider: &str, account: &str) -> ProviderStatus {
+        ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))
+    }
+
+    #[test]
+    fn removal_matches_the_full_provider_account_identity() {
+        let statuses = vec![status("zai", "first"), status("zai", "default")];
+        assert_eq!(account_index(&statuses, "zai", "default"), Some(1));
+        assert_eq!(account_index(&statuses, "kimi", "default"), None);
     }
 }

@@ -25,7 +25,7 @@ use std::future::poll_fn;
 use std::pin::pin;
 use std::task::Poll;
 
-use tidemark_types::ProviderStatus;
+use tidemark_types::{ProviderDefinition, ProviderStatus};
 use zbus::export::futures_core::Stream;
 
 /// How long to wait before trying the session bus again after a failure. Only reached when
@@ -39,6 +39,15 @@ const RETRY_SECONDS: u32 = 5;
     default_path = "/io/github/zbndev/Tidemark"
 )]
 pub trait Daemon {
+    /// Every provider this build knows how to configure.
+    fn list_providers(&self) -> zbus::Result<Vec<ProviderDefinition>>;
+
+    /// Adds a compiled-in provider's default account.
+    fn add_provider(&self, provider: &str) -> zbus::Result<()>;
+
+    /// Removes one configured account.
+    fn remove_provider(&self, provider: &str, account: &str) -> zbus::Result<()>;
+
     /// Every account the daemon watches.
     fn get_status(&self) -> zbus::Result<Vec<ProviderStatus>>;
 
@@ -76,6 +85,10 @@ pub trait Daemon {
     /// One account changed.
     #[zbus(signal)]
     fn provider_changed(&self, status: ProviderStatus) -> zbus::Result<()>;
+
+    /// One configured account was removed.
+    #[zbus(signal)]
+    fn provider_removed(&self, provider: &str, account: &str) -> zbus::Result<()>;
 }
 
 /// What the window is told.
@@ -90,9 +103,15 @@ pub trait Daemon {
 )]
 pub enum Update {
     /// The daemon answered. Carries everything it knows, and the handle to ask it for more.
-    Connected(DaemonProxy<'static>, Vec<ProviderStatus>),
+    Connected(
+        DaemonProxy<'static>,
+        Vec<ProviderDefinition>,
+        Vec<ProviderStatus>,
+    ),
     /// One account changed.
     Changed(ProviderStatus),
+    /// One configured account was removed.
+    Removed { provider: String, account: String },
     /// There is nothing to show, with the reason to put on the screen.
     Waiting(String),
 }
@@ -131,6 +150,7 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
     // delivered as a signal rather than missed by both.
     let mut owner = pin!(proxy.inner().receive_owner_changed().await?);
     let mut changes = pin!(proxy.receive_provider_changed().await?);
+    let mut removals = pin!(proxy.receive_provider_removed().await?);
 
     load(&proxy, on).await;
 
@@ -141,6 +161,9 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
             }
             if let Poll::Ready(change) = changes.as_mut().poll_next(context) {
                 return Poll::Ready(Event::Changed(change));
+            }
+            if let Poll::Ready(removal) = removals.as_mut().poll_next(context) {
+                return Poll::Ready(Event::Removed(removal));
             }
             Poll::Pending
         })
@@ -161,18 +184,29 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
                 Ok(args) => on(Update::Changed(args.status)),
                 Err(error) => tracing::warn!(%error, "a ProviderChanged signal did not parse"),
             },
+            Event::Removed(Some(signal)) => match signal.args() {
+                Ok(args) => on(Update::Removed {
+                    provider: args.provider.to_owned(),
+                    account: args.account.to_owned(),
+                }),
+                Err(error) => tracing::warn!(%error, "a ProviderRemoved signal did not parse"),
+            },
             // Either stream ending means the connection is finished with.
-            Event::Owner(None) | Event::Changed(None) => return Ok(()),
+            Event::Owner(None) | Event::Changed(None) | Event::Removed(None) => return Ok(()),
         }
     }
 }
 
 /// Asks for the whole picture, and reports what came back.
 async fn load(proxy: &DaemonProxy<'static>, on: &impl Fn(Update)) {
-    match proxy.get_status().await {
-        Ok(statuses) => on(Update::Connected(proxy.clone(), statuses)),
-        Err(error) => {
-            tracing::info!(%error, "the daemon did not answer GetStatus");
+    let definitions = proxy.list_providers().await;
+    let statuses = proxy.get_status().await;
+    match (definitions, statuses) {
+        (Ok(definitions), Ok(statuses)) => {
+            on(Update::Connected(proxy.clone(), definitions, statuses))
+        }
+        (Err(error), _) | (_, Err(error)) => {
+            tracing::info!(%error, "the daemon did not answer ListProviders or GetStatus");
             on(Update::Waiting("The daemon is not running.".into()));
         }
     }
@@ -182,6 +216,7 @@ async fn load(proxy: &DaemonProxy<'static>, on: &impl Fn(Update)) {
 enum Event {
     Owner(Option<Option<zbus::names::UniqueName<'static>>>),
     Changed(Option<ProviderChanged>),
+    Removed(Option<ProviderRemoved>),
 }
 
 #[cfg(test)]
