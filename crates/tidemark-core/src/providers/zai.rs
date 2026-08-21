@@ -101,12 +101,15 @@ pub static SPEC: Spec = Spec {
     options: &[OptionSchema {
         name: REGION,
         title: "Region",
-        description: Some("Two hosts for one API. Pick the one your account is on."),
+        description: Some(
+            "The same API on two hosts. A key issued for one is rejected by the other.",
+        ),
         default: "global",
         choices: &[
             ("global", "Global (api.z.ai)"),
             ("bigmodel-cn", "China (open.bigmodel.cn)"),
         ],
+        required: false,
     }],
 };
 

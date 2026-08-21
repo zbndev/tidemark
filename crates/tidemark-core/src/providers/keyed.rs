@@ -67,6 +67,11 @@ pub struct OptionSchema {
     pub default: &'static str,
     /// `(value, label)` pairs. Empty means free text, such as a base URL.
     pub choices: &'static [(&'static str, &'static str)],
+    /// True when the account cannot poll without a value — a base URL with no default
+    /// host, an account id that is part of the path. [`Keyed::new`] refuses to build with
+    /// one unset, saying which setting is missing, rather than letting the endpoint
+    /// produce a malformed URL the user would only ever see as `Unreachable`.
+    pub required: bool,
 }
 
 /// Everything a key-authenticated provider is.
@@ -103,11 +108,27 @@ pub struct Keyed {
 impl Keyed {
     /// Builds a client. The URL is resolved once, here, because a setting that changed
     /// the host would otherwise take effect only on the next daemon restart.
+    ///
+    /// A required option left unset fails here, named in the message, so the card says
+    /// what is missing instead of the `Unreachable` a malformed URL would produce on
+    /// every poll.
     pub fn new(
         spec: &'static Spec,
         credential: Credential,
         options: &Options,
     ) -> Result<Self, ProviderError> {
+        for schema in spec.options {
+            if schema.required
+                && options
+                    .get(schema.name)
+                    .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(ProviderError::Local(format!(
+                    "{} is not set for this account",
+                    schema.title
+                )));
+            }
+        }
         Ok(Self {
             spec,
             client: http::client()?,
@@ -180,6 +201,42 @@ pub async fn request(
         .text()
         .await
         .map_err(|error| ProviderError::Transport(redact_query(error)))
+}
+
+/// Reads a free-text base-URL option the way every self-hosted provider needs it read:
+/// the account's value when one is set, the spec's default otherwise, with any trailing
+/// slash trimmed so the endpoint can append its path.
+///
+/// Refused unless it speaks HTTPS — a key sent over plain HTTP to a remote host is a key
+/// given away — except to a loopback host, which is how a self-hosted Ollama is reached.
+/// A provider with a friendlier policy, such as falling back to its default host on a bad
+/// value, keeps that policy in its own endpoint and calls this for the mechanics.
+pub fn base_url(options: &Options, name: &str, default: &str) -> Result<String, ProviderError> {
+    let raw = options
+        .get(name)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(default)
+        .trim_end_matches('/');
+    if raw.is_empty() {
+        return Err(ProviderError::Local(format!(
+            "{name} is not set for this account"
+        )));
+    }
+    if let Some(host) = raw.strip_prefix("http://") {
+        let host = host.split('/').next().unwrap_or_default();
+        let host = host.rsplit_once(':').map_or(host, |(name, _)| name);
+        if host != "localhost" && host != "127.0.0.1" {
+            return Err(ProviderError::Local(format!(
+                "{name} must be an https:// URL; a key over plain HTTP to {host} would be given away"
+            )));
+        }
+    } else if !raw.starts_with("https://") {
+        return Err(ProviderError::Local(format!(
+            "{name} must be an https:// URL"
+        )));
+    }
+    Ok(raw.to_owned())
 }
 
 /// Strips the query string — where [`Auth::Query`] carries the credential — off every
@@ -320,6 +377,31 @@ mod tests {
         options: &[],
     };
 
+    static SELF_HOSTED: Spec = Spec {
+        id: "test",
+        title: "Test",
+        endpoint: |options| {
+            format!(
+                "{}/usage",
+                base_url(options, "base_url", "https://cloud.example.invalid")
+                    .expect("a required option was checked at build time")
+            )
+        },
+        method: Method::Get,
+        auth: Auth::Bearer,
+        headers: &[("Accept", "application/json")],
+        parse: parse_ok,
+        credential_hint: "Test console.",
+        options: &[OptionSchema {
+            name: "base_url",
+            title: "Base URL",
+            description: None,
+            default: "",
+            choices: &[],
+            required: true,
+        }],
+    };
+
     #[test]
     fn a_bearer_key_goes_in_the_authorization_header() {
         let keyed = Keyed::new(&BEARER, Credential::new("sk-1"), &options(&[])).expect("builds");
@@ -399,6 +481,76 @@ mod tests {
         .expect("builds");
         assert_eq!(global.url(), "https://example.invalid/usage");
         assert_eq!(cn.url(), "https://cn.example.invalid/usage");
+    }
+
+    #[test]
+    fn an_unset_required_option_names_itself_rather_than_malforming_the_url() {
+        // Sub2API, LiteLLM and LLMProxy have no default host: without this check the user
+        // would see "Unreachable: relative URL without a base" on every poll, with nothing
+        // pointing at the settings field that fixes it.
+        let error = Keyed::new(&SELF_HOSTED, Credential::new("sk-6"), &options(&[]))
+            .expect_err("the required option is unset");
+        assert!(
+            matches!(error, ProviderError::Local(ref message)
+                if message == "Base URL is not set for this account"),
+            "{error}"
+        );
+
+        let blank = Keyed::new(
+            &SELF_HOSTED,
+            Credential::new("sk-6"),
+            &options(&[("base_url", "  ")]),
+        )
+        .expect_err("a blank value is an unset value");
+        assert!(
+            matches!(blank, ProviderError::Local(ref message) if message.contains("Base URL")),
+            "{blank}"
+        );
+
+        let set = Keyed::new(
+            &SELF_HOSTED,
+            Credential::new("sk-6"),
+            &options(&[("base_url", "https://self.example.invalid/")]),
+        )
+        .expect("builds with the option set");
+        assert_eq!(set.url(), "https://self.example.invalid/usage");
+    }
+
+    #[test]
+    fn a_base_url_trims_its_slash_and_falls_back_to_its_default() {
+        let empty = Options::new();
+        assert_eq!(
+            base_url(&empty, "base_url", "https://cloud.example.invalid").expect("default"),
+            "https://cloud.example.invalid"
+        );
+        let trailing = options(&[("base_url", "https://self.example.invalid//")]);
+        assert_eq!(
+            base_url(&trailing, "base_url", "https://cloud.example.invalid").expect("trims"),
+            "https://self.example.invalid"
+        );
+    }
+
+    #[test]
+    fn a_base_url_refuses_plain_http_except_to_loopback() {
+        let remote = options(&[("base_url", "http://self.example.invalid:8080")]);
+        let error = base_url(&remote, "base_url", "https://cloud.example.invalid")
+            .expect_err("a key over plain HTTP to a remote host is a key given away");
+        assert!(
+            matches!(error, ProviderError::Local(ref message) if message.contains("https://")),
+            "{error}"
+        );
+
+        let words = options(&[("base_url", "self.example.invalid")]);
+        assert!(base_url(&words, "base_url", "https://cloud.example.invalid").is_err());
+
+        for loopback in ["http://localhost:11434", "http://127.0.0.1:11434"] {
+            let set = options(&[("base_url", loopback)]);
+            assert_eq!(
+                base_url(&set, "base_url", "https://cloud.example.invalid")
+                    .expect("loopback is how a self-hosted Ollama is reached"),
+                loopback
+            );
+        }
     }
 
     #[tokio::test]
