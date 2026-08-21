@@ -1,9 +1,11 @@
 //! Which accounts this build watches, and how each of them is signed in to.
 //!
-//! Registration is a spec in `keyed::CATALOG`, for every key-authenticated provider. Only
-//! the three OAuth providers — Antigravity, Claude and Codex — are registered by hand here,
-//! because each of them acquires its credential its own way. Nothing else in the daemon
-//! names a key-authenticated provider.
+//! Registration is a spec in `keyed::CATALOG`, for every single-request
+//! key-authenticated provider. The three OAuth providers — Antigravity, Claude and Codex
+//! — are registered by hand here, because each of them acquires its credential its own
+//! way; so are the hand-written key providers below, whose fetch is more than one
+//! request and so cannot be a `keyed::Spec`. Nothing else in the daemon names a
+//! key-authenticated provider.
 //!
 //! An entry says three things beyond how to build a client. **How the account is
 //! authenticated** decides what the credentials dialog offers — a key field, a sign-in
@@ -56,6 +58,15 @@ static OAUTH: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// The hand-written key-authenticated providers: those whose fetch is more than one
+/// request, so a `keyed::Spec` cannot describe them — a paged usage history, a balance
+/// plus a quota. Each entry is the provider's own [`keyed::HandSpec`], which carries
+/// everything a `Spec` carries except the single endpoint, and says how to build a
+/// client from the stored key and the account's settings. The credential is the same
+/// pasted key as the catalog's, `CredentialKind::Key`, so the credentials dialog is
+/// unchanged.
+static HAND_WRITTEN: &[&keyed::HandSpec] = &[];
+
 /// The catalog's own spelling of a provider's name, for the places the daemon speaks to a
 /// person outside the settings dialog: notification text, and anything else that has only a
 /// slug in hand.
@@ -74,27 +85,42 @@ pub fn title(provider: &str) -> Option<&'static str> {
                 .find(|spec| spec.id == provider)
                 .map(|spec| spec.title)
         })
+        .or_else(|| {
+            HAND_WRITTEN
+                .iter()
+                .find(|spec| spec.id == provider)
+                .map(|spec| spec.title)
+        })
 }
 
 /// Every provider this build can configure, in stable display order.
 ///
 /// The three OAuth providers come first, written out because each of them
-/// acquires its credential its own way. Every key-authenticated provider follows, one
-/// entry per spec in `keyed::CATALOG` — so adding one is a file beside `keyed.rs` and a
-/// line in that table, not a new stanza here.
+/// acquires its credential its own way. Every single-request key-authenticated provider
+/// follows, one entry per spec in `keyed::CATALOG` — so adding one is a file beside
+/// `keyed.rs` and a line in that table, not a new stanza here. The hand-written
+/// key-authenticated providers come last, from the table above, in the same shape.
 pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
     let mut definitions: Vec<ProviderDefinition> = OAUTH
         .iter()
         .map(|(provider, title, hint, fallback)| ProviderDefinition {
             provider: (*provider).to_owned(),
             title: (*title).to_owned(),
-            credential: CredentialKind::OAuth.as_wire().into(),
+            credential: CredentialKind::OAuth.as_wire().to_owned(),
             credential_hint: (*hint).to_owned(),
             external_fallback: Some((*fallback).to_owned()),
             options: options(provider, config),
         })
         .collect();
     definitions.extend(keyed::CATALOG.iter().map(|spec| ProviderDefinition {
+        provider: spec.id.to_owned(),
+        title: spec.title.to_owned(),
+        credential: CredentialKind::Key.as_wire().to_owned(),
+        credential_hint: spec.credential_hint.to_owned(),
+        external_fallback: None,
+        options: options(spec.id, config),
+    }));
+    definitions.extend(HAND_WRITTEN.iter().map(|spec| ProviderDefinition {
         provider: spec.id.to_owned(),
         title: spec.title.to_owned(),
         credential: CredentialKind::Key.as_wire().to_owned(),
@@ -118,7 +144,13 @@ pub fn account(
         other => keyed::CATALOG
             .iter()
             .find(|spec| spec.id == other)
-            .map(|spec| keyed_account(spec)),
+            .map(|spec| keyed_account(spec))
+            .or_else(|| {
+                HAND_WRITTEN
+                    .iter()
+                    .find(|spec| spec.id == other)
+                    .map(|spec| hand_written_account(spec))
+            }),
     };
     Ok(account.map(|account| {
         account
@@ -164,34 +196,55 @@ pub fn notify(provider: &str, config: &Config) -> Vec<String> {
 /// The settings one provider exposes, filled in from the user's file.
 ///
 /// Called again whenever the file changes, so a provider's published options are always
-/// what is on disk rather than what was on disk when the daemon started.
+/// what is on disk rather than what was on disk when the daemon started. The schema comes
+/// from `keyed::CATALOG`, or from the hand-written table for the providers that are not a
+/// `Spec`; either way the row is the same shape.
 pub fn options(provider: &str, config: &Config) -> Vec<ProviderOption> {
     if provider == antigravity::PROVIDER_ID {
         return vec![antigravity_source_option(config)];
     }
-    let Some(spec) = keyed::CATALOG.iter().find(|spec| spec.id == provider) else {
-        return Vec::new();
-    };
-    spec.options
+    keyed::CATALOG
         .iter()
-        .map(|schema| ProviderOption {
-            name: schema.name.to_owned(),
-            title: schema.title.to_owned(),
-            description: schema.description.map(str::to_owned),
-            value: config
-                .option(provider, schema.name)
-                .unwrap_or(schema.default)
-                .to_owned(),
-            choices: schema
-                .choices
+        .find(|spec| spec.id == provider)
+        .map(|spec| spec.options)
+        .or_else(|| {
+            HAND_WRITTEN
                 .iter()
-                .map(|(value, label)| OptionChoice {
-                    value: (*value).to_owned(),
-                    title: (*label).to_owned(),
-                })
-                .collect(),
+                .find(|spec| spec.id == provider)
+                .map(|spec| spec.options)
         })
-        .collect()
+        .map(|schemas| {
+            schemas
+                .iter()
+                .map(|schema| published_option(provider, schema, config))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One published setting: the provider's schema for it, filled in with the user's value.
+fn published_option(
+    provider: &str,
+    schema: &keyed::OptionSchema,
+    config: &Config,
+) -> ProviderOption {
+    ProviderOption {
+        name: schema.name.to_owned(),
+        title: schema.title.to_owned(),
+        description: schema.description.map(str::to_owned),
+        value: config
+            .option(provider, schema.name)
+            .unwrap_or(schema.default)
+            .to_owned(),
+        choices: schema
+            .choices
+            .iter()
+            .map(|(value, title)| OptionChoice {
+                value: (*value).to_owned(),
+                title: (*title).to_owned(),
+            })
+            .collect(),
+    }
 }
 
 /// Antigravity's two quota sources, and letting the user say which one this account reads.
@@ -321,6 +374,20 @@ fn keyed_account(spec: &'static keyed::Spec) -> Account {
             // setting drops the client: either may change which host this account talks to.
             Ok(Arc::new(keyed::Keyed::new(spec, credential, options)?) as Arc<dyn Provider>)
         }),
+    )
+    .with_credential(CredentialKind::Key)
+    .with_hint(spec.credential_hint)
+}
+
+/// The hand-written key-authenticated accounts, built the same way as the catalogued ones:
+/// the engine hands over the stored key and the account's settings, and the provider's own
+/// builder says what to do with them. It, too, resolves its URLs at build time and refuses
+/// a required option that is unset, naming it.
+fn hand_written_account(spec: &'static keyed::HandSpec) -> Account {
+    Account::new(
+        ProviderId::new(spec.id),
+        AccountId::default(),
+        Box::new(move |credential, options| (spec.build)(credential, options)),
     )
     .with_credential(CredentialKind::Key)
     .with_hint(spec.credential_hint)
@@ -561,6 +628,32 @@ mod tests {
     }
 
     #[test]
+    fn every_hand_written_spec_reaches_the_published_catalog() {
+        // The second table is hand-maintained, so each of its entries is checked for the
+        // same agreement the catalog gets as a whole: same title, same pasted-key
+        // credential, same hint, same options — and it must build an account at all.
+        let config = empty_config();
+        let published = catalog(&config);
+        for spec in HAND_WRITTEN {
+            let entry = published
+                .iter()
+                .find(|definition| definition.provider == spec.id)
+                .unwrap_or_else(|| panic!("{} is in the table but not published", spec.id));
+            assert_eq!(entry.title, spec.title);
+            assert_eq!(entry.credential, CredentialKind::Key.as_wire());
+            assert_eq!(entry.credential_hint, spec.credential_hint);
+            assert_eq!(entry.options.len(), spec.options.len());
+            assert!(
+                account(spec.id, &secrets(), &config)
+                    .expect("no error")
+                    .is_some(),
+                "{} must build an account",
+                spec.id
+            );
+        }
+    }
+
+    #[test]
     fn the_oauth_providers_keep_the_head_of_the_catalog() {
         let published = catalog(&empty_config());
         let slugs: Vec<&str> = published
@@ -572,12 +665,12 @@ mod tests {
 
     #[test]
     fn every_published_slug_is_unique() {
-        // A duplicate id in `keyed::CATALOG` would publish two definitions with the same
-        // slug — two settings rows — while `account()`'s find silently uses the first; an
-        // id colliding with an OAuth slug is worse, because the hand-written stanza and the
-        // spec then shadow each other. At two entries neither can happen by accident; at
-        // twenty-eight hand-edited lines it can, so the invariant is asserted rather than
-        // trusted.
+        // A duplicate id in `keyed::CATALOG` — or in the hand-written table, or between
+        // the two — would publish two definitions with the same slug: two settings rows,
+        // while `account()`'s find silently uses the first; an id colliding with an OAuth
+        // slug is worse, because the hand-written stanza and the spec then shadow each
+        // other. At two entries neither can happen by accident; across the tables it can,
+        // so the invariant is asserted rather than trusted.
         let published = catalog(&empty_config());
         let mut slugs: Vec<&str> = published
             .iter()

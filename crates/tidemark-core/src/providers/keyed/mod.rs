@@ -17,6 +17,16 @@
 //! body and the clock — no client, no credential, no status, no headers in scope — so
 //! every trap in a response is reachable from a test that needs no network, and the
 //! accidental path to a request from inside a parser does not exist.
+//!
+//! # The ones whose fetch is not one request
+//!
+//! A [`Spec`] states that the fetch *is* one request. The providers for which that is
+//! false — a paged history, a balance plus a quota — are still key-authenticated, still
+//! JSON, still a pasted key, so they live in this module too, but as [`HandSpec`]s with
+//! their own `impl Provider`, each request going through [`request`] so the transport
+//! rules below travel with the function. They register in a second table in
+//! `tidemarkd::registry`, beside [`CATALOG`]; everything the settings dialog needs from
+//! them is the same shape as a `Spec`'s, so the dialog does not distinguish the tables.
 
 pub mod amp;
 pub mod chutes;
@@ -37,6 +47,7 @@ pub mod zenmux;
 use super::{BoxFuture, Credential, Provider, ProviderError, http};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use tidemark_types::{AccountId, ProviderId, Snapshot, Timestamp};
 
 /// The settings of one account, as `config.toml` holds them.
@@ -117,6 +128,38 @@ pub struct Spec {
     pub credential_hint: &'static str,
     /// What the user may choose.
     pub options: &'static [OptionSchema],
+}
+
+/// Builds a pollable client from the stored key and the account's settings: what a
+/// [`HandSpec`] hands the registry so the daemon can construct the provider the same way
+/// it constructs a [`Keyed`].
+pub type Builder = fn(Credential, &Options) -> Result<Arc<dyn Provider>, ProviderError>;
+
+/// Everything a hand-written key-authenticated provider publishes about itself: the parts
+/// of a [`Spec`] that are not about one request, and how to build a pollable client from
+/// the stored key.
+///
+/// For the providers whose fetch is not one request — a paged history, a balance plus a
+/// quota. Each keeps its own `impl Provider` in a module of this one and sends every
+/// request through [`request`], so the parts that are easy to forget (status mapping,
+/// `Retry-After`, the redaction of any `reqwest` error) travel with the function rather
+/// than with each provider. These register in a second table in `tidemarkd::registry`,
+/// not in [`CATALOG`], because a `Spec` says the fetch is one request; the settings
+/// dialog sees the same fields either way, so a hand-written provider needs no stanza of
+/// its own there.
+#[derive(Debug)]
+pub struct HandSpec {
+    /// The stable slug this provider's history is filed under. Never changes once shipped.
+    pub id: &'static str,
+    /// What to call it in front of a person.
+    pub title: &'static str,
+    /// One sentence saying which page the key is on.
+    pub credential_hint: &'static str,
+    /// What the user may choose. A required option is refused by `build`, named in the
+    /// message, exactly as [`Keyed::new`] refuses one.
+    pub options: &'static [OptionSchema],
+    /// Builds a client from the stored key and the account's settings.
+    pub build: Builder,
 }
 
 /// A client for one key against one [`Spec`].
@@ -309,10 +352,12 @@ impl Provider for Keyed {
     }
 }
 
-/// Every key-authenticated provider this build supports, in the order they are shown.
+/// Every single-request key-authenticated provider this build supports, in the order they
+/// are shown.
 ///
 /// Adding a provider is a file beside this one and a line here. Nothing else in the
-/// workspace names it.
+/// workspace names it. The multi-request providers are [`HandSpec`]s registered in a
+/// second table in `tidemarkd::registry`, not here.
 pub static CATALOG: &[&Spec] = &[
     &amp::SPEC,
     &chutes::SPEC,
