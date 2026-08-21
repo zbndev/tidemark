@@ -391,6 +391,7 @@ mod tests {
         Window {
             key: WindowKey::named(&format!("w{seconds}")),
             title: format!("{seconds}s"),
+            subtitle: None,
             used_percent: used,
             resets_at: None,
             length: WindowLength::from_secs(seconds),

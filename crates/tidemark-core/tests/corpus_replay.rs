@@ -104,6 +104,7 @@ fn replay(provider: &str, window_id: &str, readings: &[Reading]) -> Replay {
             windows: vec![Window {
                 key: key.clone(),
                 title: window_id.to_owned(),
+                subtitle: None,
                 used_percent: reading.used_percent,
                 resets_at: reading
                     .resets_at

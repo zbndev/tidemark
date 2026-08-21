@@ -589,6 +589,7 @@ mod tests {
             windows: vec![Window {
                 key: key(),
                 title: "five hours".into(),
+                subtitle: None,
                 used_percent: used,
                 resets_at: resets.map(at),
                 length: WindowLength::from_secs(5 * 3600),

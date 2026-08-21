@@ -241,6 +241,7 @@ mod tests {
         WindowStatus {
             key: "w18000".into(),
             title: "5 hours".into(),
+            subtitle: None,
             used_percent: 50.0,
             resets_at: Some(18_000),
             length_secs: Some(18_000),

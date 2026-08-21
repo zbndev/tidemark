@@ -62,6 +62,7 @@ mod tests {
         Window {
             key: WindowKey::named(&format!("w{length:?}")),
             title: format!("{length:?}"),
+            subtitle: None,
             used_percent: used,
             resets_at: None,
             length: length.and_then(WindowLength::from_secs),

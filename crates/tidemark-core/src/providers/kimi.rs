@@ -204,6 +204,7 @@ impl Measured {
             window: Window {
                 key,
                 title,
+                subtitle: None,
                 used_percent: used.clamp(0, limit) as f64 * 100.0 / limit as f64,
                 resets_at: resets_at(detail.reset_time.as_deref(), what)?,
                 length,

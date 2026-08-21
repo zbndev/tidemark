@@ -784,6 +784,7 @@ impl Bucket {
                 None => WindowKey::named(id),
             },
             title: format!("{group} · {span}"),
+            subtitle: None,
             used_percent,
             resets_at: resets_at(self.reset_time.as_deref(), &what)?,
             length,

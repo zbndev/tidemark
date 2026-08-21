@@ -233,6 +233,9 @@ pub struct WindowStatus {
     pub key: String,
     /// What to call it, in the provider's own terms.
     pub title: String,
+    /// The absolute quantities behind `used_percent`, already formatted by the provider.
+    /// Absent when the provider reported only a percentage. See [`Window::subtitle`].
+    pub subtitle: Option<String>,
     /// Consumption, 0..=100.
     pub used_percent: f64,
     /// Unix seconds of the next rollover, when the provider said.
@@ -247,6 +250,7 @@ impl WindowStatus {
         Self {
             key: window.key.to_string(),
             title: window.title.clone(),
+            subtitle: window.subtitle.clone(),
             used_percent: window.used_percent,
             resets_at: window.resets_at.map(Timestamp::as_unix),
             length_secs: window.length.map(WindowLength::as_secs),
@@ -263,6 +267,7 @@ impl WindowStatus {
         Window {
             key: WindowKey::named(&self.key),
             title: self.title.clone(),
+            subtitle: self.subtitle.clone(),
             used_percent: self.used_percent,
             resets_at: self.resets_at.and_then(|s| Timestamp::from_unix(s).ok()),
             length: self.length_secs.and_then(WindowLength::from_secs),
@@ -416,6 +421,7 @@ mod tests {
         Window {
             key: WindowKey::named("w18000"),
             title: "5 hours".into(),
+            subtitle: None,
             used_percent: 42.5,
             resets_at: resets_at.map(|s| Timestamp::from_unix(s).expect("plausible")),
             length: WindowLength::from_secs(18_000),
@@ -514,6 +520,24 @@ mod tests {
                 .to_window()
                 .pace(now),
             None
+        );
+    }
+
+    #[test]
+    fn absolutes_survive_the_round_trip_to_the_wire_and_back() {
+        let mut source = window(Some(1_785_704_500));
+        source.subtitle = Some("100 / 1000 credits".to_owned());
+        let published = WindowStatus::from_window(&source);
+        assert_eq!(published.subtitle.as_deref(), Some("100 / 1000 credits"));
+        assert_eq!(published.to_window().subtitle, source.subtitle);
+    }
+
+    #[test]
+    fn a_window_with_no_absolutes_publishes_no_subtitle_key() {
+        let published = WindowStatus::from_window(&window(None));
+        assert!(
+            published.subtitle.is_none(),
+            "an absent key is how a{{sv}} says the provider did not tell us"
         );
     }
 

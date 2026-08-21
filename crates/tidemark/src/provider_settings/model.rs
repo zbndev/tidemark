@@ -205,6 +205,7 @@ mod tests {
             .map(|(key, title)| tidemark_types::WindowStatus {
                 key: (*key).into(),
                 title: (*title).into(),
+                subtitle: None,
                 used_percent: 0.0,
                 resets_at: None,
                 length_secs: None,

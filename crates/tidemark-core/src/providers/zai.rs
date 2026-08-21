@@ -258,6 +258,7 @@ impl Parsed {
         Window {
             key: self.key(),
             title: self.title.clone(),
+            subtitle: None,
             used_percent: self.used_percent,
             resets_at: self.resets_at,
             length: self.length,

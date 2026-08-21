@@ -158,6 +158,7 @@ mod tests {
                 .map(|len| Window {
                     key: WindowKey::named(&format!("{len:?}")),
                     title: format!("{len:?}"),
+                    subtitle: None,
                     used_percent: 0.0,
                     resets_at: None,
                     length: len.and_then(WindowLength::from_secs),

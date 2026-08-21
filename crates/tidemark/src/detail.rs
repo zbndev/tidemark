@@ -400,6 +400,7 @@ mod tests {
             .map(|(key, length_secs)| WindowStatus {
                 key: (*key).into(),
                 title: (*key).into(),
+                subtitle: None,
                 used_percent: 42.0,
                 resets_at: Some(1_785_718_000),
                 length_secs: *length_secs,

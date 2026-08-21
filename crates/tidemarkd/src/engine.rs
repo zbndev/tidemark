@@ -1127,6 +1127,7 @@ mod tests {
             windows: vec![Window {
                 key: WindowKey::for_length(WindowLength::from_secs(18_000).expect("nonzero")),
                 title: "5 hours".into(),
+                subtitle: None,
                 used_percent: used,
                 resets_at: Some(captured_at.saturating_add_seconds(resets_in)),
                 length: WindowLength::from_secs(18_000),
@@ -1144,6 +1145,7 @@ mod tests {
             windows: vec![Window {
                 key: WindowKey::for_length(WindowLength::from_secs(18_000).expect("nonzero")),
                 title: "5 hours".into(),
+                subtitle: None,
                 used_percent: used,
                 resets_at: Some(now.saturating_add_seconds(resets_in)),
                 length: WindowLength::from_secs(18_000),

@@ -556,6 +556,7 @@ impl WindowSnapshot {
         Ok(Window {
             key,
             title,
+            subtitle: None,
             used_percent: self.used_percent.clamp(0.0, 100.0),
             resets_at,
             length: Some(length),

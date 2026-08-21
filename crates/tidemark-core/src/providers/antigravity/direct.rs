@@ -127,6 +127,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
         windows.push(Window {
             key,
             title,
+            subtitle: None,
             used_percent: (1.0 - quota.remaining_fraction.clamp(0.0, 1.0)) * 100.0,
             resets_at: quota.resets_at,
             length: quota.descriptor.length,

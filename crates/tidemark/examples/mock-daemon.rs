@@ -58,6 +58,7 @@ fn window(title: &str, length: u64, used: f64, resets_in: Option<i64>) -> Window
     Window {
         key: WindowKey::for_length(WindowLength::from_secs(length).expect("nonzero")),
         title: title.to_owned(),
+        subtitle: None,
         used_percent: used,
         resets_at: resets_in.map(|secs| now.saturating_add_seconds(secs)),
         length: WindowLength::from_secs(length),

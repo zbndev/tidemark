@@ -1777,6 +1777,7 @@ mod tests {
         zai.windows = vec![tidemark_types::WindowStatus {
             key: "w18000".into(),
             title: "5 hours".into(),
+            subtitle: None,
             used_percent: 42.0,
             resets_at: None,
             length_secs: Some(18_000),

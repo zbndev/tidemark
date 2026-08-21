@@ -95,6 +95,17 @@ pub struct Window {
     pub key: WindowKey,
     /// What to call it in the interface, in the provider's own terms.
     pub title: String,
+    /// The absolute quantities behind [`Window::used_percent`], already formatted by the
+    /// adapter — `100 / 1000 credits`, `4.2M / 10M tokens`.
+    ///
+    /// Presentation the provider owns rather than a pair of numbers, because the unit is
+    /// the provider's and so is the rounding: a credit balance in dollars and a token
+    /// allowance in millions are not the same kind of quantity, and a shared formatter
+    /// would have to pick a house style for both. The interface draws it small under the
+    /// bar and never parses it.
+    ///
+    /// `None` where the provider reported only a percentage, which is the common case.
+    pub subtitle: Option<String>,
     /// Consumption, 0..=100.
     pub used_percent: f64,
     /// When the window rolls over, if the provider says.
@@ -137,6 +148,7 @@ mod tests {
         let w = Window {
             key: WindowKey::for_length(WindowLength::from_secs(length).expect("nonzero")),
             title: "test".into(),
+            subtitle: None,
             used_percent: used,
             resets_at: Some(now.saturating_add_seconds(resets_in)),
             length: WindowLength::from_secs(length),

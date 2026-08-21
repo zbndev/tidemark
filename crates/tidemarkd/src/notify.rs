@@ -319,6 +319,7 @@ mod tests {
         Window {
             key: WindowKey::for_length(length.expect("nonzero")),
             title: "5 hours".into(),
+            subtitle: None,
             used_percent: used,
             resets_at: resets_in.map(|s| now().saturating_add_seconds(s)),
             length,

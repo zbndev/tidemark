@@ -512,6 +512,7 @@ impl Kind {
         Ok(Window {
             key,
             title,
+            subtitle: None,
             used_percent: limit.percent.clamp(0.0, 100.0),
             resets_at,
             length: Some(length),
