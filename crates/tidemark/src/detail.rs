@@ -220,7 +220,10 @@ impl DetailDialog {
         });
         dialog.connect_closed(move |_| on_closed());
 
-        detail.apply(&detail.status.borrow().clone());
+        // Keep the immutable borrow out of `apply`: it replaces the stored status as its
+        // first step, so borrowing and cloning inline would overlap the two RefCell borrows.
+        let initial_status = detail.status.borrow().clone();
+        detail.apply(&initial_status);
         dialog.present(Some(parent));
         detail
     }

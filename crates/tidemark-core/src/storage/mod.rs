@@ -760,10 +760,12 @@ mod tests {
     #[test]
     fn current_points_are_empty_for_a_window_never_seen() {
         let history = history();
-        assert!(history
-            .current_points("test", "default", &key())
-            .expect("unseen history reads")
-            .is_empty());
+        assert!(
+            history
+                .current_points("test", "default", &key())
+                .expect("unseen history reads")
+                .is_empty()
+        );
     }
 
     #[test]

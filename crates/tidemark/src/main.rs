@@ -12,8 +12,8 @@
 
 mod bar;
 mod bus;
-mod chart;
 mod card;
+mod chart;
 mod detail;
 mod format;
 mod mark;

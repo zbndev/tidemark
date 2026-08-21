@@ -229,8 +229,10 @@ impl Card {
         keys.connect_key_pressed({
             let invoke = Rc::clone(&invoke);
             move |_, key, _, _| {
-                if matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::space)
-                {
+                if matches!(
+                    key,
+                    gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::space
+                ) {
                     invoke();
                     gtk::glib::Propagation::Stop
                 } else {
