@@ -14,6 +14,20 @@ const WAITING: &str = "waiting";
 
 type WaitingCallback = Rc<dyn Fn(String, String, bool) -> bool>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AfterBeginAction {
+    OpenBrowserAndAwait,
+    CancelLogin,
+}
+
+pub(super) fn after_begin_action(accepted: bool) -> AfterBeginAction {
+    if accepted {
+        AfterBeginAction::OpenBrowserAndAwait
+    } else {
+        AfterBeginAction::CancelLogin
+    }
+}
+
 /// One provider's stable detail page. It is cached by the dialog so navigation never
 /// discards text being entered or a browser login in progress.
 pub(super) struct ProviderDetail {
@@ -426,19 +440,19 @@ impl ProviderDetail {
     }
 
     async fn sign_in(self: Rc<Self>, provider: String, account: String) {
-        if !(self.on_waiting)(provider.clone(), account.clone(), true) {
-            return;
-        }
         let url = match self.proxy.begin_login(&provider, &account).await {
             Ok(url) => url,
             Err(error) => {
-                (self.on_waiting)(provider, account, false);
                 self.toast(&reason(&error));
                 return;
             }
         };
-        if !self.set_waiting(&provider, &account, Some(&url)) {
-            return;
+        match after_begin_action(self.set_waiting(&provider, &account, Some(&url))) {
+            AfterBeginAction::OpenBrowserAndAwait => {}
+            AfterBeginAction::CancelLogin => {
+                let _ = self.proxy.cancel_login(&provider, &account).await;
+                return;
+            }
         }
 
         let launcher = gtk::UriLauncher::new(&url);

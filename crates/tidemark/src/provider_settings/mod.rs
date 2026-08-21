@@ -55,6 +55,66 @@ impl PendingLogins {
     }
 }
 
+#[derive(Debug)]
+struct CachedDetail<T> {
+    provider: String,
+    account: String,
+    value: T,
+}
+
+#[derive(Debug)]
+struct DetailCache<T>(Vec<CachedDetail<T>>);
+
+impl<T> Default for DetailCache<T> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<T> DetailCache<T> {
+    fn get(&self, provider: &str, account: &str) -> Option<&T> {
+        self.0
+            .iter()
+            .find(|detail| detail.provider == provider && detail.account == account)
+            .map(|detail| &detail.value)
+    }
+
+    fn insert(&mut self, provider: &str, account: &str, value: T) {
+        self.remove(provider, account);
+        self.0.push(CachedDetail {
+            provider: provider.into(),
+            account: account.into(),
+            value,
+        });
+    }
+
+    fn remove(&mut self, provider: &str, account: &str) {
+        self.0
+            .retain(|detail| detail.provider != provider || detail.account != account);
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&str, &str) -> bool) {
+        self.0
+            .retain(|detail| keep(&detail.provider, &detail.account));
+    }
+
+    fn values(&self) -> impl Iterator<Item = &T> {
+        self.0.iter().map(|detail| &detail.value)
+    }
+}
+
+fn remove_local_provider<T>(
+    statuses: &mut Vec<ProviderStatus>,
+    local_added: &mut HashSet<String>,
+    details: &mut DetailCache<T>,
+    provider: &str,
+    account: &str,
+) {
+    local_added.remove(provider);
+    statuses.retain(|status| status.provider != provider || status.account != account);
+    details.remove(provider, account);
+}
+
 /// Owns every page for one open provider-settings dialog.
 #[derive(Debug)]
 pub struct ProviderSettings {
@@ -65,7 +125,7 @@ pub struct ProviderSettings {
     local_added: RefCell<HashSet<String>>,
     configured: ConfiguredList,
     picker: Rc<Picker>,
-    details: RefCell<Vec<Rc<ProviderDetail>>>,
+    details: RefCell<DetailCache<Rc<ProviderDetail>>>,
     pending: Rc<PendingLogins>,
     self_weak: RefCell<Weak<ProviderSettings>>,
 }
@@ -113,7 +173,7 @@ impl ProviderSettings {
             local_added: RefCell::new(HashSet::new()),
             configured,
             picker,
-            details: RefCell::new(Vec::new()),
+            details: RefCell::new(DetailCache::default()),
             pending: Rc::new(PendingLogins::default()),
             self_weak: RefCell::new(Weak::new()),
         });
@@ -147,10 +207,16 @@ impl ProviderSettings {
             .borrow_mut()
             .retain(|provider| !statuses.iter().any(|status| status.provider == *provider));
         *self.statuses.borrow_mut() = merged;
+        self.details.borrow_mut().retain(|provider, account| {
+            self.statuses
+                .borrow()
+                .iter()
+                .any(|status| status.provider == provider && status.account == account)
+        });
         self.refresh_views();
 
         let statuses = self.statuses.borrow();
-        for detail in self.details.borrow().iter() {
+        for detail in self.details.borrow().values() {
             if let Some(status) = statuses
                 .iter()
                 .find(|status| detail.matches(&status.provider, &status.account))
@@ -227,13 +293,7 @@ impl ProviderSettings {
     }
 
     fn open_detail(self: &Rc<Self>, provider: String, account: String) {
-        if let Some(existing) = self
-            .details
-            .borrow()
-            .iter()
-            .find(|detail| detail.matches(&provider, &account))
-            .cloned()
-        {
+        if let Some(existing) = self.details.borrow().get(&provider, &account).cloned() {
             self.dialog.push_subpage(existing.page());
             return;
         }
@@ -270,7 +330,9 @@ impl ProviderSettings {
             })
         });
         self.dialog.push_subpage(detail.page());
-        self.details.borrow_mut().push(detail);
+        self.details
+            .borrow_mut()
+            .insert(&provider, &account, detail);
     }
 
     fn confirm_removal(self: &Rc<Self>, provider: String, account: String) {
@@ -298,10 +360,13 @@ impl ProviderSettings {
             if confirmation.choose_future(Some(&settings.dialog)).await == "remove" {
                 match settings.proxy.remove_provider(&provider, &account).await {
                     Ok(()) => {
-                        settings.local_added.borrow_mut().remove(&provider);
-                        settings.statuses.borrow_mut().retain(|status| {
-                            status.provider != provider || status.account != account
-                        });
+                        remove_local_provider(
+                            &mut settings.statuses.borrow_mut(),
+                            &mut settings.local_added.borrow_mut(),
+                            &mut settings.details.borrow_mut(),
+                            &provider,
+                            &account,
+                        );
                         settings.refresh_views();
                     }
                     Err(error) => settings.toast(&reason(&error)),
@@ -350,7 +415,10 @@ pub(super) fn reason(error: &zbus::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::PendingLogins;
+    use std::collections::HashSet;
+
+    use super::detail::{AfterBeginAction, after_begin_action};
+    use super::{DetailCache, PendingLogins, remove_local_provider};
 
     #[test]
     fn pending_logins_are_taken_once_for_cancellation() {
@@ -370,5 +438,53 @@ mod tests {
 
         assert!(!pending.insert("antigravity", "default"));
         assert!(pending.take_all().is_empty());
+    }
+
+    #[test]
+    fn repeated_waiting_update_after_begin_reaches_browser_and_await() {
+        let pending = PendingLogins::default();
+        assert!(pending.insert("claude", "default"));
+
+        let accepted = pending.insert("claude", "default");
+
+        assert_eq!(
+            after_begin_action(accepted),
+            AfterBeginAction::OpenBrowserAndAwait
+        );
+    }
+
+    #[test]
+    fn begin_login_completion_after_dialog_close_requests_cancellation() {
+        let pending = PendingLogins::default();
+        pending.close();
+
+        let accepted_after_begin = pending.insert("claude", "default");
+
+        assert_eq!(
+            after_begin_action(accepted_after_begin),
+            AfterBeginAction::CancelLogin
+        );
+        assert!(pending.take_all().is_empty());
+    }
+
+    #[test]
+    fn remove_then_readd_uses_a_fresh_detail_value() {
+        let mut details = DetailCache::default();
+        let mut statuses = Vec::new();
+        let mut local_added = HashSet::from(["zai".to_owned()]);
+        details.insert("zai", "default", "old credential page");
+
+        remove_local_provider(
+            &mut statuses,
+            &mut local_added,
+            &mut details,
+            "zai",
+            "default",
+        );
+        details.insert("zai", "default", "fresh pending page");
+
+        assert_eq!(details.get("zai", "default"), Some(&"fresh pending page"));
+        assert_eq!(details.values().count(), 1);
+        assert!(!local_added.contains("zai"));
     }
 }
