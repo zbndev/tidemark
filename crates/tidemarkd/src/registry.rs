@@ -11,10 +11,9 @@
 //! as knowledge the interface has to carry: Z.ai's two regions are two hosts for one API,
 //! and a client that had to know what a region *is* could not draw the control.
 //!
-//! There is still no list of accounts in configuration, and deliberately so — an account
-//! exists as far as the daemon is concerned and reports `no-credential` until something
-//! supplies one. What `config.toml` now holds is the settings *of* those accounts, which
-//! is a different question from which of them exist.
+//! The compiled catalog is separate from the configured accounts. A catalog entry tells
+//! clients what this build supports; an account exists only after its slug appears in
+//! `config.toml`.
 
 use std::sync::Arc;
 
@@ -22,7 +21,9 @@ use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex, kimi, zai};
 use tidemark_core::secrets::Secrets;
-use tidemark_types::{AccountId, CredentialKind, OptionChoice, ProviderId, ProviderOption};
+use tidemark_types::{
+    AccountId, CredentialKind, OptionChoice, ProviderDefinition, ProviderId, ProviderOption,
+};
 
 use crate::engine::Account;
 
@@ -31,24 +32,85 @@ pub const ZAI_REGION: &str = "region";
 const ZAI_GLOBAL: &str = "global";
 const ZAI_BIGMODEL_CN: &str = "bigmodel-cn";
 
-/// Every account the daemon polls.
+/// Every provider this build can configure, in stable display order.
+pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
+    vec![
+        ProviderDefinition {
+            provider: antigravity::PROVIDER_ID.into(),
+            title: "Antigravity".into(),
+            credential: CredentialKind::External.as_wire().into(),
+            credential_hint: "Sign in with the Antigravity IDE or the agy CLI; Tidemark reads the session they keep.".into(),
+            external_fallback: Some("agy session".into()),
+            options: options(antigravity::PROVIDER_ID, config),
+        },
+        ProviderDefinition {
+            provider: "claude".into(),
+            title: "Claude".into(),
+            credential: CredentialKind::OAuth.as_wire().into(),
+            credential_hint: "Sign in through Tidemark or use Claude Code's login.".into(),
+            external_fallback: Some("Claude Code login".into()),
+            options: options("claude", config),
+        },
+        ProviderDefinition {
+            provider: codex::PROVIDER_ID.into(),
+            title: "Codex".into(),
+            credential: CredentialKind::OAuth.as_wire().into(),
+            credential_hint: "Sign in through Tidemark or use the Codex CLI's login.".into(),
+            external_fallback: Some("Codex CLI login".into()),
+            options: options(codex::PROVIDER_ID, config),
+        },
+        ProviderDefinition {
+            provider: kimi::PROVIDER_ID.into(),
+            title: "Kimi".into(),
+            credential: CredentialKind::Key.as_wire().into(),
+            credential_hint: "Kimi Code Console → API keys. This is Kimi For Coding, not the Open Platform.".into(),
+            external_fallback: None,
+            options: options(kimi::PROVIDER_ID, config),
+        },
+        ProviderDefinition {
+            provider: zai::PROVIDER_ID.into(),
+            title: "Z.ai".into(),
+            credential: CredentialKind::Key.as_wire().into(),
+            credential_hint: "Z.ai dashboard → API keys, on whichever region your account is on.".into(),
+            external_fallback: None,
+            options: options(zai::PROVIDER_ID, config),
+        },
+    ]
+}
+
+/// Builds one configured account, or returns `None` for a slug this build does not support.
+pub fn account(
+    provider: &str,
+    secrets: &Arc<dyn Secrets>,
+    config: &Config,
+) -> Result<Option<Account>, ProviderError> {
+    let account = match provider {
+        antigravity::PROVIDER_ID => Some(antigravity_account()?),
+        "claude" => Some(claude_account(secrets)?),
+        codex::PROVIDER_ID => Some(codex_account(secrets)?),
+        kimi::PROVIDER_ID => Some(kimi_account()),
+        zai::PROVIDER_ID => Some(zai_account()),
+        _ => None,
+    };
+    Ok(account.map(|account| account.with_options(options(provider, config))))
+}
+
+/// Every configured account the daemon polls, in the order of `config.toml`.
 pub fn accounts(
     secrets: &Arc<dyn Secrets>,
     config: &Config,
 ) -> Result<Vec<Account>, ProviderError> {
-    Ok(vec![
-        antigravity_account()?,
-        claude_account(secrets)?,
-        codex_account(secrets)?,
-        kimi_account(),
-        zai_account(),
-    ]
-    .into_iter()
-    .map(|account| {
-        let options = options(account.provider().as_str(), config);
-        account.with_options(options)
-    })
-    .collect())
+    let providers = config
+        .providers()
+        .map_err(|error| ProviderError::Local(error.to_string()))?;
+    let mut accounts = Vec::with_capacity(providers.len());
+    for provider in providers {
+        match account(&provider, secrets, config)? {
+            Some(account) => accounts.push(account),
+            None => tracing::warn!(provider, "configured provider is unsupported by this build"),
+        }
+    }
+    Ok(accounts)
 }
 
 /// The settings one provider exposes, filled in from the user's file.
@@ -231,58 +293,62 @@ mod tests {
         .expect("a missing file is an empty config")
     }
 
-    fn registered() -> Vec<Account> {
-        let secrets: Arc<dyn Secrets> = Arc::new(NoSecrets);
-        accounts(&secrets, &empty_config()).expect("registry builds")
+    fn secrets() -> Arc<dyn Secrets> {
+        Arc::new(NoSecrets)
+    }
+
+    fn scratch_config(name: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tidemark-registry-{name}-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, contents).expect("seeds config");
+        path
     }
 
     #[test]
-    fn every_registered_account_is_published_before_it_is_polled() {
-        let accounts = registered();
-        assert_eq!(accounts.len(), 5);
-        let providers: Vec<&str> = accounts
-            .iter()
-            .map(|account| account.status().provider.as_str())
-            .collect();
-        assert_eq!(
-            providers,
-            [
-                antigravity::PROVIDER_ID,
-                "claude",
-                codex::PROVIDER_ID,
-                kimi::PROVIDER_ID,
-                zai::PROVIDER_ID
-            ]
+    fn the_catalog_exists_even_when_no_account_is_configured() {
+        let config = empty_config();
+        assert!(
+            accounts(&secrets(), &config)
+                .expect("accounts build")
+                .is_empty()
         );
-        assert!(accounts.iter().all(|account| {
-            account.status().account == "default" && account.status().captured_at.is_none()
-        }));
+        let definitions = catalog(&config);
+        assert_eq!(definitions.len(), 5);
+        assert_eq!(definitions[0].provider, "antigravity");
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| !definition.title.is_empty())
+        );
     }
 
     #[test]
-    fn every_account_says_what_its_credentials_dialog_should_offer() {
-        for account in registered() {
-            let status = account.status();
-            assert!(
-                status.credential_kind().is_some(),
-                "{} published no credential kind",
-                status.provider
-            );
-            assert!(
-                status.credential_hint.is_some(),
-                "{} left the user with nowhere to go",
-                status.provider
-            );
-        }
+    fn only_configured_known_providers_become_accounts_in_file_order() {
+        let path = scratch_config(
+            "configured",
+            "providers = [\"zai\", \"future\", \"claude\"]\n",
+        );
+        let config = Config::at(path.clone()).expect("parses");
+        let accounts = accounts(&secrets(), &config).expect("known accounts build");
+        let slugs: Vec<&str> = accounts
+            .iter()
+            .map(|account| account.provider().as_str())
+            .collect();
+        assert_eq!(slugs, ["zai", "claude"]);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn only_the_provider_with_a_choice_to_make_publishes_one() {
-        for account in registered() {
-            let status = account.status();
-            let expected = usize::from(status.provider == zai::PROVIDER_ID);
-            assert_eq!(status.options.len(), expected, "{}", status.provider);
-        }
+    fn invalid_configured_providers_are_reported_as_local_errors() {
+        let path = scratch_config("invalid-providers", "providers = \"claude\"\n");
+        let config = Config::at(path.clone()).expect("parses");
+        let error = accounts(&secrets(), &config).expect_err("providers are invalid");
+        assert!(
+            matches!(error, ProviderError::Local(message) if message.contains("providers must be an array of strings"))
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

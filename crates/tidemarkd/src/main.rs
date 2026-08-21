@@ -5,9 +5,10 @@
 //! a viewer of this process, and a CLI or a Waybar module would be another one — none of
 //! them reach a provider themselves.
 //!
-//! The pieces: `registry` says which accounts exist, `keyring` reads their keys, `engine`
-//! runs the poll loop over them, `scheduler` decides when the next poll is, and `service`
-//! is the D-Bus interface. This file wires them together and handles shutdown.
+//! The pieces: `registry` selects configured accounts from the compiled catalog, `keyring`
+//! reads their keys, `engine` runs the poll loop over them, `scheduler` decides when the
+//! next poll is, and `service` is the D-Bus interface. This file wires them together and
+//! handles shutdown.
 
 mod engine;
 mod keyring;
