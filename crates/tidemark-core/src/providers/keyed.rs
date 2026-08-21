@@ -27,6 +27,11 @@ use tidemark_types::{AccountId, ProviderId, Snapshot, Timestamp};
 pub type Options = BTreeMap<String, String>;
 
 /// Where the key goes on the wire.
+///
+/// A key-derived header — `Basic base64(key:)`, `token <key>` — is not expressible: the
+/// key goes in whole, as the provider's own header or bearer token. A provider needing
+/// more than that keeps its own `impl Provider` and sends through [`request`], rather
+/// than smuggling a derived value into the URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Auth {
     /// `Authorization: Bearer <key>`.
