@@ -552,12 +552,10 @@ mod tests {
                 "sk-pasted-with-whitespace".to_owned()
             )]
         );
-        assert_eq!(
+        assert!(matches!(
             commands.try_recv().expect("the loop was told"),
-            Command::Reload {
-                provider: Some("zai".into())
-            }
-        );
+            Command::Reload { provider: Some(provider) } if provider == "zai"
+        ));
     }
 
     #[tokio::test]
@@ -609,12 +607,10 @@ mod tests {
             )],
             "signing out of one account must not take another account's key with it"
         );
-        assert_eq!(
+        assert!(matches!(
             commands.try_recv().expect("the loop was told"),
-            Command::Reload {
-                provider: Some("claude".into())
-            }
-        );
+            Command::Reload { provider: Some(provider) } if provider == "claude"
+        ));
     }
 
     #[tokio::test]
@@ -687,19 +683,19 @@ mod tests {
             "a typo must be visible"
         );
         assert!(daemon.refresh("zai").await.is_ok());
-        assert_eq!(
+        assert!(matches!(
             rx.try_recv().expect("the loop was told"),
-            Command::Refresh(Some("zai".into()))
-        );
+            Command::Refresh(Some(provider)) if provider == "zai"
+        ));
 
         assert!(
             daemon.refresh("").await.is_ok(),
             "an empty slug means everything"
         );
-        assert_eq!(
+        assert!(matches!(
             rx.try_recv().expect("the loop was told"),
             Command::Refresh(None)
-        );
+        ));
     }
 
     /// Talks to the interface the way `busctl`, the GUI and any future CLI will: over a
@@ -765,9 +761,11 @@ mod tests {
         call("Refresh", "zai")
             .await
             .expect("a known provider refreshes");
-        assert_eq!(
-            command_queue.recv().await,
-            Some(Command::Refresh(Some("zai".into()))),
+        assert!(
+            matches!(
+                command_queue.recv().await,
+                Some(Command::Refresh(Some(provider))) if provider == "zai"
+            ),
             "the call reached the poll loop"
         );
         assert!(

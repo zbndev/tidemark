@@ -23,12 +23,12 @@ use tidemark_core::config::Config;
 use tidemark_core::paths;
 use tidemark_core::secrets::Secrets;
 use tidemark_core::storage::History;
-use tidemark_types::{ProviderStatus, ids};
+use tidemark_types::ids;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use zbus::object_server::SignalEmitter;
 
-use crate::engine::{Command, Engine};
+use crate::engine::{Command, Engine, Publication};
 use crate::service::{Daemon, Published};
 
 /// Commands from D-Bus clients. Small: a burst of refreshes is a user hammering a button,
@@ -94,7 +94,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     );
 
     let (commands, mut command_queue) = mpsc::channel(COMMAND_QUEUE);
-    let (updates, mut update_queue) = mpsc::channel::<ProviderStatus>(UPDATE_QUEUE);
+    let (updates, mut update_queue) = mpsc::channel::<Publication>(UPDATE_QUEUE);
     let published = Published::default();
 
     let connection = zbus::connection::Builder::session()?
@@ -121,10 +121,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let publisher = tokio::spawn({
         let published = published.clone();
         async move {
-            while let Some(status) = update_queue.recv().await {
-                published.upsert(status.clone()).await;
-                if let Err(error) = Daemon::provider_changed(&emitter, status).await {
-                    tracing::warn!(%error, "could not announce a change");
+            while let Some(publication) = update_queue.recv().await {
+                match publication {
+                    Publication::Changed(status) => {
+                        published.upsert(status.clone()).await;
+                        if let Err(error) = Daemon::provider_changed(&emitter, status).await {
+                            tracing::warn!(%error, "could not announce a change");
+                        }
+                    }
+                    // Task 5 adds removal from shared state and its D-Bus signal together.
+                    Publication::Removed { .. } => {}
                 }
             }
         }

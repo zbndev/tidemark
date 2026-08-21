@@ -20,7 +20,7 @@ use tidemark_types::{
     AccountId, CredentialKind, ProviderId, ProviderOption, ProviderState, ProviderStatus, Snapshot,
     Timestamp, WindowStatus,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use crate::scheduler::{self, Situation};
@@ -33,8 +33,40 @@ pub const THIN_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 /// as ratios multiplied out wobble in the last decimal place; a wobble is not a session.
 const CHANGE_EPSILON: f64 = 0.01;
 
+/// A change the publisher task must apply to its shared view of the accounts.
+#[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the published status wire shape stays owned and unboxed at this five-account scale"
+)]
+pub enum Publication {
+    /// Add or replace one account status.
+    Changed(ProviderStatus),
+    /// Remove the exact account from the published topology.
+    Removed {
+        /// Stable provider slug.
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "the D-Bus removal publisher reads this field in Task 5"
+            )
+        )]
+        provider: String,
+        /// Stable account name.
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "the D-Bus removal publisher reads this field in Task 5"
+            )
+        )]
+        account: String,
+    },
+}
+
 /// What the D-Bus interface asks the loop to do.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Command {
     /// Poll now: one provider by slug, or every account when `None`.
     Refresh(Option<String>),
@@ -47,6 +79,30 @@ pub enum Command {
     Reload {
         /// Provider slug, or `None` for every account.
         provider: Option<String>,
+    },
+    /// Add one provider's default account and report the persisted topology result.
+    #[expect(
+        dead_code,
+        reason = "the D-Bus method that constructs this command is added in Task 5"
+    )]
+    AddProvider {
+        /// Stable provider slug.
+        provider: String,
+        /// Completion sent after persistence and in-memory mutation finish.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Remove one exact provider/account pair and report the persisted topology result.
+    #[expect(
+        dead_code,
+        reason = "the D-Bus method that constructs this command is added in Task 5"
+    )]
+    RemoveProvider {
+        /// Stable provider slug.
+        provider: String,
+        /// Stable account name.
+        account: String,
+        /// Completion sent after persistence and in-memory mutation finish.
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Stop the loop.
     Shutdown,
@@ -154,6 +210,10 @@ impl Account {
     }
 
     /// Which provider this account belongs to.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by engine and registry tests")
+    )]
     pub fn provider(&self) -> &ProviderId {
         &self.provider
     }
@@ -192,7 +252,7 @@ pub struct Engine {
     accounts: Vec<Account>,
     history: History,
     secrets: Arc<dyn Secrets>,
-    updates: mpsc::Sender<ProviderStatus>,
+    updates: mpsc::Sender<Publication>,
     /// Where the settings are read from on a reload. Held rather than resolved from the
     /// environment each time, so the loop can be run over a settings file of a test's own.
     config_path: std::path::PathBuf,
@@ -205,7 +265,7 @@ impl Engine {
         accounts: Vec<Account>,
         history: History,
         secrets: Arc<dyn Secrets>,
-        updates: mpsc::Sender<ProviderStatus>,
+        updates: mpsc::Sender<Publication>,
         config_path: std::path::PathBuf,
     ) -> Self {
         Self {
@@ -225,8 +285,68 @@ impl Engine {
     /// array it cannot tell apart from "nothing is configured".
     pub async fn announce(&self) {
         for account in &self.accounts {
-            let _ = self.updates.send(account.status.clone()).await;
+            let _ = self
+                .updates
+                .send(Publication::Changed(account.status.clone()))
+                .await;
         }
+    }
+
+    /// Adds the default account for a compiled-in provider without restarting the loop.
+    pub async fn add_provider(&mut self, provider: &str) -> Result<(), String> {
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        if self.accounts.iter().any(|account| {
+            account.provider.as_str() == provider && account.account == AccountId::default()
+        }) {
+            return Ok(());
+        }
+
+        let Some(mut account) = crate::registry::account(provider, &self.secrets, &config)
+            .map_err(|error| error.to_string())?
+        else {
+            return Err(format!(
+                "provider {provider} is not supported by this build"
+            ));
+        };
+        config
+            .add_provider(provider)
+            .map_err(|error| error.to_string())?;
+
+        account.due = Instant::now();
+        self.accounts.push(account);
+        self.probe_credentials(Some(provider)).await;
+        let status = self
+            .accounts
+            .last()
+            .expect("the account was just pushed")
+            .status
+            .clone();
+        let _ = self.updates.send(Publication::Changed(status)).await;
+        Ok(())
+    }
+
+    /// Removes an exact account from future polling without touching its history.
+    pub async fn remove_provider(&mut self, provider: &str, account: &str) -> Result<(), String> {
+        let Some(index) = self.accounts.iter().position(|configured| {
+            configured.provider.as_str() == provider && configured.account.as_str() == account
+        }) else {
+            return Err(format!("account {provider}/{account} is not configured"));
+        };
+
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        config
+            .remove_provider(provider)
+            .map_err(|error| error.to_string())?;
+
+        let removed = self.accounts.remove(index);
+        let _ = self
+            .updates
+            .send(Publication::Removed {
+                provider: removed.provider.as_str().to_owned(),
+                account: removed.account.as_str().to_owned(),
+            })
+            .await;
+        Ok(())
     }
 
     /// Runs until a [`Command::Shutdown`] arrives or the command channel closes.
@@ -244,6 +364,14 @@ impl Engine {
                 command = commands.recv() => match command {
                     Some(Command::Refresh(target)) => self.mark_due(target.as_deref()),
                     Some(Command::Reload { provider }) => self.reload(provider.as_deref()).await,
+                    Some(Command::AddProvider { provider, reply }) => {
+                        let result = self.add_provider(&provider).await;
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::RemoveProvider { provider, account, reply }) => {
+                        let result = self.remove_provider(&provider, &account).await;
+                        let _ = reply.send(result);
+                    }
                     Some(Command::Shutdown) | None => return,
                 },
             }
@@ -457,7 +585,10 @@ impl Engine {
             seconds = interval.as_secs(),
             "next poll scheduled"
         );
-        let _ = self.updates.send(account.status.clone()).await;
+        let _ = self
+            .updates
+            .send(Publication::Changed(account.status.clone()))
+            .await;
     }
 
     /// Brings accounts forward so the next turn of the loop polls them.
@@ -501,7 +632,9 @@ impl Engine {
                 account.status.options =
                     crate::registry::options(account.provider.as_str(), config);
             }
-            account.client = None;
+            if account.factory.is_some() {
+                account.client = None;
+            }
             account.failures = 0;
             account.retry_after = None;
             account.due = Instant::now();
@@ -728,11 +861,43 @@ mod tests {
 
     struct Harness {
         engine: Engine,
-        updates: mpsc::Receiver<ProviderStatus>,
+        updates: mpsc::Receiver<Publication>,
+        config_path: std::path::PathBuf,
     }
 
     impl Harness {
         fn new(accounts: Vec<Account>, secrets: Arc<dyn Secrets>) -> Self {
+            let (tx, rx) = mpsc::channel(64);
+            let config_path = std::env::temp_dir().join("tidemark-engine-tests-absent.toml");
+            Self {
+                engine: Engine::new(
+                    accounts,
+                    History::in_memory().expect("an in-memory database opens"),
+                    secrets,
+                    tx,
+                    config_path.clone(),
+                ),
+                updates: rx,
+                config_path,
+            }
+        }
+
+        async fn empty(name: &str) -> Self {
+            Self::configured(name, &[]).await
+        }
+
+        async fn configured(name: &str, providers: &[&str]) -> Self {
+            let config_path = std::env::temp_dir().join(format!(
+                "tidemark-engine-{name}-{}.toml",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&config_path);
+            let mut config = Config::at(config_path.clone()).expect("empty config parses");
+            for provider in providers {
+                config.add_provider(provider).expect("provider configured");
+            }
+            let secrets = unlocked();
+            let accounts = crate::registry::accounts(&secrets, &config).expect("accounts build");
             let (tx, rx) = mpsc::channel(64);
             Self {
                 engine: Engine::new(
@@ -740,9 +905,10 @@ mod tests {
                     History::in_memory().expect("an in-memory database opens"),
                     secrets,
                     tx,
-                    std::env::temp_dir().join("tidemark-engine-tests-absent.toml"),
+                    config_path.clone(),
                 ),
                 updates: rx,
+                config_path,
             }
         }
 
@@ -764,8 +930,10 @@ mod tests {
 
         fn published(&mut self) -> Vec<ProviderStatus> {
             let mut drained = Vec::new();
-            while let Ok(status) = self.updates.try_recv() {
-                drained.push(status);
+            while let Ok(publication) = self.updates.try_recv() {
+                if let Publication::Changed(status) = publication {
+                    drained.push(status);
+                }
             }
             drained
         }
@@ -785,10 +953,58 @@ mod tests {
                 History::in_memory().expect("an in-memory database opens"),
                 unlocked(),
                 tx,
-                config,
+                config.clone(),
             ),
             updates: rx,
+            config_path: config,
         }
+    }
+
+    #[tokio::test]
+    async fn adding_a_provider_persists_announces_and_makes_it_due_now() {
+        let mut harness = Harness::empty("runtime-add").await;
+        harness.engine.add_provider("kimi").await.expect("added");
+
+        assert_eq!(harness.engine.accounts().len(), 1);
+        assert_eq!(harness.engine.accounts()[0].provider().as_str(), "kimi");
+        let publication = harness.updates.recv().await.expect("announced");
+        assert!(matches!(publication, Publication::Changed(status) if status.provider == "kimi"));
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(config.providers().expect("readable"), ["kimi"]);
+    }
+
+    #[tokio::test]
+    async fn removing_a_provider_stops_polling_and_keeps_history() {
+        let mut harness = Harness::configured("runtime-remove", &["kimi"]).await;
+        let before = harness.engine.history.point_count().expect("count");
+        harness
+            .engine
+            .remove_provider("kimi", "default")
+            .await
+            .expect("removed");
+
+        assert!(harness.engine.accounts().is_empty());
+        assert_eq!(harness.engine.history.point_count().expect("count"), before);
+        assert!(matches!(
+            harness.updates.recv().await,
+            Some(Publication::Removed { provider, account })
+                if provider == "kimi" && account == "default"
+        ));
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert!(config.providers().expect("readable").is_empty());
+    }
+
+    #[tokio::test]
+    async fn reload_keeps_a_self_loading_provider_client_alive() {
+        let mut harness = with_provider(Fake::new(vec![Ok(snapshot(7.0, 3_600))]));
+        harness.engine.reload(None).await;
+        harness.engine.poll_due(Instant::now()).await;
+
+        let published = harness.published();
+        assert_eq!(
+            published.last().and_then(ProviderStatus::state),
+            Some(ProviderState::Ok)
+        );
     }
 
     #[tokio::test]
