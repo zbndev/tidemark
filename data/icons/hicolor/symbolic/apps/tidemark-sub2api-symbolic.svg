@@ -1,0 +1,8 @@
+<!-- The sub2api mark belongs to the sub2api project. Not covered by Tidemark's MIT licence; used nominatively
+     to identify the service a card reports on. See docs/TRADEMARKS.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
+  <g transform="translate(0.618 3.0815) scale(0.35569)">
+    <path d="M20 8h25l11 13-7 7-9-11H24L12 31l17 10-7 8L5 38a9 9 0 0 1-2-13L14 11a8 8 0 0 1 6-3Z"/>
+    <path d="m42 15 17 11a9 9 0 0 1 2 13L50 53a8 8 0 0 1-6 3H19L8 43l7-7 9 11h16l12-14-17-10 7-8Z"/>
+  </g>
+</svg>

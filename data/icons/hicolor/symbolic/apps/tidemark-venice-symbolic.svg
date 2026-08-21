@@ -1,0 +1,8 @@
+<!-- Venice is a trademark of Venice AI. Not covered by Tidemark's MIT licence; used nominatively to identify
+     the service a card reports on. See docs/TRADEMARKS.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
+  <g transform="translate(-4.5 -7) scale(1.1111)">
+    <path d="M6.2 7.2h4.1l4.6 12.7 4.6-12.7h4L15.7 27h-3.3L6.2 7.2Z"/>
+    <path d="M13 18.2h5.9l-1 2.8h-4l-.9-2.8Z" opacity="0.35"/>
+  </g>
+</svg>
