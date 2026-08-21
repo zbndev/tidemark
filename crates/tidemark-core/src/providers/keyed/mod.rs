@@ -21,6 +21,7 @@
 pub mod clinepass;
 pub mod crof;
 pub mod kimi;
+pub mod synthetic;
 pub mod venice;
 pub mod zai;
 
@@ -307,6 +308,7 @@ pub static CATALOG: &[&Spec] = &[
     &clinepass::SPEC,
     &crof::SPEC,
     &kimi::SPEC,
+    &synthetic::SPEC,
     &venice::SPEC,
     &zai::SPEC,
 ];

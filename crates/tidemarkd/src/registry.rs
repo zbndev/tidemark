@@ -445,7 +445,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 8);
+        assert_eq!(definitions.len(), 9);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(
