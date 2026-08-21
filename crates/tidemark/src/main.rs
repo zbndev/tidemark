@@ -12,6 +12,8 @@
 
 mod bar;
 mod bus;
+#[cfg(test)]
+mod chart;
 mod card;
 mod format;
 mod mark;
