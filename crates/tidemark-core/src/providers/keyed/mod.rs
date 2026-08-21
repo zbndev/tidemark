@@ -24,6 +24,7 @@ pub mod clinepass;
 pub mod crof;
 pub mod elevenlabs;
 pub mod kimi;
+pub mod llmproxy;
 pub mod neuralwatt;
 pub mod sub2api;
 pub mod synthetic;
@@ -317,6 +318,7 @@ pub static CATALOG: &[&Spec] = &[
     &crof::SPEC,
     &elevenlabs::SPEC,
     &kimi::SPEC,
+    &llmproxy::SPEC,
     &neuralwatt::SPEC,
     &sub2api::SPEC,
     &synthetic::SPEC,
