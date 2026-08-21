@@ -137,7 +137,7 @@ everything, and re-reads the credential on the way. `Version` says what is on th
 end.
 
 Credentials are the daemon's, so changing them is the daemon's too: `SetKey`, `SignOut`,
-`SetOption`, and the two halves of a login. Nothing there is specific to the GUI — a
+`SetOption`, `SetWindowNotify`, and the two halves of a login. Nothing there is specific to the GUI — a
 `busctl` line does the same thing — which is why it is on the interface rather than inside
 a dialog. **A login is two calls, because the work spans two processes.** `BeginLogin`
 takes the callback port, builds the authorize URL and returns it without waiting; the client
@@ -254,8 +254,9 @@ distribution-wide LTO off; `PKGBUILD` does it with `options=(!lto)`.
   document shape the vendor CLI uses — so one parser and one expiry rule serve both
   sources. It wins over the CLI's file when it is there, because it exists only because
   the user explicitly signed in here; signing out removes it and hands the account back.
-- **Settings** — `config.toml` holds what is neither a secret nor a reading: Z.ai's region
-  and the ordered `providers` array today, card order later. A missing file or missing
+- **Settings** — `config.toml` holds what is neither a secret nor a reading: Z.ai's region,
+  the ordered `providers` array and the per-window notification opt-in (`[notify.<slug>]`,
+  a `windows` array of window keys) today, card order later. A missing file or missing
   array has the same meaning as `providers = []`: a fresh installation has no configured
   accounts. It is edited rather than rewritten, so comments, ordering and keys a newer
   build added all survive a change made from the interface. A file that does not parse is
@@ -297,12 +298,29 @@ corrupt the forecast, which is the one thing the history exists for.
 
 ## Notifications
 
-Thresholds at 80% and 95%, fired once per segment — the segment is the natural dedup key.
-Every window notifies, not just the dominant one: you need to know both that the
-five-hour window is closing and that the weekly one is. Reset notifications only fire for
-windows that passed 50% in the previous segment; "your weekly quota reset" after burning
-3% of it is noise. Forecast-based notifications are deliberately not in v1 — they need
-calibration against history that does not exist yet.
+Thresholds at 80% and 95%, fired once per segment — the segment is the natural dedup key,
+and the rows recording what has gone out live in the history database, so a daemon restart
+does not warn anybody a second time. Any window can notify, not just the dominant one: you
+need to know both that the five-hour window is closing and that the weekly one is.
+
+**Opted into per window.** Five providers report fifteen windows between them, and a
+warning about all of them is a warning about none, so a freshly added provider is silent
+until a switch on its settings page is turned on. The switch covers both the thresholds and
+the reset for that window.
+
+**A reset always notifies**, however little of the previous segment was spent. The earlier
+rule here was "only above 50%, because *your weekly quota reset* after burning 3% of it is
+noise" — and that reasoning holds only for resets that arrive on schedule. Providers reset
+quota outside their own schedule, and an unscheduled reset is exactly the news a person
+acts on. The opt-in is what keeps the volume down; a consumption threshold on top of it
+would only hide the interesting case.
+
+The two thresholds are the same constants the bar changes colour at, defined once in
+`tidemark-types` rather than in each process, and the phrasing of a percentage or a span is
+shared the same way: the card and the notification must never disagree.
+
+Forecast-based notifications are deliberately not in v1 — they need calibration against
+history that does not exist yet.
 
 ## Interface
 
@@ -328,6 +346,10 @@ calibration against history that does not exist yet.
   recoloured by the theme — not a glyph of our invention standing in for someone else's
   product. The marks are their owners' trademarks, used to identify the service the card is
   about; they are not covered by this project's licence, and whatever ships them says so.
+- **Provider settings carry the notification switches** — one row per window the account
+  currently reports, drawn from the last reading rather than from a fixed list, because the
+  window set is whatever arrived. An account nobody has polled yet has no switches to
+  offer and the group is not drawn at all.
 - **The bar is drawn, not a `GtkLevelBar`**, because of the pace mark. Its colours come
   from the CSS names `@accent_bg_color`, `@warning_bg_color` and `@error_bg_color` rather
   than from `AdwStyleManager`, so that a user who has themed their accent gets a bar in

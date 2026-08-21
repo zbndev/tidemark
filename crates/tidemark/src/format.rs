@@ -9,7 +9,10 @@
 //! the daemon did not send is not shown.** Every function that depends on an absent field
 //! returns `None` rather than a plausible-looking placeholder.
 
+use tidemark_types::present::{duration, plural};
 use tidemark_types::{ProviderState, ProviderStatus, Remedy, Timestamp};
+
+pub use tidemark_types::present::percent;
 
 /// How much emphasis a chip gets. Maps to the libadwaita style classes, which is why there
 /// are three of them rather than one per [`ProviderState`].
@@ -85,47 +88,6 @@ pub fn chip(status: &ProviderStatus) -> Option<Chip> {
     })
 }
 
-/// Consumption as the big number on the card.
-///
-/// Rounds, but never across the ends: a window with something spent in it never reads `0%`,
-/// and one with anything left never reads `100%`. Those two are the readings a person acts
-/// on, and rounding is not a good enough reason to get either wrong.
-pub fn percent(used_percent: f64) -> String {
-    let used = used_percent.clamp(0.0, 100.0);
-    let rounded = used.round();
-    if rounded <= 0.0 && used > 0.0 {
-        "<1%".to_owned()
-    } else if rounded >= 100.0 && used < 100.0 {
-        ">99%".to_owned()
-    } else {
-        format!("{rounded:.0}%")
-    }
-}
-
-/// A span of time, at the coarsest unit that still says something useful.
-pub fn duration(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    let minutes = seconds / 60;
-    let hours = minutes / 60;
-    let days = hours / 24;
-
-    if minutes == 0 {
-        "under a minute".to_owned()
-    } else if hours == 0 {
-        format!("{minutes} min")
-    } else if days == 0 {
-        match minutes % 60 {
-            0 => format!("{hours} h"),
-            rest => format!("{hours} h {rest} min"),
-        }
-    } else {
-        match hours % 24 {
-            0 => plural(days, "day"),
-            rest => format!("{} {rest} h", plural(days, "day")),
-        }
-    }
-}
-
 /// When the window rolls over, phrased for the line under the bar.
 pub fn resets_in(seconds: i64) -> String {
     if seconds <= 0 {
@@ -166,14 +128,6 @@ pub fn footer(status: &ProviderStatus, now: Timestamp) -> Option<String> {
         .map(|at| format!("checked {}", ago(now.as_unix() - at)))
 }
 
-fn plural(count: i64, unit: &str) -> String {
-    if count == 1 {
-        format!("1 {unit}")
-    } else {
-        format!("{count} {unit}s")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,41 +162,6 @@ mod tests {
         let chip = chip(&status).expect("an unknown state is still a problem");
         assert_eq!(chip.text, "quota-frozen");
         assert_eq!(chip.tone, Tone::Danger);
-    }
-
-    #[test]
-    fn rounding_never_reports_an_untouched_window_or_an_exhausted_one_by_mistake() {
-        assert_eq!(percent(0.0), "0%");
-        assert_eq!(
-            percent(0.2),
-            "<1%",
-            "something was spent; do not print zero"
-        );
-        assert_eq!(
-            percent(99.7),
-            ">99%",
-            "there is quota left; do not print 100"
-        );
-        assert_eq!(percent(100.0), "100%");
-        assert_eq!(percent(42.4), "42%");
-        assert_eq!(percent(42.5), "43%");
-    }
-
-    #[test]
-    fn a_percentage_outside_the_range_is_clamped_rather_than_printed() {
-        assert_eq!(percent(140.0), "100%");
-        assert_eq!(percent(-3.0), "0%");
-    }
-
-    #[test]
-    fn durations_stop_at_the_unit_that_still_means_something() {
-        assert_eq!(duration(30), "under a minute");
-        assert_eq!(duration(90), "1 min");
-        assert_eq!(duration(3600), "1 h");
-        assert_eq!(duration(3600 + 12 * 60), "1 h 12 min");
-        assert_eq!(duration(48 * 3600), "2 days");
-        assert_eq!(duration(50 * 3600), "2 days 2 h");
-        assert_eq!(duration(-5), "under a minute");
     }
 
     #[test]

@@ -28,6 +28,15 @@ use crate::paths;
 const PROVIDER_TABLE: &str = "provider";
 const PROVIDERS_KEY: &str = "providers";
 
+/// Table the notification opt-in lives under: `[notify.claude]`.
+///
+/// Deliberately not a key inside `[provider.<slug>]`. That table holds the settings a
+/// provider *declares* — enumerated choices the daemon validates against the provider's
+/// own list — and an array of window keys the user happens to have switched on is neither
+/// declared nor enumerable.
+const NOTIFY_TABLE: &str = "notify";
+const NOTIFY_WINDOWS_KEY: &str = "windows";
+
 /// Why the settings could not be read or written.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -68,6 +77,14 @@ pub enum ConfigError {
         path: PathBuf,
         /// Why the provider list is invalid.
         reason: String,
+    },
+    /// A provider's notification opt-in list is not an array of window keys.
+    #[error("{path}: [{NOTIFY_TABLE}.{provider}] {NOTIFY_WINDOWS_KEY} must be an array of strings")]
+    InvalidNotify {
+        /// The file.
+        path: PathBuf,
+        /// Whose list it is.
+        provider: String,
     },
 }
 
@@ -170,14 +187,19 @@ impl Config {
         let providers = self.providers()?;
         let configured = providers.iter().any(|candidate| candidate == provider);
 
-        if configured && let Some(item) = self.document.get_mut(PROVIDER_TABLE) {
-            let table = item
-                .as_table_like_mut()
-                .ok_or_else(|| ConfigError::NotATable {
-                    path: self.path.clone(),
-                    table: PROVIDER_TABLE.to_owned(),
-                })?;
-            table.remove(provider);
+        if configured {
+            for name in [PROVIDER_TABLE, NOTIFY_TABLE] {
+                let Some(item) = self.document.get_mut(name) else {
+                    continue;
+                };
+                let table = item
+                    .as_table_like_mut()
+                    .ok_or_else(|| ConfigError::NotATable {
+                        path: self.path.clone(),
+                        table: name.to_owned(),
+                    })?;
+                table.remove(provider);
+            }
         }
         let normalized = self.normalize_providers(Some(provider))?;
         if configured || normalized {
@@ -220,6 +242,101 @@ impl Config {
         self.write()
     }
 
+    /// Window keys of this provider whose notifications the user has switched on.
+    ///
+    /// Absent table, absent key and empty array all mean the same thing: this provider
+    /// notifies about nothing. Notifications are opted into per window, so silence is the
+    /// state a fresh installation is in — see `CONTEXT.md` § Notifications.
+    pub fn notify_windows(&self, provider: &str) -> Result<Vec<String>, ConfigError> {
+        let Some(item) = self
+            .document
+            .get(NOTIFY_TABLE)
+            .and_then(|table| table.get(provider))
+            .and_then(|table| table.get(NOTIFY_WINDOWS_KEY))
+        else {
+            return Ok(Vec::new());
+        };
+        let array = item.as_array().ok_or_else(|| ConfigError::InvalidNotify {
+            path: self.path.clone(),
+            provider: provider.to_owned(),
+        })?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut windows = Vec::new();
+        for entry in array.iter() {
+            let key = entry.as_str().ok_or_else(|| ConfigError::InvalidNotify {
+                path: self.path.clone(),
+                provider: provider.to_owned(),
+            })?;
+            if seen.insert(key.to_owned()) {
+                windows.push(key.to_owned());
+            }
+        }
+        Ok(windows)
+    }
+
+    /// Switches one window's notifications on or off and writes the file.
+    ///
+    /// The list is rewritten from the validated set rather than edited in place: it holds
+    /// opaque window keys with no decoration worth preserving, unlike the `providers`
+    /// array a person is expected to read.
+    pub fn set_window_notify(
+        &mut self,
+        provider: &str,
+        window: &str,
+        enabled: bool,
+    ) -> Result<(), ConfigError> {
+        let mut windows = self.notify_windows(provider)?;
+        let held = windows.iter().any(|held| held == window);
+        match (enabled, held) {
+            (true, false) => windows.push(window.to_owned()),
+            (false, true) => windows.retain(|held| held != window),
+            _ => return Ok(()),
+        }
+
+        let notify = self
+            .document
+            .entry(NOTIFY_TABLE)
+            .or_insert_with(|| Item::Table(implicit_table()));
+        let notify = notify
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: NOTIFY_TABLE.to_owned(),
+            })?;
+        let table = notify
+            .entry(provider)
+            .or_insert_with(|| Item::Table(Table::new()));
+        let table = table
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: format!("{NOTIFY_TABLE}.{provider}"),
+            })?;
+        let entry = table
+            .entry(NOTIFY_WINDOWS_KEY)
+            .or_insert_with(|| Item::Value(Array::new().into()));
+        let array = entry.as_array_mut().ok_or_else(|| ConfigError::InvalidNotify {
+            path: self.path.clone(),
+            provider: provider.to_owned(),
+        })?;
+        // Edited rather than replaced, for the same reason the whole file is: a comment
+        // somebody wrote on this line is theirs, not ours to drop.
+        if enabled {
+            array.push(window);
+        } else {
+            let removed: Vec<usize> = array
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.as_str() == Some(window))
+                .map(|(index, _)| index)
+                .collect();
+            for (already, index) in removed.into_iter().enumerate() {
+                remove_carrying_prefix(array, index - already);
+            }
+        }
+        self.write()
+    }
+
     /// Normalizes the editable provider array without replacing it, retaining every
     /// surviving value's decoration and the array's own prefix and suffix.
     ///
@@ -249,19 +366,7 @@ impl Config {
         }
         let changed = !remove_indices.is_empty();
         for (removed, index) in remove_indices.into_iter().enumerate() {
-            let index = index - removed;
-            let prefix = array
-                .get(index)
-                .and_then(|value| value.decor().prefix())
-                .cloned();
-            array.remove(index);
-            if let Some(prefix) = prefix {
-                if let Some(next) = array.get_mut(index) {
-                    next.decor_mut().set_prefix(prefix);
-                } else {
-                    array.set_trailing(prefix);
-                }
-            }
+            remove_carrying_prefix(array, index - removed);
         }
         Ok(changed)
     }
@@ -281,6 +386,27 @@ impl Config {
             path: self.path.clone(),
             source,
         })
+    }
+}
+
+/// Removes one array element and hands its leading decoration to whatever follows it.
+///
+/// An element's prefix carries the line break and indentation that put it on its own line,
+/// and any comment written above it. Dropping the element without passing that on collapses
+/// the rest of the array onto one line, or strands a comment against the closing bracket.
+fn remove_carrying_prefix(array: &mut Array, index: usize) {
+    let prefix = array
+        .get(index)
+        .and_then(|value| value.decor().prefix())
+        .cloned();
+    array.remove(index);
+    let Some(prefix) = prefix else {
+        return;
+    };
+    if let Some(next) = array.get_mut(index) {
+        next.decor_mut().set_prefix(prefix);
+    } else {
+        array.set_trailing(prefix);
     }
 }
 
@@ -567,5 +693,105 @@ mod tests {
         let config = Config::at(path.clone()).expect("valid toml");
         assert_eq!(config.option("zai", "region"), None);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_provider_nobody_opted_in_for_notifies_about_nothing() {
+        let config = Config::at(scratch("notify-absent").with_file_name("nothing.toml"))
+            .expect("a missing file is an empty document");
+        assert_eq!(config.notify_windows("claude").expect("read"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn switching_a_window_on_persists_it() {
+        let path = scratch("notify-on");
+        let _ = std::fs::remove_file(&path);
+        let mut config = Config::at(path.clone()).expect("loaded");
+        config
+            .set_window_notify("claude", "w18000", true)
+            .expect("written");
+
+        let reread = Config::at(path).expect("reloaded");
+        assert_eq!(reread.notify_windows("claude").expect("read"), vec!["w18000".to_owned()]);
+    }
+
+    #[test]
+    fn switching_the_same_window_on_twice_lists_it_once() {
+        let path = scratch("notify-twice");
+        let _ = std::fs::remove_file(&path);
+        let mut config = Config::at(path).expect("loaded");
+        config
+            .set_window_notify("claude", "w18000", true)
+            .expect("written");
+        config
+            .set_window_notify("claude", "w18000", true)
+            .expect("written again");
+        assert_eq!(config.notify_windows("claude").expect("read"), vec!["w18000".to_owned()]);
+    }
+
+    #[test]
+    fn switching_one_window_off_leaves_the_others_alone() {
+        let path = scratch("notify-off");
+        let _ = std::fs::remove_file(&path);
+        let mut config = Config::at(path).expect("loaded");
+        config
+            .set_window_notify("claude", "w18000", true)
+            .expect("written");
+        config
+            .set_window_notify("claude", "w604800", true)
+            .expect("written");
+        config
+            .set_window_notify("claude", "w18000", false)
+            .expect("written");
+        assert_eq!(config.notify_windows("claude").expect("read"), vec!["w604800".to_owned()]);
+    }
+
+    #[test]
+    fn one_provider_opt_in_says_nothing_about_another() {
+        let path = scratch("notify-scoped");
+        let _ = std::fs::remove_file(&path);
+        let mut config = Config::at(path).expect("loaded");
+        config
+            .set_window_notify("claude", "w18000", true)
+            .expect("written");
+        assert_eq!(config.notify_windows("codex").expect("read"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn removing_a_provider_forgets_which_windows_it_notified_about() {
+        let path = scratch("notify-removed");
+        let _ = std::fs::remove_file(&path);
+        let mut config = Config::at(path).expect("loaded");
+        config.add_provider("claude").expect("added");
+        config
+            .set_window_notify("claude", "w18000", true)
+            .expect("written");
+        config.remove_provider("claude").expect("removed");
+        assert_eq!(config.notify_windows("claude").expect("read"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_opt_in_list_that_is_not_strings_is_refused_rather_than_ignored() {
+        let path = scratch("notify-wrongtype");
+        std::fs::write(&path, "[notify.claude]\nwindows = [4]\n").expect("seeded");
+        let config = Config::at(path).expect("valid TOML");
+        assert!(config.notify_windows("claude").is_err());
+    }
+
+    #[test]
+    fn a_comment_in_the_opt_in_table_survives_a_change() {
+        let path = scratch("notify-comment");
+        std::fs::write(
+            &path,
+            "# hand-written\n[notify.claude]\nwindows = [\"w18000\"] # the one that matters\n",
+        )
+        .expect("seeded");
+        let mut config = Config::at(path.clone()).expect("loaded");
+        config
+            .set_window_notify("claude", "w604800", true)
+            .expect("written");
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(text.contains("# hand-written"), "{text}");
+        assert!(text.contains("# the one that matters"), "{text}");
     }
 }

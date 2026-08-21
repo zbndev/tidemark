@@ -35,19 +35,9 @@ use gtk::prelude::*;
 /// the mark on the name's baseline; see the note on framing in `docs/TRADEMARKS.md`.
 const SIZE: i32 = 28;
 
-/// The icon name a provider's mark is installed under, or `None` for a slug that cannot
-/// name one.
-///
-/// The slug arrives over D-Bus from the daemon, so it is not assumed to be one of ours.
-/// Anything outside `[a-z0-9-]` gets no mark rather than a lookup for a name we would never
-/// have installed.
-pub fn icon_name(slug: &str) -> Option<String> {
-    let usable = !slug.is_empty()
-        && slug
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    usable.then(|| format!("tidemark-{slug}-symbolic"))
-}
+/// The icon name a provider's mark is installed under. Defined in the shared crate, so
+/// the card and the daemon's notifications look the same mark up.
+pub use tidemark_types::present::icon_name;
 
 /// The image widget for a card's title row. Starts hidden; [`set`] fills it in.
 pub fn image_at(pixel_size: i32) -> gtk::Image {
@@ -81,29 +71,4 @@ pub fn set(image: &gtk::Image, slug: &str) {
 /// Whether the icon theme of the display this widget is on has `name`.
 fn has_icon(widget: &impl IsA<gtk::Widget>, name: &str) -> bool {
     gtk::IconTheme::for_display(&widget.as_ref().display()).has_icon(name)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_slug_names_the_icon_it_was_installed_as() {
-        assert_eq!(
-            icon_name("zai").as_deref(),
-            Some("tidemark-zai-symbolic"),
-            "the name here and the filename in data/icons are the same convention"
-        );
-        assert_eq!(
-            icon_name("antigravity").as_deref(),
-            Some("tidemark-antigravity-symbolic")
-        );
-    }
-
-    #[test]
-    fn a_slug_that_is_not_ours_gets_no_mark_rather_than_a_lookup() {
-        for slug in ["", "Z.ai", "../../etc", "zai fake", "ZAI"] {
-            assert_eq!(icon_name(slug), None, "slug {slug:?} should name no icon");
-        }
-    }
 }

@@ -99,7 +99,11 @@ pub fn account(
         zai::PROVIDER_ID => Some(zai_account()),
         _ => None,
     };
-    Ok(account.map(|account| account.with_options(options(provider, config))))
+    Ok(account.map(|account| {
+        account
+            .with_options(options(provider, config))
+            .with_notify(notify(provider, config))
+    }))
 }
 
 /// Every configured account the daemon polls, in the order of `config.toml`.
@@ -118,6 +122,22 @@ pub fn accounts(
         }
     }
     Ok(accounts)
+}
+
+/// Which of a provider's windows the user asked to be notified about.
+///
+/// A list the file holds in a shape this build cannot read is reported and treated as
+/// empty. Refusing to start over it would take the whole daemon down for a typo in an
+/// opt-in list, and repairing it silently would decide on the user's behalf which windows
+/// they meant.
+pub fn notify(provider: &str, config: &Config) -> Vec<String> {
+    match config.notify_windows(provider) {
+        Ok(windows) => windows,
+        Err(error) => {
+            tracing::warn!(provider, %error, "ignoring an unreadable notification opt-in");
+            Vec::new()
+        }
+    }
 }
 
 /// The settings one provider exposes, filled in from the user's file.

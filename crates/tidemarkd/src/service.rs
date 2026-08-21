@@ -575,6 +575,36 @@ impl Daemon {
         Ok(())
     }
 
+    /// Switches one window's notifications on or off.
+    ///
+    /// Per window rather than per provider, and off by default: the five providers report
+    /// fifteen windows between them, and a warning about every one of them is a warning
+    /// about none. The engine validates the window against what the account currently
+    /// reports and owns the write, so this is the same serialized configuration
+    /// transaction as `SetOption`.
+    async fn set_window_notify(
+        &self,
+        provider: &str,
+        account: &str,
+        window: &str,
+        enabled: bool,
+    ) -> fdo::Result<()> {
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
+        self.account(provider, account).await?;
+
+        self.config_request(|reply| Command::SetWindowNotify {
+            provider: provider.to_owned(),
+            account: account.to_owned(),
+            window: window.to_owned(),
+            enabled,
+            reply,
+        })
+        .await?;
+        tracing::info!(provider, window, enabled, "notification switch changed");
+        Ok(())
+    }
+
     /// The daemon's version, so a client can tell what it is talking to.
     #[zbus(property)]
     async fn version(&self) -> String {
@@ -1661,5 +1691,65 @@ mod tests {
             .deserialize()
             .expect("a client parses the provider/account pair");
         assert_eq!(carried, ("zai".into(), "default".into()));
+    }
+
+
+    #[tokio::test]
+    async fn a_notification_switch_is_serialized_through_the_engine() {
+        let mut zai = key_account("zai");
+        zai.windows = vec![tidemark_types::WindowStatus {
+            key: "w18000".into(),
+            title: "5 hours".into(),
+            used_percent: 42.0,
+            resets_at: None,
+            length_secs: Some(18_000),
+        }];
+        let (daemon, _secrets, mut commands) = daemon_over(vec![zai]).await;
+        let daemon = Arc::new(daemon);
+        let switching = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move {
+                daemon
+                    .set_window_notify("zai", "default", "w18000", true)
+                    .await
+            }
+        });
+
+        let Command::SetWindowNotify {
+            provider,
+            account,
+            window,
+            enabled,
+            reply,
+        } = commands.recv().await.expect("switch reaches engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(
+            (provider, account, window, enabled),
+            (
+                "zai".to_owned(),
+                "default".to_owned(),
+                "w18000".to_owned(),
+                true
+            )
+        );
+        assert!(!switching.is_finished(), "D-Bus waits for persistence");
+        reply.send(Ok(())).expect("caller waits for reply");
+        switching
+            .await
+            .expect("switch task did not panic")
+            .expect("engine accepted the switch");
+    }
+
+    #[tokio::test]
+    async fn a_notification_switch_for_an_unconfigured_account_is_an_error() {
+        let (daemon, _secrets, _commands) = daemon_over(vec![key_account("zai")]).await;
+        assert!(
+            daemon
+                .set_window_notify("codex", "default", "w18000", true)
+                .await
+                .is_err()
+        );
     }
 }

@@ -4,6 +4,18 @@ use crate::time::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Consumption at which a window stops being unremarkable.
+///
+/// One pair of numbers, in the shared crate, because two processes act on them: the daemon
+/// fires a notification here, and the interface changes the colour of the bar here. The
+/// card and the notification that interrupts you must never disagree about when a window
+/// became worth worrying about, and a comment in each crate saying "keep these in step" is
+/// not a mechanism. See `CONTEXT.md` § Notifications.
+pub const WARNING_AT: f64 = 80.0;
+
+/// Consumption at which a window is nearly gone. See [`WARNING_AT`].
+pub const DANGER_AT: f64 = 95.0;
+
 /// How long a window lasts, in whole seconds. Never zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

@@ -38,6 +38,35 @@ pub fn connection_text(definition: &ProviderDefinition, status: &ProviderStatus)
     }
 }
 
+/// One line of the notifications group: a window the account reports, and whether the user
+/// asked to hear about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationRow {
+    /// The window key, which is what the daemon is told to switch.
+    pub key: String,
+    /// The window's own title, in the provider's terms.
+    pub title: String,
+    /// Whether notifications for it are on.
+    pub enabled: bool,
+}
+
+/// The switches to draw for one account, in the order the provider reported its windows.
+///
+/// Driven by the windows rather than by the opt-in list: what the interface can offer is
+/// what the account currently reports, and an account nobody has polled yet reports nothing
+/// — a normal state on the first seconds of a daemon's life, and one the group hides for.
+pub fn notification_rows(status: &ProviderStatus) -> Vec<NotificationRow> {
+    status
+        .windows
+        .iter()
+        .map(|window| NotificationRow {
+            key: window.key.clone(),
+            title: window.title.clone(),
+            enabled: status.notify.iter().any(|key| key == &window.key),
+        })
+        .collect()
+}
+
 /// Keeps successful local additions visible until the daemon publishes their first status.
 pub fn merge_local_additions(
     incoming: &[ProviderStatus],
@@ -68,7 +97,7 @@ mod tests {
         AccountId, CredentialKind, ProviderDefinition, ProviderId, ProviderState, ProviderStatus,
     };
 
-    use super::{addable, connection_text, merge_local_additions};
+    use super::{NotificationRow, addable, connection_text, merge_local_additions, notification_rows};
 
     fn definition(provider: &str, title: &str) -> ProviderDefinition {
         ProviderDefinition {
@@ -167,5 +196,56 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["claude", "codex"]
         );
+    }
+
+    fn windowed(keys: &[(&str, &str)], notify: &[&str]) -> ProviderStatus {
+        let mut status = ProviderStatus::pending(&ProviderId::new("claude"), &AccountId::default());
+        status.windows = keys
+            .iter()
+            .map(|(key, title)| tidemark_types::WindowStatus {
+                key: (*key).into(),
+                title: (*title).into(),
+                used_percent: 0.0,
+                resets_at: None,
+                length_secs: None,
+            })
+            .collect();
+        status.notify = notify.iter().map(|key| (*key).to_string()).collect();
+        status
+    }
+
+    #[test]
+    fn a_switch_is_offered_for_every_window_the_account_reports() {
+        let status = windowed(&[("w18000", "5 hours"), ("w604800", "Weekly")], &["w604800"]);
+        assert_eq!(
+            notification_rows(&status),
+            vec![
+                NotificationRow {
+                    key: "w18000".into(),
+                    title: "5 hours".into(),
+                    enabled: false
+                },
+                NotificationRow {
+                    key: "w604800".into(),
+                    title: "Weekly".into(),
+                    enabled: true
+                },
+            ]
+        );
+    }
+
+    /// The window set is whatever arrived. An opt-in for a window the provider has stopped
+    /// reporting stays in the settings file — it is not ours to delete — but there is
+    /// nothing to draw a switch against.
+    #[test]
+    fn an_opt_in_for_a_window_nobody_reports_draws_no_row() {
+        let status = windowed(&[("w18000", "5 hours")], &["w18000", "w604800"]);
+        assert_eq!(notification_rows(&status).len(), 1);
+    }
+
+    #[test]
+    fn an_account_that_has_never_been_polled_offers_nothing_to_switch() {
+        let status = ProviderStatus::pending(&ProviderId::new("claude"), &AccountId::default());
+        assert!(notification_rows(&status).is_empty());
     }
 }

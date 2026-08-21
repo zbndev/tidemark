@@ -8,14 +8,16 @@
 //! Anything that needs an HTTP client belongs in `tidemark-core`; anything that needs GTK
 //! belongs in `tidemark`. `scripts/check-layering.sh` enforces that.
 
+pub mod present;
 pub mod snapshot;
 pub mod time;
 pub mod window;
 pub mod wire;
 
+pub use present::{duration, icon_name, percent};
 pub use snapshot::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, provider_label};
 pub use time::{AbsurdTimestamp, Timestamp};
-pub use window::{Window, WindowKey, WindowLength};
+pub use window::{DANGER_AT, WARNING_AT, Window, WindowKey, WindowLength};
 pub use wire::{
     CredentialKind, OptionChoice, ProviderDefinition, ProviderOption, ProviderState,
     ProviderStatus, Remedy, WindowStatus,

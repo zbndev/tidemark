@@ -42,6 +42,8 @@ pub(super) struct ProviderDetail {
     sign_in: RefCell<Option<SignInRow>>,
     external: RefCell<Option<adw::ActionRow>>,
     options: RefCell<BTreeMap<String, Rc<OptionRow>>>,
+    notifications: adw::PreferencesGroup,
+    notify_rows: RefCell<Vec<Rc<NotifyRow>>>,
     waiting: Cell<bool>,
     on_waiting: WaitingCallback,
 }
@@ -127,6 +129,75 @@ impl OptionSelection {
     }
 }
 
+/// One notification switch, told apart from the daemon's answer about it.
+///
+/// The same discipline as [`OptionSelection`], for the same reason: the widget moves the
+/// moment it is clicked, the write happens afterwards, and a refused write or a status
+/// arriving mid-flight must put the switch back without that looking like a second click.
+#[derive(Debug)]
+struct SwitchState {
+    authoritative: Cell<bool>,
+    displayed: Cell<bool>,
+    suppress: Cell<bool>,
+}
+
+impl SwitchState {
+    fn new(active: bool) -> Self {
+        Self {
+            authoritative: Cell::new(active),
+            displayed: Cell::new(active),
+            suppress: Cell::new(false),
+        }
+    }
+
+    /// The write this toggle asks for, or `None` when the widget was moved by us.
+    fn toggled(&self, active: bool) -> Option<bool> {
+        self.displayed.set(active);
+        (!self.suppress.get()).then_some(active)
+    }
+
+    #[cfg(test)]
+    fn displayed(&self) -> bool {
+        self.displayed.get()
+    }
+
+    fn apply_authoritative(&self, active: bool, set: impl FnOnce(bool)) {
+        self.authoritative.set(active);
+        self.set_without_signal(active, set);
+    }
+
+    fn rollback(&self, set: impl FnOnce(bool)) {
+        self.set_without_signal(self.authoritative.get(), set);
+    }
+
+    fn set_without_signal(&self, active: bool, set: impl FnOnce(bool)) {
+        self.suppress.set(true);
+        self.displayed.set(active);
+        set(active);
+        self.suppress.set(false);
+    }
+}
+
+/// One row of the notifications group, and the window it switches.
+#[derive(Debug)]
+struct NotifyRow {
+    key: String,
+    row: adw::SwitchRow,
+    state: SwitchState,
+}
+
+impl NotifyRow {
+    fn apply_authoritative(&self, active: bool) {
+        self.state
+            .apply_authoritative(active, |active| self.row.set_active(active));
+    }
+
+    fn rollback(&self) {
+        self.state
+            .rollback(|active| self.row.set_active(active));
+    }
+}
+
 impl OptionRow {
     fn apply_authoritative(&self, value: &str) {
         self.selection
@@ -176,9 +247,15 @@ impl ProviderDetail {
             .title("Authentication")
             .build();
         let options = adw::PreferencesGroup::builder().title("Settings").build();
+        let notifications = adw::PreferencesGroup::builder()
+            .title("Notifications")
+            .description("Warn at 80% and 95%, and say when a window resets.")
+            .visible(false)
+            .build();
         let preferences = adw::PreferencesPage::new();
         preferences.add(&authentication);
         preferences.add(&options);
+        preferences.add(&notifications);
         let toolbar = adw::ToolbarView::builder().content(&preferences).build();
         toolbar.add_top_bar(&header);
         let page = adw::NavigationPage::new(&toolbar, &definition.title);
@@ -194,6 +271,8 @@ impl ProviderDetail {
             sign_in: RefCell::new(None),
             external: RefCell::new(None),
             options: RefCell::new(BTreeMap::new()),
+            notifications,
+            notify_rows: RefCell::new(Vec::new()),
             waiting: Cell::new(false),
             on_waiting,
         });
@@ -215,7 +294,7 @@ impl ProviderDetail {
 
     /// Updates daemon-owned state only. Entry text and the option widgets themselves stay
     /// in place, so a poll cannot erase a key being typed.
-    pub(super) fn apply(&self, status: &ProviderStatus) {
+    pub(super) fn apply(self: &Rc<Self>, status: &ProviderStatus) {
         *self.status.borrow_mut() = status.clone();
         self.authentication
             .set_description(Some(&describe(&self.definition, status)));
@@ -251,6 +330,91 @@ impl ProviderDetail {
                 row.apply_authoritative(&option.value);
             }
         }
+        drop(rows);
+        self.apply_notifications(status);
+    }
+
+    /// Redraws the notification switches for the windows the account currently reports.
+    ///
+    /// The window set is whatever the last reading contained and can change between polls,
+    /// so the rows are rebuilt when it does — and left alone when it has not, because
+    /// replacing a row under a pointer that is on it loses the click.
+    fn apply_notifications(self: &Rc<Self>, status: &ProviderStatus) {
+        let wanted = model::notification_rows(status);
+        self.notifications.set_visible(!wanted.is_empty());
+
+        let same_windows = {
+            let held = self.notify_rows.borrow();
+            held.len() == wanted.len()
+                && held
+                    .iter()
+                    .zip(&wanted)
+                    .all(|(held, wanted)| held.key == wanted.key)
+        };
+        if !same_windows {
+            for row in self.notify_rows.borrow_mut().drain(..) {
+                self.notifications.remove(&row.row);
+            }
+            let rebuilt: Vec<Rc<NotifyRow>> = wanted
+                .iter()
+                .map(|wanted| self.build_notify_row(&wanted.key, &wanted.title, wanted.enabled))
+                .collect();
+            for row in &rebuilt {
+                self.notifications.add(&row.row);
+            }
+            *self.notify_rows.borrow_mut() = rebuilt;
+            return;
+        }
+
+        let held = self.notify_rows.borrow();
+        for (held, wanted) in held.iter().zip(&wanted) {
+            held.apply_authoritative(wanted.enabled);
+        }
+    }
+
+    fn build_notify_row(self: &Rc<Self>, key: &str, title: &str, enabled: bool) -> Rc<NotifyRow> {
+        // Titled by the window, not by its key: the key is what the daemon is told, and
+        // showing it here would put an identifier in front of somebody who has the card's
+        // own name for the same thing two clicks away.
+        let row = adw::SwitchRow::builder()
+            .title(title)
+            .active(enabled)
+            .build();
+        let notify_row = Rc::new(NotifyRow {
+            key: key.to_owned(),
+            row,
+            state: SwitchState::new(enabled),
+        });
+
+        let watched = Rc::clone(&notify_row);
+        notify_row.row.connect_active_notify({
+            let weak = Rc::downgrade(self);
+            move |row| {
+                let Some(enabled) = watched.state.toggled(row.is_active()) else {
+                    return;
+                };
+                let Some(detail) = weak.upgrade() else {
+                    return;
+                };
+                let status = detail.status.borrow();
+                let provider = status.provider.clone();
+                let account = status.account.clone();
+                drop(status);
+                let window = watched.key.clone();
+                let watched = Rc::clone(&watched);
+                glib::spawn_future_local(async move {
+                    if let Err(error) = detail
+                        .proxy
+                        .set_window_notify(&provider, &account, &window, enabled)
+                        .await
+                    {
+                        watched.rollback();
+                        detail.toast(&reason(&error));
+                    }
+                });
+            }
+        });
+        notify_row
     }
 
     fn build_authentication(self: &Rc<Self>) {
@@ -565,7 +729,7 @@ impl ProviderDetail {
         }
     }
 
-    fn set_waiting(&self, provider: &str, account: &str, url: Option<&str>) -> bool {
+    fn set_waiting(self: &Rc<Self>, provider: &str, account: &str, url: Option<&str>) -> bool {
         if !(self.on_waiting)(provider.into(), account.into(), url.is_some()) {
             return false;
         }
@@ -741,5 +905,39 @@ mod tests {
             Some("bigmodel-cn".to_owned())
         );
         assert_eq!(selection.selection_changed(0), Some("global".to_owned()));
+    }
+
+    #[test]
+    fn flicking_a_switch_requests_the_write_it_shows() {
+        let state = SwitchState::new(false);
+        assert_eq!(state.toggled(true), Some(true));
+        assert_eq!(state.toggled(false), Some(false));
+    }
+
+    #[test]
+    fn an_authoritative_switch_update_changes_the_display_without_requesting_a_write() {
+        let state = SwitchState::new(false);
+        let requested = RefCell::new(None);
+
+        state.apply_authoritative(true, |active| {
+            *requested.borrow_mut() = state.toggled(active);
+        });
+
+        assert!(state.displayed());
+        assert_eq!(*requested.borrow(), None);
+    }
+
+    #[test]
+    fn a_rejected_switch_write_restores_the_last_authoritative_state() {
+        let state = SwitchState::new(false);
+        assert_eq!(state.toggled(true), Some(true));
+        let requested = RefCell::new(None);
+
+        state.rollback(|active| {
+            *requested.borrow_mut() = state.toggled(active);
+        });
+
+        assert!(!state.displayed());
+        assert_eq!(*requested.borrow(), None);
     }
 }

@@ -232,7 +232,82 @@ impl History {
             ",
             params![cutoff, THINNED_BUCKET_SECS],
         )?;
+
+        // Notices are state, not history: once the segment they deduplicate against has
+        // been closed for longer than anything is kept at full resolution, no reading can
+        // ever land in it again and the row can only grow the file.
+        self.connection.execute(
+            r"
+            DELETE FROM notice
+            WHERE EXISTS (
+                    SELECT 1 FROM segment
+                    WHERE segment.provider = notice.provider
+                      AND segment.account  = notice.account
+                      AND segment.window   = notice.window
+                      AND segment.segment  = notice.segment
+                      AND segment.ended_at IS NOT NULL
+                      AND segment.ended_at < ?1
+            )
+            ",
+            params![cutoff],
+        )?;
+
         Ok(removed)
+    }
+
+    /// Whether a notification of this kind has already gone out for this segment.
+    ///
+    /// Kinds are the daemon's vocabulary rather than the database's: what is stored is
+    /// whatever string the caller deduplicates on.
+    pub fn notice_sent(
+        &self,
+        provider: &str,
+        account: &str,
+        window: &WindowKey,
+        segment: i64,
+        kind: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT 1 FROM notice
+                 WHERE provider = ?1 AND account = ?2 AND window = ?3
+                   AND segment = ?4 AND kind = ?5",
+                params![provider, account, window.as_str(), segment, kind],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Records that a notification of this kind went out for this segment.
+    ///
+    /// Written **after** the notification server accepted it, never before: a row written
+    /// ahead of a delivery that then failed is a warning the user never sees and the
+    /// daemon never retries. Repeating a record is not an error — the first time stands.
+    pub fn record_notice(
+        &mut self,
+        provider: &str,
+        account: &str,
+        window: &WindowKey,
+        segment: i64,
+        kind: &str,
+        sent_at: Timestamp,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO notice
+                 (provider, account, window, segment, kind, sent_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                provider,
+                account,
+                window.as_str(),
+                segment,
+                kind,
+                sent_at.as_unix()
+            ],
+        )?;
+        Ok(())
     }
 
     /// The segment currently open for a window, if the window has ever been seen.
@@ -725,5 +800,131 @@ mod tests {
             assert_eq!(report.windows[0].boundary, None);
         }
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_notice_nobody_recorded_has_not_been_sent() {
+        let history = history();
+        assert!(
+            !history
+                .notice_sent("test", "default", &key(), 1, "threshold-80")
+                .expect("looked up")
+        );
+    }
+
+    #[test]
+    fn a_recorded_notice_reads_back_as_sent() {
+        let mut history = history();
+        history
+            .record_notice("test", "default", &key(), 1, "threshold-80", at(0))
+            .expect("recorded");
+        assert!(
+            history
+                .notice_sent("test", "default", &key(), 1, "threshold-80")
+                .expect("looked up")
+        );
+    }
+
+    #[test]
+    fn one_kind_of_notice_says_nothing_about_another() {
+        let mut history = history();
+        history
+            .record_notice("test", "default", &key(), 1, "threshold-80", at(0))
+            .expect("recorded");
+        assert!(
+            !history
+                .notice_sent("test", "default", &key(), 1, "threshold-95")
+                .expect("looked up")
+        );
+    }
+
+    #[test]
+    fn the_next_segment_arms_the_same_notice_again() {
+        let mut history = history();
+        history
+            .record_notice("test", "default", &key(), 1, "threshold-80", at(0))
+            .expect("recorded");
+        assert!(
+            !history
+                .notice_sent("test", "default", &key(), 2, "threshold-80")
+                .expect("looked up")
+        );
+    }
+
+    #[test]
+    fn recording_the_same_notice_twice_is_not_an_error() {
+        let mut history = history();
+        history
+            .record_notice("test", "default", &key(), 1, "reset", at(0))
+            .expect("recorded");
+        history
+            .record_notice("test", "default", &key(), 1, "reset", at(POLL))
+            .expect("recorded again");
+        assert!(
+            history
+                .notice_sent("test", "default", &key(), 1, "reset")
+                .expect("looked up")
+        );
+    }
+
+    /// The point of filing notices in the database rather than in the daemon's memory: a
+    /// restart must not fire the eighty-percent warning at somebody a second time.
+    #[test]
+    fn a_recorded_notice_survives_reopening_the_database() {
+        let directory =
+            std::env::temp_dir().join(format!("tidemark-notice-{}", std::process::id()));
+        let path = directory.join("history.db");
+        let _ = std::fs::remove_dir_all(&directory);
+
+        {
+            let mut history = History::open(&path).expect("opened");
+            history
+                .record_notice("test", "default", &key(), 1, "threshold-80", at(0))
+                .expect("recorded");
+        }
+        {
+            let history = History::open(&path).expect("reopened");
+            assert!(
+                history
+                    .notice_sent("test", "default", &key(), 1, "threshold-80")
+                    .expect("looked up")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn thinning_forgets_notices_of_segments_that_closed_long_ago() {
+        let mut history = history();
+        // Segment one opens, then rolls over, which closes it at the second reading.
+        history
+            .ingest(&snapshot(0, 96.0, Some(HOUR)))
+            .expect("ingested");
+        history
+            .ingest(&snapshot(POLL, 1.0, Some(HOUR + 5 * HOUR)))
+            .expect("ingested");
+        history
+            .record_notice("test", "default", &key(), 1, "threshold-95", at(0))
+            .expect("recorded");
+        history
+            .record_notice("test", "default", &key(), 2, "reset", at(POLL))
+            .expect("recorded");
+
+        history
+            .thin(at(POLL + FULL_RESOLUTION_SECS + 1))
+            .expect("thinned");
+
+        assert!(
+            !history
+                .notice_sent("test", "default", &key(), 1, "threshold-95")
+                .expect("looked up"),
+            "a notice for a segment that closed ninety days ago is state nobody can use"
+        );
+        assert!(
+            history
+                .notice_sent("test", "default", &key(), 2, "reset")
+                .expect("looked up"),
+            "the segment still open must keep its notices"
+        );
     }
 }

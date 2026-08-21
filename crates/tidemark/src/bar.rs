@@ -28,14 +28,9 @@ use gtk::cairo;
 use gtk::gdk::RGBA;
 use gtk::prelude::*;
 
-/// Consumption at which the bar stops being plain accent-coloured.
-///
-/// The same numbers as the notification thresholds in `CONTEXT.md` § Notifications, and
-/// deliberately so: the colour on the card and the notification that interrupts you should
-/// never disagree about when a window became worth worrying about.
-pub const WARNING_AT: f64 = 80.0;
-/// Consumption at which the bar turns to the error colour. See [`WARNING_AT`].
-pub const DANGER_AT: f64 = 95.0;
+/// Consumption at which the bar stops being plain accent-coloured, and at which the daemon
+/// fires the first notification. Defined once, in the crate both processes share.
+pub use tidemark_types::{DANGER_AT, WARNING_AT};
 
 /// Style class every bar carries; `style.rs` gives it its fill colour.
 const CLASS_BAR: &str = "quota-bar";

@@ -12,6 +12,7 @@
 
 mod engine;
 mod keyring;
+mod notify;
 mod registry;
 mod scheduler;
 mod service;
@@ -172,7 +173,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let mut engine = Engine::new(accounts, history, secrets, updates, config_path);
+    // The daemon's own session-bus connection carries the notifications too: it is already
+    // open, and org.freedesktop.Notifications is on the same bus as everything else here.
+    let notifier = Arc::new(notify::Desktop::new(connection.clone()));
+    let mut engine = Engine::new(
+        accounts,
+        history,
+        secrets,
+        updates,
+        config_path,
+        notifier as Arc<dyn notify::Notifier>,
+    );
     // Before the first announcement, so a client connecting immediately is told whether
     // each account has a credential rather than having to wait a poll to find out.
     engine.probe_credentials(None).await;

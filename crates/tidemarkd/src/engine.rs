@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tidemark_core::config::Config;
 use tidemark_core::providers::{Credential, Provider, ProviderError};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
-use tidemark_core::storage::History;
+use tidemark_core::storage::{History, IngestReport};
 use tidemark_types::{
     AccountId, CredentialKind, ProviderId, ProviderOption, ProviderState, ProviderStatus, Snapshot,
     Timestamp, WindowStatus,
@@ -23,6 +23,7 @@ use tidemark_types::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
+use crate::notify::{self, Notifier};
 use crate::scheduler::{self, Situation};
 
 /// How often the history is thinned. Thinning only touches points older than ninety days,
@@ -92,6 +93,19 @@ pub enum Command {
         name: String,
         /// One of the option's declared values.
         value: String,
+        /// Completion sent after persistence and in-memory state agree.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Switch one window's notifications on or off, in the same queue as topology writes.
+    SetWindowNotify {
+        /// Stable provider slug.
+        provider: String,
+        /// Stable account name.
+        account: String,
+        /// The window key, as published in the account's status.
+        window: String,
+        /// Whether the user wants to hear about it.
+        enabled: bool,
         /// Completion sent after persistence and in-memory state agree.
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -227,6 +241,12 @@ impl Account {
         self
     }
 
+    /// Replaces the set of windows this account notifies about.
+    pub fn with_notify(mut self, windows: Vec<String>) -> Self {
+        self.status.notify = windows;
+        self
+    }
+
     /// Which provider this account belongs to.
     #[cfg_attr(
         not(test),
@@ -271,6 +291,7 @@ pub struct Engine {
     /// environment each time, so the loop can be run over a settings file of a test's own.
     config_path: std::path::PathBuf,
     last_thin: Option<Instant>,
+    notifier: Arc<dyn Notifier>,
 }
 
 impl Engine {
@@ -281,6 +302,7 @@ impl Engine {
         secrets: Arc<dyn Secrets>,
         updates: mpsc::Sender<Publication>,
         config_path: std::path::PathBuf,
+        notifier: Arc<dyn Notifier>,
     ) -> Self {
         Self {
             accounts,
@@ -289,6 +311,7 @@ impl Engine {
             updates,
             config_path,
             last_thin: None,
+            notifier,
         }
     }
 
@@ -428,6 +451,12 @@ impl Engine {
                         let result = self.set_option(&provider, &account, &name, &value).await;
                         let _ = reply.send(result);
                     }
+                    Some(Command::SetWindowNotify { provider, account, window, enabled, reply }) => {
+                        let result = self
+                            .set_window_notify(&provider, &account, &window, enabled)
+                            .await;
+                        let _ = reply.send(result);
+                    }
                     Some(Command::Shutdown) | None => return,
                 },
             }
@@ -558,7 +587,7 @@ impl Engine {
     async fn apply(&mut self, index: usize, result: Result<Snapshot, ProviderError>) {
         match result {
             Ok(snapshot) => {
-                self.record(index, &snapshot);
+                self.record(index, &snapshot).await;
                 let account = &mut self.accounts[index];
                 account.failures = 0;
                 account.retry_after = None;
@@ -591,7 +620,7 @@ impl Engine {
     /// A database failure is logged and swallowed on purpose: history is what the forecast
     /// is built from, but a daemon that stopped publishing numbers because it could not
     /// write them down would turn a recoverable disk problem into a blank interface.
-    fn record(&mut self, index: usize, snapshot: &Snapshot) {
+    async fn record(&mut self, index: usize, snapshot: &Snapshot) {
         let moved = consumption_moved(&self.accounts[index].status.windows, snapshot);
 
         match self.history.ingest(snapshot) {
@@ -613,6 +642,7 @@ impl Engine {
                     stale = report.stale.len(),
                     "reading filed"
                 );
+                self.raise_notices(index, snapshot, &report).await;
             }
             Err(error) => tracing::error!(
                 provider = %snapshot.provider,
@@ -625,6 +655,123 @@ impl Engine {
         if moved || account.last_change_at.is_none() {
             account.last_change_at = Some(snapshot.captured_at);
         }
+    }
+
+    /// Tells the user what this reading changed, for the windows they asked to hear about.
+    ///
+    /// Runs after the reading is filed, because the segment a notification deduplicates
+    /// against is what filing it decided. A reading the history refused is not notified
+    /// about at all: without the report there is no segment to key the dedup on, and a
+    /// warning that cannot be deduplicated is a warning every five minutes.
+    async fn raise_notices(&mut self, index: usize, snapshot: &Snapshot, report: &IngestReport) {
+        let opted = self.accounts[index].status.notify.clone();
+        if opted.is_empty() {
+            return;
+        }
+        let provider = snapshot.provider.as_str().to_owned();
+        let account = snapshot.account.as_str().to_owned();
+
+        for outcome in &report.windows {
+            if !opted.iter().any(|key| key == outcome.key.as_str()) {
+                continue;
+            }
+            let Some(window) = snapshot
+                .windows
+                .iter()
+                .find(|window| window.key == outcome.key)
+            else {
+                continue;
+            };
+
+            let mut already = Vec::new();
+            for kind in notify::Kind::ALL {
+                match self.history.notice_sent(
+                    &provider,
+                    &account,
+                    &outcome.key,
+                    outcome.segment,
+                    kind.as_str(),
+                ) {
+                    Ok(true) => already.push(kind),
+                    Ok(false) => {}
+                    // Without the dedup table there is nothing to bound repetition, and a
+                    // notification every poll forever would be worse than a missed one.
+                    Err(error) => {
+                        tracing::error!(%error, "cannot read which notifications went out");
+                        return;
+                    }
+                }
+            }
+
+            for decided in notify::decide(
+                window.used_percent,
+                outcome.boundary.is_some(),
+                &already,
+            ) {
+                let notice = notify::compose(&provider, window, decided.kind, snapshot.captured_at);
+                if let Err(error) = self.notifier.send(&notice).await {
+                    // Nothing is recorded, so the next poll says it again. The daemon can
+                    // easily outlive the session it started in.
+                    tracing::debug!(provider = %provider, %error, "notification not delivered");
+                    break;
+                }
+                tracing::info!(provider = %provider, window = %outcome.key, kind = decided.kind.as_str(), "notified");
+                for kind in decided.settles {
+                    if let Err(error) = self.history.record_notice(
+                        &provider,
+                        &account,
+                        &outcome.key,
+                        outcome.segment,
+                        kind.as_str(),
+                        snapshot.captured_at,
+                    ) {
+                        tracing::error!(%error, "could not record a delivered notification");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Switches one window's notifications on or off as a serialized configuration change.
+    ///
+    /// Switching **on** is checked against the windows the account currently reports, so a
+    /// typo over D-Bus is an error rather than a line in the settings file that never does
+    /// anything. Switching **off** is not: a provider that has temporarily stopped
+    /// reporting a window must not also trap the user into hearing about it.
+    pub async fn set_window_notify(
+        &mut self,
+        provider: &str,
+        account: &str,
+        window: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let Some(index) = self.accounts.iter().position(|configured| {
+            configured.provider.as_str() == provider && configured.account.as_str() == account
+        }) else {
+            return Err(format!("account {provider}/{account} is not configured"));
+        };
+        if enabled
+            && !self.accounts[index]
+                .status
+                .windows
+                .iter()
+                .any(|published| published.key == window)
+        {
+            return Err(format!("{provider} is not reporting a window called {window}"));
+        }
+
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        config
+            .set_window_notify(provider, window, enabled)
+            .map_err(|error| error.to_string())?;
+        self.accounts[index].status.notify = config
+            .notify_windows(provider)
+            .map_err(|error| error.to_string())?;
+        let _ = self
+            .updates
+            .send(Publication::Changed(self.accounts[index].status.clone()))
+            .await;
+        Ok(())
     }
 
     /// Chooses the next poll time and publishes the account.
@@ -701,6 +848,7 @@ impl Engine {
             if let Some(config) = &config {
                 account.status.options =
                     crate::registry::options(account.provider.as_str(), config);
+                account.status.notify = crate::registry::notify(account.provider.as_str(), config);
             }
             if account.rebuildable() {
                 account.client = None;
@@ -831,6 +979,7 @@ fn consumption_moved(published: &[WindowStatus], snapshot: &Snapshot) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notify::{Notice, NotifyError, Notifier};
     use std::sync::Mutex;
     use tidemark_core::providers::BoxFuture;
     use tidemark_types::{Window, WindowKey, WindowLength};
@@ -923,6 +1072,24 @@ mod tests {
         }
     }
 
+    /// Consecutive readings, five minutes apart. A reading whose timestamp does not move
+    /// is filed as a repeat of the one before it and never reaches the notifier, so tests
+    /// that poll twice have to say which poll is which.
+    fn reading(step: i64, used: f64, resets_in: i64) -> Snapshot {
+        let captured_at = Timestamp::now().saturating_add_seconds(step * 300 - 3600);
+        Snapshot {
+            captured_at,
+            windows: vec![Window {
+                key: WindowKey::for_length(WindowLength::from_secs(18_000).expect("nonzero")),
+                title: "5 hours".into(),
+                used_percent: used,
+                resets_at: Some(captured_at.saturating_add_seconds(resets_in)),
+                length: WindowLength::from_secs(18_000),
+            }],
+            ..snapshot(used, resets_in)
+        }
+    }
+
     fn snapshot(used: f64, resets_in: i64) -> Snapshot {
         let now = Timestamp::now();
         Snapshot {
@@ -944,12 +1111,54 @@ mod tests {
         engine: Engine,
         updates: mpsc::Receiver<Publication>,
         config_path: std::path::PathBuf,
+        notices: Arc<Recorder>,
+    }
+
+    /// A notification server that keeps what it was handed, and can be told to refuse.
+    #[derive(Debug, Default)]
+    struct Recorder {
+        sent: Mutex<Vec<Notice>>,
+        refusals: Mutex<usize>,
+    }
+
+    impl Recorder {
+        fn refusing(times: usize) -> Arc<Self> {
+            Arc::new(Self {
+                sent: Mutex::new(Vec::new()),
+                refusals: Mutex::new(times),
+            })
+        }
+
+        fn summaries(&self) -> Vec<String> {
+            self.sent
+                .lock()
+                .expect("no test panics while holding this")
+                .iter()
+                .map(|notice| notice.summary.clone())
+                .collect()
+        }
+    }
+
+    impl Notifier for Recorder {
+        fn send(&self, notice: &Notice) -> BoxFuture<'_, Result<(), NotifyError>> {
+            let mut refusals = self.refusals.lock().expect("no test panics here");
+            if *refusals > 0 {
+                *refusals -= 1;
+                return Box::pin(async { Err(NotifyError::Unreachable) });
+            }
+            self.sent
+                .lock()
+                .expect("no test panics here")
+                .push(notice.clone());
+            Box::pin(async { Ok(()) })
+        }
     }
 
     impl Harness {
         fn new(accounts: Vec<Account>, secrets: Arc<dyn Secrets>) -> Self {
             let (tx, rx) = mpsc::channel(64);
             let config_path = std::env::temp_dir().join("tidemark-engine-tests-absent.toml");
+            let notices = Arc::new(Recorder::default());
             Self {
                 engine: Engine::new(
                     accounts,
@@ -957,9 +1166,11 @@ mod tests {
                     secrets,
                     tx,
                     config_path.clone(),
+                    Arc::clone(&notices) as Arc<dyn Notifier>,
                 ),
                 updates: rx,
                 config_path,
+                notices,
             }
         }
 
@@ -980,6 +1191,7 @@ mod tests {
             let secrets = unlocked();
             let accounts = crate::registry::accounts(&secrets, &config).expect("accounts build");
             let (tx, rx) = mpsc::channel(64);
+            let notices = Arc::new(Recorder::default());
             Self {
                 engine: Engine::new(
                     accounts,
@@ -987,9 +1199,11 @@ mod tests {
                     secrets,
                     tx,
                     config_path.clone(),
+                    Arc::clone(&notices) as Arc<dyn Notifier>,
                 ),
                 updates: rx,
                 config_path,
+                notices,
             }
         }
 
@@ -1028,6 +1242,7 @@ mod tests {
     /// whatever the developer running the suite happens to have configured.
     fn harness_with_config(accounts: Vec<Account>, config: std::path::PathBuf) -> Harness {
         let (tx, rx) = mpsc::channel(64);
+        let notices = Arc::new(Recorder::default());
         Harness {
             engine: Engine::new(
                 accounts,
@@ -1035,9 +1250,11 @@ mod tests {
                 unlocked(),
                 tx,
                 config.clone(),
+                Arc::clone(&notices) as Arc<dyn Notifier>,
             ),
             updates: rx,
             config_path: config,
+            notices,
         }
     }
 
@@ -1096,6 +1313,7 @@ mod tests {
             secrets,
             updates,
             config_path.clone(),
+            Arc::new(Recorder::default()) as Arc<dyn Notifier>,
         );
         assert!(
             engine.accounts[0].client.is_some(),
@@ -1141,6 +1359,7 @@ mod tests {
             secrets,
             updates,
             config_path.clone(),
+            Arc::new(Recorder::default()) as Arc<dyn Notifier>,
         );
         let (commands, mut command_queue) = mpsc::channel(4);
         let running = tokio::spawn(async move {
@@ -1528,5 +1747,197 @@ mod tests {
         gone.windows.clear();
         assert!(consumption_moved(&published, &gone));
         assert!(consumption_moved(&[], &snapshot(10.0, 3600)));
+    }
+
+    /// The opt-in is the whole point of the switch: fifteen windows announcing themselves
+    /// at eighty percent would be fifteen interruptions nobody asked for.
+    #[tokio::test]
+    async fn a_window_nobody_opted_into_is_never_notified_about() {
+        let mut harness = with_provider(Fake::new(vec![Ok(snapshot(96.0, 3600))]));
+        harness.engine.poll_due(Instant::now()).await;
+        assert!(harness.notices.summaries().is_empty());
+    }
+
+    fn notifying(provider: Arc<dyn Provider>) -> Harness {
+        Harness::new(
+            vec![Account::with_client(provider).with_notify(vec!["w18000".to_owned()])],
+            unlocked(),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_opted_in_window_warns_once_and_not_again() {
+        let mut harness = notifying(Fake::new(vec![
+            Ok(reading(0, 85.0, 3600)),
+            Ok(reading(1, 86.0, 3600)),
+        ]));
+        harness.engine.poll_due(Instant::now()).await;
+        harness.poll_again().await;
+
+        let summaries = harness.notices.summaries();
+        assert_eq!(summaries.len(), 1, "{summaries:?}");
+        assert!(summaries[0].starts_with("85% used"), "{summaries:?}");
+    }
+
+    #[tokio::test]
+    async fn crossing_the_second_threshold_warns_again() {
+        let mut harness = notifying(Fake::new(vec![
+            Ok(reading(0, 85.0, 3600)),
+            Ok(reading(1, 96.0, 3600)),
+        ]));
+        harness.engine.poll_due(Instant::now()).await;
+        harness.poll_again().await;
+
+        let summaries = harness.notices.summaries();
+        assert_eq!(summaries.len(), 2, "{summaries:?}");
+        assert!(summaries[1].starts_with("96% used"), "{summaries:?}");
+    }
+
+    /// A desktop that is not listening yet — the daemon may well have started before the
+    /// session did. Recording the row before delivery would lose the warning for good.
+    #[tokio::test]
+    async fn a_warning_the_desktop_refused_is_tried_again() {
+        let notices = Recorder::refusing(1);
+        let (tx, rx) = mpsc::channel(64);
+        let mut harness = Harness {
+            engine: Engine::new(
+                vec![
+                    Account::with_client(Fake::new(vec![
+                        Ok(reading(0, 85.0, 3600)),
+                        Ok(reading(1, 85.0, 3600)),
+                        Ok(reading(2, 85.0, 3600)),
+                    ]))
+                    .with_notify(vec!["w18000".to_owned()]),
+                ],
+                History::in_memory().expect("an in-memory database opens"),
+                unlocked(),
+                tx,
+                std::env::temp_dir().join("tidemark-engine-retry-absent.toml"),
+                Arc::clone(&notices) as Arc<dyn Notifier>,
+            ),
+            updates: rx,
+            config_path: std::env::temp_dir().join("tidemark-engine-retry-absent.toml"),
+            notices: Arc::clone(&notices),
+        };
+
+        harness.engine.poll_due(Instant::now()).await;
+        assert!(harness.notices.summaries().is_empty(), "the first attempt was refused");
+        harness.poll_again().await;
+        assert_eq!(harness.notices.summaries().len(), 1, "the retry landed");
+        harness.poll_again().await;
+        assert_eq!(
+            harness.notices.summaries().len(),
+            1,
+            "and once it has landed it is not repeated"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rollover_of_an_opted_in_window_is_announced() {
+        let mut harness = notifying(Fake::new(vec![
+            Ok(reading(0, 96.0, 60)),
+            Ok(reading(1, 1.0, 5 * 3600)),
+        ]));
+        harness.engine.poll_due(Instant::now()).await;
+        harness.poll_again().await;
+
+        let summaries = harness.notices.summaries();
+        assert_eq!(summaries.len(), 2, "{summaries:?}");
+        assert!(summaries[1].starts_with("Limit reset"), "{summaries:?}");
+    }
+
+    /// The acceptance criterion of the step: the dedup outlives the process holding it.
+    #[tokio::test]
+    async fn a_restart_does_not_repeat_a_warning_already_delivered() {
+        let directory =
+            std::env::temp_dir().join(format!("tidemark-engine-restart-{}", std::process::id()));
+        let path = directory.join("history.db");
+        let _ = std::fs::remove_dir_all(&directory);
+        let config = std::env::temp_dir().join("tidemark-engine-restart-absent.toml");
+
+        let notices = Arc::new(Recorder::default());
+        for _ in 0..2 {
+            let (tx, _rx) = mpsc::channel(64);
+            let mut engine = Engine::new(
+                vec![
+                    Account::with_client(Fake::new(vec![Ok(snapshot(85.0, 3600))]))
+                        .with_notify(vec!["w18000".to_owned()]),
+                ],
+                History::open(&path).expect("history opens"),
+                unlocked(),
+                tx,
+                config.clone(),
+                Arc::clone(&notices) as Arc<dyn Notifier>,
+            );
+            engine.poll_due(Instant::now()).await;
+        }
+
+        assert_eq!(
+            notices.summaries().len(),
+            1,
+            "the second daemon read the row the first one wrote"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[tokio::test]
+    async fn switching_a_window_on_persists_it_and_publishes_it() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-notify-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let mut harness = harness_with_config(
+            vec![Account::with_client(Fake::new(vec![Ok(reading(0, 42.0, 3600))]))],
+            config_path.clone(),
+        );
+        harness.engine.poll_due(Instant::now()).await;
+
+        harness
+            .engine
+            .set_window_notify("fake", "default", "w18000", true)
+            .await
+            .expect("switched on");
+
+        assert_eq!(
+            Config::at(config_path)
+                .expect("reloaded")
+                .notify_windows("fake")
+                .expect("read"),
+            vec!["w18000".to_owned()],
+            "the switch outlives the daemon"
+        );
+        assert_eq!(
+            harness.engine.accounts()[0].status().notify,
+            vec!["w18000".to_owned()],
+            "and the clients are told without waiting for a poll"
+        );
+    }
+
+    /// A typo over `busctl` is an error rather than a line in the settings file that never
+    /// does anything.
+    #[tokio::test]
+    async fn switching_on_a_window_the_account_does_not_report_is_refused() {
+        let mut harness = with_provider(Fake::new(vec![Ok(reading(0, 42.0, 3600))]));
+        harness.engine.poll_due(Instant::now()).await;
+        assert!(
+            harness
+                .engine
+                .set_window_notify("fake", "default", "w604800", true)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_a_window_on_for_an_account_nobody_configured_is_refused() {
+        let mut harness = Harness::empty("notify-unknown").await;
+        assert!(
+            harness
+                .engine
+                .set_window_notify("zai", "default", "w18000", true)
+                .await
+                .is_err()
+        );
     }
 }

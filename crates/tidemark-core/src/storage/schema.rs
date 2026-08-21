@@ -6,7 +6,7 @@
 use rusqlite::Connection;
 
 /// The schema version this build expects.
-pub const CURRENT_VERSION: i64 = 1;
+pub const CURRENT_VERSION: i64 = 2;
 
 const V1: &str = r"
 CREATE TABLE point (
@@ -53,12 +53,31 @@ CREATE TABLE window_state (
 ) WITHOUT ROWID;
 ";
 
+/// Which notifications have already gone out, so that a restart does not warn somebody a
+/// second time about a window they have already been warned about. The segment is in the
+/// key because that is the unit a warning is fired once per — see `segment.rs`.
+const V2: &str = r"
+CREATE TABLE notice (
+    provider TEXT    NOT NULL,
+    account  TEXT    NOT NULL,
+    window   TEXT    NOT NULL,
+    segment  INTEGER NOT NULL,
+    kind     TEXT    NOT NULL,
+    sent_at  INTEGER NOT NULL,
+    PRIMARY KEY (provider, account, window, segment, kind)
+) WITHOUT ROWID;
+";
+
 /// Brings a connection up to [`CURRENT_VERSION`].
 pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
     if version < 1 {
         connection.execute_batch(V1)?;
+    }
+
+    if version < 2 {
+        connection.execute_batch(V2)?;
     }
 
     if version != CURRENT_VERSION {

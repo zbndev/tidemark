@@ -2650,6 +2650,7 @@ name = "tidemarkd"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "thiserror",
  "tidemark-core",
  "tidemark-types",
  "tokio",

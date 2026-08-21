@@ -78,6 +78,15 @@ pub trait Daemon {
         value: &str,
     ) -> zbus::Result<()>;
 
+    /// Switches notifications for one of an account's windows on or off.
+    fn set_window_notify(
+        &self,
+        provider: &str,
+        account: &str,
+        window: &str,
+        enabled: bool,
+    ) -> zbus::Result<()>;
+
     /// What the daemon on the other end is.
     #[zbus(property)]
     fn version(&self) -> zbus::Result<String>;
@@ -97,6 +106,10 @@ pub trait Daemon {
 /// status — and that is deliberate rather than an oversight worth boxing away: this value
 /// is constructed a handful of times a minute and consumed immediately.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "constructed a handful of times a minute and consumed immediately; boxing would buy nothing"
+)]
 pub enum Update {
     /// The daemon answered. Carries everything it knows, and the handle to ask it for more.
     Connected(

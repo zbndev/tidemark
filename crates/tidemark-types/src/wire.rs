@@ -307,6 +307,12 @@ pub struct ProviderStatus {
     pub credential_hint: Option<String>,
     /// The provider's own settings, with their current values and alternatives.
     pub options: Vec<ProviderOption>,
+    /// Keys of the windows whose notifications the user has switched on.
+    ///
+    /// Empty is the state a freshly added provider is in: notifications are opted into per
+    /// window, because five providers reporting three windows each would otherwise be
+    /// fifteen sources of interruption nobody asked for. See `CONTEXT.md` § Notifications.
+    pub notify: Vec<String>,
 }
 
 impl ProviderStatus {
@@ -325,6 +331,7 @@ impl ProviderStatus {
             has_credential: None,
             credential_hint: None,
             options: Vec::new(),
+            notify: Vec::new(),
         }
     }
 
