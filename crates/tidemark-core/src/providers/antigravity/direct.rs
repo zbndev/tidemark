@@ -182,15 +182,18 @@ fn counter_title(counter: &str) -> String {
     }
 }
 
-fn counter_name(model_provider: Option<&str>, api_provider: Option<&str>) -> String {
-    match model_provider.or(api_provider).map(str::trim) {
-        Some("MODEL_PROVIDER_GOOGLE" | "API_PROVIDER_GOOGLE_GEMINI") => "google".to_owned(),
-        Some("MODEL_PROVIDER_ANTHROPIC" | "API_PROVIDER_ANTHROPIC_VERTEX") => {
-            "anthropic".to_owned()
-        }
-        Some("MODEL_PROVIDER_OPENAI" | "API_PROVIDER_OPENAI_VERTEX") => "openai".to_owned(),
-        Some(raw) if !raw.is_empty() => raw.to_ascii_lowercase(),
-        _ => "default".to_owned(),
+fn counter_name(model_provider: Option<&str>, api_provider: Option<&str>) -> Option<&'static str> {
+    model_provider
+        .and_then(recognized_counter)
+        .or_else(|| api_provider.and_then(recognized_counter))
+}
+
+fn recognized_counter(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        "MODEL_PROVIDER_GOOGLE" | "API_PROVIDER_GOOGLE_GEMINI" => Some("google"),
+        "MODEL_PROVIDER_ANTHROPIC" | "API_PROVIDER_ANTHROPIC_VERTEX" => Some("anthropic"),
+        "MODEL_PROVIDER_OPENAI" | "API_PROVIDER_OPENAI_VERTEX" => Some("openai"),
+        _ => None,
     }
 }
 
@@ -427,8 +430,14 @@ impl ParsedQuota {
             flat.quota.window_label.as_deref(),
         )
         .or(flat.container_window);
+        let counter = counter_name(flat.model_provider.as_deref(), flat.api_provider.as_deref())
+            .ok_or_else(|| {
+                ProviderError::malformed(format!(
+                    "{what} has neither a recognized modelProvider nor apiProvider"
+                ))
+            })?;
         Ok(Self {
-            counter: counter_name(flat.model_provider.as_deref(), flat.api_provider.as_deref()),
+            counter: counter.to_owned(),
             tier: nonempty(flat.tier.as_deref())
                 .map(str::to_ascii_lowercase)
                 .unwrap_or_else(|| "default".to_owned()),
@@ -658,6 +667,53 @@ mod tests {
         assert_eq!(snapshot.windows[0].key.as_str(), "google/w86400");
         assert_eq!(snapshot.windows[0].used_percent, 75.0);
         assert_eq!(snapshot.windows[0].resets_at, None);
+    }
+
+    #[test]
+    fn provider_identity_uses_recognized_api_when_model_provider_is_unspecified_or_unknown() {
+        let body = r#"{"models":{"claude":{"modelProvider":"MODEL_PROVIDER_UNSPECIFIED","apiProvider":"API_PROVIDER_ANTHROPIC_VERTEX","quotaInfo":{"remainingFraction":0.5,"windowId":"weekly"}},"gpt":{"modelProvider":"MODEL_PROVIDER_VENDOR","apiProvider":"API_PROVIDER_OPENAI_VERTEX","quotaInfo":{"remainingFraction":0.4,"windowId":"weekly"}}}}"#;
+        let snapshot = parse(
+            body,
+            Timestamp::from_unix(1_787_270_400).expect("plausible"),
+        )
+        .expect("recognized API providers parse");
+
+        let keys: Vec<_> = snapshot
+            .windows
+            .iter()
+            .map(|window| window.key.as_str())
+            .collect();
+        assert_eq!(keys, ["anthropic/w604800", "openai/w604800"]);
+    }
+
+    #[test]
+    fn provider_identity_rejects_missing_provider_instead_of_merging_models() {
+        let body = r#"{"models":{"one":{"weeklyQuotaInfo":{"remainingFraction":0.8}},"two":{"weeklyQuotaInfo":{"remainingFraction":0.1}}}}"#;
+        let error = parse(
+            body,
+            Timestamp::from_unix(1_787_270_400).expect("plausible"),
+        )
+        .expect_err("missing provider identity must fail");
+
+        assert!(matches!(
+            error,
+            crate::providers::ProviderError::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn provider_identity_rejects_unknown_provider_instead_of_creating_arbitrary_counters() {
+        let body = r#"{"models":{"one":{"modelProvider":"MODEL_PROVIDER_VENDOR_A","weeklyQuotaInfo":{"remainingFraction":0.8}},"two":{"apiProvider":"API_PROVIDER_VENDOR_B","weeklyQuotaInfo":{"remainingFraction":0.1}}}}"#;
+        let error = parse(
+            body,
+            Timestamp::from_unix(1_787_270_400).expect("plausible"),
+        )
+        .expect_err("unknown provider identity must fail");
+
+        assert!(matches!(
+            error,
+            crate::providers::ProviderError::Malformed(_)
+        ));
     }
 
     #[test]
