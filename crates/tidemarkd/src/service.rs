@@ -37,7 +37,9 @@ use std::sync::Arc;
 use tidemark_core::oauth::Login;
 use tidemark_core::providers::Credential;
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
-use tidemark_types::{AccountId, CredentialKind, ProviderDefinition, ProviderId, ProviderStatus};
+use tidemark_types::{
+    AccountId, CredentialKind, HistoryPoint, ProviderDefinition, ProviderId, ProviderStatus,
+};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinHandle};
 use zbus::object_server::SignalEmitter;
@@ -346,6 +348,33 @@ impl Daemon {
     /// the first poll, so a client can tell "nothing configured" from "nothing yet".
     async fn get_status(&self) -> Vec<ProviderStatus> {
         self.statuses.all().await
+    }
+
+    /// Stored points in the open segment of one window.
+    ///
+    /// The service only validates and relays this request. `Engine` owns the SQLite
+    /// connection, so the query shares its serial command queue with writes and polling.
+    async fn current_segment(
+        &self,
+        provider: &str,
+        account: &str,
+        window: &str,
+    ) -> fdo::Result<Vec<HistoryPoint>> {
+        self.account(provider, account).await?;
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::CurrentSegment {
+                provider: provider.to_owned(),
+                account: account.to_owned(),
+                window: window.to_owned(),
+                reply,
+            })
+            .await
+            .map_err(|_| fdo::Error::Failed("the poll loop has stopped".into()))?;
+        answer
+            .await
+            .map_err(|_| fdo::Error::Failed("the poll loop dropped the request".into()))?
+            .map_err(fdo::Error::Failed)
     }
 
     /// Polls now: one provider by slug, or every account when given an empty string.
@@ -934,6 +963,54 @@ mod tests {
         assert!(matches!(
             command_queue.try_recv().expect("the loop was told"),
             Command::Reload { provider: Some(provider) } if provider == "zai"
+        ));
+    }
+
+    #[tokio::test]
+    async fn current_segment_is_serialized_through_the_engine() {
+        let (daemon, _secrets, mut commands) = daemon_over(vec![key_account("zai")]).await;
+        let responder = tokio::spawn(async move {
+            let Command::CurrentSegment {
+                provider,
+                account,
+                window,
+                reply,
+            } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            assert_eq!(
+                (provider.as_str(), account.as_str(), window.as_str()),
+                ("zai", "default", "w18000")
+            );
+            reply
+                .send(Ok(vec![tidemark_types::HistoryPoint {
+                    captured_at: 1_785_700_000,
+                    used_percent: 42.0,
+                }]))
+                .expect("caller waits");
+        });
+
+        let points = daemon
+            .current_segment("zai", "default", "w18000")
+            .await
+            .expect("configured account reads history");
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].used_percent, 42.0);
+        responder.await.expect("responder finishes");
+    }
+
+    #[tokio::test]
+    async fn current_segment_for_an_unconfigured_account_does_not_reach_the_engine() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let error = daemon
+            .current_segment("zai", "default", "w18000")
+            .await
+            .expect_err("unknown account is rejected");
+        assert!(matches!(error, fdo::Error::InvalidArgs(_)));
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
         ));
     }
 

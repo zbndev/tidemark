@@ -51,6 +51,14 @@ pub trait Daemon {
     /// Every account the daemon watches.
     fn get_status(&self) -> zbus::Result<Vec<ProviderStatus>>;
 
+    /// Stored points in the current segment of one window, oldest first.
+    fn current_segment(
+        &self,
+        provider: &str,
+        account: &str,
+        window: &str,
+    ) -> zbus::Result<Vec<tidemark_types::HistoryPoint>>;
+
     /// Polls now: one provider by slug, or everything when given an empty string.
     fn refresh(&self, provider: &str) -> zbus::Result<()>;
 

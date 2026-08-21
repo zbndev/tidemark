@@ -17,8 +17,8 @@ use tidemark_core::providers::{Credential, Provider, ProviderError};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
 use tidemark_types::{
-    AccountId, CredentialKind, ProviderId, ProviderOption, ProviderState, ProviderStatus, Snapshot,
-    Timestamp, WindowStatus,
+    AccountId, CredentialKind, HistoryPoint, ProviderId, ProviderOption, ProviderState,
+    ProviderStatus, Snapshot, Timestamp, WindowKey, WindowStatus,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -108,6 +108,17 @@ pub enum Command {
         enabled: bool,
         /// Completion sent after persistence and in-memory state agree.
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Reads the stored points in one account window's open segment.
+    CurrentSegment {
+        /// Stable provider slug.
+        provider: String,
+        /// Stable account name.
+        account: String,
+        /// The window identity published to clients.
+        window: String,
+        /// Completion with oldest-first points, or a named account/storage error.
+        reply: oneshot::Sender<Result<Vec<HistoryPoint>, String>>,
     },
     /// Stop the loop.
     Shutdown,
@@ -424,6 +435,36 @@ impl Engine {
         Ok(())
     }
 
+    /// Reads the active history segment for one configured account/window pair.
+    ///
+    /// The engine owns the database, so even this short read goes through its command queue
+    /// rather than giving an interface client a second SQLite connection.
+    fn current_segment(
+        &self,
+        provider: &str,
+        account: &str,
+        window: &str,
+    ) -> Result<Vec<HistoryPoint>, String> {
+        if !self.accounts.iter().any(|configured| {
+            configured.provider.as_str() == provider && configured.account.as_str() == account
+        }) {
+            return Err(format!("account {provider}/{account} is not configured"));
+        }
+
+        self.history
+            .current_points(provider, account, &WindowKey::named(window))
+            .map(|points| {
+                points
+                    .into_iter()
+                    .map(|point| HistoryPoint {
+                        captured_at: point.captured_at.as_unix(),
+                        used_percent: point.used_percent,
+                    })
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    }
+
     /// Runs until a [`Command::Shutdown`] arrives or the command channel closes.
     pub async fn run(&mut self, commands: &mut mpsc::Receiver<Command>) {
         loop {
@@ -455,6 +496,10 @@ impl Engine {
                         let result = self
                             .set_window_notify(&provider, &account, &window, enabled)
                             .await;
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::CurrentSegment { provider, account, window, reply }) => {
+                        let result = self.current_segment(&provider, &account, &window);
                         let _ = reply.send(result);
                     }
                     Some(Command::Shutdown) | None => return,
@@ -1530,6 +1575,53 @@ mod tests {
 
     fn with_provider(provider: Arc<dyn Provider>) -> Harness {
         Harness::new(vec![Account::with_client(provider)], unlocked())
+    }
+
+    #[tokio::test]
+    async fn current_segment_command_returns_only_the_open_segment() {
+        let (updates, _published) = mpsc::channel(8);
+        let mut engine = Engine::new(
+            vec![Account::with_client(Fake::new(vec![
+                Ok(reading(0, 80.0, 3_600)),
+                Ok(reading(1, 2.0, 18_000)),
+            ]))],
+            History::in_memory().expect("history opens"),
+            unlocked(),
+            updates,
+            std::env::temp_dir().join("tidemark-engine-current-segment.toml"),
+            Arc::new(Recorder::default()) as Arc<dyn Notifier>,
+        );
+        engine.poll_due(Instant::now()).await;
+        engine.mark_due(None);
+        engine.poll_due(Instant::now()).await;
+
+        let (commands, mut queue) = mpsc::channel(4);
+        let running = tokio::spawn(async move {
+            engine.run(&mut queue).await;
+        });
+        let (reply, answer) = oneshot::channel();
+        commands
+            .send(Command::CurrentSegment {
+                provider: "fake".into(),
+                account: "default".into(),
+                window: "w18000".into(),
+                reply,
+            })
+            .await
+            .expect("engine is running");
+
+        let points = answer
+            .await
+            .expect("engine replied")
+            .expect("account exists");
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].used_percent, 2.0);
+
+        commands
+            .send(Command::Shutdown)
+            .await
+            .expect("engine is running");
+        running.await.expect("engine task did not panic");
     }
 
     #[tokio::test]
