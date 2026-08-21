@@ -22,6 +22,7 @@ pub mod chutes;
 pub mod clawrouter;
 pub mod clinepass;
 pub mod crof;
+pub mod elevenlabs;
 pub mod kimi;
 pub mod neuralwatt;
 pub mod sub2api;
@@ -314,6 +315,7 @@ pub static CATALOG: &[&Spec] = &[
     &clawrouter::SPEC,
     &clinepass::SPEC,
     &crof::SPEC,
+    &elevenlabs::SPEC,
     &kimi::SPEC,
     &neuralwatt::SPEC,
     &sub2api::SPEC,
