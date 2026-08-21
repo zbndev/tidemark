@@ -17,7 +17,8 @@ pub(super) const API_ENDPOINTS: &[&str] = &[
     "https://daily-cloudcode-pa.googleapis.com",
     "https://cloudcode-pa.googleapis.com",
 ];
-const ONBOARD_ATTEMPTS: usize = 5;
+/// How many times `loadCodeAssist` is re-asked for a project after onboarding.
+const PROJECT_POLLS: usize = 5;
 
 /// The registered Google desktop client used by the system-browser login flow.
 pub fn client() -> Client {
@@ -95,52 +96,112 @@ async fn complete_login_at(
         }));
     };
 
-    if let Some(project_id) = project_id(&loaded) {
-        return document_from_login(response, project_id, now_ms);
-    }
-    let tier_id = loaded
-        .get("allowedTiers")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|tiers| {
-            tiers.iter().find(|tier| {
-                tier.get("isDefault").and_then(serde_json::Value::as_bool) == Some(true)
-            })
-        })
-        .and_then(|tier| tier.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .and_then(nonblank)
-        .unwrap_or("free-tier");
+    let project = resolve_project(client, endpoint, access_token, &loaded, retry_delay).await;
+    document_from_login(response, project.as_deref(), now_ms)
+}
 
-    for attempt in 0..ONBOARD_ATTEMPTS {
-        let onboarded = post_json(
+/// The Cloud AI Companion project this account uses, when it has one.
+///
+/// `None` is an ordinary answer rather than a failure. A tier declaring
+/// `userDefinedCloudaicompanionProject` is telling us the server will not mint a project —
+/// the user names their own — and for such an account `onboardUser` answers `done` with an
+/// empty `cloudaicompanionProject` however many times it is asked. Refusing the login there
+/// would deny an account its tokens over a field only the direct quota call ever wants.
+async fn resolve_project(
+    client: &reqwest::Client,
+    endpoint: &str,
+    access_token: &str,
+    loaded: &serde_json::Value,
+    retry_delay: Duration,
+) -> Option<String> {
+    if let Some(project_id) = project_id(loaded) {
+        return Some(project_id.to_owned());
+    }
+    // No tier to onboard means nothing to ask for. The literal `free-tier` that used to
+    // stand here is the one tier the server names in `ineligibleTiers` for this client.
+    let tier_id = onboard_tier(loaded)?;
+
+    // Asked once: the answer is final on the first call, so a retry is a second identical
+    // question. A refusal — 403 for an account not eligible for the tier — is not fatal
+    // either, because onboarding is an attempt to help rather than a precondition.
+    let onboarded = post_json(
+        client,
+        endpoint,
+        "v1internal:onboardUser",
+        access_token,
+        &serde_json::json!({
+            "tierId": tier_id,
+            "metadata": client_metadata(),
+        }),
+    )
+    .await;
+    if let Ok(onboarded) = &onboarded
+        && let Some(project_id) = onboarded.get("response").and_then(project_id)
+    {
+        return Some(project_id.to_owned());
+    }
+
+    // A tier whose project is the user's to name has no project coming, and the server has
+    // said so in the same breath as the tier. Polling it is ten seconds of asking a question
+    // already answered, spent after the browser is done and while the user is watching.
+    if user_defined_project(loaded, tier_id) {
+        return None;
+    }
+
+    // Where onboarding does provision a project asynchronously, it is `loadCodeAssist` that
+    // starts naming it — the onboarding call itself has already given its final answer.
+    for _ in 0..PROJECT_POLLS {
+        tokio::time::sleep(retry_delay).await;
+        let reloaded = post_json(
             client,
             endpoint,
-            "v1internal:onboardUser",
+            "v1internal:loadCodeAssist",
             access_token,
-            &serde_json::json!({
-                "tierId": tier_id,
-                "metadata": client_metadata(),
-            }),
+            &serde_json::json!({ "metadata": client_metadata() }),
         )
-        .await?;
-        if onboarded.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
-            let project_id = onboarded
-                .get("response")
-                .and_then(project_id)
-                .ok_or_else(|| {
-                    ProviderError::malformed(
-                        "Antigravity provisioning completed without a project id",
-                    )
-                })?;
-            return document_from_login(response, project_id, now_ms);
-        }
-        if attempt + 1 < ONBOARD_ATTEMPTS {
-            tokio::time::sleep(retry_delay).await;
+        .await;
+        if let Ok(reloaded) = &reloaded
+            && let Some(project_id) = project_id(reloaded)
+        {
+            return Some(project_id.to_owned());
         }
     }
-    Err(ProviderError::malformed(
-        "Antigravity project provisioning did not complete after five attempts",
-    ))
+    None
+}
+
+/// Whether the tier being onboarded expects the user to name their own project.
+fn user_defined_project(loaded: &serde_json::Value, tier_id: &str) -> bool {
+    loaded
+        .get("allowedTiers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|tier| tier.get("id").and_then(serde_json::Value::as_str) == Some(tier_id))
+        .and_then(|tier| {
+            tier.get("userDefinedCloudaicompanionProject")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(false)
+}
+
+/// The tier to onboard into: the one the server marks default, else the first it allows.
+fn onboard_tier(loaded: &serde_json::Value) -> Option<&str> {
+    let tiers = loaded
+        .get("allowedTiers")
+        .and_then(serde_json::Value::as_array)?;
+    fn id(tier: &serde_json::Value) -> Option<&str> {
+        tier.get("id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(nonblank)
+    }
+    tiers
+        .iter()
+        .find(|tier| {
+            tier.get("isDefault").and_then(serde_json::Value::as_bool) == Some(true)
+                && id(tier).is_some()
+        })
+        .or_else(|| tiers.iter().find(|tier| id(tier).is_some()))
+        .and_then(id)
 }
 
 fn client_metadata() -> serde_json::Value {
@@ -186,7 +247,7 @@ fn project_id(response: &serde_json::Value) -> Option<&str> {
 
 fn document_from_login(
     response: &serde_json::Value,
-    project_id: &str,
+    project_id: Option<&str>,
     now_ms: i64,
 ) -> Result<serde_json::Value, ProviderError> {
     let tokens = parse_login_response(response)?;
@@ -196,19 +257,22 @@ fn document_from_login(
     let refresh_token = nonblank(&tokens.refresh_token).ok_or_else(|| {
         ProviderError::malformed("the Antigravity login response carried a blank refresh token")
     })?;
-    let project_id = nonblank(project_id)
-        .ok_or_else(|| ProviderError::malformed("Antigravity returned a blank project id"))?;
     if tokens.expires_in <= 0 {
         return Err(ProviderError::malformed(
             "the Antigravity login response carried a non-positive expiry",
         ));
     }
-    Ok(serde_json::json!({
+    let mut document = serde_json::json!({
         "access_token": access_token,
         "refresh_token": refresh_token,
         "expires_at": now_ms.saturating_add(tokens.expires_in.saturating_mul(1_000)),
-        "project_id": project_id,
-    }))
+    });
+    // Absent rather than blank: a key holding an empty string would have to be defended
+    // against everywhere it is read, and there is nothing to say.
+    if let Some(project_id) = project_id.and_then(nonblank) {
+        document["project_id"] = serde_json::Value::String(project_id.to_owned());
+    }
+    Ok(document)
 }
 
 fn parse_login_response(response: &serde_json::Value) -> Result<LoginResponse, ProviderError> {
@@ -335,7 +399,7 @@ mod tests {
                 "refresh_token": "r",
                 "expires_in": 3_600
             }),
-            "project-1",
+            Some("project-1"),
             1_787_270_400_000,
         )
         .expect("valid");
@@ -381,11 +445,10 @@ mod tests {
     }
 
     #[test]
-    fn onboarding_is_bounded_and_returns_its_project() {
-        let load = r#"{"allowedTiers":[{"id":"free-tier","isDefault":true}]}"#;
-        let pending = r#"{"done":false}"#;
+    fn onboarding_that_provisions_a_project_returns_it_without_polling() {
+        let load = r#"{"allowedTiers":[{"id":"standard-tier","isDefault":true}]}"#;
         let done = r#"{"done":true,"response":{"cloudaicompanionProject":{"id":"project-2"}}}"#;
-        let (base, requests, server) = local_server(vec![(200, load), (200, pending), (200, done)]);
+        let (base, requests, server) = local_server(vec![(200, load), (200, done)]);
         let client = crate::providers::http::client().expect("client");
         let document = block_on(complete_login_at(
             &client,
@@ -398,38 +461,170 @@ mod tests {
 
         assert_eq!(document["project_id"], "project-2");
         let _load = requests.recv().expect("load captured");
-        for _ in 0..2 {
-            let request = requests.recv().expect("onboard captured");
-            assert!(
-                request.starts_with("POST /v1internal:onboardUser "),
-                "{request}"
-            );
-            assert!(request.contains(r#""tierId":"free-tier""#), "{request}");
-        }
+        let onboard = requests.recv().expect("onboard captured");
+        assert!(
+            onboard.starts_with("POST /v1internal:onboardUser "),
+            "{onboard}"
+        );
+        assert!(onboard.contains(r#""tierId":"standard-tier""#), "{onboard}");
+        assert!(
+            requests.try_recv().is_err(),
+            "one onboarding request is enough"
+        );
         server.join().expect("server stopped");
     }
 
     #[test]
-    fn incomplete_onboarding_stops_after_five_attempts() {
-        let load = r#"{"allowedTiers":[]}"#;
-        let pending = r#"{"done":false}"#;
-        let mut responses = vec![(200, load)];
-        responses.extend(std::iter::repeat_n((200, pending), 5));
+    fn polling_that_never_yields_a_project_still_yields_a_credential() {
+        // Onboarding says `done` with an empty project object and the polls that follow
+        // never name one either — so the login completes without a project rather than
+        // failing, which is what the user saw as "unparseable response".
+        let load = r#"{"allowedTiers":[{"id":"standard-tier","isDefault":true}]}"#;
+        let onboard = r#"{"done":true,"response":{"cloudaicompanionProject":{}}}"#;
+        let mut responses = vec![(200, load), (200, onboard)];
+        responses.extend(std::iter::repeat_n((200, load), 5));
         let (base, requests, server) = local_server(responses);
         let client = crate::providers::http::client().expect("client");
-        let error = block_on(complete_login_at(
+        let document = block_on(complete_login_at(
             &client,
             &[base],
             &token_response(),
             1_787_270_400_000,
             Duration::ZERO,
         ))
-        .expect_err("provisioning must be bounded");
+        .expect("a login without a project is still a login");
 
+        assert_eq!(document["access_token"], "owned-access");
+        assert_eq!(document["refresh_token"], "owned-refresh");
         assert!(
-            matches!(error, ProviderError::Malformed(message) if message.contains("provision"))
+            document.get("project_id").is_none(),
+            "no project was discovered, so none is stored: {document}"
         );
-        assert_eq!(requests.into_iter().count(), 6);
+        assert_eq!(requests.into_iter().count(), 7);
+        server.join().expect("server stopped");
+    }
+
+    #[test]
+    fn a_user_defined_project_tier_is_not_polled_for_a_project_it_will_never_mint() {
+        // `userDefinedCloudaicompanionProject` is the server saying the user names the
+        // project. Polling it five times at two seconds apart is ten seconds of waiting for
+        // an answer it has already given.
+        let load = r#"{"allowedTiers":[{"id":"standard-tier","isDefault":true,"userDefinedCloudaicompanionProject":true}]}"#;
+        let onboard = r#"{"done":true,"response":{"cloudaicompanionProject":{}}}"#;
+        // Enough responses queued for the polling this must not do, so a poll would be
+        // served and counted rather than failing to connect and counting as nothing.
+        let mut responses = vec![(200, load), (200, onboard)];
+        responses.extend(std::iter::repeat_n((200, load), PROJECT_POLLS));
+        let (base, requests, _server) = local_server(responses);
+        let client = crate::providers::http::client().expect("client");
+        let document = block_on(complete_login_at(
+            &client,
+            &[base],
+            &token_response(),
+            1_787_270_400_000,
+            Duration::ZERO,
+        ))
+        .expect("a login without a project is still a login");
+
+        assert!(document.get("project_id").is_none(), "{document}");
+        // Drained rather than iterated: the server still waits on the requests it was given
+        // responses for, so the channel does not close while it is parked in `accept`.
+        let mut served = 0;
+        while requests.try_recv().is_ok() {
+            served += 1;
+        }
+        assert_eq!(
+            served, 2,
+            "one load and one onboarding, and no polling after them"
+        );
+    }
+
+    #[test]
+    fn onboarding_is_asked_once_and_the_project_is_then_polled_from_load() {
+        // `onboardUser` is final on the first answer, so re-asking it is five wasted calls.
+        // The project can still appear, and when it does it appears in `loadCodeAssist`.
+        let load = r#"{"allowedTiers":[{"id":"standard-tier","isDefault":true}]}"#;
+        let onboard = r#"{"done":true,"response":{"cloudaicompanionProject":{}}}"#;
+        let settled = r#"{"cloudaicompanionProject":{"id":"project-9"}}"#;
+        let (base, requests, server) =
+            local_server(vec![(200, load), (200, onboard), (200, settled)]);
+        let client = crate::providers::http::client().expect("client");
+        let document = block_on(complete_login_at(
+            &client,
+            &[base],
+            &token_response(),
+            1_787_270_400_000,
+            Duration::ZERO,
+        ))
+        .expect("the settled project is picked up");
+
+        assert_eq!(document["project_id"], "project-9");
+        let first = requests.recv().expect("load captured");
+        assert!(
+            first.starts_with("POST /v1internal:loadCodeAssist "),
+            "{first}"
+        );
+        let second = requests.recv().expect("onboard captured");
+        assert!(
+            second.starts_with("POST /v1internal:onboardUser "),
+            "{second}"
+        );
+        assert!(second.contains(r#""tierId":"standard-tier""#), "{second}");
+        let third = requests.recv().expect("re-load captured");
+        assert!(
+            third.starts_with("POST /v1internal:loadCodeAssist "),
+            "{third}"
+        );
+        assert!(requests.try_recv().is_err(), "polling stops at the project");
+        server.join().expect("server stopped");
+    }
+
+    #[test]
+    fn a_refused_onboarding_does_not_fail_the_login() {
+        // `free-tier` answers 403 FREE_TIER_USER_NOT_ELIGIBLE for an account Google has
+        // moved to Antigravity. Onboarding is an attempt to help, not a precondition.
+        let load = r#"{"allowedTiers":[{"id":"free-tier","isDefault":true}]}"#;
+        let refused = r#"{"error":{"code":403,"status":"PERMISSION_DENIED"}}"#;
+        let settled = r#"{"cloudaicompanionProject":{"id":"project-3"}}"#;
+        let (base, _requests, server) =
+            local_server(vec![(200, load), (403, refused), (200, settled)]);
+        let client = crate::providers::http::client().expect("client");
+        let document = block_on(complete_login_at(
+            &client,
+            &[base],
+            &token_response(),
+            1_787_270_400_000,
+            Duration::ZERO,
+        ))
+        .expect("a refused onboarding is not a refused login");
+
+        assert_eq!(document["project_id"], "project-3");
+        server.join().expect("server stopped");
+    }
+
+    #[test]
+    fn no_allowed_tier_means_no_onboarding_request_at_all() {
+        // The old code fell back to the literal `free-tier` here — the one tier the server
+        // has already said this client may not have. Onboarding nothing is the honest move.
+        let load = r#"{"allowedTiers":[]}"#;
+        let (base, requests, server) = local_server(vec![(200, load)]);
+        let client = crate::providers::http::client().expect("client");
+        let document = block_on(complete_login_at(
+            &client,
+            &[base],
+            &token_response(),
+            1_787_270_400_000,
+            Duration::ZERO,
+        ))
+        .expect("a login with no tier to onboard is still a login");
+
+        assert!(document.get("project_id").is_none(), "{document}");
+        for request in requests {
+            assert!(
+                !request.contains("onboardUser"),
+                "no tier was offered, so nothing may be onboarded: {request}"
+            );
+        }
         server.join().expect("server stopped");
     }
 }

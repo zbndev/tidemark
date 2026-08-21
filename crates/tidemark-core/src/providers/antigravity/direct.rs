@@ -18,12 +18,12 @@ use super::PROVIDER_ID;
 const DAY_SECONDS: u64 = 86_400;
 const WEEK_SECONDS: u64 = 7 * DAY_SECONDS;
 
-/// Fetches direct quota using the OAuth access token and discovered project.
+/// Fetches direct quota using the OAuth access token and the discovered project, if any.
 pub async fn fetch(
     client: &reqwest::Client,
     endpoint: &str,
     access_token: &str,
-    project_id: &str,
+    project_id: Option<&str>,
 ) -> Result<Snapshot, ProviderError> {
     let url = format!(
         "{}/v1internal:fetchAvailableModels",
@@ -32,7 +32,12 @@ pub async fn fetch(
     let response = client
         .post(url)
         .bearer_auth(access_token)
-        .json(&serde_json::json!({ "project": project_id }))
+        .json(&match project_id {
+            Some(project_id) => serde_json::json!({ "project": project_id }),
+            // Not `{"project": ""}`: an account Google gave no Cloud AI Companion project
+            // asks about itself, and a blank one is a value the server would validate.
+            None => serde_json::json!({}),
+        })
         .send()
         .await
         .map_err(ProviderError::Transport)?;
@@ -567,6 +572,25 @@ mod tests {
     }
 
     #[test]
+    fn a_login_without_a_project_asks_for_models_without_one() {
+        // The field is omitted rather than sent blank: `{"project":""}` is a value the
+        // server may validate, while an absent project is the question we mean to ask.
+        let (base, requests, server) = one_request_server(
+            r#"{"models":{"m":{"modelProvider":"MODEL_PROVIDER_GOOGLE","quotaInfo":{"remainingFraction":0.5,"resetTime":"2026-08-28T00:00:00Z","windowId":"weekly"}}}}"#,
+        );
+        let client = crate::providers::http::client().expect("client");
+        block_on(fetch(&client, &base, "token", None)).expect("quota fetched");
+
+        let request = requests.recv().expect("request captured");
+        assert!(
+            request.contains("{}"),
+            "an absent project sends an empty body: {request}"
+        );
+        assert!(!request.contains("\"project\""), "{request}");
+        server.join().expect("server stopped");
+    }
+
+    #[test]
     fn shared_models_become_one_counter_and_exhausted_is_not_masked() {
         let now = Timestamp::from_unix(1_787_270_400).expect("2026-08-21");
         let snapshot = parse(
@@ -798,7 +822,7 @@ mod tests {
         let fixture = include_str!("../../../tests/fixtures/antigravity-available-models.json");
         let (base, requests, server) = one_request_server(fixture);
         let client = crate::providers::http::client().expect("client");
-        let snapshot = block_on(fetch(&client, &base, "owned-access", "project-1"))
+        let snapshot = block_on(fetch(&client, &base, "owned-access", Some("project-1")))
             .expect("quota fetch succeeds");
 
         assert_eq!(snapshot.provider.as_str(), "antigravity");

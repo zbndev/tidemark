@@ -234,12 +234,16 @@ impl Antigravity {
                     .expect("checked above")
                     .expose()
             });
-        let document = serde_json::json!({
+        let mut document = serde_json::json!({
             "access_token": access_token,
             "refresh_token": refresh_token,
             "expires_at": now_ms.saturating_add(refreshed.expires_in.saturating_mul(1_000)),
-            "project_id": credentials.project_id,
         });
+        // Carried over rather than re-derived, and omitted when there is none — the same
+        // shape the login writes, so a refresh never turns an absent field into a null one.
+        if let Some(project_id) = &credentials.project_id {
+            document["project_id"] = serde_json::Value::String(project_id.clone());
+        }
         let own = self
             .own
             .as_ref()
@@ -288,7 +292,7 @@ impl Antigravity {
             &self.client,
             &self.direct_endpoint,
             credentials.access_token.expose(),
-            &credentials.project_id,
+            credentials.project_id.as_deref(),
         )
         .await
     }
@@ -300,7 +304,8 @@ struct StoredCredentials {
     #[serde(default)]
     refresh_token: Option<String>,
     expires_at: i64,
-    project_id: String,
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 struct OwnedCredentials {
@@ -308,7 +313,7 @@ struct OwnedCredentials {
     access_token: Credential,
     refresh_token: Option<Credential>,
     expires_at: i64,
-    project_id: String,
+    project_id: Option<String>,
 }
 
 impl std::fmt::Debug for OwnedCredentials {
@@ -339,9 +344,10 @@ impl OwnedCredentials {
         let access_token = nonempty(Some(&stored.access_token)).ok_or_else(|| {
             ProviderError::malformed("the stored Antigravity login has a blank access token")
         })?;
-        let project_id = nonempty(Some(&stored.project_id)).ok_or_else(|| {
-            ProviderError::malformed("the stored Antigravity login has a blank project id")
-        })?;
+        // Optional on purpose. A tier that declares `userDefinedCloudaicompanionProject`
+        // never yields one, and the project is wanted by exactly one call — the direct
+        // quota fetch, which asks about the account itself when it has no project to name.
+        let project_id = nonempty(stored.project_id.as_deref()).map(str::to_owned);
         let refresh_token = stored
             .refresh_token
             .as_deref()
@@ -352,7 +358,7 @@ impl OwnedCredentials {
             access_token: Credential::new(access_token),
             refresh_token,
             expires_at: stored.expires_at,
-            project_id: project_id.to_owned(),
+            project_id,
         })
     }
 
@@ -1129,6 +1135,21 @@ mod tests {
         include_str!("../../../tests/fixtures/antigravity-available-models.json");
 
     #[test]
+    fn a_stored_login_without_a_project_is_still_usable() {
+        // Google hands some accounts no Cloud AI Companion project at all. Their tokens are
+        // real, and rejecting the credential over the missing field signs them out.
+        let document = serde_json::json!({
+            "access_token": "owned",
+            "refresh_token": "old-refresh",
+            "expires_at": 1_787_270_400_000_i64,
+        });
+        let credentials = OwnedCredentials::from_stored(Credential::new(document.to_string()))
+            .expect("a login without a project is still a login");
+        assert_eq!(credentials.access_token.expose(), "owned");
+        assert!(credentials.project_id.is_none());
+    }
+
+    #[test]
     fn an_expired_owned_token_rotates_refresh_and_keeps_project_before_quota() {
         let secrets = FakeSecrets::holding(owned_document("old", 1_787_270_399_000));
         let refresh = r#"{"access_token":"new","refresh_token":"rotated","expires_in":3600}"#;
@@ -1162,6 +1183,44 @@ mod tests {
         assert_eq!(stored["refresh_token"], "rotated");
         assert_eq!(stored["project_id"], "project-1");
         assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+        server.join().expect("server stopped");
+    }
+
+    #[test]
+    fn refreshing_a_projectless_login_does_not_write_a_null_project() {
+        // A stored `"project_id": null` would be a field that reads back as absent while
+        // looking like a value in the vault. The login omits it; the refresh must agree.
+        let document = serde_json::json!({
+            "access_token": "old",
+            "refresh_token": "old-refresh",
+            "expires_at": 1_787_270_399_000_i64,
+        });
+        let secrets = FakeSecrets::holding(document);
+        let refresh = r#"{"access_token":"new","refresh_token":"rotated","expires_in":3600}"#;
+        let (base, requests, server) = local_server(vec![(200, refresh), (200, DIRECT_QUOTA)]);
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+            base.clone(),
+            format!("{base}/token"),
+            fake_local(true, &local_calls),
+        )
+        .expect("provider");
+
+        block_on(provider.fetch_inner()).expect("a projectless login refreshes and fetches");
+
+        let _refresh = requests.recv().expect("refresh captured");
+        let quota_request = requests.recv().expect("quota captured");
+        assert!(
+            !quota_request.contains(r#""project""#),
+            "no project is named because none is known: {quota_request}"
+        );
+        let stored = secrets.document().expect("rotated document");
+        assert_eq!(stored["refresh_token"], "rotated");
+        assert!(
+            stored.get("project_id").is_none(),
+            "absent stays absent: {stored}"
+        );
         server.join().expect("server stopped");
     }
 
