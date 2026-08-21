@@ -37,8 +37,8 @@ use std::sync::Arc;
 use tidemark_core::oauth::Login;
 use tidemark_core::providers::Credential;
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
-use tidemark_types::{AccountId, CredentialKind, ProviderId, ProviderStatus};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tidemark_types::{AccountId, CredentialKind, ProviderDefinition, ProviderId, ProviderStatus};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
@@ -65,6 +65,15 @@ impl Published {
             Some(held) => *held = status,
             None => statuses.push(status),
         }
+    }
+
+    /// Removes one exact account while preserving the order of every survivor.
+    pub async fn remove(&self, provider: &str, account: &str) -> Option<ProviderStatus> {
+        let mut statuses = self.0.write().await;
+        let index = statuses
+            .iter()
+            .position(|held| held.provider == provider && held.account == account)?;
+        Some(statuses.remove(index))
     }
 
     /// Everything currently known.
@@ -105,6 +114,7 @@ struct Pending {
 #[derive(Debug)]
 pub struct Daemon {
     statuses: Published,
+    catalog: Vec<ProviderDefinition>,
     commands: mpsc::Sender<Command>,
     secrets: Arc<dyn Secrets>,
     logins: Mutex<HashMap<(String, String), Pending>>,
@@ -114,11 +124,13 @@ impl Daemon {
     /// Wires the interface to the published state, the poll loop and the keyring.
     pub fn new(
         statuses: Published,
+        catalog: Vec<ProviderDefinition>,
         commands: mpsc::Sender<Command>,
         secrets: Arc<dyn Secrets>,
     ) -> Self {
         Self {
             statuses,
+            catalog,
             commands,
             secrets,
             logins: Mutex::new(HashMap::new()),
@@ -142,6 +154,30 @@ impl Daemon {
             .await
             .map_err(|_| fdo::Error::Failed("the poll loop has stopped".into()))
     }
+
+    /// Sends a topology mutation and returns only after the poll loop has persisted it.
+    async fn topology_request(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<(), String>>) -> Command,
+    ) -> fdo::Result<()> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(make(reply))
+            .await
+            .map_err(|_| fdo::Error::Failed("the poll loop has stopped".into()))?;
+        answer
+            .await
+            .map_err(|_| fdo::Error::Failed("the poll loop dropped the request".into()))?
+            .map_err(fdo::Error::Failed)
+    }
+
+    /// Removes and aborts a pending login, if one exists.
+    async fn cancel_pending_login(&self, provider: &str, account: &str) {
+        if let Some(pending) = self.logins.lock().await.remove(&key(provider, account)) {
+            pending.task.abort();
+            tracing::info!(provider, account, "login cancelled");
+        }
+    }
 }
 
 /// The D-Bus error a keyring failure becomes.
@@ -159,6 +195,53 @@ fn keyring_error(error: SecretError) -> fdo::Error {
 
 #[interface(name = "io.github.zbndev.Tidemark.Daemon1")]
 impl Daemon {
+    /// Every provider this build knows how to configure.
+    async fn list_providers(&self) -> Vec<ProviderDefinition> {
+        self.catalog.clone()
+    }
+
+    /// Adds a compiled-in provider's default account and waits for it to be persisted.
+    async fn add_provider(&self, provider: &str) -> fdo::Result<()> {
+        if !self
+            .catalog
+            .iter()
+            .any(|definition| definition.provider == provider)
+        {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "provider {provider} is not supported by this build"
+            )));
+        }
+        self.topology_request(|reply| Command::AddProvider {
+            provider: provider.to_owned(),
+            reply,
+        })
+        .await
+    }
+
+    /// Removes one configured account after clearing every credential Tidemark owns.
+    async fn remove_provider(&self, provider: &str, account: &str) -> fdo::Result<()> {
+        self.account(provider, account).await?;
+        self.cancel_pending_login(provider, account).await;
+
+        let provider_id = ProviderId::new(provider);
+        let account_id = AccountId::new(account);
+        self.secrets
+            .delete(Kind::Key, &provider_id, &account_id)
+            .await
+            .map_err(keyring_error)?;
+        self.secrets
+            .delete(Kind::Token, &provider_id, &account_id)
+            .await
+            .map_err(keyring_error)?;
+
+        self.topology_request(|reply| Command::RemoveProvider {
+            provider: provider.to_owned(),
+            account: account.to_owned(),
+            reply,
+        })
+        .await
+    }
+
     /// Every account the daemon watches, with its current state and last good reading.
     ///
     /// Never empty while accounts are configured: they are published as `pending` before
@@ -327,10 +410,7 @@ impl Daemon {
     /// Not an error when there is nothing to cancel: a client that closed its dialog should
     /// not have to know whether the login had already finished.
     async fn cancel_login(&self, provider: &str, account: &str) -> fdo::Result<()> {
-        if let Some(pending) = self.logins.lock().await.remove(&key(provider, account)) {
-            pending.task.abort();
-            tracing::info!(provider, account, "login cancelled");
-        }
+        self.cancel_pending_login(provider, account).await;
         Ok(())
     }
 
@@ -383,6 +463,14 @@ impl Daemon {
         emitter: &SignalEmitter<'_>,
         status: ProviderStatus,
     ) -> zbus::Result<()>;
+
+    /// One configured account was removed after its owned credentials were deleted.
+    #[zbus(signal)]
+    pub async fn provider_removed(
+        emitter: &SignalEmitter<'_>,
+        provider: &str,
+        account: &str,
+    ) -> zbus::Result<()>;
 }
 
 /// The pair an in-progress login is filed under.
@@ -393,7 +481,7 @@ fn key(provider: &str, account: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidemark_types::{AccountId, ProviderId, ids};
+    use tidemark_types::{AccountId, ProviderDefinition, ProviderId, ids};
 
     fn status(provider: &str) -> ProviderStatus {
         ProviderStatus::pending(&ProviderId::new(provider), &AccountId::default())
@@ -503,6 +591,16 @@ mod tests {
         assert_eq!(all[0].captured_at, Some(1_785_700_000));
     }
 
+    #[tokio::test]
+    async fn removing_a_published_account_does_not_reorder_the_rest() {
+        let published = Published::default();
+        published.upsert(status("zai")).await;
+        published.upsert(status("kimi")).await;
+
+        assert!(published.remove("zai", "default").await.is_some());
+        assert_eq!(published.all().await[0].provider, "kimi");
+    }
+
     fn key_account(provider: &str) -> ProviderStatus {
         let mut status = status(provider);
         status.credential = Some(CredentialKind::Key.as_wire().to_owned());
@@ -515,9 +613,27 @@ mod tests {
         status
     }
 
+    fn catalog() -> Vec<ProviderDefinition> {
+        vec![ProviderDefinition {
+            provider: "zai".into(),
+            title: "Z.ai".into(),
+            credential: "key".into(),
+            credential_hint: "Z.ai dashboard → API keys.".into(),
+            external_fallback: None,
+            options: Vec::new(),
+        }]
+    }
+
     /// A daemon over a fixed set of accounts, with the channel its commands land on.
     async fn daemon_over(
         accounts: Vec<ProviderStatus>,
+    ) -> (Daemon, Arc<FakeSecrets>, mpsc::Receiver<Command>) {
+        daemon_over_catalog(accounts, Vec::new()).await
+    }
+
+    async fn daemon_over_catalog(
+        accounts: Vec<ProviderStatus>,
+        catalog: Vec<ProviderDefinition>,
     ) -> (Daemon, Arc<FakeSecrets>, mpsc::Receiver<Command>) {
         let published = Published::default();
         for account in accounts {
@@ -526,10 +642,249 @@ mod tests {
         let secrets = Arc::new(FakeSecrets::default());
         let (tx, rx) = mpsc::channel(8);
         (
-            Daemon::new(published, tx, Arc::clone(&secrets) as Arc<dyn Secrets>),
+            Daemon::new(
+                published,
+                catalog,
+                tx,
+                Arc::clone(&secrets) as Arc<dyn Secrets>,
+            ),
             secrets,
             rx,
         )
+    }
+
+    #[tokio::test]
+    async fn the_daemon_lists_the_catalog_even_with_no_statuses() {
+        let definition = ProviderDefinition {
+            provider: "zai".into(),
+            title: "Z.ai".into(),
+            credential: "key".into(),
+            credential_hint: "Z.ai dashboard → API keys.".into(),
+            external_fallback: None,
+            options: Vec::new(),
+        };
+        let (daemon, _secrets, _commands) =
+            daemon_over_catalog(Vec::new(), vec![definition.clone()]).await;
+
+        assert_eq!(daemon.list_providers().await, vec![definition]);
+    }
+
+    #[tokio::test]
+    async fn adding_waits_for_the_engine_result() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(Vec::new(), catalog()).await;
+        let responder = tokio::spawn(async move {
+            match commands.recv().await.expect("command") {
+                Command::AddProvider { provider, reply } => {
+                    assert_eq!(provider, "zai");
+                    reply.send(Ok(())).expect("caller waits");
+                }
+                command => panic!("unexpected command: {command:?}"),
+            }
+        });
+
+        daemon.add_provider("zai").await.expect("added");
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn adding_an_unknown_provider_is_an_invalid_argument() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(Vec::new(), catalog()).await;
+
+        let error = daemon
+            .add_provider("not-a-provider")
+            .await
+            .expect_err("unknown providers are rejected before the engine");
+
+        assert!(matches!(error, fdo::Error::InvalidArgs(_)));
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_engine_add_failure_is_returned_to_the_caller() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(Vec::new(), catalog()).await;
+        let responder = tokio::spawn(async move {
+            let Command::AddProvider { reply, .. } = commands.recv().await.expect("command") else {
+                panic!("unexpected command");
+            };
+            reply
+                .send(Err("config is read-only".into()))
+                .expect("caller waits");
+        });
+
+        let error = daemon
+            .add_provider("zai")
+            .await
+            .expect_err("engine failure crosses D-Bus boundary");
+
+        assert!(matches!(error, fdo::Error::Failed(reason) if reason == "config is read-only"));
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn removing_deletes_both_owned_secret_kinds_before_the_engine_request() {
+        let (daemon, secrets, mut commands) =
+            daemon_over_catalog(vec![key_account("zai")], catalog()).await;
+        for kind in [Kind::Key, Kind::Token] {
+            secrets
+                .set(
+                    kind,
+                    &ProviderId::new("zai"),
+                    &AccountId::default(),
+                    &Credential::new("owned"),
+                )
+                .await
+                .expect("seeded");
+        }
+        let observed = Arc::clone(&secrets);
+        let responder = tokio::spawn(async move {
+            match commands.recv().await.expect("command") {
+                Command::RemoveProvider {
+                    provider,
+                    account,
+                    reply,
+                } => {
+                    assert_eq!((provider.as_str(), account.as_str()), ("zai", "default"));
+                    assert!(
+                        observed.held().is_empty(),
+                        "both secrets are gone before topology changes"
+                    );
+                    reply.send(Ok(())).expect("caller waits");
+                }
+                command => panic!("unexpected command: {command:?}"),
+            }
+        });
+
+        daemon
+            .remove_provider("zai", "default")
+            .await
+            .expect("removed");
+
+        assert!(secrets.held().is_empty());
+        responder.await.expect("responder finished");
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingDeleteSecrets;
+
+    impl Secrets for FailingDeleteSecrets {
+        fn get<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<Option<Credential>, SecretError>>
+        {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            _secret: &'a Credential,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<(), SecretError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<(), SecretError>> {
+            Box::pin(async { Err(SecretError::Locked) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_secret_delete_failure_leaves_the_provider_configured() {
+        let published = Published::default();
+        published.upsert(key_account("zai")).await;
+        let (commands, mut command_queue) = mpsc::channel(4);
+        let daemon = Daemon::new(
+            published,
+            catalog(),
+            commands,
+            Arc::new(FailingDeleteSecrets),
+        );
+
+        assert!(daemon.remove_provider("zai", "default").await.is_err());
+        assert!(matches!(
+            command_queue.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn removing_an_unconfigured_account_is_an_invalid_argument() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(Vec::new(), catalog()).await;
+
+        let error = daemon
+            .remove_provider("zai", "default")
+            .await
+            .expect_err("the catalog alone is not a configured account");
+
+        assert!(matches!(error, fdo::Error::InvalidArgs(_)));
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn removing_an_account_cancels_its_pending_login() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (daemon, _secrets, mut commands) =
+            daemon_over_catalog(vec![oauth_account("zai")], catalog()).await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = Dropped(task_dropped);
+            started.send(()).expect("test is waiting");
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        ready.await.expect("pending task started");
+        daemon
+            .logins
+            .lock()
+            .await
+            .insert(key("zai", "default"), Pending { task });
+        let responder = tokio::spawn(async move {
+            let Command::RemoveProvider { reply, .. } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            reply.send(Ok(())).expect("caller waits");
+        });
+
+        daemon
+            .remove_provider("zai", "default")
+            .await
+            .expect("removed");
+        for _ in 0..10 {
+            if dropped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(dropped.load(Ordering::SeqCst), "the login task was aborted");
+        assert!(daemon.logins.lock().await.is_empty());
+        responder.await.expect("responder finished");
     }
 
     #[tokio::test]
@@ -676,7 +1031,7 @@ mod tests {
         let published = Published::default();
         published.upsert(status("zai")).await;
         let (tx, mut rx) = mpsc::channel(4);
-        let daemon = Daemon::new(published, tx, Arc::new(FakeSecrets::default()));
+        let daemon = Daemon::new(published, Vec::new(), tx, Arc::new(FakeSecrets::default()));
 
         assert!(
             daemon.refresh("codex").await.is_err(),
@@ -716,6 +1071,7 @@ mod tests {
 
         let Ok(server) = serve(Daemon::new(
             published,
+            Vec::new(),
             commands,
             Arc::new(FakeSecrets::default()),
         ))
@@ -805,5 +1161,32 @@ mod tests {
             .deserialize()
             .expect("a client parses the signal with the same code as GetStatus");
         assert_eq!(carried.captured_at, Some(1_785_700_000));
+
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface(ids::DAEMON_INTERFACE)
+            .expect("a valid interface name")
+            .member("ProviderRemoved")
+            .expect("a valid member name")
+            .build();
+        let removals = MessageStream::for_match_rule(rule, &client, Some(4))
+            .await
+            .expect("the bus accepts the match rule");
+        let mut removals = pin!(removals);
+
+        Daemon::provider_removed(&emitter, "zai", "default")
+            .await
+            .expect("the removal signal goes out");
+        let next = std::future::poll_fn(|cx| removals.as_mut().poll_next(cx));
+        let received = tokio::time::timeout(Duration::from_secs(5), next)
+            .await
+            .expect("the signal arrives")
+            .expect("the stream is alive")
+            .expect("the message is well formed");
+        let carried: (String, String) = received
+            .body()
+            .deserialize()
+            .expect("a client parses the provider/account pair");
+        assert_eq!(carried, ("zai".into(), "default".into()));
     }
 }

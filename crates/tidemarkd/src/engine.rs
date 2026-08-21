@@ -45,22 +45,8 @@ pub enum Publication {
     /// Remove the exact account from the published topology.
     Removed {
         /// Stable provider slug.
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "the D-Bus removal publisher reads this field in Task 5"
-            )
-        )]
         provider: String,
         /// Stable account name.
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "the D-Bus removal publisher reads this field in Task 5"
-            )
-        )]
         account: String,
     },
 }
@@ -81,10 +67,6 @@ pub enum Command {
         provider: Option<String>,
     },
     /// Add one provider's default account and report the persisted topology result.
-    #[expect(
-        dead_code,
-        reason = "the D-Bus method that constructs this command is added in Task 5"
-    )]
     AddProvider {
         /// Stable provider slug.
         provider: String,
@@ -92,10 +74,6 @@ pub enum Command {
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Remove one exact provider/account pair and report the persisted topology result.
-    #[expect(
-        dead_code,
-        reason = "the D-Bus method that constructs this command is added in Task 5"
-    )]
     RemoveProvider {
         /// Stable provider slug.
         provider: String,

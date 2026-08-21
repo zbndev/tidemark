@@ -82,6 +82,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let config = Config::at(config_path.clone())?;
     let secrets: Arc<dyn Secrets> = Arc::new(keyring::Keyring::default());
     let accounts = registry::accounts(&secrets, &config)?;
+    let catalog = registry::catalog(&config);
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -101,7 +102,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .name(ids::DAEMON_BUS_NAME)?
         .serve_at(
             ids::OBJECT_PATH,
-            Daemon::new(published.clone(), commands.clone(), Arc::clone(&secrets)),
+            Daemon::new(
+                published.clone(),
+                catalog,
+                commands.clone(),
+                Arc::clone(&secrets),
+            ),
         )?
         .build()
         .await
@@ -129,8 +135,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             tracing::warn!(%error, "could not announce a change");
                         }
                     }
-                    // Task 5 adds removal from shared state and its D-Bus signal together.
-                    Publication::Removed { .. } => {}
+                    Publication::Removed { provider, account } => {
+                        let _ = published.remove(&provider, &account).await;
+                        if let Err(error) =
+                            Daemon::provider_removed(&emitter, &provider, &account).await
+                        {
+                            tracing::warn!(%error, "could not announce a removal");
+                        }
+                    }
                 }
             }
         }
