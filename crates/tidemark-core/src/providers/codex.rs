@@ -951,6 +951,22 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
+        fn compare_and_set<'a>(
+            &'a self,
+            _kind: crate::secrets::Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            expected: &'a Credential,
+            replacement: &'a Credential,
+        ) -> BoxFuture<'a, Result<bool, crate::secrets::SecretError>> {
+            let mut held = self.0.lock().expect("no test panics holding this");
+            let matches = held.as_deref() == Some(expected.expose());
+            if matches {
+                *held = Some(replacement.expose().to_owned());
+            }
+            Box::pin(async move { Ok(matches) })
+        }
+
         fn delete<'a>(
             &'a self,
             _kind: crate::secrets::Kind,

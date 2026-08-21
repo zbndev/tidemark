@@ -277,6 +277,17 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
+        fn compare_and_set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            _expected: &'a Credential,
+            _replacement: &'a Credential,
+        ) -> BoxFuture<'a, Result<bool, SecretError>> {
+            Box::pin(async { Ok(false) })
+        }
+
         fn delete<'a>(
             &'a self,
             _kind: Kind,

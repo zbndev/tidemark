@@ -257,6 +257,26 @@ fn keyring_error(error: SecretError) -> fdo::Error {
     }
 }
 
+/// Commits the completed OAuth document under the same account mutation guard as sign-out
+/// and removal. Discovery and token exchange happen before this short critical section.
+async fn commit_login(
+    secrets: &dyn Secrets,
+    mutation: &AccountMutation,
+    provider: &str,
+    account: &str,
+    document: &Credential,
+) -> Result<(), SecretError> {
+    let _guard = mutation.lock().await;
+    secrets
+        .set(
+            Kind::Token,
+            &ProviderId::new(provider),
+            &AccountId::new(account),
+            document,
+        )
+        .await
+}
+
 #[interface(name = "io.github.zbndev.Tidemark.Daemon1")]
 impl Daemon {
     /// Every provider this build knows how to configure.
@@ -445,16 +465,15 @@ impl Daemon {
             let document = registry::login_document(&provider_name, &response, now_ms)
                 .await
                 .map_err(|error| error.to_string())?;
-            let _guard = credential_mutation.lock().await;
-            secrets
-                .set(
-                    Kind::Token,
-                    &ProviderId::new(&provider_name),
-                    &AccountId::new(&account_name),
-                    &Credential::new(document.to_string()),
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+            commit_login(
+                secrets.as_ref(),
+                &credential_mutation,
+                &provider_name,
+                &account_name,
+                &Credential::new(document.to_string()),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             tracing::info!(provider = %provider_name, "signed in");
             let _ = commands
                 .send(Command::Reload {
@@ -660,6 +679,23 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
+        fn compare_and_set<'a>(
+            &'a self,
+            kind: Kind,
+            provider: &'a ProviderId,
+            account: &'a AccountId,
+            expected: &'a Credential,
+            replacement: &'a Credential,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<bool, SecretError>> {
+            let mut held = self.0.lock().expect("no test panics holding this");
+            let slot = slot(kind, provider, account);
+            let matches = held.get(&slot).map(String::as_str) == Some(expected.expose());
+            if matches {
+                held.insert(slot, replacement.expose().to_owned());
+            }
+            Box::pin(async move { Ok(matches) })
+        }
+
         fn delete<'a>(
             &'a self,
             kind: Kind,
@@ -761,6 +797,55 @@ mod tests {
             secrets,
             rx,
         )
+    }
+
+    struct StaleRefresh {
+        loaded: oneshot::Receiver<()>,
+        release: oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<bool>,
+    }
+
+    fn stale_refresh_barrier(secrets: Arc<FakeSecrets>, provider: &'static str) -> StaleRefresh {
+        let (loaded_tx, loaded) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let provider = ProviderId::new(provider);
+            let account = AccountId::default();
+            let expected = secrets
+                .get(Kind::Token, &provider, &account)
+                .await
+                .expect("refresh reads the keyring")
+                .expect("expired token seeded");
+            loaded_tx.send(()).expect("test waits at refresh barrier");
+            release_rx.await.expect("refresh released");
+            secrets
+                .compare_and_set(
+                    Kind::Token,
+                    &provider,
+                    &account,
+                    &expected,
+                    &Credential::new("stale-refresh"),
+                )
+                .await
+                .expect("refresh persistence reaches keyring")
+        });
+        StaleRefresh {
+            loaded,
+            release,
+            task,
+        }
+    }
+
+    async fn seed_token(secrets: &FakeSecrets, provider: &str, document: &str) {
+        secrets
+            .set(
+                Kind::Token,
+                &ProviderId::new(provider),
+                &AccountId::default(),
+                &Credential::new(document),
+            )
+            .await
+            .expect("token seeded");
     }
 
     #[tokio::test]
@@ -976,6 +1061,107 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn stale_refresh_cannot_undo_the_real_sign_out_mutation() {
+        const PROVIDER: &str = "antigravity";
+        let (daemon, secrets, mut commands) = daemon_over(vec![oauth_account(PROVIDER)]).await;
+        seed_token(&secrets, PROVIDER, "expired-login").await;
+        let StaleRefresh {
+            loaded,
+            release,
+            task,
+        } = stale_refresh_barrier(Arc::clone(&secrets), PROVIDER);
+        loaded.await.expect("refresh loaded the expired login");
+
+        daemon
+            .sign_out(PROVIDER, "default")
+            .await
+            .expect("sign-out completes while refresh is remote");
+        release.send(()).expect("release stale refresh");
+
+        assert!(!task.await.expect("refresh task did not panic"));
+        assert!(secrets.held().is_empty());
+        assert!(matches!(
+            commands.recv().await.expect("sign-out wakes the poll loop"),
+            Command::Reload { provider: Some(provider) } if provider == PROVIDER
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_cannot_restore_a_token_after_real_provider_removal() {
+        const PROVIDER: &str = "antigravity";
+        let (daemon, secrets, mut commands) = daemon_over(vec![oauth_account(PROVIDER)]).await;
+        seed_token(&secrets, PROVIDER, "expired-login").await;
+        let StaleRefresh {
+            loaded,
+            release,
+            task,
+        } = stale_refresh_barrier(Arc::clone(&secrets), PROVIDER);
+        loaded.await.expect("refresh loaded the expired login");
+        let responder = tokio::spawn(async move {
+            let Command::RemoveProvider { reply, .. } =
+                commands.recv().await.expect("removal reaches engine")
+            else {
+                panic!("unexpected command");
+            };
+            reply.send(Ok(())).expect("caller waits for removal");
+        });
+
+        daemon
+            .remove_provider(PROVIDER, "default")
+            .await
+            .expect("provider removed while refresh is remote");
+        assert!(matches!(
+            daemon.account(PROVIDER, "default").await,
+            Err(fdo::Error::InvalidArgs(_))
+        ));
+        release.send(()).expect("release stale refresh");
+
+        assert!(!task.await.expect("refresh task did not panic"));
+        assert!(
+            secrets.held().is_empty(),
+            "unconfigured provider has no token"
+        );
+        responder.await.expect("responder did not panic");
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_cannot_overwrite_the_real_login_commit() {
+        const PROVIDER: &str = "antigravity";
+        let (daemon, secrets, _commands) = daemon_over(vec![oauth_account(PROVIDER)]).await;
+        seed_token(&secrets, PROVIDER, "expired-login").await;
+        let StaleRefresh {
+            loaded,
+            release,
+            task,
+        } = stale_refresh_barrier(Arc::clone(&secrets), PROVIDER);
+        loaded.await.expect("refresh loaded the expired login");
+
+        let mutation = daemon.mutation(PROVIDER, "default").await;
+        commit_login(
+            secrets.as_ref(),
+            &mutation,
+            PROVIDER,
+            "default",
+            &Credential::new("new-login"),
+        )
+        .await
+        .expect("new login committed while refresh is remote");
+        release.send(()).expect("release stale refresh");
+
+        assert!(!task.await.expect("refresh task did not panic"));
+        let stored = secrets
+            .get(
+                Kind::Token,
+                &ProviderId::new(PROVIDER),
+                &AccountId::default(),
+            )
+            .await
+            .expect("keyring read")
+            .expect("new login remains stored");
+        assert_eq!(stored.expose(), "new-login");
+    }
+
     #[derive(Debug, Default)]
     struct FailingDeleteSecrets;
 
@@ -998,6 +1184,17 @@ mod tests {
             _secret: &'a Credential,
         ) -> tidemark_core::providers::BoxFuture<'a, Result<(), SecretError>> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn compare_and_set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            _expected: &'a Credential,
+            _replacement: &'a Credential,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<bool, SecretError>> {
+            Box::pin(async { Ok(false) })
         }
 
         fn delete<'a>(

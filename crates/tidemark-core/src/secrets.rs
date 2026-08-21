@@ -27,9 +27,15 @@
 //! caller to wait out, not an error to log and not a crash.
 
 use oo7::dbus::{Collection, Service};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as SyncMutex};
 use tidemark_types::{AccountId, ProviderId};
+use tokio::sync::Mutex;
 
 use crate::providers::{BoxFuture, Credential};
+
+type SecretSlot = (Kind, String, String);
+type MutationMap = SyncMutex<HashMap<SecretSlot, Arc<Mutex<()>>>>;
 
 /// The Secret Service schema every key Tidemark stores is filed under, matching
 /// `CONTEXT.md` § Identity. `xdg:schema` is the attribute name `libsecret` and other
@@ -64,7 +70,7 @@ pub enum SecretError {
 }
 
 /// Which of the two things stored under `(provider, account)` a call means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// An API key the user pasted in.
     Key,
@@ -103,12 +109,11 @@ fn attributes(
 
 /// Where the daemon reads and writes the credentials Tidemark owns.
 ///
-/// The trait exists for one reason: the state this module is built around — a locked
-/// keyring — is the one state that cannot responsibly be produced on a developer's
-/// machine. Locking the real login collection mid-session to see what the scheduler does
-/// would throw an unlock prompt at every other application holding a secret. Behind this
-/// seam the daemon's handling of [`SecretError::Locked`] is exercised for real, with a
-/// source that simply says it is locked.
+/// The trait keeps the locked-keyring state testable without locking a developer's real
+/// login collection, and defines the atomic mutation boundary shared by provider refreshes
+/// and daemon credential changes. Behind this seam tests can say the store is locked, or
+/// deterministically place sign-out between a refresh read and its conditional write,
+/// without contacting a real Secret Service.
 pub trait Secrets: std::fmt::Debug + Send + Sync {
     /// The secret of this kind stored for `(provider, account)`, if any. `Ok(None)` means
     /// nothing has been saved yet, which is a different thing from the keyring being
@@ -128,6 +133,21 @@ pub trait Secrets: std::fmt::Debug + Send + Sync {
         account: &'a AccountId,
         secret: &'a Credential,
     ) -> BoxFuture<'a, Result<(), SecretError>>;
+
+    /// Replaces a secret only when the exact document read earlier is still current.
+    ///
+    /// This is the credential mutation boundary for refreshes: token exchange happens
+    /// without a lock, then this operation prevents the stale result from undoing a
+    /// concurrent sign-out, provider removal, or newer login. Returns `false` without
+    /// writing when the slot is absent or contains different bytes.
+    fn compare_and_set<'a>(
+        &'a self,
+        kind: Kind,
+        provider: &'a ProviderId,
+        account: &'a AccountId,
+        expected: &'a Credential,
+        replacement: &'a Credential,
+    ) -> BoxFuture<'a, Result<bool, SecretError>>;
 
     /// Removes the secret of this kind. Removing one that is not there is not an error.
     fn delete<'a>(
@@ -158,6 +178,24 @@ impl Secrets for Store {
         Box::pin(Store::set(self, kind, provider, account, secret))
     }
 
+    fn compare_and_set<'a>(
+        &'a self,
+        kind: Kind,
+        provider: &'a ProviderId,
+        account: &'a AccountId,
+        expected: &'a Credential,
+        replacement: &'a Credential,
+    ) -> BoxFuture<'a, Result<bool, SecretError>> {
+        Box::pin(Store::compare_and_set(
+            self,
+            kind,
+            provider,
+            account,
+            expected,
+            replacement,
+        ))
+    }
+
     fn delete<'a>(
         &'a self,
         kind: Kind,
@@ -172,6 +210,7 @@ impl Secrets for Store {
 #[derive(Debug)]
 pub struct Store {
     service: Service,
+    mutations: MutationMap,
 }
 
 impl Store {
@@ -180,7 +219,26 @@ impl Store {
     /// an unlock prompt.
     pub async fn connect() -> Result<Self, SecretError> {
         let service = Service::new().await?;
-        Ok(Self { service })
+        Ok(Self {
+            service,
+            mutations: SyncMutex::new(HashMap::new()),
+        })
+    }
+
+    /// One short lock per stored credential. OAuth network I/O happens before this lock is
+    /// acquired; unrelated providers and accounts continue independently.
+    fn mutation(&self, kind: Kind, provider: &ProviderId, account: &AccountId) -> Arc<Mutex<()>> {
+        Arc::clone(
+            self.mutations
+                .lock()
+                .expect("no code panics while holding the credential mutation map")
+                .entry((
+                    kind,
+                    provider.as_str().to_owned(),
+                    account.as_str().to_owned(),
+                ))
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
     }
 
     /// The default collection, checked for the locked state described in the module docs
@@ -200,6 +258,15 @@ impl Store {
     /// is locked, so a caller can distinguish "waiting for keyring" from "nothing saved
     /// yet" — the latter is `Ok(None)`.
     pub async fn get(
+        &self,
+        kind: Kind,
+        provider: &ProviderId,
+        account: &AccountId,
+    ) -> Result<Option<Credential>, SecretError> {
+        self.get_uncoordinated(kind, provider, account).await
+    }
+
+    async fn get_uncoordinated(
         &self,
         kind: Kind,
         provider: &ProviderId,
@@ -228,6 +295,19 @@ impl Store {
         account: &AccountId,
         secret: &Credential,
     ) -> Result<(), SecretError> {
+        let mutation = self.mutation(kind, provider, account);
+        let _guard = mutation.lock().await;
+        self.set_uncoordinated(kind, provider, account, secret)
+            .await
+    }
+
+    async fn set_uncoordinated(
+        &self,
+        kind: Kind,
+        provider: &ProviderId,
+        account: &AccountId,
+        secret: &Credential,
+    ) -> Result<(), SecretError> {
         let collection = self.unlocked_collection().await?;
         let attrs = attributes(kind, provider, account);
         // What a keyring manager shows the user in a list of stored secrets. It names the
@@ -245,9 +325,40 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically replaces one exact document relative to all writes through this store.
+    pub async fn compare_and_set(
+        &self,
+        kind: Kind,
+        provider: &ProviderId,
+        account: &AccountId,
+        expected: &Credential,
+        replacement: &Credential,
+    ) -> Result<bool, SecretError> {
+        let mutation = self.mutation(kind, provider, account);
+        let _guard = mutation.lock().await;
+        let current = self.get_uncoordinated(kind, provider, account).await?;
+        if current.as_ref().map(Credential::expose) != Some(expected.expose()) {
+            return Ok(false);
+        }
+        self.set_uncoordinated(kind, provider, account, replacement)
+            .await?;
+        Ok(true)
+    }
+
     /// Removes the secret of this kind, if one is stored. Removing one that is not there
     /// is not an error.
     pub async fn delete(
+        &self,
+        kind: Kind,
+        provider: &ProviderId,
+        account: &AccountId,
+    ) -> Result<(), SecretError> {
+        let mutation = self.mutation(kind, provider, account);
+        let _guard = mutation.lock().await;
+        self.delete_uncoordinated(kind, provider, account).await
+    }
+
+    async fn delete_uncoordinated(
         &self,
         kind: Kind,
         provider: &ProviderId,

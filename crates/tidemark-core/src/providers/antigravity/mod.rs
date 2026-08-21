@@ -167,13 +167,7 @@ impl Antigravity {
         let Some(stored) = stored else {
             return Ok(None);
         };
-        let document: serde_json::Value =
-            serde_json::from_str(stored.expose()).map_err(|error| {
-                ProviderError::malformed(format!(
-                    "the stored Antigravity login is not readable: {error}"
-                ))
-            })?;
-        let credentials = OwnedCredentials::from_document(document)?;
+        let credentials = OwnedCredentials::from_stored(stored)?;
         let now_ms = Timestamp::now().as_unix().saturating_mul(1_000);
         if credentials.refresh_due_at(now_ms) {
             return self.refresh(&credentials, now_ms).await.map(Some);
@@ -250,15 +244,40 @@ impl Antigravity {
             .own
             .as_ref()
             .expect("owned credentials can only refresh with a Secret Service source");
-        own.set(
-            secrets::Kind::Token,
-            &ProviderId::new(PROVIDER_ID),
-            &AccountId::default(),
-            &Credential::new(document.to_string()),
-        )
-        .await
-        .map_err(ProviderError::from_secret_error)?;
-        OwnedCredentials::from_document(document)
+        let replacement = Credential::new(document.to_string());
+        let replaced = own
+            .compare_and_set(
+                secrets::Kind::Token,
+                &ProviderId::new(PROVIDER_ID),
+                &AccountId::default(),
+                &credentials.source,
+                &replacement,
+            )
+            .await
+            .map_err(ProviderError::from_secret_error)?;
+        if replaced {
+            return OwnedCredentials::from_stored(replacement);
+        }
+
+        // Another account mutation won while Google's token endpoint was in flight. Its
+        // result is authoritative: deletion remains deletion, while a new login is used
+        // directly and its document is never rewritten with this stale refresh response.
+        let current = own
+            .get(
+                secrets::Kind::Token,
+                &ProviderId::new(PROVIDER_ID),
+                &AccountId::default(),
+            )
+            .await
+            .map_err(ProviderError::from_secret_error)?
+            .ok_or(ProviderError::NoCredential)?;
+        let current = OwnedCredentials::from_stored(current)?;
+        if current.refresh_due_at(now_ms) {
+            return Err(ProviderError::Local(
+                "the Antigravity login changed during refresh and still needs refreshing".into(),
+            ));
+        }
+        Ok(current)
     }
 
     async fn fetch_direct(
@@ -285,6 +304,7 @@ struct StoredCredentials {
 }
 
 struct OwnedCredentials {
+    source: Credential,
     access_token: Credential,
     refresh_token: Option<Credential>,
     expires_at: i64,
@@ -304,7 +324,13 @@ impl std::fmt::Debug for OwnedCredentials {
 }
 
 impl OwnedCredentials {
-    fn from_document(document: serde_json::Value) -> Result<Self, ProviderError> {
+    fn from_stored(source: Credential) -> Result<Self, ProviderError> {
+        let document: serde_json::Value =
+            serde_json::from_str(source.expose()).map_err(|error| {
+                ProviderError::malformed(format!(
+                    "the stored Antigravity login is not readable: {error}"
+                ))
+            })?;
         let stored: StoredCredentials = serde_json::from_value(document).map_err(|error| {
             ProviderError::malformed(format!(
                 "the stored Antigravity login is not usable: {error}"
@@ -322,6 +348,7 @@ impl OwnedCredentials {
             .and_then(|token| nonempty(Some(token)))
             .map(Credential::new);
         Ok(Self {
+            source,
             access_token: Credential::new(access_token),
             refresh_token,
             expires_at: stored.expires_at,
@@ -881,6 +908,22 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
+        fn compare_and_set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            expected: &'a Credential,
+            replacement: &'a Credential,
+        ) -> BoxFuture<'a, Result<bool, SecretError>> {
+            let mut held = self.0.lock().expect("no test panics holding this");
+            let matches = held.as_deref() == Some(expected.expose());
+            if matches {
+                *held = Some(replacement.expose().to_owned());
+            }
+            Box::pin(async move { Ok(matches) })
+        }
+
         fn delete<'a>(
             &'a self,
             _kind: Kind,
@@ -942,44 +985,121 @@ mod tests {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .expect("read timeout");
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    let count = stream.read(&mut buffer).expect("request read");
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..count]);
-                    let Some(headers_end) = request.windows(4).position(|w| w == b"\r\n\r\n")
-                    else {
-                        continue;
-                    };
-                    let headers = String::from_utf8_lossy(&request[..headers_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|value| value.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if request.len() >= headers_end + 4 + content_length {
-                        break;
-                    }
-                }
                 requests_tx
-                    .send(String::from_utf8(request).expect("request is text"))
+                    .send(read_request(&mut stream))
                     .expect("request captured");
-                write!(
-                    stream,
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    response_body.len(),
-                    response_body
-                )
-                .expect("response written");
+                write_json_response(&mut stream, status, response_body);
             }
         });
         (format!("http://{address}"), requests_rx, handle)
+    }
+
+    struct RefreshBarrier {
+        base: String,
+        requests: mpsc::Receiver<String>,
+        refresh_started: mpsc::Receiver<()>,
+        release_refresh: mpsc::Sender<()>,
+        stop: mpsc::Sender<()>,
+        server: thread::JoinHandle<()>,
+    }
+
+    /// A refresh endpoint that does not answer until the test has completed its competing
+    /// credential mutation. The optional quota request keeps the pre-fix path from hanging,
+    /// while `stop` lets the fixed no-quota path terminate without a timing assertion.
+    fn refresh_barrier_server() -> RefreshBarrier {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let (requests_tx, requests) = mpsc::channel();
+        let (started_tx, refresh_started) = mpsc::channel();
+        let (release_refresh, release_rx) = mpsc::channel();
+        let (stop, stop_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("refresh accepted");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            requests_tx
+                .send(read_request(&mut stream))
+                .expect("refresh captured");
+            started_tx.send(()).expect("refresh start announced");
+            release_rx.recv().expect("refresh released");
+            write_json_response(
+                &mut stream,
+                200,
+                r#"{"access_token":"stale-refresh","refresh_token":"stale-rotation","expires_in":3600}"#,
+            );
+
+            listener
+                .set_nonblocking(true)
+                .expect("listener made nonblocking");
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .expect("read timeout");
+                        requests_tx
+                            .send(read_request(&mut stream))
+                            .expect("quota captured");
+                        write_json_response(&mut stream, 200, DIRECT_QUOTA);
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stop_rx.try_recv().is_ok() {
+                            break;
+                        }
+                        thread::yield_now();
+                    }
+                    Err(error) => panic!("quota accept failed: {error}"),
+                }
+            }
+        });
+        RefreshBarrier {
+            base: format!("http://{address}"),
+            requests,
+            refresh_started,
+            release_refresh,
+            stop,
+            server,
+        }
+    }
+
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let count = stream.read(&mut buffer).expect("request read");
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+            let Some(headers_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..headers_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            if request.len() >= headers_end + 4 + content_length {
+                break;
+            }
+        }
+        String::from_utf8(request).expect("request is text")
+    }
+
+    fn write_json_response(stream: &mut std::net::TcpStream, status: u16, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("response written");
     }
 
     fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -1068,6 +1188,126 @@ mod tests {
         assert_eq!(stored["project_id"], "project-1");
         assert_eq!(local_calls.load(Ordering::SeqCst), 0);
         server.join().expect("server stopped");
+    }
+
+    #[test]
+    fn a_refresh_racing_sign_out_cannot_recreate_the_deleted_token() {
+        let secrets = FakeSecrets::holding(owned_document("old", 0));
+        let barrier = refresh_barrier_server();
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(
+            Antigravity::with_endpoints_and_local(
+                Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+                barrier.base.clone(),
+                format!("{}/token", barrier.base),
+                fake_local(true, &local_calls),
+            )
+            .expect("provider"),
+        );
+        let fetch = thread::spawn(move || block_on(provider.fetch_inner()));
+        barrier
+            .refresh_started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("refresh reached the barrier");
+
+        block_on(secrets.delete(
+            Kind::Token,
+            &ProviderId::new(PROVIDER_ID),
+            &AccountId::default(),
+        ))
+        .expect("sign-out deletes the token");
+        barrier.release_refresh.send(()).expect("release refresh");
+        let result = fetch.join().expect("fetch thread stopped");
+        barrier.stop.send(()).ok();
+        barrier.server.join().expect("server stopped");
+
+        assert!(matches!(result, Err(ProviderError::NoCredential)));
+        assert!(secrets.document().is_none(), "sign-out must remain final");
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_refresh_racing_provider_removal_cannot_leave_a_token_behind() {
+        let secrets = FakeSecrets::holding(owned_document("old", 0));
+        let barrier = refresh_barrier_server();
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(
+            Antigravity::with_endpoints_and_local(
+                Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+                barrier.base.clone(),
+                format!("{}/token", barrier.base),
+                fake_local(true, &local_calls),
+            )
+            .expect("provider"),
+        );
+        let fetch = thread::spawn(move || block_on(provider.fetch_inner()));
+        barrier
+            .refresh_started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("refresh reached the barrier");
+
+        // Provider removal's credential boundary is the same production `delete(Token)`
+        // call; topology removal follows only after this operation succeeds.
+        block_on(secrets.delete(
+            Kind::Token,
+            &ProviderId::new(PROVIDER_ID),
+            &AccountId::default(),
+        ))
+        .expect("provider removal deletes the token");
+        barrier.release_refresh.send(()).expect("release refresh");
+        let result = fetch.join().expect("fetch thread stopped");
+        barrier.stop.send(()).ok();
+        barrier.server.join().expect("server stopped");
+
+        assert!(matches!(result, Err(ProviderError::NoCredential)));
+        assert!(
+            secrets.document().is_none(),
+            "an unconfigured provider must have no token"
+        );
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_refresh_racing_a_new_login_cannot_overwrite_the_new_document() {
+        let secrets = FakeSecrets::holding(owned_document("old", 0));
+        let barrier = refresh_barrier_server();
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(
+            Antigravity::with_endpoints_and_local(
+                Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+                barrier.base.clone(),
+                format!("{}/token", barrier.base),
+                fake_local(true, &local_calls),
+            )
+            .expect("provider"),
+        );
+        let fetch = thread::spawn(move || block_on(provider.fetch_inner()));
+        barrier
+            .refresh_started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("refresh reached the barrier");
+
+        let login = owned_document("new-login", i64::MAX);
+        block_on(secrets.set(
+            Kind::Token,
+            &ProviderId::new(PROVIDER_ID),
+            &AccountId::default(),
+            &Credential::new(login.to_string()),
+        ))
+        .expect("new login stored");
+        barrier.release_refresh.send(()).expect("release refresh");
+        fetch
+            .join()
+            .expect("fetch thread stopped")
+            .expect("new login remains usable");
+        barrier.stop.send(()).ok();
+        barrier.server.join().expect("server stopped");
+
+        assert_eq!(secrets.document(), Some(login));
+        let _refresh = barrier.requests.recv().expect("refresh captured");
+        let quota = barrier.requests.recv().expect("quota captured");
+        assert!(quota.contains("authorization: Bearer new-login"), "{quota}");
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
