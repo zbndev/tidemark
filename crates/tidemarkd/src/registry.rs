@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
-use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex, keyed};
+use tidemark_core::providers::keyed::{self, poe};
+use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex};
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
     AccountId, CredentialKind, OptionChoice, ProviderDefinition, ProviderId, ProviderOption,
@@ -59,13 +60,13 @@ static OAUTH: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// The hand-written key-authenticated providers: those whose fetch is more than one
-/// request, so a `keyed::Spec` cannot describe them — a paged usage history, a balance
-/// plus a quota. Each entry is the provider's own [`keyed::HandSpec`], which carries
+/// request, so a `keyed::Spec` cannot describe them — Poe pages through a usage
+/// history. Each entry is the provider's own [`keyed::HandSpec`], which carries
 /// everything a `Spec` carries except the single endpoint, and says how to build a
 /// client from the stored key and the account's settings. The credential is the same
 /// pasted key as the catalog's, `CredentialKind::Key`, so the credentials dialog is
 /// unchanged.
-static HAND_WRITTEN: &[&keyed::HandSpec] = &[];
+static HAND_WRITTEN: &[&keyed::HandSpec] = &[&poe::SPEC];
 
 /// The catalog's own spelling of a provider's name, for the places the daemon speaks to a
 /// person outside the settings dialog: notification text, and anything else that has only a
@@ -512,7 +513,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 18);
+        assert_eq!(definitions.len(), 19);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(

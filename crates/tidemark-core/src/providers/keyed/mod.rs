@@ -37,6 +37,7 @@ pub mod elevenlabs;
 pub mod kimi;
 pub mod llmproxy;
 pub mod neuralwatt;
+pub mod poe;
 pub mod sub2api;
 pub mod synthetic;
 pub mod venice;
