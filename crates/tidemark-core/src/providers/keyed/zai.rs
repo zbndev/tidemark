@@ -31,8 +31,8 @@
 //!
 //! `nextResetTime` is Unix **milliseconds**.
 
-use super::ProviderError;
-use super::keyed::{Auth, Method, OptionSchema, Spec};
+use super::{Auth, Method, OptionSchema, Spec};
+use crate::providers::ProviderError;
 use serde::Deserialize;
 use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,

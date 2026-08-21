@@ -39,8 +39,8 @@
 //! a rate limit that one day arrives with a seven-day window cannot land on top of the
 //! plan's own history.
 
-use super::keyed::{Auth, Method, Spec};
-use super::{ProviderError, length_title, parse_rfc3339, title_case};
+use super::{Auth, Method, Spec};
+use crate::providers::{ProviderError, length_title, parse_rfc3339, title_case};
 use serde::{Deserialize, Deserializer, de};
 use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,

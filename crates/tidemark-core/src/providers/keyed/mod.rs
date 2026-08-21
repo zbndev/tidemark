@@ -18,6 +18,9 @@
 //! every trap in a response is reachable from a test that needs no network, and the
 //! accidental path to a request from inside a parser does not exist.
 
+pub mod kimi;
+pub mod zai;
+
 use super::{BoxFuture, Credential, Provider, ProviderError, http};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -297,7 +300,7 @@ impl Provider for Keyed {
 ///
 /// Adding a provider is a file beside this one and a line here. Nothing else in the
 /// workspace names it.
-pub static CATALOG: &[&Spec] = &[&super::kimi::SPEC, &super::zai::SPEC];
+pub static CATALOG: &[&Spec] = &[&kimi::SPEC, &zai::SPEC];
 
 #[cfg(test)]
 mod tests {

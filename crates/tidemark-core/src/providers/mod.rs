@@ -28,8 +28,8 @@ pub mod claude;
 pub mod codex;
 pub mod http;
 pub mod keyed;
-pub mod kimi;
-pub mod zai;
+
+pub use keyed::{kimi, zai};
 
 use std::fmt;
 use std::future::Future;
