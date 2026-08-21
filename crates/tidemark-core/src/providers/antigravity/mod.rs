@@ -1202,6 +1202,17 @@ mod tests {
         })
     }
 
+    /// An `expires_at` that is comfortably in the future. Computed rather than hardcoded:
+    /// a hardcoded "future" is only future until the suite runs after that date, at which
+    /// point every test holding that login refreshes it before use and the refresh request
+    /// eats the response the test had queued for something else.
+    fn valid_for_another_hour_ms() -> i64 {
+        Timestamp::now()
+            .as_unix()
+            .saturating_mul(1_000)
+            .saturating_add(3_600_000)
+    }
+
     fn fake_local(available: bool, calls: &Arc<AtomicUsize>) -> Box<dyn LocalQuota> {
         Box::new(FakeLocal::new(
             available,
@@ -1218,7 +1229,7 @@ mod tests {
         // The order CodexBar's "Auto" uses: the local server is the vendor's own live
         // session, and asking Google first spends a request to learn what `agy` already
         // knows. A token being present must not take the local source out of the picture.
-        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let secrets = FakeSecrets::holding(owned_document("owned", valid_for_another_hour_ms()));
         let local_calls = Arc::new(AtomicUsize::new(0));
         let provider = Antigravity::with_endpoints_and_local(
             Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
@@ -1239,7 +1250,7 @@ mod tests {
     #[test]
     fn auto_uses_the_login_when_there_is_no_local_server() {
         // The case the login was built for: no `agy` on the machine at all.
-        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let secrets = FakeSecrets::holding(owned_document("owned", valid_for_another_hour_ms()));
         let (base, _requests, _server) = local_server(vec![(200, DIRECT_QUOTA)]);
         let local_calls = Arc::new(AtomicUsize::new(0));
         let provider = Antigravity::with_endpoints_and_local(
@@ -1261,7 +1272,7 @@ mod tests {
     fn oauth_only_never_asks_the_local_server() {
         // Pinned to the login: a user who chose this wants to know their login is broken,
         // not to be quietly served from a source they excluded.
-        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let secrets = FakeSecrets::holding(owned_document("owned", valid_for_another_hour_ms()));
         let refused = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}"#;
         let (base, _requests, _server) = local_server(vec![(429, refused)]);
         let local_calls = Arc::new(AtomicUsize::new(0));
@@ -1304,7 +1315,7 @@ mod tests {
 
     #[test]
     fn cli_only_without_a_local_server_says_so_rather_than_using_the_login() {
-        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let secrets = FakeSecrets::holding(owned_document("owned", valid_for_another_hour_ms()));
         let local_calls = Arc::new(AtomicUsize::new(0));
         let provider = Antigravity::with_endpoints_and_local(
             Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
@@ -1334,7 +1345,7 @@ mod tests {
         // `agy` is installed and running but has nobody logged into it. The login is the
         // whole reason this account has a second source, so it is asked rather than the
         // card being failed on the first source's word.
-        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let secrets = FakeSecrets::holding(owned_document("owned", valid_for_another_hour_ms()));
         let (base, requests, server) = local_server(vec![(200, DIRECT_QUOTA)]);
         let local_calls = Arc::new(AtomicUsize::new(0));
         let local = Box::new(FakeLocal::new(
@@ -1364,7 +1375,7 @@ mod tests {
     fn a_direct_failure_with_no_local_server_is_reported_rather_than_hidden() {
         // The fallback exists because there is somewhere better to look, not to swallow
         // the reason. With nothing local running, the direct refusal is the answer.
-        let secrets = FakeSecrets::holding(owned_document("owned", 1_787_324_000_000));
+        let secrets = FakeSecrets::holding(owned_document("owned", valid_for_another_hour_ms()));
         let refused = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}"#;
         let (base, _requests, _server) = local_server(vec![(429, refused)]);
         let local_calls = Arc::new(AtomicUsize::new(0));
