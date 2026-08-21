@@ -37,6 +37,7 @@ use crate::format;
 #[derive(Debug)]
 pub struct Credentials {
     dialog: adw::PreferencesDialog,
+    page: adw::PreferencesPage,
     proxy: DaemonProxy<'static>,
     accounts: RefCell<Vec<AccountRows>>,
 }
@@ -84,6 +85,7 @@ impl Credentials {
 
         let credentials = Rc::new(Self {
             dialog: dialog.clone(),
+            page: page.clone(),
             proxy,
             accounts: RefCell::new(Vec::new()),
         });
@@ -102,7 +104,9 @@ impl Credentials {
     /// Brings the parts that depend on the daemon up to date, leaving anything the user is
     /// in the middle of typing alone.
     pub fn apply(&self, statuses: &[ProviderStatus]) {
-        for rows in self.accounts.borrow().iter() {
+        let mut accounts = self.accounts.borrow_mut();
+        remove_absent_rows(&self.page, &mut accounts, statuses);
+        for rows in accounts.iter() {
             let Some(status) = statuses
                 .iter()
                 .find(|s| s.provider == rows.provider && s.account == rows.account)
@@ -505,6 +509,23 @@ impl Credentials {
     }
 }
 
+/// Removes the GTK groups and stored rows for accounts the daemon no longer configures.
+fn remove_absent_rows(
+    page: &adw::PreferencesPage,
+    accounts: &mut Vec<AccountRows>,
+    statuses: &[ProviderStatus],
+) {
+    let (kept, removed) = std::mem::take(accounts).into_iter().partition(|rows| {
+        statuses
+            .iter()
+            .any(|status| rows.provider == status.provider && rows.account == status.account)
+    });
+    *accounts = kept;
+    for rows in removed {
+        page.remove(&rows.group);
+    }
+}
+
 /// A sentence under a row, in the quiet style libadwaita uses for one.
 fn caption(text: &str) -> gtk::Label {
     gtk::Label::builder()
@@ -568,6 +589,59 @@ mod tests {
         status.credential = Some(kind.as_wire().to_owned());
         status.credential_hint = Some("Z.ai dashboard → API keys.".into());
         status
+    }
+
+    fn account_status(provider: &str, account: &str) -> ProviderStatus {
+        ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))
+    }
+
+    #[test]
+    fn applying_updates_to_an_open_dialog_removes_an_absent_account_row() {
+        gtk::init().expect("GTK is available for widget tests");
+        let page = adw::PreferencesPage::new();
+        let first = AccountRows {
+            provider: "zai".into(),
+            account: "first".into(),
+            group: adw::PreferencesGroup::new(),
+            sign_in: None,
+            key: None,
+            remove: None,
+            waiting: std::cell::Cell::new(false),
+        };
+        let default = AccountRows {
+            provider: "zai".into(),
+            account: "default".into(),
+            group: adw::PreferencesGroup::new(),
+            sign_in: None,
+            key: None,
+            remove: None,
+            waiting: std::cell::Cell::new(false),
+        };
+        let other_provider = AccountRows {
+            provider: "kimi".into(),
+            account: "default".into(),
+            group: adw::PreferencesGroup::new(),
+            sign_in: None,
+            key: None,
+            remove: None,
+            waiting: std::cell::Cell::new(false),
+        };
+        let first_group = first.group.clone();
+        let default_group = default.group.clone();
+        let other_provider_group = other_provider.group.clone();
+        page.add(&first.group);
+        page.add(&default.group);
+        page.add(&other_provider.group);
+        let mut displayed = vec![first, default, other_provider];
+        let statuses = vec![account_status("zai", "default")];
+
+        remove_absent_rows(&page, &mut displayed, &statuses);
+
+        assert_eq!(displayed.len(), 1);
+        assert_eq!(displayed[0].account, "default");
+        assert!(first_group.parent().is_none());
+        assert!(default_group.parent().is_some());
+        assert!(other_provider_group.parent().is_none());
     }
 
     #[test]
