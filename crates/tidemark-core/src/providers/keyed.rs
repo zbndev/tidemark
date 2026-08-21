@@ -149,22 +149,37 @@ impl Keyed {
         if self.credential.is_blank() {
             return Err(ProviderError::Credential { status: 401 });
         }
-        let response = self
-            .client
-            .execute(self.build_request()?)
-            .await
-            .map_err(|error| ProviderError::Transport(redact_query(error)))?;
-
-        let status = response.status();
-        let retry_after = http::retry_after_header(&response).map(str::to_owned);
-        http::check(status, retry_after.as_deref())?;
-
-        let body = response
-            .text()
-            .await
-            .map_err(|error| ProviderError::Transport(redact_query(error)))?;
+        let body = request(&self.client, self.build_request()?).await?;
         (self.spec.parse)(&body, Timestamp::now())
     }
+}
+
+/// Sends one built request and reads its body, mapping every failure the way the keyed
+/// providers have agreed to map it.
+///
+/// A provider whose fetch is not one request — Poe pages through a usage history,
+/// OpenRouter makes two calls — keeps its own `impl Provider` and sends each of its
+/// requests through here, so the parts that are easy to forget travel with the function
+/// rather than with each provider: `Retry-After` is read before the body consumes the
+/// headers, a non-success status goes through `http::check`, and the query string is
+/// stripped off any `reqwest` error before it can be rendered.
+pub async fn request(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+) -> Result<String, ProviderError> {
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|error| ProviderError::Transport(redact_query(error)))?;
+
+    let status = response.status();
+    let retry_after = http::retry_after_header(&response).map(str::to_owned);
+    http::check(status, retry_after.as_deref())?;
+
+    response
+        .text()
+        .await
+        .map_err(|error| ProviderError::Transport(redact_query(error)))
 }
 
 /// Strips the query string — where [`Auth::Query`] carries the credential — off every
