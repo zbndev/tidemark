@@ -38,8 +38,9 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
         ProviderDefinition {
             provider: antigravity::PROVIDER_ID.into(),
             title: "Antigravity".into(),
-            credential: CredentialKind::External.as_wire().into(),
-            credential_hint: "Sign in with the Antigravity IDE or the agy CLI; Tidemark reads the session they keep.".into(),
+            credential: CredentialKind::OAuth.as_wire().into(),
+            credential_hint:
+                "Sign in with Google through Tidemark, or use an existing agy session.".into(),
             external_fallback: Some("agy session".into()),
             options: options(antigravity::PROVIDER_ID, config),
         },
@@ -63,7 +64,9 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
             provider: kimi::PROVIDER_ID.into(),
             title: "Kimi".into(),
             credential: CredentialKind::Key.as_wire().into(),
-            credential_hint: "Kimi Code Console → API keys. This is Kimi For Coding, not the Open Platform.".into(),
+            credential_hint:
+                "Kimi Code Console → API keys. This is Kimi For Coding, not the Open Platform."
+                    .into(),
             external_fallback: None,
             options: options(kimi::PROVIDER_ID, config),
         },
@@ -71,7 +74,8 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
             provider: zai::PROVIDER_ID.into(),
             title: "Z.ai".into(),
             credential: CredentialKind::Key.as_wire().into(),
-            credential_hint: "Z.ai dashboard → API keys, on whichever region your account is on.".into(),
+            credential_hint: "Z.ai dashboard → API keys, on whichever region your account is on."
+                .into(),
             external_fallback: None,
             options: options(zai::PROVIDER_ID, config),
         },
@@ -85,7 +89,7 @@ pub fn account(
     config: &Config,
 ) -> Result<Option<Account>, ProviderError> {
     let account = match provider {
-        antigravity::PROVIDER_ID => Some(antigravity_account()?),
+        antigravity::PROVIDER_ID => Some(antigravity_account(secrets)?),
         "claude" => Some(claude_account(secrets)?),
         codex::PROVIDER_ID => Some(codex_account(secrets)?),
         kimi::PROVIDER_ID => Some(kimi_account()),
@@ -157,6 +161,7 @@ fn region(config: &Config) -> (&'static str, zai::Region) {
 /// The OAuth client to run a login against, for a provider that has one.
 pub fn oauth_client(provider: &str) -> Option<oauth::Client> {
     match provider {
+        antigravity::PROVIDER_ID => Some(antigravity::oauth::client()),
         "claude" => Some(claude::oauth_client()),
         codex::PROVIDER_ID => Some(codex::oauth_client()),
         _ => None,
@@ -168,12 +173,13 @@ pub fn oauth_client(provider: &str) -> Option<oauth::Client> {
 /// Built by the provider rather than here, because the shape is the provider's: it is the
 /// same document its parser reads out of the vendor CLI's file, which is what lets one
 /// implementation serve both sources.
-pub fn login_document(
+pub async fn login_document(
     provider: &str,
     response: &serde_json::Value,
     now_ms: i64,
 ) -> Result<serde_json::Value, ProviderError> {
     match provider {
+        antigravity::PROVIDER_ID => antigravity::oauth::complete_login(response, now_ms).await,
         "claude" => claude::document_from_login(response, now_ms),
         codex::PROVIDER_ID => codex::document_from_login(response),
         _ => Err(ProviderError::Local(format!(
@@ -182,16 +188,13 @@ pub fn login_document(
     }
 }
 
-fn antigravity_account() -> Result<Account, ProviderError> {
-    // Its credential is neither ours to hold nor a file we read: the `agy` CLI keeps a
-    // session in the system keyring and answers on loopback. What this build owns is the
-    // process, which is why the client exists from registration and starts nothing until
-    // the first poll. There is nothing here for a credentials dialog to do — signing in
-    // happens in `agy`, and Tidemark reports what it finds.
+fn antigravity_account(secrets: &Arc<dyn Secrets>) -> Result<Account, ProviderError> {
     Ok(
-        Account::with_client(Arc::new(antigravity::Antigravity::new()?))
-            .with_credential(CredentialKind::External)
-            .with_hint("Sign in with the Antigravity IDE or the agy CLI; Tidemark reads the session they keep."),
+        Account::with_client(Arc::new(antigravity::Antigravity::new(Some(Arc::clone(
+            secrets,
+        )))?))
+        .with_credential(CredentialKind::OAuth)
+        .with_hint("Sign in with Google through Tidemark, or use an existing agy session."),
     )
 }
 
@@ -317,11 +320,45 @@ mod tests {
         let definitions = catalog(&config);
         assert_eq!(definitions.len(), 5);
         assert_eq!(definitions[0].provider, "antigravity");
+        assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
+        assert_eq!(
+            definitions[0].external_fallback.as_deref(),
+            Some("agy session")
+        );
+        assert_eq!(
+            definitions[0].credential_hint,
+            "Sign in with Google through Tidemark, or use an existing agy session."
+        );
         assert!(
             definitions
                 .iter()
                 .all(|definition| !definition.title.is_empty())
         );
+    }
+
+    #[test]
+    fn antigravity_exposes_its_registered_google_oauth_client() {
+        let client = oauth_client(antigravity::PROVIDER_ID).expect("OAuth client");
+        assert_eq!(client.redirect_port, 51_121);
+        assert_eq!(client.redirect_path, "/oauth-callback");
+        assert!(client.client_secret.is_some());
+    }
+
+    #[tokio::test]
+    async fn existing_oauth_document_builders_survive_async_completion() {
+        let document = login_document(
+            codex::PROVIDER_ID,
+            &serde_json::json!({
+                "access_token": "access",
+                "refresh_token": "refresh"
+            }),
+            1_787_270_400_000,
+        )
+        .await
+        .expect("Codex document");
+
+        assert_eq!(document["tokens"]["access_token"], "access");
+        assert_eq!(document["tokens"]["refresh_token"], "refresh");
     }
 
     #[test]

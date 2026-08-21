@@ -487,6 +487,11 @@ fn resolve_binary() -> Option<PathBuf> {
     })
 }
 
+/// Whether the local fallback can be attempted without trying to start a process.
+pub fn is_available() -> bool {
+    resolve_binary().is_some()
+}
+
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)

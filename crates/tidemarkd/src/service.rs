@@ -443,6 +443,7 @@ impl Daemon {
                 .as_unix()
                 .saturating_mul(1_000);
             let document = registry::login_document(&provider_name, &response, now_ms)
+                .await
                 .map_err(|error| error.to_string())?;
             let _guard = credential_mutation.lock().await;
             secrets

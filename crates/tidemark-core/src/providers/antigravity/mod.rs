@@ -37,15 +37,18 @@
 
 pub mod agy;
 pub mod direct;
+pub mod oauth;
 
 use serde::Deserialize;
+use std::sync::Arc;
 use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
     WindowLength,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::{BoxFuture, Provider, ProviderError, length_title, title_case};
+use super::{BoxFuture, Credential, Provider, ProviderError, http, length_title, title_case};
+use crate::secrets::{self, Secrets};
 use agy::Agy;
 
 /// The slug this provider's history is filed under. Never changes once shipped.
@@ -70,23 +73,273 @@ const CADENCES: &[(&str, u64)] = &[
     ("fivehour", 5 * 3_600),
 ];
 
-/// An Antigravity account, seen through the local server.
+/// How close to expiry an owned access token is refreshed rather than spent.
+const REFRESH_MARGIN_MS: i64 = 5 * 60 * 1_000;
+
+trait LocalQuota: std::fmt::Debug + Send + Sync {
+    fn available(&self) -> bool;
+    fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>>;
+}
+
 #[derive(Debug)]
-pub struct Antigravity {
+struct AgyQuota {
     agy: Agy,
 }
 
-impl Antigravity {
-    /// Builds the provider. No process is started until the first fetch.
-    pub fn new() -> Result<Self, ProviderError> {
+impl AgyQuota {
+    fn new() -> Result<Self, ProviderError> {
         Ok(Self { agy: Agy::new()? })
+    }
+}
+
+impl LocalQuota for AgyQuota {
+    fn available(&self) -> bool {
+        agy::is_available()
+    }
+
+    fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+        Box::pin(async move {
+            let ready = self.agy.ready().await?;
+            let quota = self.agy.rpc(ready.port, agy::QUOTA_SUMMARY_PATH).await?;
+            parse(&quota, &ready.status_body, Timestamp::now())
+        })
+    }
+}
+
+/// An Antigravity account, preferring an owned Google OAuth login over local `agy`.
+#[derive(Debug)]
+pub struct Antigravity {
+    client: reqwest::Client,
+    own: Option<Arc<dyn Secrets>>,
+    direct_endpoint: String,
+    token_endpoint: String,
+    local: Box<dyn LocalQuota>,
+}
+
+impl Antigravity {
+    /// Builds the provider. The local fallback starts no process until it is selected.
+    pub fn new(own: Option<Arc<dyn Secrets>>) -> Result<Self, ProviderError> {
+        Ok(Self {
+            client: http::client()?,
+            own,
+            direct_endpoint: oauth::API_ENDPOINTS[0].to_owned(),
+            token_endpoint: oauth::TOKEN_URL.to_owned(),
+            local: Box::new(AgyQuota::new()?),
+        })
+    }
+
+    #[cfg(test)]
+    fn with_endpoints_and_local(
+        own: Option<Arc<dyn Secrets>>,
+        direct_endpoint: String,
+        token_endpoint: String,
+        local: Box<dyn LocalQuota>,
+    ) -> Result<Self, ProviderError> {
+        Ok(Self {
+            client: http::client()?,
+            own,
+            direct_endpoint,
+            token_endpoint,
+            local,
+        })
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
-        let ready = self.agy.ready().await?;
-        let quota = self.agy.rpc(ready.port, agy::QUOTA_SUMMARY_PATH).await?;
-        parse(&quota, &ready.status_body, Timestamp::now())
+        match self.own_token().await? {
+            Some(credentials) => self.fetch_direct(&credentials).await,
+            None if self.local.available() => self.local.fetch().await,
+            None => Err(ProviderError::NoCredential),
+        }
     }
+
+    async fn own_token(&self) -> Result<Option<OwnedCredentials>, ProviderError> {
+        let Some(own) = &self.own else {
+            return Ok(None);
+        };
+        let stored = own
+            .get(
+                secrets::Kind::Token,
+                &ProviderId::new(PROVIDER_ID),
+                &AccountId::default(),
+            )
+            .await
+            .map_err(ProviderError::from_secret_error)?;
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        let document: serde_json::Value =
+            serde_json::from_str(stored.expose()).map_err(|error| {
+                ProviderError::malformed(format!(
+                    "the stored Antigravity login is not readable: {error}"
+                ))
+            })?;
+        let credentials = OwnedCredentials::from_document(document)?;
+        let now_ms = Timestamp::now().as_unix().saturating_mul(1_000);
+        if credentials.refresh_due_at(now_ms) {
+            return self.refresh(&credentials, now_ms).await.map(Some);
+        }
+        Ok(Some(credentials))
+    }
+
+    async fn refresh(
+        &self,
+        credentials: &OwnedCredentials,
+        now_ms: i64,
+    ) -> Result<OwnedCredentials, ProviderError> {
+        let refresh_token = credentials
+            .refresh_token
+            .as_ref()
+            .ok_or(ProviderError::Credential { status: 401 })?;
+        let oauth = oauth::client();
+        let client_secret = oauth.client_secret.ok_or_else(|| {
+            ProviderError::Local("Antigravity OAuth has no registered client secret".into())
+        })?;
+        let response = self
+            .client
+            .post(&self.token_endpoint)
+            .form(&[
+                ("client_id", oauth.client_id),
+                ("client_secret", client_secret),
+                ("refresh_token", refresh_token.expose()),
+                ("grant_type", "refresh_token"),
+            ])
+            .send()
+            .await
+            .map_err(ProviderError::Transport)?;
+        let status = response.status();
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            return Err(ProviderError::Credential {
+                status: status.as_u16(),
+            });
+        }
+        let retry_after = http::retry_after_header(&response).map(str::to_owned);
+        http::check(status, retry_after.as_deref())?;
+        let refreshed: RefreshResponse = response.json().await.map_err(|error| {
+            ProviderError::malformed(format!(
+                "the Antigravity refresh response is not readable: {error}"
+            ))
+        })?;
+        let access_token = nonempty(Some(&refreshed.access_token)).ok_or_else(|| {
+            ProviderError::malformed(
+                "the Antigravity refresh response carried a blank access token",
+            )
+        })?;
+        if refreshed.expires_in <= 0 {
+            return Err(ProviderError::malformed(
+                "the Antigravity refresh response carried a non-positive expiry",
+            ));
+        }
+        let refresh_token = refreshed
+            .refresh_token
+            .as_deref()
+            .and_then(|token| nonempty(Some(token)))
+            .unwrap_or_else(|| {
+                credentials
+                    .refresh_token
+                    .as_ref()
+                    .expect("checked above")
+                    .expose()
+            });
+        let document = serde_json::json!({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_at": now_ms.saturating_add(refreshed.expires_in.saturating_mul(1_000)),
+            "project_id": credentials.project_id,
+        });
+        let own = self
+            .own
+            .as_ref()
+            .expect("owned credentials can only refresh with a Secret Service source");
+        own.set(
+            secrets::Kind::Token,
+            &ProviderId::new(PROVIDER_ID),
+            &AccountId::default(),
+            &Credential::new(document.to_string()),
+        )
+        .await
+        .map_err(ProviderError::from_secret_error)?;
+        OwnedCredentials::from_document(document)
+    }
+
+    async fn fetch_direct(
+        &self,
+        credentials: &OwnedCredentials,
+    ) -> Result<Snapshot, ProviderError> {
+        direct::fetch(
+            &self.client,
+            &self.direct_endpoint,
+            credentials.access_token.expose(),
+            &credentials.project_id,
+        )
+        .await
+    }
+}
+
+#[derive(Deserialize)]
+struct StoredCredentials {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    expires_at: i64,
+    project_id: String,
+}
+
+struct OwnedCredentials {
+    access_token: Credential,
+    refresh_token: Option<Credential>,
+    expires_at: i64,
+    project_id: String,
+}
+
+impl std::fmt::Debug for OwnedCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OwnedCredentials")
+            .field("access_token", &self.access_token)
+            .field("has_refresh_token", &self.refresh_token.is_some())
+            .field("expires_at", &self.expires_at)
+            .field("project_id", &self.project_id)
+            .finish()
+    }
+}
+
+impl OwnedCredentials {
+    fn from_document(document: serde_json::Value) -> Result<Self, ProviderError> {
+        let stored: StoredCredentials = serde_json::from_value(document).map_err(|error| {
+            ProviderError::malformed(format!(
+                "the stored Antigravity login is not usable: {error}"
+            ))
+        })?;
+        let access_token = nonempty(Some(&stored.access_token)).ok_or_else(|| {
+            ProviderError::malformed("the stored Antigravity login has a blank access token")
+        })?;
+        let project_id = nonempty(Some(&stored.project_id)).ok_or_else(|| {
+            ProviderError::malformed("the stored Antigravity login has a blank project id")
+        })?;
+        let refresh_token = stored
+            .refresh_token
+            .as_deref()
+            .and_then(|token| nonempty(Some(token)))
+            .map(Credential::new);
+        Ok(Self {
+            access_token: Credential::new(access_token),
+            refresh_token,
+            expires_at: stored.expires_at,
+            project_id: project_id.to_owned(),
+        })
+    }
+
+    fn refresh_due_at(&self, now_ms: i64) -> bool {
+        now_ms >= self.expires_at.saturating_sub(REFRESH_MARGIN_MS)
+    }
+}
+
+#[derive(Deserialize)]
+struct RefreshResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    expires_in: i64,
 }
 
 impl Provider for Antigravity {
@@ -489,6 +742,14 @@ impl PlanInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::Credential;
+    use crate::secrets::{Kind, SecretError, Secrets};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::thread;
+    use std::time::Duration;
 
     /// The body the live server returned on 2026-08-20, verbatim in shape. Both groups run
     /// weekly, both declare the cadence, and both were untouched — which is exactly the
@@ -574,6 +835,315 @@ mod tests {
             LIVE_STATUS,
             now(),
         )
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeSecrets(Mutex<Option<String>>);
+
+    impl FakeSecrets {
+        fn holding(document: serde_json::Value) -> Arc<Self> {
+            Arc::new(Self(Mutex::new(Some(document.to_string()))))
+        }
+
+        fn document(&self) -> Option<serde_json::Value> {
+            self.0
+                .lock()
+                .expect("no test panics holding this")
+                .as_deref()
+                .map(|document| serde_json::from_str(document).expect("stored JSON"))
+        }
+    }
+
+    impl Secrets for FakeSecrets {
+        fn get<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<Option<Credential>, SecretError>> {
+            let held = self
+                .0
+                .lock()
+                .expect("no test panics holding this")
+                .clone()
+                .map(Credential::new);
+            Box::pin(async move { Ok(held) })
+        }
+
+        fn set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            secret: &'a Credential,
+        ) -> BoxFuture<'a, Result<(), SecretError>> {
+            *self.0.lock().expect("no test panics holding this") = Some(secret.expose().to_owned());
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<(), SecretError>> {
+            *self.0.lock().expect("no test panics holding this") = None;
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeLocal {
+        available: bool,
+        calls: Arc<AtomicUsize>,
+        result: Mutex<Option<Result<Snapshot, ProviderError>>>,
+    }
+
+    impl FakeLocal {
+        fn new(
+            available: bool,
+            calls: Arc<AtomicUsize>,
+            result: Result<Snapshot, ProviderError>,
+        ) -> Self {
+            Self {
+                available,
+                calls,
+                result: Mutex::new(Some(result)),
+            }
+        }
+    }
+
+    impl LocalQuota for FakeLocal {
+        fn available(&self) -> bool {
+            self.available
+        }
+
+        fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let result = self
+                .result
+                .lock()
+                .expect("no test panics holding this")
+                .take()
+                .expect("local quota fetched only once");
+            Box::pin(async move { result })
+        }
+    }
+
+    fn local_server(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let (requests_tx, requests_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            for (status, response_body) in responses {
+                let (mut stream, _) = listener.accept().expect("request accepted");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("read timeout");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).expect("request read");
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    let Some(headers_end) = request.windows(4).position(|w| w == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..headers_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= headers_end + 4 + content_length {
+                        break;
+                    }
+                }
+                requests_tx
+                    .send(String::from_utf8(request).expect("request is text"))
+                    .expect("request captured");
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                )
+                .expect("response written");
+            }
+        });
+        (format!("http://{address}"), requests_rx, handle)
+    }
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(future)
+    }
+
+    fn owned_document(access_token: &str, expires_at: i64) -> serde_json::Value {
+        serde_json::json!({
+            "access_token": access_token,
+            "refresh_token": "old-refresh",
+            "expires_at": expires_at,
+            "project_id": "project-1",
+        })
+    }
+
+    fn fake_local(available: bool, calls: &Arc<AtomicUsize>) -> Box<dyn LocalQuota> {
+        Box::new(FakeLocal::new(
+            available,
+            Arc::clone(calls),
+            Ok(parsed(LIVE_QUOTA)),
+        ))
+    }
+
+    const DIRECT_QUOTA: &str =
+        include_str!("../../../tests/fixtures/antigravity-available-models.json");
+
+    #[test]
+    fn an_expired_owned_token_rotates_refresh_and_keeps_project_before_quota() {
+        let secrets = FakeSecrets::holding(owned_document("old", 1_787_270_399_000));
+        let refresh = r#"{"access_token":"new","refresh_token":"rotated","expires_in":3600}"#;
+        let (base, requests, server) = local_server(vec![(200, refresh), (200, DIRECT_QUOTA)]);
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+            base.clone(),
+            format!("{base}/token"),
+            fake_local(true, &local_calls),
+        )
+        .expect("provider");
+
+        block_on(provider.fetch_inner()).expect("refresh and fetch succeed");
+
+        let refresh_request = requests.recv().expect("refresh captured");
+        assert!(
+            refresh_request.starts_with("POST /token "),
+            "{refresh_request}"
+        );
+        assert!(
+            refresh_request.contains("refresh_token=old-refresh"),
+            "{refresh_request}"
+        );
+        let quota_request = requests.recv().expect("quota captured");
+        assert!(
+            quota_request.contains("authorization: Bearer new"),
+            "{quota_request}"
+        );
+        let stored = secrets.document().expect("rotated document");
+        assert_eq!(stored["refresh_token"], "rotated");
+        assert_eq!(stored["project_id"], "project-1");
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+        server.join().expect("server stopped");
+    }
+
+    #[test]
+    fn a_refresh_without_rotation_preserves_the_previous_refresh_token() {
+        let secrets = FakeSecrets::holding(owned_document("old", 1_787_270_399_000));
+        let refresh = r#"{"access_token":"new","expires_in":3600}"#;
+        let (base, requests, server) = local_server(vec![(200, refresh), (200, DIRECT_QUOTA)]);
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
+            base.clone(),
+            format!("{base}/token"),
+            fake_local(true, &local_calls),
+        )
+        .expect("provider");
+
+        block_on(provider.fetch_inner()).expect("refresh and fetch succeed");
+
+        let _refresh = requests.recv().expect("refresh captured");
+        let _quota = requests.recv().expect("quota captured");
+        let stored = secrets.document().expect("refreshed document");
+        assert_eq!(stored["refresh_token"], "old-refresh");
+        assert_eq!(stored["project_id"], "project-1");
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+        server.join().expect("server stopped");
+    }
+
+    #[test]
+    fn stored_oauth_wins_over_local() {
+        let secrets = FakeSecrets::holding(owned_document("owned-access", i64::MAX));
+        let (base, direct_requests, server) = local_server(vec![(200, DIRECT_QUOTA)]);
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(secrets as Arc<dyn Secrets>),
+            base,
+            "http://127.0.0.1:9/token".into(),
+            fake_local(true, &local_calls),
+        )
+        .expect("provider");
+
+        block_on(provider.fetch_inner()).expect("direct fetch succeeds");
+
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(direct_requests.into_iter().count(), 1);
+        server.join().expect("server stopped");
+    }
+
+    #[test]
+    fn local_is_used_only_without_an_owned_token() {
+        let secrets = Arc::new(FakeSecrets::default());
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(secrets as Arc<dyn Secrets>),
+            "http://127.0.0.1:9".into(),
+            "http://127.0.0.1:9/token".into(),
+            fake_local(true, &local_calls),
+        )
+        .expect("provider");
+
+        block_on(provider.fetch_inner()).expect("local fetch succeeds");
+
+        assert_eq!(local_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn missing_owned_and_local_credentials_is_no_credential() {
+        let secrets = Arc::new(FakeSecrets::default());
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(secrets as Arc<dyn Secrets>),
+            "http://127.0.0.1:9".into(),
+            "http://127.0.0.1:9/token".into(),
+            fake_local(false, &local_calls),
+        )
+        .expect("provider");
+
+        let error = block_on(provider.fetch_inner()).expect_err("no source is usable");
+
+        assert!(matches!(error, ProviderError::NoCredential));
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn rejected_owned_oauth_does_not_fall_back() {
+        let secrets = FakeSecrets::holding(owned_document("rejected", i64::MAX));
+        let (base, direct_requests, server) = local_server(vec![(401, "{}")]);
+        let local_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Antigravity::with_endpoints_and_local(
+            Some(secrets as Arc<dyn Secrets>),
+            base,
+            "http://127.0.0.1:9/token".into(),
+            fake_local(true, &local_calls),
+        )
+        .expect("provider");
+
+        let error = block_on(provider.fetch_inner()).expect_err("owned token is rejected");
+
+        assert!(matches!(error, ProviderError::Credential { status: 401 }));
+        assert_eq!(local_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(direct_requests.into_iter().count(), 1);
+        server.join().expect("server stopped");
     }
 
     #[test]
