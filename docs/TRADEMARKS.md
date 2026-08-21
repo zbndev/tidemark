@@ -14,7 +14,9 @@ whose services the cards are about:
 | `tidemark-clinepass-symbolic.svg` | Cline (ClinePass) |
 | `tidemark-codex-symbolic.svg` | OpenAI (Codex) |
 | `tidemark-crof-symbolic.svg` | Crof |
+| `tidemark-elevenlabs-symbolic.svg` | ElevenLabs |
 | `tidemark-kimi-symbolic.svg` | Moonshot AI (Kimi) |
+| `tidemark-llmproxy-symbolic.svg` | The LLM Proxy project |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
@@ -31,8 +33,9 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the nine marks that CodexBar records as the provider icons of Chutes,
-ClawRouter, ClinePass, Crof, Neuralwatt, sub2api, Synthetic, Venice and ZenMux — the
+asset, and except the eleven marks that CodexBar records as the provider icons of Chutes,
+ClawRouter, ClinePass, Crof, ElevenLabs, LLM Proxy, Neuralwatt, sub2api, Synthetic,
+Venice and ZenMux — the
 ClinePass one, its file notes, is
 Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand). Each was reduced to a
 single-colour path set and stripped of the fills, gradients, masks

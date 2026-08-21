@@ -1,0 +1,8 @@
+<!-- The ElevenLabs mark belongs to ElevenLabs. Not covered by Tidemark's MIT licence; used nominatively
+     to identify the service a card reports on. See docs/TRADEMARKS.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
+  <g transform="translate(-2 1.25) scale(0.875)">
+    <path d="M7 6h4v20H7V6Zm7 0h4v20h-4V6Zm7 0h4v20h-4V6Z"/>
+    <path d="M3.5 15h25v2h-25v-2Z" opacity=".35"/>
+  </g>
+</svg>
