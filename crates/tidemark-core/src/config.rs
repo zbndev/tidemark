@@ -20,12 +20,13 @@
 
 use std::path::{Path, PathBuf};
 
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 use crate::paths;
 
 /// Table every provider's own settings live under: `[provider.zai]`.
 const PROVIDER_TABLE: &str = "provider";
+const PROVIDERS_KEY: &str = "providers";
 
 /// Why the settings could not be read or written.
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +60,14 @@ pub enum ConfigError {
         path: PathBuf,
         /// The dotted name of the offending entry.
         table: String,
+    },
+    /// The configured provider list is not an array of strings.
+    #[error("{path}: {reason}")]
+    InvalidProviders {
+        /// The file.
+        path: PathBuf,
+        /// Why the provider list is invalid.
+        reason: String,
     },
 }
 
@@ -103,6 +112,79 @@ impl Config {
             .get(provider)?
             .get(name)?
             .as_str()
+    }
+
+    /// Returns configured providers in file order, with duplicates removed.
+    pub fn providers(&self) -> Result<Vec<String>, ConfigError> {
+        let Some(item) = self.document.get(PROVIDERS_KEY) else {
+            return Ok(Vec::new());
+        };
+        let array = item
+            .as_array()
+            .ok_or_else(|| ConfigError::InvalidProviders {
+                path: self.path.clone(),
+                reason: "providers must be an array of strings".to_owned(),
+            })?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut providers = Vec::new();
+        for item in array.iter() {
+            let slug = item.as_str().ok_or_else(|| ConfigError::InvalidProviders {
+                path: self.path.clone(),
+                reason: "every providers entry must be a string".to_owned(),
+            })?;
+            if seen.insert(slug.to_owned()) {
+                providers.push(slug.to_owned());
+            }
+        }
+        Ok(providers)
+    }
+
+    /// Adds a provider to the configured set, writing only when it was absent.
+    pub fn add_provider(&mut self, provider: &str) -> Result<bool, ConfigError> {
+        let providers = self.providers()?;
+        if providers.iter().any(|configured| configured == provider) {
+            return Ok(false);
+        }
+        let item = self
+            .document
+            .entry(PROVIDERS_KEY)
+            .or_insert_with(|| Item::Value(Array::new().into()));
+        let array = item
+            .as_array_mut()
+            .ok_or_else(|| ConfigError::InvalidProviders {
+                path: self.path.clone(),
+                reason: "providers must be an array of strings".to_owned(),
+            })?;
+        array.push(provider);
+        self.write()?;
+        Ok(true)
+    }
+
+    /// Removes a provider and its provider-specific settings, writing only when present.
+    pub fn remove_provider(&mut self, provider: &str) -> Result<bool, ConfigError> {
+        let providers = self.providers()?;
+        if !providers.iter().any(|configured| configured == provider) {
+            return Ok(false);
+        }
+        let mut array = Array::new();
+        for configured in providers {
+            if configured != provider {
+                array.push(configured);
+            }
+        }
+        self.document[PROVIDERS_KEY] = value(array);
+
+        if let Some(item) = self.document.get_mut(PROVIDER_TABLE) {
+            let table = item
+                .as_table_like_mut()
+                .ok_or_else(|| ConfigError::NotATable {
+                    path: self.path.clone(),
+                    table: PROVIDER_TABLE.to_owned(),
+                })?;
+            table.remove(provider);
+        }
+        self.write()?;
+        Ok(true)
     }
 
     /// Sets one provider setting and writes the file.
@@ -180,6 +262,64 @@ mod tests {
         let config = Config::at(scratch("absent").with_file_name("nothing.toml"))
             .expect("a missing file is an empty document");
         assert_eq!(config.option("zai", "region"), None);
+    }
+
+    #[test]
+    fn a_first_run_has_no_configured_providers() {
+        let config = Config::at(scratch("providers-absent")).expect("missing is valid");
+        assert_eq!(config.providers().expect("readable"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn configured_providers_keep_their_order_and_first_duplicate() {
+        let path = scratch("providers-order");
+        std::fs::write(&path, "providers = [\"claude\", \"zai\", \"claude\"]\n").expect("seed");
+        let config = Config::at(path.clone()).expect("parses");
+        assert_eq!(config.providers().expect("readable"), ["claude", "zai"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_non_array_provider_list_is_refused_not_replaced() {
+        let path = scratch("providers-wrong-type");
+        std::fs::write(&path, "providers = \"claude\"\n").expect("seed");
+        let config = Config::at(path.clone()).expect("valid TOML");
+        assert!(matches!(
+            config.providers(),
+            Err(ConfigError::InvalidProviders { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still there"),
+            "providers = \"claude\"\n"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn adding_is_idempotent_and_removing_drops_only_that_provider_table() {
+        let path = scratch("provider-mutations");
+        std::fs::write(
+            &path,
+            "# owned by the user\nproviders = [\"claude\"]\n\n[provider.claude]\nfuture = \"gone with claude\"\n\n[unrelated]\nfuture = \"kept\"\n",
+        )
+        .expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+        assert!(config.add_provider("zai").expect("added"));
+        assert!(!config.add_provider("zai").expect("duplicate is a no-op"));
+        assert!(config.remove_provider("claude").expect("removed"));
+        assert!(
+            !config
+                .remove_provider("claude")
+                .expect("missing is a no-op")
+        );
+
+        let reread = Config::at(path.clone()).expect("parses again");
+        assert_eq!(reread.providers().expect("readable"), ["zai"]);
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert!(text.contains("# owned by the user"));
+        assert!(text.contains("[unrelated]"));
+        assert!(!text.contains("[provider.claude]"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
