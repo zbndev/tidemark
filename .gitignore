@@ -10,6 +10,7 @@
 # local scratch
 /scratch/
 /.direnv/
+/.worktrees/
 
 # local planning, not for history
 /PLAN.md
