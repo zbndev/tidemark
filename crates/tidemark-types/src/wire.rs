@@ -270,6 +270,20 @@ impl WindowStatus {
     }
 }
 
+/// One stored measurement from the current segment of a rate-limit window.
+///
+/// The daemon, rather than a client, owns the database that holds these rows. This compact
+/// wire value is deliberately separate from the storage type so the GUI never learns about
+/// SQLite or the historical reset-time column it does not need to draw consumption.
+#[derive(Debug, Clone, Copy, PartialEq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct HistoryPoint {
+    /// Unix seconds when the provider reading completed.
+    pub captured_at: i64,
+    /// Percent of the selected window consumed at that moment, in 0..=100.
+    pub used_percent: f64,
+}
+
 /// Everything the daemon currently knows about one account.
 #[derive(Debug, Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
 #[zvariant(signature = "a{sv}")]
@@ -445,6 +459,17 @@ mod tests {
         let (decoded, _): (ProviderDefinition, _) = encoded.deserialize().expect("decodes");
         assert_eq!(decoded, original);
         assert_eq!(decoded.credential_kind(), Some(CredentialKind::OAuth));
+    }
+
+    #[test]
+    fn a_history_point_survives_the_bus() {
+        let original = HistoryPoint {
+            captured_at: 1_785_700_000,
+            used_percent: 37.5,
+        };
+        let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
+        let (decoded, _): (HistoryPoint, _) = encoded.deserialize().expect("decodes");
+        assert_eq!(decoded, original);
     }
 
     #[test]

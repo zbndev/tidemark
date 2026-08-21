@@ -370,6 +370,22 @@ impl History {
             .map_err(StorageError::from)
     }
 
+    /// Every stored point in the segment that is currently open for a window.
+    ///
+    /// A window the daemon has not seen yet has no current segment, which is an ordinary
+    /// empty chart rather than a storage error.
+    pub fn current_points(
+        &self,
+        provider: &str,
+        account: &str,
+        window: &WindowKey,
+    ) -> Result<Vec<Point>, StorageError> {
+        let Some(segment) = self.current_segment(provider, account, window)? else {
+            return Ok(Vec::new());
+        };
+        self.points(provider, account, window, segment)
+    }
+
     /// Total points stored, across everything. Diagnostics and tests.
     pub fn point_count(&self) -> Result<i64, StorageError> {
         Ok(self
@@ -711,6 +727,43 @@ mod tests {
         );
         assert_eq!(points[3].used_percent, 3.0);
         assert_eq!(points[0].resets_at, Some(at(5 * HOUR)));
+    }
+
+    #[test]
+    fn current_points_exclude_the_segment_before_a_rollover() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 10.0, Some(5 * HOUR)))
+            .expect("first segment starts");
+        history
+            .ingest(&snapshot(POLL, 80.0, Some(5 * HOUR)))
+            .expect("first segment advances");
+        history
+            .ingest(&snapshot(2 * POLL, 2.0, Some(10 * HOUR)))
+            .expect("rolls over");
+        history
+            .ingest(&snapshot(3 * POLL, 20.0, Some(10 * HOUR)))
+            .expect("current segment advances");
+
+        let points = history
+            .current_points("test", "default", &key())
+            .expect("current segment reads");
+        assert_eq!(
+            points
+                .iter()
+                .map(|point| point.used_percent)
+                .collect::<Vec<_>>(),
+            [2.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn current_points_are_empty_for_a_window_never_seen() {
+        let history = history();
+        assert!(history
+            .current_points("test", "default", &key())
+            .expect("unseen history reads")
+            .is_empty());
     }
 
     #[test]
