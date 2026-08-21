@@ -50,12 +50,17 @@ pub fn icon_name(slug: &str) -> Option<String> {
 }
 
 /// The image widget for a card's title row. Starts hidden; [`set`] fills it in.
-pub fn image() -> gtk::Image {
+pub fn image_at(pixel_size: i32) -> gtk::Image {
     gtk::Image::builder()
-        .pixel_size(SIZE)
+        .pixel_size(pixel_size)
         .valign(gtk::Align::Center)
         .visible(false)
         .build()
+}
+
+/// The image widget for a card's title row. Starts hidden; [`set`] fills it in.
+pub fn image() -> gtk::Image {
+    image_at(SIZE)
 }
 
 /// Shows `slug`'s mark in `image`, or hides the image if there is no mark for it.

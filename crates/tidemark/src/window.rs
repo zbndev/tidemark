@@ -23,8 +23,8 @@ use tidemark_types::{ProviderDefinition, ProviderStatus, Timestamp};
 
 use crate::bus::{self, DaemonProxy, Update};
 use crate::card::Card;
-use crate::credentials::Credentials;
 use crate::model;
+use crate::provider_settings::ProviderSettings;
 
 /// How often the clock-dependent parts of every card are redrawn. Half a minute is well
 /// inside the resolution of everything shown — the coarsest unit on a card is a minute —
@@ -41,6 +41,38 @@ fn account_index(statuses: &[ProviderStatus], provider: &str, account: &str) -> 
         .position(|status| status.provider == provider && status.account == account)
 }
 
+#[derive(Debug)]
+struct DialogSlot<T>(RefCell<Option<Rc<T>>>);
+
+impl<T> Default for DialogSlot<T> {
+    fn default() -> Self {
+        Self(RefCell::new(None))
+    }
+}
+
+impl<T> DialogSlot<T> {
+    fn insert_if_empty(&self, value: Rc<T>) -> bool {
+        let mut held = self.0.borrow_mut();
+        if held.is_some() {
+            return false;
+        }
+        *held = Some(value);
+        true
+    }
+
+    fn get(&self) -> Option<Rc<T>> {
+        self.0.borrow().clone()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.borrow().is_none()
+    }
+
+    fn clear(&self) {
+        self.0.borrow_mut().take();
+    }
+}
+
 /// The main window and everything it is currently showing.
 #[derive(Debug)]
 pub struct MainWindow {
@@ -53,10 +85,8 @@ pub struct MainWindow {
     cards: RefCell<Vec<Rc<Card>>>,
     definitions: RefCell<Vec<ProviderDefinition>>,
     daemon: RefCell<Option<DaemonProxy<'static>>>,
-    /// The credentials dialog while it is on screen, so the statuses arriving on the
-    /// signal reach it too. A dialog that went on saying "no key" after the key was
-    /// accepted would be the one place in the program that lied about the daemon.
-    credentials: RefCell<Option<Rc<Credentials>>>,
+    /// The provider dialog while it is open, so live catalog and status changes reach it.
+    provider_settings: DialogSlot<ProviderSettings>,
 }
 
 impl MainWindow {
@@ -137,7 +167,7 @@ impl MainWindow {
             cards: RefCell::new(Vec::new()),
             definitions: RefCell::new(Vec::new()),
             daemon: RefCell::new(None),
-            credentials: RefCell::new(None),
+            provider_settings: DialogSlot::default(),
         });
 
         main.install_sort();
@@ -188,7 +218,7 @@ impl MainWindow {
             );
             self.cards.borrow_mut().clear();
             self.grid.remove_all();
-            self.update_credentials();
+            self.update_provider_settings();
             return;
         }
 
@@ -205,7 +235,7 @@ impl MainWindow {
         }
         self.grid.invalidate_sort();
         self.stack.set_visible_child_name(PAGE_GRID);
-        self.update_credentials();
+        self.update_provider_settings();
     }
 
     /// Removes one account's card after the daemon confirms it is no longer configured.
@@ -224,7 +254,7 @@ impl MainWindow {
                 "Add a provider to start tracking your quota.",
             );
         }
-        self.update_credentials();
+        self.update_provider_settings();
     }
 
     /// Applies one account's update, adding a card for an account seen for the first time.
@@ -251,7 +281,7 @@ impl MainWindow {
         // holds rather than being rebuilt.
         self.grid.invalidate_sort();
         self.stack.set_visible_child_name(PAGE_GRID);
-        self.update_credentials();
+        self.update_provider_settings();
     }
 
     /// Everything the daemon has said, in the order the cards were built.
@@ -263,13 +293,10 @@ impl MainWindow {
             .collect()
     }
 
-    /// Feeds the open credentials dialog, and lets go of one the user has closed.
-    fn update_credentials(&self) {
-        let mut held = self.credentials.borrow_mut();
-        match held.as_ref() {
-            Some(dialog) if dialog.is_open() => dialog.apply(&self.statuses()),
-            Some(_) => *held = None,
-            None => {}
+    /// Feeds the open provider dialog without consulting widget visibility for ownership.
+    fn update_provider_settings(&self) {
+        if let Some(dialog) = self.provider_settings.get() {
+            dialog.apply(&self.definitions.borrow(), &self.statuses());
         }
     }
 
@@ -279,18 +306,28 @@ impl MainWindow {
             let Some(main) = weak.upgrade() else {
                 return;
             };
-            // Already open: present it again rather than stacking a second copy on top of
-            // a key somebody is halfway through typing.
-            if let Some(dialog) = main.credentials.borrow().as_ref()
-                && dialog.is_open()
-            {
+            if !main.provider_settings.is_empty() {
                 return;
             }
             let Some(proxy) = main.daemon.borrow().clone() else {
                 return;
             };
-            let dialog = Credentials::present(&main.window, proxy, &main.statuses());
-            *main.credentials.borrow_mut() = Some(dialog);
+            let on_closed = {
+                let weak = weak.clone();
+                move || {
+                    if let Some(main) = weak.upgrade() {
+                        main.provider_settings.clear();
+                    }
+                }
+            };
+            let dialog = ProviderSettings::present(
+                &main.window,
+                proxy,
+                &main.definitions.borrow(),
+                &main.statuses(),
+                on_closed,
+            );
+            assert!(main.provider_settings.insert_if_empty(dialog));
         });
     }
 
@@ -362,9 +399,11 @@ impl MainWindow {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use tidemark_types::{AccountId, ProviderId, ProviderStatus};
 
-    use super::account_index;
+    use super::{DialogSlot, account_index};
 
     fn status(provider: &str, account: &str) -> ProviderStatus {
         ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))
@@ -375,5 +414,14 @@ mod tests {
         let statuses = vec![status("zai", "first"), status("zai", "default")];
         assert_eq!(account_index(&statuses, "zai", "default"), Some(1));
         assert_eq!(account_index(&statuses, "kimi", "default"), None);
+    }
+
+    #[test]
+    fn a_closed_dialog_slot_can_be_filled_again() {
+        let slot = DialogSlot::default();
+        assert!(slot.insert_if_empty(Rc::new(1)));
+        assert!(!slot.insert_if_empty(Rc::new(2)));
+        slot.clear();
+        assert!(slot.insert_if_empty(Rc::new(3)));
     }
 }
