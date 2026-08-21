@@ -30,6 +30,7 @@ pub mod neuralwatt;
 pub mod sub2api;
 pub mod synthetic;
 pub mod venice;
+pub mod warp;
 pub mod zai;
 pub mod zenmux;
 
@@ -325,6 +326,7 @@ pub static CATALOG: &[&Spec] = &[
     &sub2api::SPEC,
     &synthetic::SPEC,
     &venice::SPEC,
+    &warp::SPEC,
     &zai::SPEC,
     &zenmux::SPEC,
 ];
