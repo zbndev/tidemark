@@ -305,6 +305,11 @@ mod tests {
     use tidemark_core::providers::{BoxFuture, Credential, zai};
     use tidemark_core::secrets::{Kind, SecretError};
 
+    // The tests below name `zai` where a concrete slug is unavoidable: a config→option
+    // binding needs a provider that has an option, and it is the only one that does. The
+    // production path above names no key-authenticated provider — that is the point of the
+    // table — and these tests are not a reason to reintroduce a name.
+
     #[derive(Debug)]
     struct NoSecrets;
 
@@ -535,6 +540,25 @@ mod tests {
             .map(|definition| definition.provider.as_str())
             .collect();
         assert_eq!(&slugs[..3], &["antigravity", "claude", "codex"]);
+    }
+
+    #[test]
+    fn every_published_slug_is_unique() {
+        // A duplicate id in `keyed::CATALOG` would publish two definitions with the same
+        // slug — two settings rows — while `account()`'s find silently uses the first; an
+        // id colliding with an OAuth slug is worse, because the hand-written stanza and the
+        // spec then shadow each other. At two entries neither can happen by accident; at
+        // twenty-eight hand-edited lines it can, so the invariant is asserted rather than
+        // trusted.
+        let published = catalog(&empty_config());
+        let mut slugs: Vec<&str> = published
+            .iter()
+            .map(|definition| definition.provider.as_str())
+            .collect();
+        slugs.sort_unstable();
+        let count = slugs.len();
+        slugs.dedup();
+        assert_eq!(slugs.len(), count, "every slug must name one provider");
     }
 
     #[test]
