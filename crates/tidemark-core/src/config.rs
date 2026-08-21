@@ -315,10 +315,12 @@ impl Config {
         let entry = table
             .entry(NOTIFY_WINDOWS_KEY)
             .or_insert_with(|| Item::Value(Array::new().into()));
-        let array = entry.as_array_mut().ok_or_else(|| ConfigError::InvalidNotify {
-            path: self.path.clone(),
-            provider: provider.to_owned(),
-        })?;
+        let array = entry
+            .as_array_mut()
+            .ok_or_else(|| ConfigError::InvalidNotify {
+                path: self.path.clone(),
+                provider: provider.to_owned(),
+            })?;
         // Edited rather than replaced, for the same reason the whole file is: a comment
         // somebody wrote on this line is theirs, not ours to drop.
         if enabled {
@@ -699,7 +701,10 @@ mod tests {
     fn a_provider_nobody_opted_in_for_notifies_about_nothing() {
         let config = Config::at(scratch("notify-absent").with_file_name("nothing.toml"))
             .expect("a missing file is an empty document");
-        assert_eq!(config.notify_windows("claude").expect("read"), Vec::<String>::new());
+        assert_eq!(
+            config.notify_windows("claude").expect("read"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -712,7 +717,10 @@ mod tests {
             .expect("written");
 
         let reread = Config::at(path).expect("reloaded");
-        assert_eq!(reread.notify_windows("claude").expect("read"), vec!["w18000".to_owned()]);
+        assert_eq!(
+            reread.notify_windows("claude").expect("read"),
+            vec!["w18000".to_owned()]
+        );
     }
 
     #[test]
@@ -726,7 +734,10 @@ mod tests {
         config
             .set_window_notify("claude", "w18000", true)
             .expect("written again");
-        assert_eq!(config.notify_windows("claude").expect("read"), vec!["w18000".to_owned()]);
+        assert_eq!(
+            config.notify_windows("claude").expect("read"),
+            vec!["w18000".to_owned()]
+        );
     }
 
     #[test]
@@ -743,7 +754,10 @@ mod tests {
         config
             .set_window_notify("claude", "w18000", false)
             .expect("written");
-        assert_eq!(config.notify_windows("claude").expect("read"), vec!["w604800".to_owned()]);
+        assert_eq!(
+            config.notify_windows("claude").expect("read"),
+            vec!["w604800".to_owned()]
+        );
     }
 
     #[test]
@@ -754,7 +768,10 @@ mod tests {
         config
             .set_window_notify("claude", "w18000", true)
             .expect("written");
-        assert_eq!(config.notify_windows("codex").expect("read"), Vec::<String>::new());
+        assert_eq!(
+            config.notify_windows("codex").expect("read"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -767,7 +784,10 @@ mod tests {
             .set_window_notify("claude", "w18000", true)
             .expect("written");
         config.remove_provider("claude").expect("removed");
-        assert_eq!(config.notify_windows("claude").expect("read"), Vec::<String>::new());
+        assert_eq!(
+            config.notify_windows("claude").expect("read"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

@@ -193,8 +193,7 @@ impl NotifyRow {
     }
 
     fn rollback(&self) {
-        self.state
-            .rollback(|active| self.row.set_active(active));
+        self.state.rollback(|active| self.row.set_active(active));
     }
 }
 

@@ -748,11 +748,8 @@ impl Engine {
                 }
             }
 
-            for decided in notify::decide(
-                window.used_percent,
-                outcome.boundary.is_some(),
-                &already,
-            ) {
+            for decided in notify::decide(window.used_percent, outcome.boundary.is_some(), &already)
+            {
                 let notice = notify::compose(&provider, window, decided.kind, snapshot.captured_at);
                 if let Err(error) = self.notifier.send(&notice).await {
                     // Nothing is recorded, so the next poll says it again. The daemon can
@@ -802,7 +799,9 @@ impl Engine {
                 .iter()
                 .any(|published| published.key == window)
         {
-            return Err(format!("{provider} is not reporting a window called {window}"));
+            return Err(format!(
+                "{provider} is not reporting a window called {window}"
+            ));
         }
 
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
@@ -1024,7 +1023,7 @@ fn consumption_moved(published: &[WindowStatus], snapshot: &Snapshot) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::notify::{Notice, NotifyError, Notifier};
+    use crate::notify::{Notice, Notifier, NotifyError};
     use std::sync::Mutex;
     use tidemark_core::providers::BoxFuture;
     use tidemark_types::{Window, WindowKey, WindowLength};
@@ -1915,7 +1914,10 @@ mod tests {
         };
 
         harness.engine.poll_due(Instant::now()).await;
-        assert!(harness.notices.summaries().is_empty(), "the first attempt was refused");
+        assert!(
+            harness.notices.summaries().is_empty(),
+            "the first attempt was refused"
+        );
         harness.poll_again().await;
         assert_eq!(harness.notices.summaries().len(), 1, "the retry landed");
         harness.poll_again().await;
@@ -1982,7 +1984,9 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&config_path);
         let mut harness = harness_with_config(
-            vec![Account::with_client(Fake::new(vec![Ok(reading(0, 42.0, 3600))]))],
+            vec![Account::with_client(Fake::new(vec![Ok(reading(
+                0, 42.0, 3600,
+            ))]))],
             config_path.clone(),
         );
         harness.engine.poll_due(Instant::now()).await;

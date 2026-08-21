@@ -1770,7 +1770,6 @@ mod tests {
         assert_eq!(carried, ("zai".into(), "default".into()));
     }
 
-
     #[tokio::test]
     async fn a_notification_switch_is_serialized_through_the_engine() {
         let mut zai = key_account("zai");

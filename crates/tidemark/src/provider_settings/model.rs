@@ -97,7 +97,9 @@ mod tests {
         AccountId, CredentialKind, ProviderDefinition, ProviderId, ProviderState, ProviderStatus,
     };
 
-    use super::{NotificationRow, addable, connection_text, merge_local_additions, notification_rows};
+    use super::{
+        NotificationRow, addable, connection_text, merge_local_additions, notification_rows,
+    };
 
     fn definition(provider: &str, title: &str) -> ProviderDefinition {
         ProviderDefinition {
@@ -217,7 +219,10 @@ mod tests {
 
     #[test]
     fn a_switch_is_offered_for_every_window_the_account_reports() {
-        let status = windowed(&[("w18000", "5 hours"), ("w604800", "Weekly")], &["w604800"]);
+        let status = windowed(
+            &[("w18000", "5 hours"), ("w604800", "Weekly")],
+            &["w604800"],
+        );
         assert_eq!(
             notification_rows(&status),
             vec![

@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use tidemark_core::providers::BoxFuture;
-use tidemark_types::{DANGER_AT, WARNING_AT, Timestamp, Window, present, provider_label};
+use tidemark_types::{DANGER_AT, Timestamp, WARNING_AT, Window, present, provider_label};
 
 /// How long the notification server is given to answer.
 ///
@@ -189,11 +189,7 @@ pub fn compose(provider: &str, window: &Window, kind: Kind, now: Timestamp) -> N
     };
 
     Notice {
-        summary: format!(
-            "{event} — {} · {}",
-            provider_label(provider),
-            window.title
-        ),
+        summary: format!("{event} — {} · {}", provider_label(provider), window.title),
         body,
         icon: present::icon_name(provider),
         urgency: match kind {
@@ -339,7 +335,10 @@ mod tests {
     fn the_first_threshold_is_due_the_moment_it_is_reached() {
         let decided = decide(80.0, false, &[]);
         assert_eq!(kinds(&decided), vec![Kind::Threshold(Threshold::Warning)]);
-        assert_eq!(decided[0].settles, vec![Kind::Threshold(Threshold::Warning)]);
+        assert_eq!(
+            decided[0].settles,
+            vec![Kind::Threshold(Threshold::Warning)]
+        );
     }
 
     /// A window first seen at 96% — a fresh install, or a provider that only just started
@@ -406,7 +405,12 @@ mod tests {
     /// The event comes first because the tail is what a notification server truncates.
     #[test]
     fn a_threshold_notice_leads_with_the_number() {
-        let notice = compose("claude", &window(80.0, Some(HOUR + 12 * 60)), Kind::Threshold(Threshold::Warning), now());
+        let notice = compose(
+            "claude",
+            &window(80.0, Some(HOUR + 12 * 60)),
+            Kind::Threshold(Threshold::Warning),
+            now(),
+        );
         assert_eq!(notice.summary, "80% used — Claude · 5 hours");
         assert_eq!(notice.body.as_deref(), Some("Resets in 1 h 12 min."));
     }
@@ -422,26 +426,46 @@ mod tests {
     /// to fill the second line would put a confident wrong number on screen.
     #[test]
     fn a_window_with_no_reset_time_has_no_second_line() {
-        let notice = compose("kimi", &window(96.0, None), Kind::Threshold(Threshold::Danger), now());
+        let notice = compose(
+            "kimi",
+            &window(96.0, None),
+            Kind::Threshold(Threshold::Danger),
+            now(),
+        );
         assert_eq!(notice.body, None);
     }
 
     #[test]
     fn an_overdue_reset_is_happening_rather_than_negative() {
-        let notice = compose("codex", &window(96.0, Some(-600)), Kind::Threshold(Threshold::Danger), now());
+        let notice = compose(
+            "codex",
+            &window(96.0, Some(-600)),
+            Kind::Threshold(Threshold::Danger),
+            now(),
+        );
         assert_eq!(notice.body.as_deref(), Some("Resetting now."));
     }
 
     #[test]
     fn the_number_on_the_notice_is_the_reading_not_the_threshold_it_crossed() {
-        let notice = compose("claude", &window(96.4, None), Kind::Threshold(Threshold::Danger), now());
+        let notice = compose(
+            "claude",
+            &window(96.4, None),
+            Kind::Threshold(Threshold::Danger),
+            now(),
+        );
         assert!(notice.summary.starts_with("96% used"), "{}", notice.summary);
     }
 
     /// One window, one entry in the tray: the reset replaces the warning it follows.
     #[test]
     fn every_notice_about_one_window_carries_the_same_identity() {
-        let warning = compose("claude", &window(96.0, None), Kind::Threshold(Threshold::Danger), now());
+        let warning = compose(
+            "claude",
+            &window(96.0, None),
+            Kind::Threshold(Threshold::Danger),
+            now(),
+        );
         let reset = compose("claude", &window(0.0, None), Kind::Reset, now());
         assert_eq!(warning.about, reset.about);
 
@@ -464,7 +488,12 @@ mod tests {
 
     #[test]
     fn the_notice_carries_the_providers_own_mark() {
-        let notice = compose("claude", &window(80.0, None), Kind::Threshold(Threshold::Warning), now());
+        let notice = compose(
+            "claude",
+            &window(80.0, None),
+            Kind::Threshold(Threshold::Warning),
+            now(),
+        );
         assert_eq!(notice.icon.as_deref(), Some("tidemark-claude-symbolic"));
     }
 
@@ -472,11 +501,23 @@ mod tests {
     #[test]
     fn the_first_threshold_does_not_demand_attention_and_the_second_does() {
         assert_eq!(
-            compose("claude", &window(80.0, None), Kind::Threshold(Threshold::Warning), now()).urgency,
+            compose(
+                "claude",
+                &window(80.0, None),
+                Kind::Threshold(Threshold::Warning),
+                now()
+            )
+            .urgency,
             Urgency::Normal
         );
         assert_eq!(
-            compose("claude", &window(96.0, None), Kind::Threshold(Threshold::Danger), now()).urgency,
+            compose(
+                "claude",
+                &window(96.0, None),
+                Kind::Threshold(Threshold::Danger),
+                now()
+            )
+            .urgency,
             Urgency::Critical
         );
         assert_eq!(
