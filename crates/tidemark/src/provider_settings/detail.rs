@@ -88,7 +88,7 @@ impl OptionSelection {
     fn selection_changed(&self, selected: u32) -> Option<String> {
         self.displayed.set(selected);
         let chosen = self.values.get(selected as usize)?;
-        (!self.suppress.get() && *self.authoritative.borrow() != *chosen).then(|| chosen.clone())
+        (!self.suppress.get()).then(|| chosen.clone())
     }
 
     fn apply_authoritative(&self, value: &str, select: impl FnOnce(u32)) {
@@ -726,5 +726,20 @@ mod tests {
 
         assert_eq!(selection.displayed_value(), Some("global"));
         assert_eq!(*requested.borrow(), None);
+    }
+
+    #[test]
+    fn a_quick_correction_back_to_the_authoritative_value_still_requests_a_write() {
+        let selection = OptionSelection::new(
+            vec!["global".into(), "bigmodel-cn".into()],
+            "global".into(),
+            0,
+        );
+
+        assert_eq!(
+            selection.selection_changed(1),
+            Some("bigmodel-cn".to_owned())
+        );
+        assert_eq!(selection.selection_changed(0), Some("global".to_owned()));
     }
 }
