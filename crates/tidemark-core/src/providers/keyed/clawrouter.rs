@@ -225,6 +225,11 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 /// The first instant of the month after the one `windowKey` names, or `None` when the
 /// key names no month. A key that names an impossible month is refused: the plugin's
 /// own date parser rejects it, and a guessed reset is worse than none.
+///
+/// The key is read byte-wise throughout, as a shape check should be: a multibyte key
+/// fails the digit check below the way ASCII garbage does — the plugin's regex simply
+/// does not match it — rather than panicking on a char boundary the slicing never
+/// looked for.
 fn monthly_reset(window_key: Option<&str>) -> Result<Option<Timestamp>, ProviderError> {
     let Some(key) = window_key else {
         return Ok(None);
@@ -233,16 +238,19 @@ fn monthly_reset(window_key: Option<&str>) -> Result<Option<Timestamp>, Provider
     if bytes.len() < 7 {
         return Ok(None);
     }
-    let tail = &key[key.len() - 7..];
+    let tail = &bytes[bytes.len() - 7..];
     let (year, month) = tail.split_at(4);
     let month = &month[1..];
-    if !year.bytes().all(|b| b.is_ascii_digit()) || !month.bytes().all(|b| b.is_ascii_digit()) {
+    if !year.iter().all(|b| b.is_ascii_digit()) || !month.iter().all(|b| b.is_ascii_digit()) {
         return Ok(None);
     }
-    let year: i32 = year
+    // Slices of nothing but ASCII digits are valid UTF-8, so these reads cannot fail.
+    let year: i32 = std::str::from_utf8(year)
+        .expect("every byte is an ASCII digit")
         .parse()
         .map_err(|_| ProviderError::malformed("windowKey names no readable year"))?;
-    let month: u32 = month
+    let month: u32 = std::str::from_utf8(month)
+        .expect("every byte is an ASCII digit")
         .parse()
         .map_err(|_| ProviderError::malformed("windowKey names no readable month"))?;
     if !(1..=12).contains(&month) {
@@ -578,6 +586,21 @@ mod tests {
         let snapshot = parse(&body, at(FIXTURE_NOW)).expect("parses");
         assert_eq!(snapshot.windows.len(), 1);
         assert_eq!(snapshot.windows[0].used_percent, 0.024);
+    }
+
+    #[test]
+    fn a_multibyte_window_key_costs_the_pace_mark_not_the_fetch() {
+        // Not a recorded body: it tests the panic-safety of the string handling, not
+        // provider semantics. The recorded key replaced by a multibyte one whose last
+        // seven bytes are not `YYYY-MM`, the window draws with no reset — exactly what
+        // ASCII garbage yields — instead of panicking on a char boundary.
+        let body = BUDGETED.replace("openclaw/openclaw-smoke/2026-07", "öaaaaaa");
+        let snapshot = parse(&body, at(FIXTURE_NOW)).expect("parses");
+        assert_eq!(snapshot.windows.len(), 1, "the budget itself still stands");
+        assert_eq!(
+            snapshot.windows[0].resets_at, None,
+            "a key that names no month yields no pace mark, never a panic"
+        );
     }
 
     fn endpoint(pairs: &[(&str, &str)]) -> String {

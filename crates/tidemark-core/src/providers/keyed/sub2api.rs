@@ -19,7 +19,7 @@
 //!
 //! A **quota-limited key** carries `quota: {limit, used, remaining, unit}` — a fixed
 //! balance against a stated limit, drawn as one window keyed `balance` with both
-//! absolutes under the bar. The unit is the quota's own, the root's, or USD, in that
+//! absolutes under the bar. The unit is the root's, the quota's, or USD, in that
 //! order; a quota whose limit is not positive draws no window (there is nothing to
 //! divide by) and the totals carry the reading.
 //!
@@ -34,6 +34,14 @@
 //! a title and gets no length, and `pct`'s rule that a limit of zero or less reads as
 //! a full bar is preserved. A `reset_at` that is present but unreadable fails the
 //! fetch, as it does in the plugin.
+//!
+//! A subscription and a `rate_limits` array can name the *same* span — the weekly
+//! subscription window beside a `7d` rate limit is two quotas, not one window
+//! reported twice — so a span both sections report draws both windows, keyed by pool
+//! (`subscription/w604800` beside `rate/w604800`), and a span only one section
+//! reports keeps the plain length key. A duplicate the two pools cannot separate —
+//! the same span twice inside `rate_limits` — is still refused: one section naming
+//! one span twice is a reading this port cannot tell apart.
 //!
 //! # The rejection that arrives as a 200
 //!
@@ -65,6 +73,12 @@ const KNOWN_RATE_WINDOWS: &[(&str, u64, &str)] = &[
     ("1d", 86_400, "Daily limit"),
     ("7d", 604_800, "7 day limit"),
 ];
+
+/// Key prefix for the subscription block's windows, when `rate_limits` names the same
+/// span: one key per section, so both windows draw. See [`WindowKey::for_pool`].
+const SUBSCRIPTION_POOL: &str = "subscription";
+/// Key prefix for the `rate_limits` windows under the same circumstances.
+const RATE_POOL: &str = "rate";
 
 #[derive(Debug, Deserialize)]
 struct Envelope {
@@ -242,7 +256,10 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
         .or_else(|| data.quota.as_ref().and_then(|quota| quota.unit.clone()))
         .unwrap_or_else(|| "USD".to_owned());
 
+    // The subscription block and `rate_limits` are kept apart until their keys are
+    // settled, because a span both sections report needs a key per section.
     let mut windows = Vec::new();
+    let mut subscription_windows = Vec::new();
     if let Some(subscription) = &data.subscription {
         // The subscription block is authoritative; the `daily_usage` series beside it
         // is read by nobody, and no window is recomputed from it.
@@ -268,7 +285,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
                 continue;
             };
             let length = WindowLength::from_secs(secs).expect("a fixed span is not zero");
-            windows.push(Window {
+            subscription_windows.push(Window {
                 key: WindowKey::for_length(length),
                 title: length_title(length),
                 subtitle: Some(format!(
@@ -286,7 +303,8 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
     } else if let Some(quota) = &data.quota
         && quota.limit > 0.0
     {
-        // A balance has no length to key on: it does not roll over, it drains.
+        // A balance has no length to key on: it does not roll over, it drains. It
+        // cannot contest a span with anything, so it needs no pool.
         windows.push(Window {
             key: WindowKey::named("balance"),
             title: "Balance".to_owned(),
@@ -301,6 +319,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
         });
     }
 
+    let mut rate_windows = Vec::new();
     for rate in data.rate_limits.iter().flatten() {
         let known = KNOWN_RATE_WINDOWS
             .iter()
@@ -320,7 +339,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
             })?,
             None => None,
         };
-        windows.push(Window {
+        rate_windows.push(Window {
             key,
             title,
             subtitle: Some(format!(
@@ -334,8 +353,33 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
         });
     }
 
+    // A span both sections name is keyed by pool on both sides, so the subscription's
+    // weekly window and a `7d` rate limit both draw; a span only one section reports
+    // keeps the plain length key, recorded bodies unchanged.
+    for window in &mut subscription_windows {
+        if let Some(length) = window.length
+            && rate_windows
+                .iter()
+                .any(|other| other.length == Some(length))
+        {
+            window.key = WindowKey::for_pool(SUBSCRIPTION_POOL, length);
+        }
+    }
+    for window in &mut rate_windows {
+        if let Some(length) = window.length
+            && subscription_windows
+                .iter()
+                .any(|other| other.length == Some(length))
+        {
+            window.key = WindowKey::for_pool(RATE_POOL, length);
+        }
+    }
+    windows.append(&mut subscription_windows);
+    windows.append(&mut rate_windows);
+
     // Two windows under one key is a storage hazard: the ingest files the second as
-    // stale and drops it silently, so the duplicate is refused instead.
+    // stale and drops it silently. The pools above separate the sections; a duplicate
+    // that survives them — the same span twice inside `rate_limits`, say — is refused.
     for (index, one) in windows.iter().enumerate() {
         if windows[..index].iter().any(|other| other.key == one.key) {
             return Err(ProviderError::malformed(format!(
@@ -596,6 +640,32 @@ mod tests {
     /// response": the rejection arrives in the body of a 200.
     const REJECTED_KEY: &str = r#"{"mode":"unrestricted","isValid":false}"#;
 
+    /// Spliced, not recorded: the subscription body above carrying the `rate_limits`
+    /// array of the quota body above. Each shape is individually real, so a body with
+    /// both is plausible — and there, the subscription's weekly span and the `7d` rate
+    /// limit are two quotas under one span. Every number is one a fixture recorded.
+    const SUBSCRIPTION_WITH_RATES: &str = r#"
+        {
+          "mode": "unrestricted",
+          "planName": "Claude Team",
+          "subscription": {
+            "daily_usage_usd": 120.23,
+            "weekly_usage_usd": 229.20,
+            "monthly_usage_usd": 1296.23,
+            "daily_limit_usd": 120,
+            "weekly_limit_usd": 700,
+            "monthly_limit_usd": 2800,
+            "expires_at": "2026-08-15T00:00:00.123Z"
+          },
+          "rate_limits": [
+            { "window": "5h", "limit": 20, "used": 5, "remaining": 15,
+              "reset_at": "2026-07-11T12:30:00Z" },
+            { "window": "7d", "limit": 200, "used": 40, "remaining": 160 }
+          ],
+          "daily_usage": [{ "date": "2026-07-05", "actual_cost": 229.20 }]
+        }
+        "#;
+
     fn at(unix: i64) -> Timestamp {
         Timestamp::from_unix(unix).expect("plausible")
     }
@@ -777,6 +847,56 @@ mod tests {
         assert_eq!(weekly.title, "7 day limit");
         assert_eq!(weekly.used_percent, 20.0);
         assert_eq!(weekly.subtitle.as_deref(), Some("$40.00 / $200.00"));
+    }
+
+    #[test]
+    fn a_span_both_sections_report_draws_both_windows_keyed_by_pool() {
+        let snapshot = parse(SUBSCRIPTION_WITH_RATES, at(1_720_440_000)).expect("parses");
+        let keys: Vec<&str> = snapshot.windows.iter().map(|w| w.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "w86400",
+                "subscription/w604800",
+                "w2592000",
+                "w18000",
+                "rate/w604800",
+            ],
+            "only the contested weekly span takes a pool; the rest keep length keys"
+        );
+
+        let subscribed = window(&snapshot, "subscription/w604800");
+        assert_eq!(subscribed.title, "7 days");
+        assert_eq!(subscribed.used_percent, 229.20 / 700.0 * 100.0);
+        assert_eq!(subscribed.subtitle.as_deref(), Some("$229.20 / $700.00"));
+
+        let rated = window(&snapshot, "rate/w604800");
+        assert_eq!(rated.title, "7 day limit");
+        assert_eq!(rated.used_percent, 20.0, "used 40 of limit 200");
+        assert_eq!(rated.subtitle.as_deref(), Some("$40.00 / $200.00"));
+
+        assert_eq!(
+            snapshot.dominant_window().expect("present").key.as_str(),
+            "w18000",
+            "the card still leads with the five-hour limit beside the pooled windows"
+        );
+    }
+
+    #[test]
+    fn the_same_span_twice_inside_rate_limits_is_still_refused() {
+        // The recorded `7d` entry standing twice: one section naming one span twice is
+        // a reading this port cannot tell apart, so no pool separates it.
+        let body = r#"
+        { "rate_limits": [
+            { "window": "7d", "limit": 200, "used": 40, "remaining": 160 },
+            { "window": "7d", "limit": 200, "used": 40, "remaining": 160 }
+        ] }
+        "#;
+        let error = parse(body, at(1_785_000_000)).expect_err("contested within one section");
+        assert!(
+            matches!(error, ProviderError::Malformed(_)),
+            "{error} for {body}"
+        );
     }
 
     #[test]

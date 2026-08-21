@@ -24,6 +24,15 @@
 //! length; the generic entries are keyed by their own label, or by their length when
 //! the entry states one (`window_minutes` and its spellings).
 //!
+//! Two generic entries can key alike while naming different quotas — the same label
+//! twice, or two label-less entries stating the same length, arrived from different
+//! sections of the walked payload. Each such entry is re-keyed by the pool of the
+//! section it was found under — the object key it arrived beneath (`fast/w86400`
+//! beside `slow/w86400`) — so both windows draw. A duplicate the sections cannot
+//! separate — one section reporting the same span twice, or a label two entries
+//! share while stating no length — is still refused: only their position in the list
+//! would tell them apart, and position is not identity.
+//!
 //! # What is a window and what is a row
 //!
 //! Each quota entry becomes one window, its percentage read directly when a percent
@@ -210,19 +219,21 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 
     if !any_slot {
         for entry in generic_entries(&root, data) {
-            let quota = quota(&entry).map_err(ProviderError::Malformed)?;
+            let quota = quota(&entry.value).map_err(ProviderError::Malformed)?;
             // The entry's own label is its only stable identity unless it states a
             // length; a window with neither has nothing honest to be keyed on.
-            if let Some(label) = first_string(&entry, LABEL_KEYS) {
+            if let Some(label) = first_string(&entry.value, LABEL_KEYS) {
                 parsed.push(Quota {
                     key: label.to_lowercase(),
                     title: label,
+                    section: entry.section,
                     ..quota
                 });
             } else if let Some(length) = quota.window.length {
                 parsed.push(Quota {
                     key: format!("w{}", length.as_secs()),
                     title: length_title(length),
+                    section: entry.section,
                     ..quota
                 });
             } else {
@@ -238,8 +249,23 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
         ));
     }
 
-    // Two windows under one key is a storage hazard, not a drawing one: the ingest would
-    // file the second under stale and drop it silently. Refusing is the honest answer.
+    // A key two entries claim is two windows, and the ingest files the second under
+    // the first's key as stale and drops it silently. Entries that state a length are
+    // re-keyed by the pool of the section they were found under, so the same span
+    // reported by two sections draws both windows. A duplicate the sections cannot
+    // separate — one section reporting it twice, or a shared label with no length
+    // stated — is still refused: only their position would tell them apart.
+    let contested: Vec<bool> = parsed
+        .iter()
+        .map(|quota| parsed.iter().filter(|other| other.key == quota.key).count() > 1)
+        .collect();
+    for (quota, contested) in parsed.iter_mut().zip(contested) {
+        if contested && let Some(length) = quota.window.length {
+            quota.key = WindowKey::for_pool(&quota.section, length)
+                .as_str()
+                .to_owned();
+        }
+    }
     for (index, one) in parsed.iter().enumerate() {
         if parsed[..index].iter().any(|other| other.key == one.key) {
             return Err(ProviderError::malformed(format!(
@@ -320,6 +346,10 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 struct Quota {
     key: String,
     title: String,
+    /// The object key the entry was found under — its section of the payload, and the
+    /// only pool a re-keyed window can be named by. Empty for the named slots, whose
+    /// keys are fixed and never contested.
+    section: String,
     window: Window,
     /// `tickPercent`, scaled — the share of the window restored per tick.
     tick_percent: Option<f64>,
@@ -409,6 +439,7 @@ fn quota(entry: &Value) -> Result<Quota, String> {
     Ok(Quota {
         key: String::new(),
         title: String::new(),
+        section: String::new(),
         window: Window {
             key: WindowKey::named(""),
             title: String::new(),
@@ -435,26 +466,34 @@ fn is_quota(entry: &Value) -> bool {
     .any(|keys| first_number(entry, keys).is_some())
 }
 
+/// One walked quota entry, with the section of the payload it arrived from: the object
+/// key it was found under, which for an array is the array's own key. This is all the
+/// identity a pool-keyed window can be named by when two entries key alike.
+struct Entry {
+    value: Value,
+    section: String,
+}
+
 /// The first candidate container that yields entries, walked recursively as the plugin
 /// walks it: quota-shaped objects collect themselves, everything else descends in
-/// sorted key order.
-fn generic_entries(root: &Value, data: Option<&Value>) -> Vec<Value> {
-    let mut candidates: Vec<&Value> = Vec::new();
+/// sorted key order, and each entry remembers the key it descended through.
+fn generic_entries(root: &Value, data: Option<&Value>) -> Vec<Entry> {
+    let mut candidates: Vec<(&Value, &str)> = Vec::new();
     for key in CONTAINER_KEYS {
         if let Some(candidate) = root.get(*key) {
-            candidates.push(candidate);
+            candidates.push((candidate, key));
         }
     }
     if let Some(data) = data {
         for key in &CONTAINER_KEYS[..CONTAINER_KEYS.len() - 1] {
             if let Some(candidate) = data.get(*key) {
-                candidates.push(candidate);
+                candidates.push((candidate, key));
             }
         }
     }
-    for candidate in candidates {
+    for (candidate, section) in candidates {
         let mut collected = Vec::new();
-        collect(candidate, &mut collected);
+        collect(candidate, section, &mut collected);
         if !collected.is_empty() {
             return collected;
         }
@@ -462,15 +501,18 @@ fn generic_entries(root: &Value, data: Option<&Value>) -> Vec<Value> {
     Vec::new()
 }
 
-fn collect(value: &Value, out: &mut Vec<Value>) {
+fn collect(value: &Value, section: &str, out: &mut Vec<Entry>) {
     match value {
-        Value::Array(items) => items.iter().for_each(|item| collect(item, out)),
-        Value::Object(_) if is_quota(value) => out.push(value.clone()),
+        Value::Array(items) => items.iter().for_each(|item| collect(item, section, out)),
+        Value::Object(_) if is_quota(value) => out.push(Entry {
+            value: value.clone(),
+            section: section.to_owned(),
+        }),
         Value::Object(map) => {
             let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
             keys.sort_unstable();
             for key in keys {
-                collect(&map[key], out);
+                collect(&map[key], key, out);
             }
         }
         _ => {}
@@ -911,6 +953,52 @@ mod tests {
                 Err(ProviderError::Malformed(_))
             ),
             "used without a limit or a percentage is not a readable quota"
+        );
+    }
+
+    #[test]
+    fn the_same_span_from_two_sections_draws_both_windows_keyed_by_pool() {
+        // Spliced, not recorded: the recorded generic Daily entry standing twice, once
+        // under each of two sections of the walked payload. Both entries key `daily`
+        // and both state window_minutes 1440, so the sections' pools separate them and
+        // both windows draw instead of one refusing the fetch.
+        let body = r#"
+        {
+          "plan": "Starter",
+          "usage": {
+            "text": { "name": "Daily", "max": 200, "remaining": 50, "window_minutes": 1440 },
+            "code": { "name": "Daily", "max": 200, "remaining": 50, "window_minutes": 1440 }
+          }
+        }
+        "#;
+        let snapshot = parse(body, at(1_775_000_000)).expect("parses");
+        let keys: Vec<&str> = snapshot.windows.iter().map(|w| w.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["code/w86400", "text/w86400"],
+            "sorted key order walks code first"
+        );
+        for key in ["code/w86400", "text/w86400"] {
+            assert_eq!(window(&snapshot, key).used_percent, 75.0);
+        }
+        assert_eq!(window(&snapshot, "code/w86400").title, "Daily");
+    }
+
+    #[test]
+    fn the_same_span_twice_in_one_section_is_still_refused() {
+        // The recorded Daily entry standing twice inside one `quotas` list: one section
+        // reporting one span twice leaves only position to tell the entries apart, and
+        // no pool separates them.
+        let body = r#"
+        { "quotas": [
+            { "name": "Daily", "max": 200, "remaining": 50, "window_minutes": 1440 },
+            { "name": "Daily", "max": 200, "remaining": 50, "window_minutes": 1440 }
+        ] }
+        "#;
+        let error = parse(body, at(1_775_000_000)).expect_err("contested within one section");
+        assert!(
+            matches!(error, ProviderError::Malformed(_)),
+            "{error} for {body}"
         );
     }
 
