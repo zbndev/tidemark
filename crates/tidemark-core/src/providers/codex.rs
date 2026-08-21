@@ -56,6 +56,7 @@ pub fn oauth_client() -> oauth::Client {
         authorize_url: AUTHORIZE_URL,
         token_url: REFRESH_URL,
         client_id: OAUTH_CLIENT_ID,
+        client_secret: None,
         redirect_port: REDIRECT_PORT,
         redirect_path: REDIRECT_PATH,
         scopes: OAUTH_SCOPES,

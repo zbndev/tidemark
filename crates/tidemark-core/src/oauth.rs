@@ -75,9 +75,11 @@ pub struct Client {
     pub authorize_url: &'static str,
     /// Where the code is exchanged.
     pub token_url: &'static str,
-    /// The public client identifier. Public clients hold no secret; PKCE is what stands
-    /// in for one.
+    /// The public client identifier. Most public clients hold no secret; some desktop
+    /// clients also declare a public secret that is sent with the code exchange.
     pub client_id: &'static str,
+    /// An optional public desktop-client secret required by some authorization servers.
+    pub client_secret: Option<&'static str>,
     /// The loopback port the client is registered with, or zero to take any free one.
     pub redirect_port: u16,
     /// The path of the registered redirect URI.
@@ -328,7 +330,7 @@ async fn exchange(
     verifier: &str,
     code: &str,
 ) -> Result<serde_json::Value, LoginError> {
-    let fields = [
+    let mut fields = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", redirect_uri),
@@ -338,6 +340,9 @@ async fn exchange(
         // wants the state back alongside the code.
         ("state", state),
     ];
+    if let Some(secret) = oauth.client_secret {
+        fields.push(("client_secret", secret));
+    }
     let request = client.post(oauth.token_url);
     let request = match oauth.encoding {
         Encoding::Form => request.form(&fields),
@@ -538,17 +543,116 @@ mod tests {
     use super::*;
 
     fn client() -> Client {
+        test_client(0, Encoding::Form, None)
+    }
+
+    fn test_client(
+        redirect_port: u16,
+        encoding: Encoding,
+        client_secret: Option<&'static str>,
+    ) -> Client {
         Client {
             authorize_url: "https://example.test/authorize",
             token_url: "https://example.test/token",
             client_id: "an-id",
+            client_secret,
             // Zero, so the tests never fight the real ports a vendor CLI may be using.
-            redirect_port: 0,
+            redirect_port,
             redirect_path: "/callback",
             scopes: "user:profile user:inference",
             authorize_extras: &[("code", "true")],
-            encoding: Encoding::Form,
+            encoding,
         }
+    }
+
+    #[test]
+    fn a_provider_client_secret_is_sent_only_when_declared() {
+        let body = finish_against_server(test_client(
+            0,
+            Encoding::Form,
+            Some("desktop-public-secret"),
+        ))
+        .expect("exchange succeeds");
+        assert!(body.contains("client_secret=desktop-public-secret"));
+
+        let body =
+            finish_against_server(test_client(0, Encoding::Form, None)).expect("exchange succeeds");
+        assert!(!body.contains("client_secret="));
+
+        let body = finish_against_server(test_client(
+            0,
+            Encoding::Json,
+            Some("desktop-public-secret"),
+        ))
+        .expect("exchange succeeds");
+        assert!(body.contains("\"client_secret\":\"desktop-public-secret\""));
+
+        let body =
+            finish_against_server(test_client(0, Encoding::Json, None)).expect("exchange succeeds");
+        assert!(!body.contains("client_secret"));
+    }
+
+    fn finish_against_server(oauth: Client) -> Result<String, LoginError> {
+        use std::io::{Read, Write};
+        use std::net::TcpStream as SyncStream;
+
+        let token_server = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let token_url: &'static str = Box::leak(
+            format!(
+                "http://127.0.0.1:{}/token",
+                token_server.local_addr().expect("addr").port()
+            )
+            .into_boxed_str(),
+        );
+        let token_thread = std::thread::spawn(move || {
+            let (mut stream, _) = token_server.accept().expect("the exchange arrives");
+            let mut buffer = [0u8; 4096];
+            let read = stream.read(&mut buffer).expect("request");
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let body = r#"{"access_token":"at"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("answer");
+            request
+        });
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let mut oauth = oauth;
+        oauth.token_url = token_url;
+        let login = runtime.block_on(Login::begin(oauth))?;
+        let url = login.url().to_owned();
+        let port: u16 = login
+            .redirect_uri
+            .rsplit_once(':')
+            .and_then(|(_, tail)| tail.split('/').next())
+            .and_then(|port| port.parse().ok())
+            .expect("the redirect names the port it bound");
+        let state = url
+            .split("&state=")
+            .nth(1)
+            .and_then(|tail| tail.split('&').next())
+            .expect("the URL carries the state")
+            .to_owned();
+        let browser = std::thread::spawn(move || {
+            let mut stream = SyncStream::connect(("127.0.0.1", port)).expect("listener");
+            stream
+                .write_all(
+                    format!(
+                        "GET /callback?code=the-code&state={state} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .expect("request");
+        });
+        let http = super::client().expect("an HTTP client");
+        runtime.block_on(login.finish(&http))?;
+        browser.join().expect("browser thread");
+        Ok(token_thread.join().expect("token thread"))
     }
 
     #[test]
