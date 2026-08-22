@@ -38,6 +38,7 @@ pub mod chutes;
 pub mod clawrouter;
 pub mod clinepass;
 pub mod crof;
+pub mod deepgram;
 pub mod deepinfra;
 pub mod deepseek;
 pub mod elevenlabs;

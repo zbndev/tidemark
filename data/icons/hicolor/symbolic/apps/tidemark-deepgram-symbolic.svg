@@ -1,0 +1,7 @@
+<!-- The Deepgram mark belongs to Deepgram, Inc. Not covered by Tidemark's MIT licence;
+     used nominatively to identify the service a card reports on. The faded baseline the
+     original draws under the four bars is dropped: a symbolic icon is recoloured by the
+     theme and carries no opacity. See docs/TRADEMARKS.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
+  <path transform="translate(-4.5 -4)" d="M6 9h3v14H6V9Zm6-4h3v22h-3V5Zm6 7h3v8h-3v-8Zm6-3h3v14h-3V9Z"/>
+</svg>
