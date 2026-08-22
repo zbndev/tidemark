@@ -46,12 +46,13 @@ be reinstalled after any change rather than only at a release:
 
 ```sh
 makepkg -sif    # -f: the version does not change between builds, so force the rebuild
-systemctl --user enable --now tidemarkd.service
 ```
 
-It installs `tidemark`, `tidemarkd`, the systemd user unit and the provider marks. `options=(!lto)` is
-required, not preferred: rustls's default provider vendors C and assembly through
-`aws-lc-sys`, and objects built with GCC's LTO cannot be linked by `rust-lld`.
+It installs `tidemark`, `tidemarkd`, their desktop integration, the systemd user unit and
+the provider marks. Opening Tidemark starts the daemon through D-Bus activation; package
+upgrades automatically restart it for active desktop users. `options=(!lto)` is required,
+not preferred: rustls's default provider vendors C and assembly through `aws-lc-sys`, and
+objects built with GCC's LTO cannot be linked by `rust-lld`.
 
 ## Running the daemon
 
@@ -92,7 +93,7 @@ busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark \
     io.github.zbndev.Tidemark.Daemon1 Refresh s ""
 ```
 
-As a user service, once the binary is installed at `/usr/bin/tidemarkd`:
+For a source-tree unit rather than an installed package:
 
 ```sh
 install -Dm644 data/tidemarkd.service ~/.config/systemd/user/tidemarkd.service
@@ -103,8 +104,9 @@ systemctl --user enable --now tidemarkd.service
 ## The window
 
 `tidemark` is a viewer: it shows what `tidemarkd` publishes and never talks to a provider
-itself. Start the daemon first, or leave the window open — it waits for the daemon to
-appear on the bus, and picks up again by itself when the daemon is restarted.
+itself. An installed copy activates the daemon over D-Bus when needed. When running from
+the source tree without the installed activation file, start the daemon first or leave the
+window open — it waits for the daemon to appear and picks up again after a restart.
 
 ```sh
 tidemark                 # or: cargo run -p tidemark

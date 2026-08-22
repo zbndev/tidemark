@@ -36,9 +36,10 @@ use tidemark_types::{DANGER_AT, ProviderStatus, ids, present};
 use crate::format;
 use crate::model;
 
-/// The icon the panel shows. Ours, unlike the provider marks: `data/icons` ships it under
-/// this name and the `PKGBUILD` installs it.
-const ICON: &str = "io.github.zbndev.Tidemark-symbolic";
+/// The icon the panel shows. It deliberately uses the same full-colour icon name as the
+/// application: `data/icons` supplies native small sizes so a panel never has to enlarge a
+/// tiny fallback pixmap, and the `PKGBUILD` installs them all.
+const ICON: &str = ids::APP_ID;
 
 /// What a menu row asks the interface to do.
 ///
@@ -228,6 +229,10 @@ impl ksni::Tray for Model {
     }
 
     fn icon_name(&self) -> String {
+        ICON.to_owned()
+    }
+
+    fn attention_icon_name(&self) -> String {
         ICON.to_owned()
     }
 
@@ -519,5 +524,17 @@ mod tests {
             vec![window(18_000, 3.0), window(604_800, 99.0)],
         );
         assert!(needs_attention(&[status]));
+    }
+
+    #[test]
+    fn the_panel_receives_the_same_full_colour_icon_as_the_application() {
+        let (commands, _inbox) = async_channel::unbounded();
+        let tray = Model {
+            state: State::default(),
+            commands,
+        };
+
+        assert_eq!(ksni::Tray::icon_name(&tray), ids::APP_ID);
+        assert_eq!(ksni::Tray::attention_icon_name(&tray), ids::APP_ID);
     }
 }

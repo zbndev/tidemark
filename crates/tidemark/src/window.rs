@@ -97,8 +97,11 @@ pub struct MainWindow {
 }
 
 impl MainWindow {
-    /// Builds the window, connects it to the daemon and presents it.
-    pub fn present(app: &adw::Application) {
+    /// Builds the window, connects it to the daemon and presents it unless this is the
+    /// desktop-session autostart. A background start becomes useful only after a panel has
+    /// accepted the tray icon; without one it exits rather than leaving an invisible
+    /// process behind.
+    pub fn present(app: &adw::Application, background: bool) {
         let grid = gtk::FlowBox::builder()
             .min_children_per_line(1)
             .max_children_per_line(3)
@@ -183,8 +186,10 @@ impl MainWindow {
         main.connect_refresh_button();
         main.connect_providers_button();
         main.start_clock();
-        main.start_tray();
-        main.window.present();
+        main.start_tray(background);
+        if !background {
+            main.window.present();
+        }
 
         // The strong reference lives here, in the closure the bus watcher keeps for the
         // life of the process. GTK owns the widgets, but nothing owns the Rust state that
@@ -497,7 +502,7 @@ impl MainWindow {
     /// back, so the close handler is connected inside the success branch and nowhere else.
     /// A session with no status-notifier host therefore behaves exactly as it did before
     /// this existed: the close button closes.
-    fn start_tray(self: &Rc<Self>) {
+    fn start_tray(self: &Rc<Self>, background: bool) {
         let weak: Weak<Self> = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let (commands, inbox) = async_channel::unbounded::<tray::Command>();
@@ -508,6 +513,12 @@ impl MainWindow {
                         %error,
                         "no status-notifier host took the icon; the close button still closes"
                     );
+                    if background
+                        && let Some(main) = weak.upgrade()
+                        && let Some(app) = main.window.application()
+                    {
+                        app.quit();
+                    }
                     return;
                 }
             };

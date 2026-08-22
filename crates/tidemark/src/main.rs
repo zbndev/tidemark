@@ -29,6 +29,15 @@ use tidemark_types::ids;
 
 use crate::window::MainWindow;
 
+fn background_requested<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .any(|argument| argument.as_ref() == "--background")
+}
+
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -37,29 +46,46 @@ fn main() -> glib::ExitCode {
         )
         .init();
 
-    if std::env::args().any(|a| a == "--version") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|argument| argument == "--version") {
         println!("tidemark {}", env!("CARGO_PKG_VERSION"));
         return glib::ExitCode::SUCCESS;
     }
+    let background = background_requested(&args);
 
     let app = adw::Application::builder()
         .application_id(ids::APP_ID)
         .build();
 
     app.connect_startup(|_| style::load());
-    app.connect_activate(|app| {
+    app.connect_activate(move |app| {
         // A second `tidemark` on an already-running instance raises the window it has
         // rather than opening another one onto the same daemon.
         if let Some(existing) = app.active_window() {
             existing.present();
             return;
         }
-        tracing::info!(app_id = ids::APP_ID, "presenting main window");
-        MainWindow::present(app);
+        tracing::info!(app_id = ids::APP_ID, background, "starting desktop client");
+        MainWindow::present(app, background);
     });
 
-    // GTK's own argument parsing is not wanted: the only flag this program has is handled
-    // above, and anything else on the command line is a mistake worth ignoring rather than
-    // a reason to refuse to start.
+    // GTK's own argument parsing is not wanted: this program's two flags are handled above,
+    // and anything else on the command line is a mistake worth ignoring rather than a
+    // reason to refuse to start.
     app.run_with_args::<&str>(&[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_flag_requests_a_hidden_start() {
+        assert!(background_requested(["tidemark", "--background"]));
+    }
+
+    #[test]
+    fn ordinary_launch_requests_a_visible_start() {
+        assert!(!background_requested(["tidemark"]));
+    }
 }

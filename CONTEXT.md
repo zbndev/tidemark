@@ -393,6 +393,9 @@ history that does not exist yet.
   conditional on the icon actually being accepted: when no status-notifier host answers, the
   close button closes the program exactly as it did before, because hiding a window with
   nothing left to bring it back is worse than having no tray.
+- **Desktop autostart uses that same condition.** `tidemark --background` builds the window
+  without showing it and stays only after a StatusNotifier host accepts the icon. On a
+  desktop without one it exits cleanly instead of leaving an invisible process behind.
 - **`libayatana-appindicator-glib` is GPL-3** and cannot be linked into an MIT project. The
   protocol is spoken through `ksni`, which is Unlicense — public domain, so compatible —
   and which is built on the same zbus the interface already reaches the daemon over.

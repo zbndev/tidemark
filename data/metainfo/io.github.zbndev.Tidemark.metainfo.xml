@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.zbndev.Tidemark</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Tidemark</name>
+  <summary>Track AI provider quota limits</summary>
+  <description>
+    <p>
+      Tidemark shows how much of each AI provider rate-limit window has been used, when it
+      resets, and whether the current pace will reach the limit.
+    </p>
+    <p>
+      Compare configured providers in one native desktop window, inspect recent quota
+      history, refresh readings from the tray, and receive warnings near a limit.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.zbndev.Tidemark.desktop</launchable>
+  <provides>
+    <binary>tidemark</binary>
+  </provides>
+  <url type="homepage">https://github.com/zbndev/tidemark</url>
+  <url type="bugtracker">https://github.com/zbndev/tidemark/issues</url>
+  <developer id="io.github.zbndev">
+    <name>zbndev</name>
+  </developer>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-08-22" />
+  </releases>
+</component>

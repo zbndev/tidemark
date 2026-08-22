@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Tidemark
+Comment=Keep AI provider quotas available in the tray
+Exec=tidemark --background
+Icon=io.github.zbndev.Tidemark
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

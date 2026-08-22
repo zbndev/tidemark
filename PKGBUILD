@@ -52,14 +52,31 @@ package() {
     # The unit's ExecStart is /usr/bin/tidemarkd, which is where the line above puts it.
     install -Dm644 data/tidemarkd.service "$pkgdir/usr/lib/systemd/user/tidemarkd.service"
 
-    # Tidemark's own icon, in both the forms something asks for it: the symbolic one is
-    # what the tray hands the panel, and the full-colour one is for anything that will not
-    # take a `-symbolic` name. Ours, MIT, and installed separately from the provider marks
-    # below on purpose — the licence note that follows them does not apply to these two.
-    install -Dm644 data/icons/hicolor/symbolic/apps/io.github.zbndev.Tidemark-symbolic.svg \
-        "$pkgdir/usr/share/icons/hicolor/symbolic/apps/io.github.zbndev.Tidemark-symbolic.svg"
-    install -Dm644 data/icons/hicolor/scalable/apps/io.github.zbndev.Tidemark.svg \
-        "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.zbndev.Tidemark.svg"
+    # Tidemark's own full-colour icon. Native panel sizes matter: some SNI hosts display a
+    # small fallback pixmap at integer scale, which makes even simple art look pixelated.
+    # These are high-quality reductions of the owner's 1024px source; the small variants
+    # also trim only transparent margin so the mark remains legible in a 16px panel. The
+    # source itself is a 512px icon at 2x scale, a directory declared by hicolor rather
+    # than an unindexed 1024x1024 directory GTK would never select.
+    local size
+    for size in 16 22 24 32 48 64 128 256 512; do
+        install -Dm644 \
+            "data/icons/hicolor/${size}x${size}/apps/io.github.zbndev.Tidemark.png" \
+            "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/io.github.zbndev.Tidemark.png"
+    done
+    install -Dm644 data/icons/hicolor/512x512@2/apps/io.github.zbndev.Tidemark.png \
+        "$pkgdir/usr/share/icons/hicolor/512x512@2/apps/io.github.zbndev.Tidemark.png"
+
+    install -Dm644 data/applications/io.github.zbndev.Tidemark.desktop \
+        "$pkgdir/usr/share/applications/io.github.zbndev.Tidemark.desktop"
+    install -Dm644 data/autostart/io.github.zbndev.Tidemark.desktop \
+        "$pkgdir/etc/xdg/autostart/io.github.zbndev.Tidemark.desktop"
+    install -Dm644 data/metainfo/io.github.zbndev.Tidemark.metainfo.xml \
+        "$pkgdir/usr/share/metainfo/io.github.zbndev.Tidemark.metainfo.xml"
+    install -Dm644 data/dbus-1/services/io.github.zbndev.Tidemark.Daemon.service \
+        "$pkgdir/usr/share/dbus-1/services/io.github.zbndev.Tidemark.Daemon.service"
+    install -Dm755 data/restart-user-daemon \
+        "$pkgdir/usr/lib/tidemark/restart-user-daemon"
 
     # The provider marks. They are recoloured by the theme only because GTK finds them
     # through the icon theme as symbolic icons, which is what putting them in hicolor buys;

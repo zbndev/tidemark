@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.github.zbndev.Tidemark.Daemon
+Exec=/usr/bin/tidemarkd
+SystemdService=tidemarkd.service

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Tidemark
+Comment=Track AI provider quota limits
+Exec=tidemark
+Icon=io.github.zbndev.Tidemark
+Terminal=false
+Categories=Utility;
+Keywords=AI;quota;usage;rate limit;
+StartupNotify=true
