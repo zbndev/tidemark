@@ -1,0 +1,8 @@
+<!-- The Codebuff mark belongs to Codebuff, Inc. Not covered by Tidemark's MIT licence;
+     used nominatively to identify the service a card reports on. See docs/TRADEMARKS.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
+  <g transform="translate(-1.0952 -1.0952) scale(0.261905)">
+    <path fill-rule="evenodd" d="M50 8L12 28V72L50 92L88 72V28L50 8ZM50 22.5L74 35.25V64.75L50 77.5L26 64.75V35.25L50 22.5Z"/>
+    <path fill-rule="evenodd" d="M50 40L61 46V54L50 60L39 54V46L50 40Z"/>
+  </g>
+</svg>

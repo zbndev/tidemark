@@ -37,6 +37,7 @@ pub mod amp;
 pub mod chutes;
 pub mod clawrouter;
 pub mod clinepass;
+pub mod codebuff;
 pub mod crof;
 pub mod deepgram;
 pub mod deepinfra;

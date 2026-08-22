@@ -15,6 +15,7 @@ whose services the cards are about:
 | `tidemark-clawrouter-symbolic.svg` | The OpenClaw project (ClawRouter) |
 | `tidemark-clinepass-symbolic.svg` | Cline (ClinePass) |
 | `tidemark-codex-symbolic.svg` | OpenAI (Codex) |
+| `tidemark-codebuff-symbolic.svg` | Codebuff, Inc. |
 | `tidemark-crof-symbolic.svg` | Crof |
 | `tidemark-deepinfra-symbolic.svg` | DeepInfra |
 | `tidemark-deepgram-symbolic.svg` | Deepgram, Inc. |
@@ -51,9 +52,9 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the twenty-seven marks that CodexBar records as the provider icons of
-ai&, Amp, Chutes, ClawRouter, ClinePass, Crof, Deepgram, DeepInfra, DeepSeek, ElevenLabs,
-Factory,
+asset, and except the twenty-eight marks that CodexBar records as the provider icons of
+ai&, Amp, Chutes, ClawRouter, ClinePass, Codebuff, Crof, Deepgram, DeepInfra, DeepSeek,
+ElevenLabs, Factory,
 Fireworks, Groq, IBM Bob, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, OpenAI, OpenCode Go,
 OpenRouter, Poe, sub2api, Synthetic, Venice, Warp and ZenMux — and except the xAI mark, which is
 xAI's own, taken from

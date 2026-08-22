@@ -25,8 +25,8 @@ use std::sync::Arc;
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
-    self, aiand, deepgram, deepinfra, factory, fireworks, groq, ibmbob, litellm, llmproxy,
-    openai_api, openrouter, poe, sub2api, xai,
+    self, aiand, codebuff, deepgram, deepinfra, factory, fireworks, groq, ibmbob, litellm,
+    llmproxy, openai_api, openrouter, poe, sub2api, xai,
 };
 use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex};
 use tidemark_core::secrets::Secrets;
@@ -65,6 +65,7 @@ static OAUTH: &[(&str, &str, &str, &str)] = &[
 
 /// The hand-written key-authenticated providers: those whose fetch is more than one
 /// request, so a `keyed::Spec` cannot describe them — ai& pages a request log,
+/// Codebuff posts for credits and then reads a subscription it can do without,
 /// Deepgram lists projects and then reads a usage breakdown for each (and puts its key in
 /// a scheme of its own, `Authorization: Token`, which `keyed::Auth` cannot express),
 /// DeepInfra reads a checklist and a month's usage, Factory walks an
@@ -83,6 +84,7 @@ static OAUTH: &[(&str, &str, &str, &str)] = &[
 /// as the catalog's, `CredentialKind::Key`, so the credentials dialog is unchanged.
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &aiand::SPEC,
+    &codebuff::SPEC,
     &deepgram::SPEC,
     &deepinfra::SPEC,
     &factory::SPEC,
@@ -543,7 +545,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 34);
+        assert_eq!(definitions.len(), 35);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(
