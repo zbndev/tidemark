@@ -65,6 +65,7 @@ pub mod sub2api;
 pub mod synthetic;
 pub mod venice;
 pub mod warp;
+pub mod wayfinder;
 pub mod xai;
 pub mod zai;
 pub mod zenmux;

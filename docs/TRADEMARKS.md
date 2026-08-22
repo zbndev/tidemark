@@ -40,6 +40,7 @@ whose services the cards are about:
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
 | `tidemark-venice-symbolic.svg` | Venice AI |
 | `tidemark-warp-symbolic.svg` | Warp (warp.dev) |
+| `tidemark-wayfinder-symbolic.svg` | The Wayfinder project (wayfinder-router) |
 | `tidemark-xai-symbolic.svg` | xAI Corp. |
 | `tidemark-zai-symbolic.svg` | Z.ai (Zhipu AI) |
 | `tidemark-zenmux-symbolic.svg` | ZenMux |
@@ -53,11 +54,11 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the twenty-nine marks that CodexBar records as the provider icons of
+asset, and except the thirty marks that CodexBar records as the provider icons of
 ai&, Amp, Chutes, ClawRouter, ClinePass, Codebuff, Crof, Deepgram, DeepInfra, DeepSeek,
 ElevenLabs, Factory,
 Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, OpenAI, OpenCode Go,
-OpenRouter, Poe, sub2api, Synthetic, Venice, Warp and ZenMux — and except the xAI mark, which is
+OpenRouter, Poe, sub2api, Synthetic, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
 xAI's own, taken from
 [File:XAI Logo.svg](https://commons.wikimedia.org/wiki/File:XAI_Logo.svg) on Wikimedia
 Commons: the icon CodexBar files under `xai` is three strokes in the shape of an X and a
@@ -69,7 +70,7 @@ Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand), and the Op
 is the blossom CodexBar files under its codex name. Each was reduced to a
 single-colour path set and stripped of the fills, gradients, masks and filters the
 originals carry — a symbolic icon is recoloured by the theme and cannot keep
-them; the ai&, ClawRouter, Fireworks, LiteLLM, OpenRouter and Synthetic marks were first
+them; the ai&, ClawRouter, Fireworks, LiteLLM, OpenRouter, Synthetic and Wayfinder marks were first
 drawn as strokes, a stroke being as single-colour as a fill, and their strokes have since
 been outlined into the filled paths that ship — GTK's symbolic renderer paints `fill` and
 does not draw a `stroke` at all, so the stroked files rendered as blank or half-blank
