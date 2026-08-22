@@ -404,9 +404,34 @@ history that does not exist yet.
 
 `deb`, `rpm`, `PKGBUILD`. Distribution artwork policies can refuse third-party trademarks,
 so a build with no provider marks stays a supported configuration: a card without one is a
-state the interface already has. Targets need GTK4 ≥ 4.18, which rules out Ubuntu 24.04 as a
-target — though its glibc, being the oldest, makes it a candidate build host, since glibc
-is forward- but not backward-compatible.
+state the interface already has.
+
+The GTK 4.22 / libadwaita 1.9 floor above is GNOME 50, which became the default in exactly
+two places: **Fedora 44** and **Ubuntu 26.04 LTS**. So the `rpm` targets Fedora 44+ and the
+`deb` targets Ubuntu 26.04+. Nothing older qualifies — Debian's trixie is at GTK 4.18 — and
+the `ubuntu-26.04` runner reports 4.22.4 and 1.9.1, which is where that is checked rather
+than assumed.
+
+glibc is forward- but not backward-compatible, so a build host must be no newer than the
+oldest target. That is settled by construction rather than by choosing a host: each format
+is built on the oldest release of its own target — the `deb` on the `ubuntu-26.04` runner,
+the `rpm` in a `fedora:44` container, because GitHub hosts no Fedora runner. There is no
+cross-distribution glibc question left to get wrong.
+
+Building each format on its own target is a correctness requirement, not tidiness.
+Measured 2026-08-22: `cargo-generate-rpm`'s `auto-req` scans the payload *transitively*
+rather than reading `DT_NEEDED`, so an `rpm` built on Arch asked for `libgstreamer`,
+`libcups`, `libkrb5` and `libxml2.so.16` — none of which either binary links, and some of
+which Fedora numbers differently. And neither packaging tool treats a missing dependency
+helper as an error: without `dpkg-shlibdeps`, `depends = "$auto"` resolves to *nothing* and
+`cargo-deb` emits a warning a log scrolls past, yielding a package that installs with no
+GTK present and then fails to start. `scripts/check-package-deps.sh` turns that warning
+into a failed build, and both package jobs run it.
+
+An upgrade restarts the user's daemon: both formats' maintainer scripts call
+`data/restart-user-daemon`, which reaches each real user manager through
+`--machine=<user>@.host` rather than talking to root's. `scripts/test-package-upgrade.sh`
+proves it against a real systemd, and is run by hand rather than in CI.
 
 ## Non-goals
 

@@ -39,6 +39,25 @@ from standard input rather than an argument, because arguments are visible in `p
 pass my/zai | cargo run -p tidemark-core --example probe
 ```
 
+## Installing
+
+Download the `.deb` or `.rpm` from the
+[latest release](https://github.com/zbndev/tidemark/releases/latest):
+
+```sh
+sudo apt install ./tidemark_0.1.0-1_amd64.deb     # Ubuntu 26.04 or newer
+sudo dnf install ./tidemark-0.1.0-1.x86_64.rpm    # Fedora 44 or newer
+```
+
+Tidemark is built against GTK 4.22 and libadwaita 1.9, which is GNOME 50 — the release
+that ships in Fedora 44 and Ubuntu 26.04 LTS. Older distributions cannot run it, and that
+is deliberate: the interface follows the toolkit rather than the other way round. See
+`CONTEXT.md` § API floor.
+
+Upgrading restarts the daemon for you, so a new package never leaves the previous
+`tidemarkd` running. The interface is not restarted — it belongs to your tray, and no
+package script should reach into it.
+
 ## Installing on Arch
 
 `PKGBUILD` in this directory builds a release package **from the working tree**, so it can
