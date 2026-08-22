@@ -36,12 +36,16 @@ notifications stay current. Native GTK4 + libadwaita — no Electron, no embedde
 
 ## Installation
 
+### Ubuntu/Fedora
+
 Download the `.deb` or `.rpm` from the [latest release](https://github.com/zbndev/tidemark/releases/latest):
 
-On Arch, build the package from this repository:
+### Arch Linux
+
+Install from AUR with yay/paru
 
 ```bash
-makepkg -sif
+yay -S tidemark-git
 ```
 
 ## Getting started
