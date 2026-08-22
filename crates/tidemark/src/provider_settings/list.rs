@@ -109,6 +109,9 @@ fn configured_row(
     let image = mark::image();
     mark::set(&image, &status.provider);
     let row = adw::ActionRow::new();
+    // The picker's stay-off-markup rule again: the title and the subtitle both carry
+    // the daemon's own words, which are data, never markup.
+    row.set_use_markup(false);
     row.add_prefix(&image);
 
     let edit = gtk::Button::builder()
@@ -276,9 +279,13 @@ impl Picker {
         for definition in matches {
             let image = mark::image();
             mark::set(&image, &definition.provider);
+            // Markup off: a title here is a name — `ai&` among them — and a preferences
+            // row parses its title as Pango markup by default, where a stray `&` fails
+            // the parse and leaves the row untitled.
             let row = adw::ActionRow::builder()
                 .title(&definition.title)
                 .subtitle(&definition.provider)
+                .use_markup(false)
                 .activatable(true)
                 .build();
             row.add_prefix(&image);

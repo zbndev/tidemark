@@ -295,8 +295,12 @@ impl ProviderDetail {
     /// in place, so a poll cannot erase a key being typed.
     pub(super) fn apply(self: &Rc<Self>, status: &ProviderStatus) {
         *self.status.borrow_mut() = status.clone();
+        // A preferences group parses its description as Pango markup and offers no
+        // switch to turn that off, so the daemon's words — which can carry the same
+        // `ai&` the titles do — are escaped instead.
+        let description = glib::markup_escape_text(&describe(&self.definition, status));
         self.authentication
-            .set_description(Some(&describe(&self.definition, status)));
+            .set_description(Some(description.as_str()));
 
         let stored = status.has_credential == Some(true);
         if let Some(rows) = self.key.borrow().as_ref() {
@@ -374,10 +378,12 @@ impl ProviderDetail {
     fn build_notify_row(self: &Rc<Self>, key: &str, title: &str, enabled: bool) -> Rc<NotifyRow> {
         // Titled by the window, not by its key: the key is what the daemon is told, and
         // showing it here would put an identifier in front of somebody who has the card's
-        // own name for the same thing two clicks away.
+        // own name for the same thing two clicks away. The window's name is the daemon's
+        // words too, so markup stays off.
         let row = adw::SwitchRow::builder()
             .title(title)
             .active(enabled)
+            .use_markup(false)
             .build();
         let notify_row = Rc::new(NotifyRow {
             key: key.to_owned(),
@@ -426,8 +432,11 @@ impl ProviderDetail {
             Some(CredentialKind::None) => self.authentication.set_visible(false),
             Some(CredentialKind::External) | None => {
                 let status = self.status.borrow();
+                // The row's stay-off-markup rule: the title is the daemon's connection
+                // words, which are data, never markup.
                 let row = adw::ActionRow::builder()
                     .title(model::connection_text(&self.definition, &status))
+                    .use_markup(false)
                     .build();
                 self.authentication.add(&row);
                 *self.external.borrow_mut() = Some(row);
@@ -517,8 +526,11 @@ impl ProviderDetail {
     }
 
     fn build_sign_in_row(self: &Rc<Self>) {
+        // Markup off for the row as a whole: the subtitle `apply` sets later carries the
+        // daemon's connection words, which are data, never markup.
         let row = adw::ActionRow::builder()
             .title("Tidemark's own account")
+            .use_markup(false)
             .build();
         let button = gtk::Button::builder()
             .label("Sign in…")
