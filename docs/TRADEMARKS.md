@@ -7,6 +7,7 @@ whose services the cards are about:
 
 | File | Mark of |
 | --- | --- |
+| `tidemark-aiand-symbolic.svg` | ai& (console.aiand.com) |
 | `tidemark-amp-symbolic.svg` | Amp (ampcode.com) |
 | `tidemark-antigravity-symbolic.svg` | Google LLC (Antigravity) |
 | `tidemark-chutes-symbolic.svg` | Chutes AI (Chutes) |
@@ -15,10 +16,13 @@ whose services the cards are about:
 | `tidemark-clinepass-symbolic.svg` | Cline (ClinePass) |
 | `tidemark-codex-symbolic.svg` | OpenAI (Codex) |
 | `tidemark-crof-symbolic.svg` | Crof |
+| `tidemark-deepinfra-symbolic.svg` | DeepInfra |
 | `tidemark-elevenlabs-symbolic.svg` | ElevenLabs |
+| `tidemark-fireworks-symbolic.svg` | Fireworks AI |
 | `tidemark-kimi-symbolic.svg` | Moonshot AI (Kimi) |
 | `tidemark-llmproxy-symbolic.svg` | The LLM Proxy project |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
+| `tidemark-openai-api-symbolic.svg` | OpenAI |
 | `tidemark-openrouter-symbolic.svg` | OpenRouter |
 | `tidemark-poe-symbolic.svg` | Quora, Inc. (Poe) |
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
@@ -38,12 +42,14 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the sixteen marks that CodexBar records as the provider icons of Amp,
-Chutes, ClawRouter, ClinePass, Crof, ElevenLabs, LLM Proxy, Neuralwatt, OpenRouter,
+asset, and except the twenty marks that CodexBar records as the provider icons of ai&,
+Amp, Chutes, ClawRouter, ClinePass, Crof, DeepInfra, ElevenLabs, Fireworks, LLM Proxy,
+Neuralwatt, OpenAI, OpenRouter,
 Poe, sub2api,
 Synthetic, Venice, Warp, xAI and ZenMux — the
 ClinePass one, its file notes, is
-Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand). Each was reduced to a
+Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand), and the OpenAI one
+is the blossom CodexBar files under its codex name. Each was reduced to a
 single-colour path set and stripped of the fills, gradients, masks and filters the
 originals carry — a symbolic icon is recoloured by the theme and cannot keep
 them; the OpenRouter and xAI marks are drawn as strokes and keep them, a stroke being as
