@@ -225,3 +225,49 @@ slug in `config.toml` still being warned about rather than failing the daemon.
 5. The sixteen Swift-backed providers.
 6. The custom-fetch remainder: Poe, OpenRouter, and anything demoted here from steps 4
    and 5 on discovering it needs more than one request.
+
+## Ported
+
+Recorded 2026-08-21, after the last provider landed. Twenty-six were named above;
+twenty-four shipped and two were refused with grounds. Kimi and Z.ai moved onto `keyed`
+with their tests unchanged, which was the migration's acceptance criterion.
+
+Thirteen shipped as the design intended — a `Spec` plus a pure `parse`, registered in
+`keyed::CATALOG`:
+
+ClinePass, Crof, Venice, Synthetic, ClawRouter, Sub2API, Chutes, ZenMux, Neuralwatt,
+ElevenLabs, LLMProxy, Amp, Warp.
+
+Eleven need more than one request and keep their own `impl Provider`, registered through a
+`keyed::HandSpec` in the `HAND_WRITTEN` table in `tidemarkd::registry`:
+
+Poe, OpenRouter, xAI, OpenAI, AiAnd, Fireworks, DeepInfra, LiteLLM, IBM Bob, Groq,
+Factory.
+
+Poe and OpenRouter were named custom-fetch cases from the start; the other nine were
+demoted from single-request batches when reading the source showed one request could not
+carry them. The grounds, one clause each: xAI reads a prepaid balance and a spend history;
+OpenAI's card needs two paginated Admin endpoints (it ships under the slug `openai-api`,
+CodexBar's own id lowercased — not `openai`); AiAnd sums a cursor-paged log feed;
+Fireworks computes its billing window per poll; DeepInfra's card needs both `usage` and
+`checklist`; LiteLLM's budget windows all live in a second request; IBM Bob derives its
+Authorization by JWT-sniffing and walks per-team endpoints; Groq reads four Prometheus
+scalars; Factory climbs auth/me → limits → usage.
+
+Two were not ported. Ollama's key-authenticated path is a `web_search` validation ping
+plus `/api/tags`, whose only yield is a model count that CodexBar's own
+`toUsageSnapshot()` drops; its meaningful usage parser reads browser-cookie HTML, which
+this plan excludes by non-goal. Azure OpenAI's API-key path is a chat-completions
+validation ping whose only "reading" is a fabricated 0% — no usage, quota or cost exists
+on the wire. Neither was forgotten: each was read and found to have nothing a card could
+draw.
+
+Marks became part of each provider's definition of done mid-plan, by the owner's decision:
+every ported provider shipped a symbolic SVG and a `TRADEMARKS.md` row, twenty-four of
+each.
+
+The unverified surface is the one the goals accepted, stated plainly: all twenty-four
+ported providers ship having never been seen answering. Every test number comes from a
+body CodexBar recorded, and the tests assert agreement with CodexBar rather than with the
+live APIs. A provider whose API has drifted since CodexBar recorded its fixtures will
+parse what it is sent and still be wrong; only a live account can tell.
