@@ -46,19 +46,19 @@ static OAUTH: &[(&str, &str, &str, &str)] = &[
     (
         antigravity::PROVIDER_ID,
         "Antigravity",
-        "Sign in with Google through Tidemark, or use an existing agy session.",
+        "Sign in with Google through Tidemark",
         "agy session",
     ),
     (
         "claude",
         "Claude",
-        "Sign in through Tidemark or use Claude Code's login.",
+        "Sign in through Tidemark",
         "Claude Code login",
     ),
     (
         codex::PROVIDER_ID,
         "Codex",
-        "Sign in through Tidemark or use the Codex CLI's login.",
+        "Sign in through Tidemark",
         "Codex CLI login",
     ),
 ];
@@ -393,7 +393,7 @@ fn antigravity_account(
         })
     })
     .with_credential(CredentialKind::OAuth)
-    .with_hint("Sign in with Google through Tidemark, or use an existing agy session."))
+    .with_hint("Sign in with Google through Tidemark"))
 }
 
 fn claude_account(secrets: &Arc<dyn Secrets>) -> Result<Account, ProviderError> {
@@ -639,7 +639,7 @@ mod tests {
         );
         assert_eq!(
             definitions[0].credential_hint,
-            "Sign in with Google through Tidemark, or use an existing agy session."
+            "Sign in with Google through Tidemark"
         );
         assert!(
             definitions
