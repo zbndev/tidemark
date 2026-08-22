@@ -38,6 +38,7 @@ pub mod deepinfra;
 pub mod elevenlabs;
 pub mod fireworks;
 pub mod kimi;
+pub mod litellm;
 pub mod llmproxy;
 pub mod neuralwatt;
 // The slug carries a hyphen, which a module name cannot; the file keeps the slug so the
