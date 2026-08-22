@@ -29,7 +29,7 @@ die() {
 # zeroes (a lone zero is fine) — the same form check-tag-version.sh and tidemarkd's update
 # checker accept.
 canonical() {
-    case $1 in *[!0-9.]*) return 1 ;; esac
+    case $1 in *[!0-9.]* | .* | *.) return 1 ;; esac
 
     old_ifs=$IFS
     IFS=.

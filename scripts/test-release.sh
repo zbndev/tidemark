@@ -84,6 +84,8 @@ reject 1.02.3
 reject 1.2.03
 reject 1..2
 reject .1.2
+reject ".$next_version"
+reject "$next_version."
 cleanup
 
 printf 'rejecting a release cut outside main\n'
