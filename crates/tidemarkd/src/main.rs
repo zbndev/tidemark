@@ -16,6 +16,7 @@ mod notify;
 mod registry;
 mod scheduler;
 mod service;
+mod update;
 
 use std::error::Error;
 use std::sync::Arc;

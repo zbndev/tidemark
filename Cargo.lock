@@ -2685,6 +2685,8 @@ dependencies = [
 name = "tidemarkd"
 version = "0.1.0"
 dependencies = [
+ "reqwest",
+ "semver",
  "serde_json",
  "thiserror",
  "tidemark-core",

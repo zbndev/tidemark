@@ -14,9 +14,11 @@ workspace = true
 [dependencies]
 tidemark-types = { path = "../tidemark-types" }
 tidemark-core = { version = "0.1.0", path = "../tidemark-core" }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "io-util"] }
 zbus = "5.13.2"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "charset", "http2", "system-proxy"] }
+semver = "1.0.27"
