@@ -233,12 +233,15 @@ fn parse_balance(body: &str) -> Result<f64, ProviderError> {
             "the xAI balance total.val is not a cent amount",
         ));
     }
-    // A number too long for f64 parses to infinity, which is as unreadable as "n/a".
+    // A number too long for f64 parses to infinity, which is as unreadable as "n/a": the
+    // shape held but the value cannot be read, and that is malformed, not a panic.
     let cents: f64 = raw
         .parse::<f64>()
         .ok()
         .filter(|cents| cents.is_finite())
-        .expect("cent_amount checked the shape");
+        .ok_or_else(|| {
+            ProviderError::malformed("the xAI balance total.val is not a finite amount")
+        })?;
     // The sign is the ledger's, and the balance is the negation of it: -1000 cents is
     // $10.00 of credit.
     Ok(-cents / 100.0)
@@ -486,6 +489,16 @@ mod tests {
         }
         let named = parse_balance(BALANCE_MALFORMED).expect_err("names the field");
         assert!(format!("{named}").contains("total.val"), "{named}");
+    }
+
+    #[test]
+    fn a_cent_amount_too_large_for_f64_is_malformed_not_a_panic() {
+        // Not a recorded body: the recorded balance with `total.val` replaced by 400
+        // ones, which passes the cent shape but overflows f64 to infinity. A recognised
+        // field whose value cannot be read is malformed, never a panic on server input.
+        let overflowing = BALANCE.replace("-1000", &"1".repeat(400));
+        let error = parse_balance(&overflowing).expect_err("must refuse");
+        assert!(matches!(error, ProviderError::Malformed(_)), "{error:?}");
     }
 
     #[test]

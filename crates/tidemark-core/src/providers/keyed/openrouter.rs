@@ -16,7 +16,8 @@
 //! to a row rather than thrown; that is kept, and the reason reaches the row. The
 //! source's one-second cap on the request is not: it belongs to a menu-bar app that
 //! cannot hang a refresh, while this is a background poll that can afford the shared
-//! 30-second ceiling.
+//! 30-second ceiling. The "Key spend" bars chart CodexBar draws from the same key data
+//! is dropped: a Tidemark card has no chart.
 //!
 //! # The reading
 //!

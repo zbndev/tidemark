@@ -17,7 +17,9 @@
 //! is not JSON, a row whose points are not a number — and keeps the rows that already
 //! landed. That is kept here, because a broken history must not cost the balance. But
 //! the swallow is made visible — one row saying the history is unavailable, or
-//! incomplete when some of it landed — where CodexBar said nothing at all.
+//! incomplete when some of it landed — where CodexBar said nothing at all. The "Daily
+//! points" bars chart CodexBar draws over the same history is dropped: a Tidemark card
+//! has no chart.
 //!
 //! # What ships untested
 //!
