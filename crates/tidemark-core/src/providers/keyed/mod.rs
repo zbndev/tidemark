@@ -37,6 +37,7 @@ pub mod crof;
 pub mod deepinfra;
 pub mod elevenlabs;
 pub mod fireworks;
+pub mod groq;
 pub mod ibmbob;
 pub mod kimi;
 pub mod litellm;
