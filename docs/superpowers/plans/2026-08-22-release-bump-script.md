@@ -4,7 +4,7 @@
 
 **Goal:** `scripts/release.sh X.X.X` turns the state of `main` into a pushed release tag by bumping every version-carrying file, committing, tagging and pushing, with all guards running before the first edit.
 
-**Architecture:** One POSIX sh script in the house style of the sibling check scripts, plus one hermetic smoke-test script (`scripts/test-release.sh`) that drives it against a throwaway git fixture whose `origin` is a bare repository in a temp directory. Two workflow files gain one explicit test step each.
+**Architecture:** One POSIX sh script in the house style of the sibling check scripts, plus one hermetic smoke-test script (`scripts/test-release.sh`) that drives it against a throwaway git fixture whose `origin` is a bare repository in a temp directory.
 
 **Tech Stack:** POSIX sh (`#!/bin/sh`, `set -eu`), git, cargo, GNU sed, `date`. No new dependencies.
 
@@ -175,7 +175,7 @@ die() {
 # zeroes (a lone zero is fine) — the same form check-tag-version.sh and tidemarkd's update
 # checker accept.
 canonical() {
-    case $1 in *[!0-9.]*) return 1 ;; esac
+    case $1 in *[!0-9.]* | .* | *.) return 1 ;; esac
 
     old_ifs=$IFS
     IFS=.
@@ -509,6 +509,10 @@ Expected: empty (every task committed; nothing stray introduced).
 
 ## Self-Review Notes
 
+- Final-review fix (2026-08-22): canonical() originally accepted a trailing dot (the IFS
+  word split drops a trailing null field under bash-as-/bin/sh), letting a typo like
+  `0.2.0.` past the front gate to a late cargo failure after edits; the charset case now
+  rejects leading and trailing dots, with two reject() pins in the smoke test.
 - Owner decision (2026-08-22): Task 4's CI wiring was reverted — `scripts/test-release.sh`
   runs by hand only; the pre-existing shellcheck steps still cover both new scripts.
 - Corrected during execution (coordinator, 2026-08-22): reject() originally asserted an
