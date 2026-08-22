@@ -96,14 +96,18 @@ make_fixture() {
     git -C "$fixture" push -q origin main
 }
 
-# Runs the fixture's release.sh expecting failure, and proving it edited nothing.
+# Runs the fixture's release.sh expecting failure, and proving it changed nothing: the
+# tree may already be dirty (the dirty-tree scenario dirties it on purpose), so the
+# invariant is before/after equality, not emptiness.
 reject() {
+    before=$(git -C "$fixture" status --porcelain)
     if (cd "$fixture" && scripts/release.sh "$@" >/dev/null 2>&1); then
         printf 'expected scripts/release.sh %s to fail\n' "$*" >&2
         exit 1
     fi
-    [ -z "$(git -C "$fixture" status --porcelain)" ] || {
-        printf 'scripts/release.sh %s failed but edited the tree\n' "$*" >&2
+    after=$(git -C "$fixture" status --porcelain)
+    [ "$before" = "$after" ] || {
+        printf 'scripts/release.sh %s failed but changed the tree\n' "$*" >&2
         exit 1
     }
 }
@@ -529,6 +533,10 @@ Expected: empty (every task committed; nothing stray introduced).
 
 ## Self-Review Notes
 
+- Corrected during execution (coordinator, 2026-08-22): reject() originally asserted an
+  empty porcelain after a rejection, which the dirty-tree scenario (a deliberately dirty
+  fixture) can never satisfy; the spec's invariant is "changed nothing", so the helper now
+  asserts before/after equality.
 - Spec coverage: canonical-argument gate (Task 1), main/clean/stale/newer/tag guards
   (Task 2), six-file edit set, `check-tag-version.sh` self-check, best-effort
   `appstreamcli`, explicit `git add`, `chore: bump to vX.X.X`, annotated tag, single push
