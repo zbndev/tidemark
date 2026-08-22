@@ -1,0 +1,15 @@
+name: Feature request
+description: Suggest a new feature
+labels: ["enhancement"]
+title: "[FEATURE] "
+body:
+
+    - type: textarea
+      attributes:
+          label: "What would you like to be added?"
+          description: "It can be a suggestion to a new provider, UI/UX improvement.. whatever."
+
+    - type: textarea
+      attributes:
+          label: "How will this help the project and other people?"
+          description: "Describe why you think this feature (or change) should be implemented."

@@ -1,0 +1,42 @@
+name: Bug
+description: Report a bug
+labels: ["bug"]
+title: "[BUG] "
+body:
+    - type: markdown
+      attributes:
+          value: "**Welcome to a bug report form!**\n- This form is only for bug reports\n- If you want to suggest enhancement or make a feature request please select a \"Feature request\" issue type"
+
+    - type: textarea
+      attributes:
+          label: "Step 1. Environment"
+          description: "Tidemark version, distro and DE version"
+          value: |
+              - **Version:** 0.1.0
+              - **Distro:** Fedora 44
+              - **DE:** Gnome 50
+      validations:
+          required: true
+
+    - type: textarea
+      attributes:
+          label: "Step 2. Steps to reproduce, expected and actual result"
+          value: |
+              1. Go to page X
+              2. Press button Y
+
+              Expected 1, got 2
+      validations:
+          required: true
+
+    - type: textarea
+      attributes:
+          label: "Step 3. Any useful logs"
+          value: "App logs, systemd unit logs, etc"
+
+    - type: checkboxes
+      attributes:
+          label: Reminder
+          options:
+              - label: I agree that it's usually impossible to help me without information above.
+                required: true
