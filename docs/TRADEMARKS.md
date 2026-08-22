@@ -18,8 +18,12 @@ whose services the cards are about:
 | `tidemark-crof-symbolic.svg` | Crof |
 | `tidemark-deepinfra-symbolic.svg` | DeepInfra |
 | `tidemark-elevenlabs-symbolic.svg` | ElevenLabs |
+| `tidemark-factory-symbolic.svg` | Factory AI, Inc. (Factory) |
 | `tidemark-fireworks-symbolic.svg` | Fireworks AI |
+| `tidemark-groq-symbolic.svg` | Groq, Inc. |
+| `tidemark-ibmbob-symbolic.svg` | IBM (Bob) |
 | `tidemark-kimi-symbolic.svg` | Moonshot AI (Kimi) |
+| `tidemark-litellm-symbolic.svg` | The LiteLLM project |
 | `tidemark-llmproxy-symbolic.svg` | The LLM Proxy project |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
 | `tidemark-openai-api-symbolic.svg` | OpenAI |
@@ -42,11 +46,10 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the twenty marks that CodexBar records as the provider icons of ai&,
-Amp, Chutes, ClawRouter, ClinePass, Crof, DeepInfra, ElevenLabs, Fireworks, LLM Proxy,
-Neuralwatt, OpenAI, OpenRouter,
-Poe, sub2api,
-Synthetic, Venice, Warp, xAI and ZenMux — the
+asset, and except the twenty-four marks that CodexBar records as the provider icons of
+ai&, Amp, Chutes, ClawRouter, ClinePass, Crof, DeepInfra, ElevenLabs, Factory,
+Fireworks, Groq, IBM Bob, LiteLLM, LLM Proxy, Neuralwatt, OpenAI, OpenRouter, Poe,
+sub2api, Synthetic, Venice, Warp, xAI and ZenMux — the
 ClinePass one, its file notes, is
 Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand), and the OpenAI one
 is the blossom CodexBar files under its codex name. Each was reduced to a
