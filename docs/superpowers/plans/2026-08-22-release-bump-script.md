@@ -24,8 +24,10 @@
 
 - Create: `scripts/release.sh` — the whole release flow: guards, edits, verification, commit/tag/push.
 - Create: `scripts/test-release.sh` — hermetic smoke test: fixture builder, rejection helpers, happy-path assertions.
-- Modify: `.github/workflows/ci.yml` — one step running `scripts/test-release.sh`.
-- Modify: `.github/workflows/release.yml` — one step running `scripts/test-release.sh`.
+
+`scripts/test-release.sh` is a run-by-hand test, like `scripts/test-package-upgrade.sh`: the
+project's owner declined a CI trigger for it (2026-08-22). The pre-existing `shellcheck
+scripts/*.sh` steps in both workflows still lint the two new scripts.
 
 ---
 
@@ -479,47 +481,13 @@ git commit -m "feat: bump, commit, tag and push from the release script"
 
 ---
 
-### Task 4: CI wiring
+### Task 4: CI wiring — dropped by the owner
 
-**Files:**
-- Modify: `.github/workflows/ci.yml` (after the "The user-daemon restart helper" step)
-- Modify: `.github/workflows/release.yml` (after the "The user-daemon restart helper" run)
-
-**Interfaces:**
-- Consumes: `scripts/test-release.sh` from Tasks 1–3.
-- Produces: nothing consumed later.
-
-- [ ] **Step 1: Add the step to ci.yml**
-
-In `.github/workflows/ci.yml`, directly after the `scripts/test-restart-user-daemon.sh`
-step, add:
-
-```yaml
-      - name: The release helper
-        run: scripts/test-release.sh
-```
-
-- [ ] **Step 2: Add the step to release.yml**
-
-In `.github/workflows/release.yml`, directly after the
-`- run: scripts/test-restart-user-daemon.sh` line in the `checks` job, add:
-
-```yaml
-      - run: scripts/test-release.sh
-```
-
-- [ ] **Step 3: Verify the YAML parses**
-
-Run: `python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml')); yaml.safe_load(open('.github/workflows/release.yml')); print('ok')"`
-Expected: `ok`. (If `python3` or `yaml` is unavailable, `git diff` review of indentation
-against the neighbouring steps is an acceptable substitute.)
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add .github/workflows/ci.yml .github/workflows/release.yml
-git commit -m "ci: run the release script tests"
-```
+The plan originally added a `scripts/test-release.sh` step to both `ci.yml` and
+`release.yml`. The project's owner declined CI triggers for this test (2026-08-22): it is
+run by hand, like `scripts/test-package-upgrade.sh`, whose header documents the same
+choice. The commit was reverted from the branch; the pre-existing `shellcheck scripts/*.sh`
+steps in both workflows still lint the new scripts. Nothing to implement.
 
 ---
 
@@ -541,6 +509,8 @@ Expected: empty (every task committed; nothing stray introduced).
 
 ## Self-Review Notes
 
+- Owner decision (2026-08-22): Task 4's CI wiring was reverted — `scripts/test-release.sh`
+  runs by hand only; the pre-existing shellcheck steps still cover both new scripts.
 - Corrected during execution (coordinator, 2026-08-22): reject() originally asserted an
   empty porcelain after a rejection, which the dirty-tree scenario (a deliberately dirty
   fixture) can never satisfy; the spec's invariant is "changed nothing", so the helper now
