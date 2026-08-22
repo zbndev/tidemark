@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+# dpkg runs this after the new files are unpacked, which is the point at which restarting
+# the daemon picks up the new binary rather than the old one.
+#
+# $1 is the action, $2 the previously configured version. A non-empty $2 means this is an
+# upgrade; empty means a fresh install, which has no running daemon to replace.
+if [ "$1" = configure ]; then
+    if [ -n "$2" ]; then
+        /usr/lib/tidemark/restart-user-daemon
+    else
+        cat /usr/share/doc/tidemark/first-run.txt
+    fi
+fi
+
+#DEBHELPER#

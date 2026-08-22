@@ -28,3 +28,56 @@ tidemark-types = { path = "../tidemark-types" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zbus = "5.13.2"
+
+# The Debian package. It carries binaries from two crates, so it is built from a prior
+# `cargo build --release --workspace` and invoked with `--no-build`. The metadata lives
+# here rather than at the workspace root because a virtual manifest has no [package] to
+# hang it on, which is also why the data files are reached as `../../data/...`.
+#
+# The asset list mirrors package() in PKGBUILD file for file. That function is the
+# definition of what a Tidemark package contains; keep the two in step.
+[package.metadata.deb]
+maintainer = "zbndev <https://github.com/zbndev>"
+copyright = "2026 zbndev"
+license-file = ["../../LICENSE", "0"]
+section = "utils"
+priority = "optional"
+# One line per paragraph: cargo-deb re-wraps this to Debian's control-file width, and a
+# string broken across source lines comes out wrapped twice.
+extended-description = "Tidemark tracks how much of each AI provider's rate-limit window is burned, when it resets, and whether the current pace reaches it. A polling daemon runs as a systemd user unit; the GTK4 interface reads it over D-Bus."
+# $auto is dpkg-shlibdeps over the built ELF, so GTK, libadwaita and SQLite are named the
+# way Ubuntu names them rather than the way a hand-written list guesses. The two appended
+# by hand are the two no ELF can reveal: zbus is pure Rust, so libdbus is never linked,
+# and an icon theme leaves no trace in a binary at all. They match the
+# [package.metadata.generate-rpm.requires] table below, under Debian's names.
+depends = "$auto, dbus-user-session, hicolor-icon-theme"
+conf-files = ["/etc/xdg/autostart/io.github.zbndev.Tidemark.desktop"]
+maintainer-scripts = "../../data/packaging/deb"
+assets = [
+    ["target/release/tidemark", "usr/bin/", "755"],
+    ["target/release/tidemarkd", "usr/bin/", "755"],
+    ["../../data/tidemarkd.service", "usr/lib/systemd/user/", "644"],
+    ["../../data/icons/hicolor/16x16/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
+    ["../../data/icons/hicolor/22x22/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/22x22/apps/", "644"],
+    ["../../data/icons/hicolor/24x24/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
+    ["../../data/icons/hicolor/32x32/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
+    ["../../data/icons/hicolor/48x48/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
+    ["../../data/icons/hicolor/64x64/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
+    ["../../data/icons/hicolor/128x128/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["../../data/icons/hicolor/256x256/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["../../data/icons/hicolor/512x512/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+    ["../../data/icons/hicolor/512x512@2/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/512x512@2/apps/", "644"],
+    # These SVGs are their owners' trademarks and are not under this package's licence,
+    # which is why TRADEMARKS.md is installed beside the copyright file. A rebuild that
+    # drops both lines is a supported configuration: a card with no mark is a state the
+    # interface already has.
+    ["../../data/icons/hicolor/symbolic/apps/tidemark-*-symbolic.svg", "usr/share/icons/hicolor/symbolic/apps/", "644"],
+    ["../../data/applications/io.github.zbndev.Tidemark.desktop", "usr/share/applications/", "644"],
+    ["../../data/autostart/io.github.zbndev.Tidemark.desktop", "etc/xdg/autostart/", "644"],
+    ["../../data/metainfo/io.github.zbndev.Tidemark.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../data/dbus-1/services/io.github.zbndev.Tidemark.Daemon.service", "usr/share/dbus-1/services/", "644"],
+    ["../../data/restart-user-daemon", "usr/lib/tidemark/restart-user-daemon", "755"],
+    ["../../data/packaging/message.txt", "usr/share/doc/tidemark/first-run.txt", "644"],
+    ["../../docs/TRADEMARKS.md", "usr/share/doc/tidemark/TRADEMARKS.md", "644"],
+    ["../../README.md", "usr/share/doc/tidemark/README.md", "644"],
+]
