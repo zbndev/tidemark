@@ -202,6 +202,68 @@ fn additional_rate_limits_become_windows_named_after_their_own_pool() {
 }
 
 #[test]
+fn the_gpt_reserve_pool_is_dropped_instead_of_drawn_as_a_second_week() {
+    // The body the live endpoint returned on 2026-08-22, identifiers replaced. The
+    // reserve's reset is `captured_at + 604800` to the second, so its seven days restart
+    // on every poll while the account's own weekly window counts down beside it.
+    let body = r#"{
+      "plan_type": "plus",
+      "rate_limit": {
+        "allowed": true,
+        "limit_reached": false,
+        "primary_window": {"used_percent": 40, "limit_window_seconds": 604800,
+                           "reset_after_seconds": 560287, "reset_at": 1787815811},
+        "secondary_window": null
+      },
+      "additional_rate_limits": [
+        {"limit_name": "gpt-reserve", "metered_feature": "base_model_inference",
+         "rate_limit": {
+           "allowed": true,
+           "limit_reached": false,
+           "primary_window": {"used_percent": 0, "limit_window_seconds": 604800,
+                              "reset_after_seconds": 604800, "reset_at": 1787860324},
+           "secondary_window": null}}
+      ]
+    }"#;
+
+    let snapshot = codex::parse(body, captured_at()).expect("the live body parses");
+
+    let keys: Vec<&str> = snapshot.windows.iter().map(|w| w.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        ["w604800"],
+        "the account's own weekly window is the only quota in this body"
+    );
+}
+
+#[test]
+fn the_reserve_is_known_by_its_feature_slug_and_not_by_the_name_it_is_shown_under() {
+    // Same entry with the display name reworded: the slug still identifies it. And a
+    // pool that merely calls itself gpt-reserve while metering something else is a real
+    // limit, drawn like any other.
+    let reworded = r#"{
+      "rate_limit": {"primary_window": {"used_percent": 40, "limit_window_seconds": 604800}},
+      "additional_rate_limits": [
+        {"limit_name": "GPT Reserve", "metered_feature": "base_model_inference",
+         "rate_limit": {"primary_window": {"used_percent": 0, "limit_window_seconds": 604800}}}
+      ]
+    }"#;
+    let snapshot = codex::parse(reworded, captured_at()).expect("parses");
+    assert_eq!(snapshot.windows.len(), 1);
+
+    let borrowed_name = r#"{
+      "rate_limit": {"primary_window": {"used_percent": 40, "limit_window_seconds": 604800}},
+      "additional_rate_limits": [
+        {"limit_name": "gpt-reserve", "metered_feature": "some_new_pool",
+         "rate_limit": {"primary_window": {"used_percent": 7, "limit_window_seconds": 18000}}}
+      ]
+    }"#;
+    let snapshot = codex::parse(borrowed_name, captured_at()).expect("parses");
+    let keys: Vec<&str> = snapshot.windows.iter().map(|w| w.key.as_str()).collect();
+    assert_eq!(keys, ["w604800", "some_new_pool/w18000"]);
+}
+
+#[test]
 fn an_extra_pool_with_no_name_at_all_fails_rather_than_colliding_with_the_main_one() {
     let body = r#"{
       "rate_limit": {"primary_window": {"used_percent": 19, "limit_window_seconds": 604800}},
