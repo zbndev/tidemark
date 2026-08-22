@@ -72,8 +72,9 @@ trap cleanup EXIT
 make_fixture() {
     fixture=$(mktemp -d "${TMPDIR:-/tmp}/tidemark-release-test.XXXXXX")
 
-    mkdir -p "$fixture/scripts" "$fixture/data/metainfo" "$fixture/crates/tidemark-types" \
-        "$fixture/crates/tidemark-core" "$fixture/crates/tidemarkd" "$fixture/crates/tidemark"
+    mkdir -p "$fixture/scripts" "$fixture/data/metainfo" "$fixture/crates/tidemark-types/src" \
+        "$fixture/crates/tidemark-core/src" "$fixture/crates/tidemarkd/src" \
+        "$fixture/crates/tidemark/src"
     cp "$project_root/Cargo.toml" "$project_root/Cargo.lock" \
         "$project_root/rust-toolchain.toml" "$project_root/PKGBUILD" "$fixture/"
     cp "$project_root/crates/tidemark-types/Cargo.toml" "$fixture/crates/tidemark-types/"
@@ -84,6 +85,12 @@ make_fixture() {
         "$fixture/data/metainfo/"
     cp "$project_root/scripts/release.sh" "$project_root/scripts/check-tag-version.sh" \
         "$fixture/scripts/"
+    # `cargo update` must be able to load the workspace, and target auto-discovery needs
+    # these; empty stubs do — nothing ever compiles in the fixture.
+    : >"$fixture/crates/tidemark-types/src/lib.rs"
+    : >"$fixture/crates/tidemark-core/src/lib.rs"
+    : >"$fixture/crates/tidemarkd/src/main.rs"
+    : >"$fixture/crates/tidemark/src/main.rs"
 
     git -C "$fixture" init -q -b main
     git -C "$fixture" config user.name fixture
@@ -329,7 +336,7 @@ metainfo=data/metainfo/io.github.zbndev.Tidemark.metainfo.xml
 
 printf 'cutting a full release\n'
 make_fixture
-(cd "$fixture" && scripts/release.sh "$next_version") >/dev/null
+(cd "$fixture" && scripts/release.sh "$next_version") >/dev/null 2>&1
 
 [ "$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' \
     "$fixture/Cargo.toml")" = "$next_version" ]
@@ -365,7 +372,8 @@ make_fixture
 sed -i "/^\[workspace\.package\]/,/^\[/ s/^version = \"\(.*\)\"\$/version = \"0.1.9\"/" \
     "$fixture/Cargo.toml"
 git -C "$fixture" commit -qam 'fixture at 0.1.9'
-(cd "$fixture" && scripts/release.sh 0.1.10) >/dev/null
+git -C "$fixture" push -q origin main
+(cd "$fixture" && scripts/release.sh 0.1.10) >/dev/null 2>&1
 [ "$(git -C "$fixture" log -1 --format=%s)" = 'chore: bump to v0.1.10' ]
 cleanup
 
@@ -537,6 +545,11 @@ Expected: empty (every task committed; nothing stray introduced).
   empty porcelain after a rejection, which the dirty-tree scenario (a deliberately dirty
   fixture) can never satisfy; the spec's invariant is "changed nothing", so the helper now
   asserts before/after equality.
+- Corrected during execution (coordinator, 2026-08-22): the fixture needs empty target
+  stubs (src/lib.rs, src/main.rs) or `cargo update` cannot load the workspace ("no targets
+  specified"); happy-path invocations redirect stderr too so git push's summary does not
+  pollute test output; the numeric-order scenario syncs its `fixture at 0.1.9` commit to
+  the fixture origin before releasing, or the stale-main guard correctly fires.
 - Spec coverage: canonical-argument gate (Task 1), main/clean/stale/newer/tag guards
   (Task 2), six-file edit set, `check-tag-version.sh` self-check, best-effort
   `appstreamcli`, explicit `git add`, `chore: bump to vX.X.X`, annotated tag, single push
