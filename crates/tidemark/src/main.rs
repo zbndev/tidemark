@@ -21,6 +21,7 @@ mod model;
 mod provider_settings;
 mod style;
 mod tray;
+mod update;
 mod window;
 
 use adw::prelude::*;

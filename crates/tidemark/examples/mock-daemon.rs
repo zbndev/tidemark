@@ -67,9 +67,9 @@ impl MockDaemon {
         Ok(())
     }
 
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "false"))]
     async fn version(&self) -> String {
-        format!("{} (mock)", env!("CARGO_PKG_VERSION"))
+        env!("CARGO_PKG_VERSION").to_owned()
     }
 
     #[zbus(signal)]

@@ -635,7 +635,7 @@ impl Daemon {
     }
 
     /// The daemon's version, so a client can tell what it is talking to.
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "false"))]
     async fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_owned()
     }
