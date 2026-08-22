@@ -10,7 +10,11 @@ if [ "$1" = configure ]; then
     if [ -n "$2" ]; then
         /usr/lib/tidemark/restart-user-daemon
     else
-        cat /usr/share/doc/tidemark/first-run.txt
+        # Never allowed to fail the transaction. The notice lives under /usr/lib rather
+        # than /usr/share/doc because a minimal installation excludes documentation —
+        # Ubuntu's own container image ships path-exclude=/usr/share/doc/*, and reading a
+        # greeting from there aborted the install outright.
+        cat /usr/lib/tidemark/first-run.txt 2>/dev/null || true
     fi
 fi
 

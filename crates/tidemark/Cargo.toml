@@ -78,7 +78,7 @@ assets = [
     ["../../data/metainfo/io.github.zbndev.Tidemark.metainfo.xml", "usr/share/metainfo/", "644"],
     ["../../data/dbus-1/services/io.github.zbndev.Tidemark.Daemon.service", "usr/share/dbus-1/services/", "644"],
     ["../../data/restart-user-daemon", "usr/lib/tidemark/restart-user-daemon", "755"],
-    ["../../data/packaging/message.txt", "usr/share/doc/tidemark/first-run.txt", "644"],
+    ["../../data/packaging/message.txt", "usr/lib/tidemark/first-run.txt", "644"],
     ["../../docs/TRADEMARKS.md", "usr/share/doc/tidemark/TRADEMARKS.md", "644"],
     ["../../README.md", "usr/share/doc/tidemark/README.md", "644"],
 ]
@@ -123,7 +123,7 @@ assets = [
     { source = "../../data/metainfo/io.github.zbndev.Tidemark.metainfo.xml", dest = "/usr/share/metainfo/io.github.zbndev.Tidemark.metainfo.xml", mode = "644" },
     { source = "../../data/dbus-1/services/io.github.zbndev.Tidemark.Daemon.service", dest = "/usr/share/dbus-1/services/io.github.zbndev.Tidemark.Daemon.service", mode = "644" },
     { source = "../../data/restart-user-daemon", dest = "/usr/lib/tidemark/restart-user-daemon", mode = "755" },
-    { source = "../../data/packaging/message.txt", dest = "/usr/share/doc/tidemark/first-run.txt", mode = "644" },
+    { source = "../../data/packaging/message.txt", dest = "/usr/lib/tidemark/first-run.txt", mode = "644" },
     # The .deb gets these from cargo-deb's own license-file and doc handling; rpm has no
     # such field, so they are listed.
     { source = "../../LICENSE", dest = "/usr/share/licenses/tidemark/LICENSE", mode = "644", doc = true },
