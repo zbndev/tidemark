@@ -96,7 +96,7 @@ pub trait Daemon {
     ) -> zbus::Result<()>;
 
     /// What the daemon on the other end is.
-    #[zbus(property)]
+    #[zbus(property(emits_changed_signal = "false"))]
     fn version(&self) -> zbus::Result<String>;
 
     /// One account changed.
@@ -114,14 +114,11 @@ pub trait Daemon {
 /// status — and that is deliberate rather than an oversight worth boxing away: this value
 /// is constructed a handful of times a minute and consumed immediately.
 #[derive(Debug)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "constructed a handful of times a minute and consumed immediately; boxing would buy nothing"
-)]
 pub enum Update {
     /// The daemon answered. Carries everything it knows, and the handle to ask it for more.
     Connected(
         DaemonProxy<'static>,
+        Option<String>,
         Vec<ProviderDefinition>,
         Vec<ProviderStatus>,
     ),
@@ -216,12 +213,22 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
 
 /// Asks for the whole picture, and reports what came back.
 async fn load(proxy: &DaemonProxy<'static>, on: &impl Fn(Update)) {
+    let version = match proxy.version().await {
+        Ok(version) => Some(version),
+        Err(error) => {
+            tracing::warn!(%error, "the daemon did not answer Version");
+            None
+        }
+    };
     let definitions = proxy.list_providers().await;
     let statuses = proxy.get_status().await;
     match (definitions, statuses) {
-        (Ok(definitions), Ok(statuses)) => {
-            on(Update::Connected(proxy.clone(), definitions, statuses))
-        }
+        (Ok(definitions), Ok(statuses)) => on(Update::Connected(
+            proxy.clone(),
+            version,
+            definitions,
+            statuses,
+        )),
         (Err(error), _) | (_, Err(error)) => {
             tracing::info!(%error, "the daemon did not answer ListProviders or GetStatus");
             on(Update::Waiting("The daemon is not running.".into()));
@@ -238,7 +245,37 @@ enum Event {
 
 #[cfg(test)]
 mod tests {
-    use tidemark_types::ids;
+    use std::cell::RefCell;
+    use std::process;
+
+    use tidemark_types::{ProviderDefinition, ProviderStatus, ids};
+
+    use super::{DaemonProxy, Update, load};
+
+    #[derive(Debug)]
+    struct VersionService(&'static str);
+
+    #[zbus::interface(name = "io.github.zbndev.Tidemark.Daemon1")]
+    impl VersionService {
+        #[zbus(property)]
+        fn version(&self) -> String {
+            self.0.to_owned()
+        }
+    }
+
+    #[derive(Debug)]
+    struct StatusService;
+
+    #[zbus::interface(name = "io.github.zbndev.Tidemark.Daemon1")]
+    impl StatusService {
+        fn list_providers(&self) -> Vec<ProviderDefinition> {
+            Vec::new()
+        }
+
+        fn get_status(&self) -> Vec<ProviderStatus> {
+            Vec::new()
+        }
+    }
 
     #[test]
     fn the_proxy_is_pointed_at_the_interface_the_daemon_serves() {
@@ -246,5 +283,89 @@ mod tests {
         assert_eq!(ids::DAEMON_INTERFACE, "io.github.zbndev.Tidemark.Daemon1");
         assert_eq!(ids::DAEMON_BUS_NAME, "io.github.zbndev.Tidemark.Daemon");
         assert_eq!(ids::OBJECT_PATH, "/io/github/zbndev/Tidemark");
+    }
+
+    #[test]
+    fn version_is_read_from_a_replacement_daemon_owner() {
+        zbus::block_on(async {
+            let Ok(client_connection) = zbus::Connection::session().await else {
+                eprintln!("skipped: no session bus is reachable");
+                return;
+            };
+            let name = format!("io.github.zbndev.Tidemark.Test.p{}", process::id());
+            let first = zbus::connection::Builder::session()
+                .expect("session bus address")
+                .name(name.as_str())
+                .expect("valid test bus name")
+                .serve_at(ids::OBJECT_PATH, VersionService("0.1.0"))
+                .expect("valid test object")
+                .build()
+                .await
+                .expect("first test service");
+            let proxy = DaemonProxy::builder(&client_connection)
+                .destination(name.as_str())
+                .expect("test destination")
+                .build()
+                .await
+                .expect("daemon proxy");
+
+            assert_eq!(proxy.version().await.unwrap(), "0.1.0");
+            assert!(first.release_name(name.as_str()).await.unwrap());
+
+            let _second = zbus::connection::Builder::session()
+                .expect("session bus address")
+                .name(name.as_str())
+                .expect("valid test bus name")
+                .serve_at(ids::OBJECT_PATH, VersionService("0.2.0"))
+                .expect("valid test object")
+                .build()
+                .await
+                .expect("replacement test service");
+
+            assert_eq!(proxy.version().await.unwrap(), "0.2.0");
+        });
+    }
+
+    #[test]
+    fn an_unavailable_version_does_not_hide_the_daemons_status() {
+        zbus::block_on(async {
+            let Ok(client_connection) = zbus::Connection::session().await else {
+                eprintln!("skipped: no session bus is reachable");
+                return;
+            };
+            let name = format!("io.github.zbndev.Tidemark.StatusTest.p{}", process::id());
+            let _service = zbus::connection::Builder::session()
+                .expect("session bus address")
+                .name(name.as_str())
+                .expect("valid test bus name")
+                .serve_at(ids::OBJECT_PATH, StatusService)
+                .expect("valid test object")
+                .build()
+                .await
+                .expect("test service");
+            let destination = zbus::names::OwnedBusName::try_from(name.as_str())
+                .expect("valid owned test destination");
+            let proxy = DaemonProxy::builder(&client_connection)
+                .destination(destination)
+                .expect("test destination")
+                .build()
+                .await
+                .expect("daemon proxy");
+            let seen = RefCell::new(None);
+
+            load(&proxy, &|update| {
+                seen.replace(Some(update));
+            })
+            .await;
+
+            match seen.into_inner() {
+                Some(Update::Connected(_, version, definitions, statuses)) => {
+                    assert_eq!(version, None);
+                    assert!(definitions.is_empty());
+                    assert!(statuses.is_empty());
+                }
+                other => panic!("expected connected status, got {other:?}"),
+            }
+        });
     }
 }

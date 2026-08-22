@@ -27,6 +27,7 @@ use crate::detail::DetailDialog;
 use crate::model;
 use crate::provider_settings::ProviderSettings;
 use crate::tray::{self, Tray};
+use crate::update::{self, UpdateNotice};
 
 /// How often the clock-dependent parts of every card are redrawn. Half a minute is well
 /// inside the resolution of everything shown — the coarsest unit on a card is a minute —
@@ -87,6 +88,7 @@ pub struct MainWindow {
     cards: RefCell<Vec<Rc<Card>>>,
     definitions: RefCell<Vec<ProviderDefinition>>,
     daemon: RefCell<Option<DaemonProxy<'static>>>,
+    update_notice: RefCell<UpdateNotice>,
     /// The provider dialog while it is open, so live catalog and status changes reach it.
     provider_settings: DialogSlot<ProviderSettings>,
     /// The account detail dialog while it is open, so its chart follows daemon updates.
@@ -177,6 +179,7 @@ impl MainWindow {
             cards: RefCell::new(Vec::new()),
             definitions: RefCell::new(Vec::new()),
             daemon: RefCell::new(None),
+            update_notice: RefCell::new(UpdateNotice::new(env!("CARGO_PKG_VERSION"))),
             provider_settings: DialogSlot::default(),
             detail_dialog: DialogSlot::default(),
             tray: RefCell::new(None),
@@ -202,12 +205,49 @@ impl MainWindow {
     /// Acts on one message from the daemon.
     fn handle(self: &Rc<Self>, update: Update) {
         match update {
-            Update::Connected(proxy, definitions, statuses) => {
+            Update::Connected(proxy, daemon_version, definitions, statuses) => {
                 *self.daemon.borrow_mut() = Some(proxy);
                 *self.definitions.borrow_mut() = definitions;
                 self.refresh.set_sensitive(true);
                 self.providers.set_sensitive(true);
                 self.show_all(statuses);
+
+                let offer_restart = daemon_version.as_deref().is_some_and(|version| {
+                    match self.update_notice.borrow_mut().consider(version) {
+                        Ok(offer) => offer,
+                        Err(error) => {
+                            tracing::warn!(version, %error, "the daemon reported an invalid version");
+                            false
+                        }
+                    }
+                });
+                if offer_restart {
+                    self.window.present();
+                    let parent = self.window.clone();
+                    glib::spawn_future_local(async move {
+                        let notice = adw::AlertDialog::builder()
+                            .heading("Tidemark has been updated")
+                            .body("Restart the app to finish the update.")
+                            .build();
+                        notice.add_responses(&[("later", "Later"), ("restart", "Restart")]);
+                        notice.set_default_response(Some("restart"));
+                        notice.set_close_response("later");
+                        notice
+                            .set_response_appearance("restart", adw::ResponseAppearance::Suggested);
+                        if notice.choose_future(Some(&parent)).await == "restart" {
+                            let error = update::restart();
+                            tracing::error!(%error, "could not restart the desktop client");
+
+                            let failure = adw::AlertDialog::builder()
+                                .heading("Tidemark could not restart")
+                                .body(format!("Restart the app manually. {error}"))
+                                .build();
+                            failure.add_response("close", "Close");
+                            failure.set_close_response("close");
+                            failure.choose_future(Some(&parent)).await;
+                        }
+                    });
+                }
             }
             Update::Changed(status) => self.show_one(status),
             Update::Removed { provider, account } => self.show_removed(&provider, &account),

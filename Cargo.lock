@@ -2644,6 +2644,7 @@ dependencies = [
  "gtk4",
  "ksni",
  "libadwaita",
+ "semver",
  "tidemark-types",
  "tracing",
  "tracing-subscriber",
