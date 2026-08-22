@@ -43,6 +43,7 @@ pub mod sub2api;
 pub mod synthetic;
 pub mod venice;
 pub mod warp;
+pub mod xai;
 pub mod zai;
 pub mod zenmux;
 
@@ -276,6 +277,17 @@ pub async fn request(
         ));
     }
     Ok(body)
+}
+
+/// Reads a required option, refusing the build with the setting's name when it is unset
+/// or blank — the check [`Keyed::new`] makes generically, factored out for the
+/// hand-written providers whose builds are their own.
+pub fn required(options: &Options, name: &str, title: &str) -> Result<String, ProviderError> {
+    options
+        .get(name)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ProviderError::Local(format!("{title} is not set for this account")))
 }
 
 /// Reads a free-text base-URL option the way every self-hosted provider needs it read:
