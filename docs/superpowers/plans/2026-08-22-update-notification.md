@@ -151,10 +151,11 @@ Run:
 
 ```bash
 cargo test -p tidemarkd update::tests
-cargo clippy -p tidemarkd --all-targets -- -D warnings
 ```
 
-Expected: all checker tests and clippy pass.
+Expected: all checker tests pass. The checker is intentionally dead code until Task 2 wires it into
+the daemon; warnings-denied clippy therefore runs at the end of Task 2, not at this intermediate
+commit.
 
 - [ ] **Step 6: Commit Task 1**
 
@@ -312,15 +313,22 @@ git commit -m "feat: publish available updates from the daemon"
 
 **Files:**
 - Modify: `crates/tidemark/src/bus.rs:36-250`
-- Modify: `crates/tidemark/src/window.rs:78-225, 470-510, 588-640`
+- Modify: `crates/tidemark/src/update.rs`
+- Modify: `crates/tidemark/src/window.rs:78-265, 510-550, 625-680`
 - Modify: `crates/tidemark/examples/mock-daemon.rs:30-80`
 
 **Interfaces:**
 - Consumes D-Bus: `GetUpdate() -> String` and `UpdateChanged(String)`.
-- Produces GUI events: a fourth `String` on `Update::Connected` and `Update::Available(String)`.
+- Preserves the existing daemon-newer-than-GUI restart notice driven by the optional daemon-version
+  field on `Update::Connected`.
+- Produces GUI events: a new available-release `String` on `Update::Connected` and
+  `Update::Available(String)`.
 - Produces: `update_tooltip(&str) -> Option<String>`.
 
 - [ ] **Step 1: Write failing tooltip/visibility tests**
+
+Add these to the existing test module in `crates/tidemark/src/update.rs`; they extend rather than
+replace the package-upgrade restart tests merged from `main`:
 
 ```rust
 #[test]
@@ -344,7 +352,7 @@ Expected: compilation fails because `update_tooltip` is absent.
 ```rust
 const RELEASES_URL: &str = "https://github.com/zbndev/tidemark/releases";
 
-fn update_tooltip(version: &str) -> Option<String> {
+pub(crate) fn update_tooltip(version: &str) -> Option<String> {
     (!version.is_empty()).then(|| format!("Tidemark {version} is available"))
 }
 ```
@@ -353,7 +361,10 @@ Run the tests again; expect PASS.
 
 - [ ] **Step 3: Extend the proxy and bus event loop**
 
-Add `get_update` and `update_changed` to the proxy trait. Subscribe before `load`, poll the new stream beside owner/provider/removal, and add `Event::Available(Option<UpdateChanged>)`. Convert its payload to `Update::Available(args.version.to_owned())`.
+Add `get_update` and `update_changed` to the proxy trait. Subscribe before `load`, poll the new
+stream beside owner/provider/removal, and add `Event::Available(Option<UpdateChanged>)`. Convert its
+payload to `Update::Available(args.version.to_owned())`. Do not alter the existing daemon `Version`
+property subscription/reload behavior used by the restart notice.
 
 Keep the update getter auxiliary:
 
@@ -364,7 +375,8 @@ let available = proxy.get_update().await.unwrap_or_else(|error| {
 });
 ```
 
-Pass `available` as the fourth `Update::Connected` field. A closed update signal stream ends `serve` like the existing streams.
+Pass `available` immediately after the existing optional daemon-version field on
+`Update::Connected`. A closed update signal stream ends `serve` like the existing streams.
 
 Run: `cargo test -p tidemark bus::tests window::tests`
 
@@ -372,13 +384,16 @@ Expected: PASS after all enum matches compile.
 
 - [ ] **Step 4: Build and drive the hidden header button**
 
-Add `update: gtk::Button` to `MainWindow`. Build it with icon `software-update-available-symbolic` and `visible(false)`. Pack refresh first and update second at the header end so update is immediately left of refresh.
+Add `release: gtk::Button` to `MainWindow`; keep the existing `update_notice: RefCell<UpdateNotice>`
+unchanged because it solves package-upgrade GUI restart, a separate problem. Build the button with
+icon `software-update-available-symbolic` and `visible(false)`. Pack refresh first and release second
+at the header end so the new control is immediately left of refresh.
 
 ```rust
 fn show_update(&self, version: &str) {
     let tooltip = update_tooltip(version);
-    self.update.set_tooltip_text(tooltip.as_deref());
-    self.update.set_visible(tooltip.is_some());
+    self.release.set_tooltip_text(tooltip.as_deref());
+    self.release.set_visible(tooltip.is_some());
 }
 ```
 
@@ -413,7 +428,7 @@ Expected: the mock daemon and GUI compile.
 
 ```bash
 git add crates/tidemark/src/bus.rs crates/tidemark/src/window.rs \
-  crates/tidemark/examples/mock-daemon.rs
+  crates/tidemark/src/update.rs crates/tidemark/examples/mock-daemon.rs
 git commit -m "feat: show an available-update link in the header"
 ```
 
