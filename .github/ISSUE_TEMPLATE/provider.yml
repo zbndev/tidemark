@@ -1,6 +1,6 @@
 name: Add a provider
 description: Request to Add a Provider
-labels: ["add a provider"]
+labels: ["provider"]
 title: "[PROVIDER] "
 body:
 
