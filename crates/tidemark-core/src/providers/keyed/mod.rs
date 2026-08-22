@@ -34,6 +34,7 @@ pub mod chutes;
 pub mod clawrouter;
 pub mod clinepass;
 pub mod crof;
+pub mod deepinfra;
 pub mod elevenlabs;
 pub mod fireworks;
 pub mod kimi;
