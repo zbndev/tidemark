@@ -25,6 +25,7 @@ whose services the cards are about:
 | `tidemark-kimi-symbolic.svg` | Moonshot AI (Kimi) |
 | `tidemark-litellm-symbolic.svg` | The LiteLLM project |
 | `tidemark-llmproxy-symbolic.svg` | The LLM Proxy project |
+| `tidemark-moonshot-symbolic.svg` | Moonshot AI |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
 | `tidemark-openai-api-symbolic.svg` | OpenAI |
 | `tidemark-opencodego-symbolic.svg` | The OpenCode project (OpenCode Go) |
@@ -55,7 +56,8 @@ xAI's own, taken from
 [File:XAI Logo.svg](https://commons.wikimedia.org/wiki/File:XAI_Logo.svg) on Wikimedia
 Commons: the icon CodexBar files under `xai` is three strokes in the shape of an X and a
 bar, an approximation of the mark rather than the mark, and this shipped as that
-approximation until 2026-08-22. The
+approximation until 2026-08-22. The Moonshot mark is the Kimi one: they are the same company's, and CodexBar draws
+Moonshot with its Kimi icon for that reason. The
 ClinePass one, its file notes, is
 Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand), and the OpenAI one
 is the blossom CodexBar files under its codex name. Each was reduced to a
