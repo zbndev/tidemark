@@ -529,7 +529,7 @@ impl ProviderDetail {
         // Markup off for the row as a whole: the subtitle `apply` sets later carries the
         // daemon's connection words, which are data, never markup.
         let row = adw::ActionRow::builder()
-            .title("Tidemark's own account")
+            .title("OAuth login")
             .use_markup(false)
             .build();
         let button = gtk::Button::builder()
