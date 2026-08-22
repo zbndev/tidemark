@@ -78,6 +78,16 @@ cookies — a deliberate scope boundary, not a coincidence.
 | Kimi | `GET https://api.kimi.com/coding/v1/usages` | user-supplied key from Kimi Code Console |
 | Antigravity | Cloud Code Assist `fetchAvailableModels`; optional local `agy` fallback | Tidemark Google OAuth, or an existing `agy` session |
 
+Three of them have **two** credentials rather than one, and which of the two an account
+uses is the user's choice, not a rule hidden in the daemon. It is stored as
+`[provider.<slug>] source = "oauth" | "cli"`, published with the provider so a client can
+draw it without knowing what either credential is, and drawn in the authentication group
+as a two-part control — Tidemark's own login on the left, the local program's on the right.
+**A pinned credential that is not there is `no-credential`, never a quiet fall back to the
+other one**: falling back would show quota for an account the user did not choose. An
+account whose `source` has never been set behaves exactly as it always did — the daemon
+publishes which credential that resolves to, so the control still shows the truth.
+
 Codex reports `rate_limit.primary_window` / `secondary_window` — slots rather than lanes,
 each declaring its own length — plus a `code_review_rate_limit` of the same shape and named
 `additional_rate_limits[]`. The three are separate pools, not lengths of one. One extra
@@ -136,8 +146,9 @@ and persists the provider's `default` account; `RemoveProvider(provider, account
 one. `ProviderChanged` carries the same status shape as `GetStatus` for an account that was
 added or updated, while `ProviderRemoved(provider, account)` tells long-running clients to
 drop its settings row and card. `Refresh(provider)` polls now, with an empty string meaning
-everything, and re-reads the credential on the way. `Version` says what is on the other
-end.
+everything, re-reads the credential on the way, and looks again for the vendor login a
+provider can read instead of ours — a refresh is what a user reaches for straight after
+running `claude` in a terminal. `Version` says what is on the other end.
 
 Credentials are the daemon's, so changing them is the daemon's too: `SetKey`, `SignOut`,
 `SetOption`, `SetWindowNotify`, and the two halves of a login. Nothing there is specific to the GUI — a
@@ -385,6 +396,16 @@ history that does not exist yet.
   a new one. Removal is destructive and confirmed: it deletes Tidemark-owned credentials,
   provider settings and the current card, but keeps quota history. Closing the preferences
   dialog cancels pending OAuth work, and the dialog can then be opened again.
+- **A provider with two credentials names both of them.** Its authentication group leads
+  with a two-part control — Tidemark's own login, and the login the vendor's program keeps
+  on this machine — and the rows below it are the half that is selected. The Tidemark half
+  is the sign-in button and what it is signed in as. The local half is the three things
+  somebody with a problem needs, in that order: whether the login is there and where
+  Tidemark looked for it, what to run if it is not, and — where it is true — that Tidemark
+  refreshes that credential in place and writes the rotated token back into a file it does
+  not own. That last sentence is ADR 0001, and it is stated in the open next to the choice
+  rather than left to be discovered: a program that edits another program's credentials
+  says so where the decision is made.
 - **Tray** — a static StatusNotifierItem, owned by the interface process rather than by the
   daemon. Left click shows the window; the menu lists the configured accounts with the
   percentage of their shortest window, in the order the grid uses, and ends with Open,

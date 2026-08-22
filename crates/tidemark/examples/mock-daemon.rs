@@ -20,9 +20,9 @@
 //! It is a development aid, not a test fixture: nothing in the suite depends on it.
 
 use tidemark_types::{
-    AccountId, CredentialKind, DetailRow, DetailSection, ProviderDefinition, ProviderId,
-    ProviderState, ProviderStatus, Snapshot, Timestamp, Window, WindowKey, WindowLength, ids,
-    provider_label,
+    AccountId, CredentialKind, DetailRow, DetailSection, ExternalLogin, OptionChoice,
+    ProviderDefinition, ProviderId, ProviderOption, ProviderState, ProviderStatus, Snapshot,
+    Timestamp, Window, WindowKey, WindowLength, ids, provider_label,
 };
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
@@ -37,23 +37,33 @@ impl MockDaemon {
     // not running" if either fails — so a mock that answered only `GetStatus` drew no cards
     // at all. The entries are the accounts served below, with the least metadata the
     // settings panes will accept; this mock exists to be looked at, not to be configured.
+    //
+    // The exception is the credential choice. Three of the invented accounts have two
+    // credentials, the pane that picks between them is two screens rather than one control,
+    // and there is no way to look at the second screen on a machine whose real daemon
+    // reports the same answer every time. So the external logins are described here in the
+    // shape the real catalog publishes them in.
     async fn list_providers(&self) -> Vec<ProviderDefinition> {
         self.statuses
             .iter()
-            .map(|status| ProviderDefinition {
-                provider: status.provider.clone(),
-                title: provider_label(&status.provider).to_owned(),
-                // The invented accounts include the three OAuth providers; a key field
-                // offered for those would mislead whoever is looking at the panes.
-                credential: match status.provider.as_str() {
-                    "antigravity" | "claude" | "codex" => CredentialKind::OAuth,
-                    _ => CredentialKind::Key,
+            .map(|status| {
+                let external = external_login(&status.provider);
+                ProviderDefinition {
+                    provider: status.provider.clone(),
+                    title: provider_label(&status.provider).to_owned(),
+                    // The invented accounts include the three OAuth providers; a key field
+                    // offered for those would mislead whoever is looking at the panes.
+                    credential: if external.is_some() {
+                        CredentialKind::OAuth
+                    } else {
+                        CredentialKind::Key
+                    }
+                    .as_wire()
+                    .to_owned(),
+                    credential_hint: "Paste a key.".to_owned(),
+                    options: external.iter().map(source_option).collect(),
+                    external,
                 }
-                .as_wire()
-                .to_owned(),
-                credential_hint: "Paste a key.".to_owned(),
-                external_fallback: None,
-                options: Vec::new(),
             })
             .collect()
     }
@@ -71,6 +81,33 @@ impl MockDaemon {
         Ok(())
     }
 
+    /// The credential choice, answered the way the daemon answers it: the setting is
+    /// written, and the account is republished on the half it now sits on.
+    async fn set_option(
+        &mut self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        provider: &str,
+        account: &str,
+        name: &str,
+        value: &str,
+    ) -> fdo::Result<()> {
+        println!("set_option({provider:?}, {account:?}, {name:?}, {value:?})");
+        let Some(status) = self
+            .statuses
+            .iter_mut()
+            .find(|status| status.provider == provider && status.account == account)
+        else {
+            return Err(fdo::Error::InvalidArgs(format!("no {provider}/{account}")));
+        };
+        if name != AUTH_SOURCE {
+            return Err(fdo::Error::InvalidArgs(format!("no setting {name}")));
+        }
+        status.auth_source = Some(value.to_owned());
+        let published = status.clone();
+        Self::provider_changed(&emitter, published).await?;
+        Ok(())
+    }
+
     #[zbus(property(emits_changed_signal = "false"))]
     async fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_owned()
@@ -84,6 +121,57 @@ impl MockDaemon {
 
     #[zbus(signal)]
     pub async fn update_changed(emitter: &SignalEmitter<'_>, version: &str) -> zbus::Result<()>;
+}
+
+/// The setting the credential pill writes, spelled as the real catalog spells it.
+const AUTH_SOURCE: &str = "source";
+
+/// The three accounts that have a second credential, described as the daemon describes
+/// them: one that Tidemark refreshes in place, and one it only reads.
+fn external_login(provider: &str) -> Option<ExternalLogin> {
+    let (label, location, command, writes_back) = match provider {
+        "antigravity" => (
+            "agy session",
+            "a signed-in agy server on this machine",
+            "agy",
+            false,
+        ),
+        "claude" => (
+            "Claude Code login",
+            "~/.claude/.credentials.json",
+            "claude",
+            true,
+        ),
+        "codex" => ("Codex CLI login", "~/.codex/auth.json", "codex login", true),
+        _ => return None,
+    };
+    Some(ExternalLogin {
+        option: AUTH_SOURCE.to_owned(),
+        label: label.to_owned(),
+        location: location.to_owned(),
+        command: command.to_owned(),
+        writes_back,
+    })
+}
+
+/// The choice itself: two values, named after the two credentials.
+fn source_option(external: &ExternalLogin) -> ProviderOption {
+    ProviderOption {
+        name: external.option.clone(),
+        title: "Credential".to_owned(),
+        description: None,
+        value: "auto".to_owned(),
+        choices: vec![
+            OptionChoice {
+                value: "oauth".to_owned(),
+                title: "Tidemark login".to_owned(),
+            },
+            OptionChoice {
+                value: "cli".to_owned(),
+                title: external.label.clone(),
+            },
+        ],
+    }
 }
 
 fn window(title: &str, length: u64, used: f64, resets_in: Option<i64>) -> Window {
@@ -132,13 +220,22 @@ fn statuses() -> Vec<ProviderStatus> {
         ],
     );
     claude.next_poll_at = Some(Timestamp::now().as_unix() + 40);
+    // Reading Claude Code's own file, which is there and which Tidemark refreshes in
+    // place: the case the write-back sentence exists for.
+    claude.auth_source = Some("cli".to_owned());
+    claude.external_present = Some(true);
+    claude.has_credential = Some(false);
 
-    let codex = account(
+    let mut codex = account(
         "codex",
         "plus",
         // One window and nothing else, which is the live shape of this account.
         vec![window("1 week", 604_800, 97.5, Some(29 * 3600))],
     );
+    // Signed in here, with a CLI login on the machine that is deliberately not being used.
+    codex.auth_source = Some("oauth".to_owned());
+    codex.external_present = Some(true);
+    codex.has_credential = Some(true);
 
     let mut kimi = account(
         "kimi",
@@ -160,6 +257,11 @@ fn statuses() -> Vec<ProviderStatus> {
         ProviderState::NoCredential,
         Some("Sign in to Antigravity to see its quota.".into()),
     );
+    // The empty half of the CLI screen: nothing signed in either way, so the pane has a
+    // command to run and nothing found.
+    antigravity.auth_source = Some("cli".to_owned());
+    antigravity.external_present = Some(false);
+    antigravity.has_credential = Some(false);
 
     // The account that reports a fixed balance rather than only a percentage: the absolutes
     // behind the 41% are drawn under the bar, in the provider's own words. No live provider

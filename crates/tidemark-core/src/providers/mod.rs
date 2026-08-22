@@ -59,6 +59,58 @@ pub trait Provider: fmt::Debug + Send + Sync {
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>>;
 }
 
+/// Which of two credentials an account uses.
+///
+/// Claude, Codex and Antigravity each hold two: the vendor's own session — the CLI's
+/// credential file, or the running `agy` server — and a login the user performed **from
+/// Tidemark**, stored in the Secret Service. Two sources rather than a source and a
+/// fallback, because neither subsumes the other: the vendor's session is the account the
+/// user is actually working in, and Tidemark's login is the one that works on a machine
+/// the vendor's tool is not installed on at all. Neither is the right default everywhere,
+/// so the choice is the user's, and [`Source::Auto`] is what an account does until they
+/// make one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Source {
+    /// The provider's own rule: the stored login when there is one and the vendor's
+    /// session otherwise — except Antigravity, which asks its local server first.
+    #[default]
+    Auto,
+    /// Only the login Tidemark performed.
+    OAuth,
+    /// Only the vendor's own session: the CLI's credential file, or `agy`.
+    Cli,
+}
+
+impl Source {
+    /// The mode a stored setting names, defaulting to [`Source::Auto`].
+    ///
+    /// An unrecognised value is the default rather than an error: the settings file is
+    /// hand-editable, and a typo should cost the default rather than the account.
+    pub fn from_value(value: Option<&str>) -> Self {
+        match value {
+            Some(OAUTH_SOURCE) => Self::OAuth,
+            Some(CLI_SOURCE) => Self::Cli,
+            _ => Self::Auto,
+        }
+    }
+
+    /// The stored spelling of the mode — what [`Source::from_value`] reads back.
+    pub const fn as_value(self) -> &'static str {
+        match self {
+            Self::Auto => AUTO_SOURCE,
+            Self::OAuth => OAUTH_SOURCE,
+            Self::Cli => CLI_SOURCE,
+        }
+    }
+}
+
+/// The stored spelling of [`Source::Auto`].
+pub const AUTO_SOURCE: &str = "auto";
+/// The stored spelling of [`Source::OAuth`].
+pub const OAUTH_SOURCE: &str = "oauth";
+/// The stored spelling of [`Source::Cli`].
+pub const CLI_SOURCE: &str = "cli";
+
 /// What to call a window of this length, in the plainest terms that divide evenly.
 ///
 /// Shared because a window's span is the provider-neutral half of its title: every
@@ -249,6 +301,28 @@ mod tests {
     fn a_blank_credential_is_recognised_before_it_is_spent() {
         assert!(Credential::new("   ").is_blank());
         assert!(!Credential::new("sk-1").is_blank());
+    }
+
+    #[test]
+    fn a_source_is_read_from_its_stored_spelling_and_an_unknown_one_is_auto() {
+        assert_eq!(Source::from_value(Some("oauth")), Source::OAuth);
+        assert_eq!(Source::from_value(Some("cli")), Source::Cli);
+        assert_eq!(Source::from_value(Some("auto")), Source::Auto);
+        // Hand-editable file: a typo costs the default, not a card that will not start.
+        assert_eq!(Source::from_value(Some("nonsense")), Source::Auto);
+        assert_eq!(Source::from_value(None), Source::Auto);
+    }
+
+    #[test]
+    fn a_source_spells_itself_the_way_from_value_reads_it_back() {
+        for (source, spelling) in [
+            (Source::Auto, "auto"),
+            (Source::OAuth, "oauth"),
+            (Source::Cli, "cli"),
+        ] {
+            assert_eq!(source.as_value(), spelling);
+            assert_eq!(Source::from_value(Some(source.as_value())), source);
+        }
     }
 
     #[test]

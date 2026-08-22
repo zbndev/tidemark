@@ -864,7 +864,7 @@ mod tests {
             title: "Z.ai".into(),
             credential: "key".into(),
             credential_hint: "Z.ai dashboard → API keys.".into(),
-            external_fallback: None,
+            external: None,
             options: Vec::new(),
         }]
     }
@@ -960,7 +960,7 @@ mod tests {
             title: "Z.ai".into(),
             credential: "key".into(),
             credential_hint: "Z.ai dashboard → API keys.".into(),
-            external_fallback: None,
+            external: None,
             options: Vec::new(),
         };
         let (daemon, _secrets, _commands) =

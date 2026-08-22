@@ -1,27 +1,35 @@
 //! Claude subscription quota, over one of two credentials.
 //!
-//! # Two sources, and which one wins
+//! # Two sources, and the one this account reads
 //!
-//! Normally the account is Claude Code's: `~/.claude/.credentials.json`, read in place and
-//! refreshed back into it under the CLI's own lock protocol, per ADR 0001. That file is
-//! never created here and never replaced wholesale — Tidemark only ever updates the token
+//! One is Claude Code's own: `~/.claude/.credentials.json`, read in place and refreshed
+//! back into it under the CLI's own lock protocol, per ADR 0001. That file is never
+//! created here and never replaced wholesale — Tidemark only ever updates the token
 //! fields of a file the CLI already owns.
 //!
-//! The other source is a login the user performed **from Tidemark**, whose tokens live in
-//! the Secret Service under [`crate::secrets::Kind::Token`]. It is checked first, and the
-//! order is deliberate: it exists only because the user explicitly signed in here, so it
-//! is the more recent statement of intent, and signing out removes it and hands the
-//! account straight back to the CLI file. The stored document has the *same shape* as the
-//! CLI's, which is why one parser reads both.
+//! The other is a login the user performed **from Tidemark**, whose tokens live in the
+//! Secret Service under [`crate::secrets::Kind::Token`]. The stored document has the
+//! *same shape* as the CLI's, which is why one parser reads both.
+//!
+//! Which of them this account speaks with is the caller's choice, handed to
+//! [`Claude::new`] as a [`Source`]. [`Source::Auto`] is the historical rule, and its
+//! order is deliberate: the Tidemark login is checked first because it exists only
+//! because the user explicitly signed in here, so it is the more recent statement of
+//! intent, and signing out removes it and hands the account straight back to the CLI
+//! file. The other two pin the account to one credential and treat the other as absent —
+//! a missing pinned login is [`ProviderError::NoCredential`], not a reason to read a
+//! file the user excluded.
 
-use super::{BoxFuture, Credential, Provider, ProviderError, http, parse_rfc3339, title_case};
+use super::{
+    BoxFuture, Credential, Provider, ProviderError, Source, http, parse_rfc3339, title_case,
+};
 use crate::oauth;
 use crate::oauth_file::{
     CredentialFile, CredentialFileError, Field, LockedCredentialFile, UpdateOutcome,
 };
 use crate::secrets::{self, Secrets};
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tidemark_types::{
@@ -126,6 +134,8 @@ pub struct Claude {
     /// Where a login performed from Tidemark is kept, when the caller has somewhere to
     /// keep one. `None` in tests that only exercise the CLI file.
     own: Option<Arc<dyn Secrets>>,
+    /// Which of the two credentials this account reads — see the module docs.
+    source: Source,
     usage_url: String,
     refresh_url: String,
     profile_url: String,
@@ -134,16 +144,22 @@ pub struct Claude {
     plan: OnceLock<String>,
 }
 
+/// The canonical Claude Code credential file, or `None` when `HOME` is unusable.
+///
+/// Free-standing rather than a method so that a caller can ask whether the CLI's login
+/// exists on this machine without building the provider.
+pub fn cli_credentials_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|home| Path::new(home).is_absolute())?;
+    Some(Path::new(&home).join(".claude/.credentials.json"))
+}
+
 impl Claude {
     /// Builds the canonical Claude Code account at `~/.claude/.credentials.json`.
-    pub fn new(own: Option<Arc<dyn Secrets>>) -> Result<Self, ProviderError> {
-        let home = std::env::var_os("HOME")
-            .filter(|home| Path::new(home).is_absolute())
-            .ok_or_else(|| {
-                ProviderError::Local("HOME does not name an absolute directory".into())
-            })?;
-        let path = Path::new(&home).join(".claude/.credentials.json");
-        let write_lock = Path::new(&home).join(".claude/.storage-write.lock");
+    pub fn new(own: Option<Arc<dyn Secrets>>, source: Source) -> Result<Self, ProviderError> {
+        let path = cli_credentials_path().ok_or_else(|| {
+            ProviderError::Local("HOME does not name an absolute directory".into())
+        })?;
+        let write_lock = path.with_file_name(".storage-write.lock");
         let mut claude = Self::with_endpoints(
             CredentialFile::new(path.clone(), path).coordinated_by(write_lock),
             USAGE_URL.to_owned(),
@@ -151,6 +167,7 @@ impl Claude {
             PROFILE_URL.to_owned(),
         )?;
         claude.own = own;
+        claude.source = source;
         Ok(claude)
     }
 
@@ -164,6 +181,7 @@ impl Claude {
             client: http::client()?,
             credentials,
             own: None,
+            source: Source::Auto,
             usage_url,
             refresh_url,
             profile_url,
@@ -245,23 +263,46 @@ impl Claude {
 
     /// The access token to spend, and the plan to put on the card.
     ///
-    /// A Tidemark login wins over the CLI file when there is one — see the module docs.
-    /// Neither source is consulted for the other's failures: a keyring that is locked
-    /// reports itself as locked rather than silently falling through to a file that may
-    /// hold a different account.
+    /// [`Source`] says which credential supplies it — see the module docs. A source that
+    /// was not selected is not consulted at all, and one that was selected answers for
+    /// itself: a keyring that is locked reports itself as locked rather than silently
+    /// falling through to a file that may hold a different account, and a pinned login
+    /// that is not there is [`ProviderError::NoCredential`].
     async fn credential(&self) -> Result<(Credential, Option<String>), ProviderError> {
-        if let Some(own) = &self.own {
-            let provider = ProviderId::new(PROVIDER_ID);
-            let account = AccountId::default();
-            let stored = own
-                .get(secrets::Kind::Token, &provider, &account)
-                .await
-                .map_err(ProviderError::from_secret_error)?;
-            if let Some(stored) = stored {
-                return self.own_login_credential(own.as_ref(), stored).await;
+        match self.source {
+            Source::Cli => self.cli_file_credential().await,
+            Source::OAuth => {
+                let Some(own) = &self.own else {
+                    return Err(ProviderError::NoCredential);
+                };
+                let stored = own
+                    .get(
+                        secrets::Kind::Token,
+                        &ProviderId::new(PROVIDER_ID),
+                        &AccountId::default(),
+                    )
+                    .await
+                    .map_err(ProviderError::from_secret_error)?;
+                match stored {
+                    Some(stored) => self.own_login_credential(own.as_ref(), stored).await,
+                    None => Err(ProviderError::NoCredential),
+                }
+            }
+            Source::Auto => {
+                if let Some(own) = &self.own {
+                    let provider = ProviderId::new(PROVIDER_ID);
+                    let account = AccountId::default();
+                    let stored = own
+                        .get(secrets::Kind::Token, &provider, &account)
+                        .await
+                        .map_err(ProviderError::from_secret_error)?;
+                    if let Some(stored) = stored {
+                        return self.own_login_credential(own.as_ref(), stored).await;
+                    }
+                }
+                self.cli_file_credential().await
             }
         }
-        self.cli_file_credential().await
     }
 
     /// The CLI's file, refreshed in place if the token in it is spent.
@@ -1228,6 +1269,136 @@ mod tests {
             requests.try_recv().is_err(),
             "the CLI file must not have been touched"
         );
+    }
+
+    #[test]
+    fn cli_source_reads_the_cli_file_even_when_a_login_is_stored() {
+        const USAGE: &str = r#"{
+          "limits":[
+            {"kind":"session","group":"session","percent":41,"severity":"normal",
+             "resets_at":"2026-08-20T21:50:00Z","scope":null,"is_active":true}
+          ],
+          "spend":null,"extra_usage":null
+        }"#;
+        // Both credentials are live and carry different tokens: the request that leaves
+        // proves which one was read.
+        let credentials = TestCredentials::expired();
+        fs::write(
+            &credentials.path,
+            serde_json::to_vec_pretty(&json!({"claudeAiOauth": {
+                "accessToken": "from-the-cli-file",
+                "refreshToken": "file-refresh",
+                "expiresAt": 4_102_444_800_000_i64,
+                "subscriptionType": "pro"
+            }}))
+            .expect("serialize"),
+        )
+        .expect("write a live CLI file");
+        let secrets = FakeSecrets::holding(json!({"claudeAiOauth": {
+            "accessToken": "from-the-tidemark-login",
+            "refreshToken": "own-refresh",
+            "expiresAt": 4_102_444_800_000_i64,
+            "subscriptionType": "max"
+        }}));
+        let (base, requests, server) = local_server(vec![USAGE]);
+        let mut provider = Claude::with_endpoints(
+            CredentialFile::new(credentials.path.clone(), credentials.path.clone()),
+            format!("{base}/usage"),
+            format!("{base}/token"),
+            format!("{base}/profile"),
+        )
+        .expect("provider builds");
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+        provider.source = Source::Cli;
+
+        let snapshot = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect("the CLI file is enough");
+
+        assert_eq!(snapshot.windows[0].used_percent, 41.0);
+        assert_eq!(
+            snapshot.details[0].rows[0].value, "Pro",
+            "the plan came from the file, not from the stored login"
+        );
+        let usage_request = requests.recv().expect("one request");
+        assert!(
+            usage_request.contains("authorization: Bearer from-the-cli-file"),
+            "{usage_request}"
+        );
+        server.join().expect("server stopped");
+        assert!(requests.try_recv().is_err(), "nothing else was asked");
+    }
+
+    #[test]
+    fn oauth_source_reads_the_stored_login_even_when_the_cli_file_is_live() {
+        const USAGE: &str = r#"{
+          "limits":[
+            {"kind":"session","group":"session","percent":12,"severity":"normal",
+             "resets_at":"2026-08-20T21:50:00Z","scope":null,"is_active":true}
+          ],
+          "spend":null,"extra_usage":null
+        }"#;
+        // The mirror image: both credentials live, the pinned source is the login.
+        let credentials = TestCredentials::expired();
+        let before = fs::read(&credentials.path).expect("fixture readable");
+        let secrets = FakeSecrets::holding(json!({"claudeAiOauth": {
+            "accessToken": "from-the-tidemark-login",
+            "refreshToken": "own-refresh",
+            "expiresAt": 4_102_444_800_000_i64,
+            "subscriptionType": "max"
+        }}));
+        let (base, requests, server) = local_server(vec![USAGE]);
+        let mut provider = Claude::with_endpoints(
+            CredentialFile::new(credentials.path.clone(), credentials.path.clone()),
+            format!("{base}/usage"),
+            format!("{base}/token"),
+            format!("{base}/profile"),
+        )
+        .expect("provider builds");
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+        provider.source = Source::OAuth;
+
+        let snapshot = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect("the stored login is enough");
+
+        assert_eq!(snapshot.windows[0].used_percent, 12.0);
+        let usage_request = requests.recv().expect("one request");
+        assert!(
+            usage_request.contains("authorization: Bearer from-the-tidemark-login"),
+            "{usage_request}"
+        );
+        server.join().expect("server stopped");
+        assert_eq!(
+            fs::read(&credentials.path).expect("still there"),
+            before,
+            "the pinned source never wrote to the CLI's file"
+        );
+    }
+
+    #[test]
+    fn oauth_source_without_a_login_says_so_without_opening_the_cli_file() {
+        // The file on disk is not even JSON: if the pinned source so much as opened it,
+        // the outcome could not be `NoCredential`.
+        let credentials = TestCredentials::expired();
+        fs::write(&credentials.path, b"this is not the CLI's JSON").expect("corrupt file");
+        let mut provider = Claude::with_endpoints(
+            CredentialFile::new(credentials.path.clone(), credentials.path.clone()),
+            "http://127.0.0.1:9/usage".to_owned(),
+            "http://127.0.0.1:9/token".to_owned(),
+            "http://127.0.0.1:9/profile".to_owned(),
+        )
+        .expect("provider builds");
+        provider.own = Some(Arc::new(FakeSecrets::default()) as Arc<dyn crate::secrets::Secrets>);
+        provider.source = Source::OAuth;
+
+        let error = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect_err("a pinned login that is not there is no credential");
+        assert!(matches!(error, ProviderError::NoCredential), "{error}");
     }
 
     #[test]
