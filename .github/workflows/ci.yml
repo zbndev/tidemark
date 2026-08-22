@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    # The only hosted runner carrying GTK 4.22 / libadwaita 1.9, which is the project's
+    # API floor. ubuntu-latest is still 24.04 and ships GTK 4.18; this code does not
+    # compile against it.
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the toolkit and the shell-check tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config \
+            dbus-daemon desktop-file-utils appstream shellcheck
+
+      - name: Confirm the toolkit meets the floor
+        run: |
+          pkg-config --atleast-version=4.22 gtk4
+          pkg-config --atleast-version=1.9 libadwaita-1
+          pkg-config --modversion gtk4 libadwaita-1
+
+      # rust-toolchain.toml pins the channel; rustup reads it on first use.
+      - name: Show the toolchain
+        run: rustup show && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # A session bus, because tidemark-core's Secret Service tests skip themselves
+      # without one and tidemarkd opens a session connection. With a bus but no Secret
+      # Service the keyring assertions still skip, which is the designed behaviour.
+      - name: Tests
+        run: dbus-run-session -- cargo test --workspace
+
+      - name: Layering
+        run: scripts/check-layering.sh
+
+      - name: Desktop integration
+        run: scripts/check-desktop-integration.sh
+
+      - name: The user-daemon restart helper
+        run: scripts/test-restart-user-daemon.sh
+
+      - name: Shell
+        run: shellcheck scripts/*.sh data/restart-user-daemon

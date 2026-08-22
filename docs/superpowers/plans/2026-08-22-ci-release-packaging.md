@@ -564,6 +564,11 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ## Task 5: The version-mismatch banner
 
+> **Deferred at the owner's request, 2026-08-22.** Not implemented in this pass. It is
+> independent of every other task — nothing else consumes `CLIENT_VERSION`,
+> `version_notice` or `Update::Version` — so it can be picked up as written whenever the
+> owner wants it, with no rework to the packaging tasks.
+
 **Files:**
 - Modify: `crates/tidemark/src/bus.rs`
 - Modify: `crates/tidemark/src/window.rs`
