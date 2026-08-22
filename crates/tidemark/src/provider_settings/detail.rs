@@ -248,7 +248,7 @@ impl ProviderDetail {
         let options = adw::PreferencesGroup::builder().title("Settings").build();
         let notifications = adw::PreferencesGroup::builder()
             .title("Notifications")
-            .description("Warn at 80% and 95%, and say when a window resets.")
+            .description("Warn at 70% and 90%, and say when a window resets.")
             .visible(false)
             .build();
         let preferences = adw::PreferencesPage::new();

@@ -298,7 +298,7 @@ corrupt the forecast, which is the one thing the history exists for.
 
 ## Notifications
 
-Thresholds at 80% and 95%, fired once per segment — the segment is the natural dedup key,
+Thresholds at 70% and 90%, fired once per segment — the segment is the natural dedup key,
 and the rows recording what has gone out live in the history database, so a daemon restart
 does not warn anybody a second time. Any window can notify, not just the dominant one: you
 need to know both that the five-hour window is closing and that the weekly one is.
@@ -353,8 +353,8 @@ history that does not exist yet.
 - **The bar is drawn, not a `GtkLevelBar`**, because of the pace mark. Its colours come
   from the CSS names `@accent_bg_color`, `@warning_bg_color` and `@error_bg_color` rather
   than from `AdwStyleManager`, so that a user who has themed their accent gets a bar in
-  their colour rather than the one libadwaita would have picked. **It changes colour at 80%
-  and 95% — the notification thresholds** — so the card and the notification never disagree
+  their colour rather than the one libadwaita would have picked. **It changes colour at 70%
+  and 90% — the notification thresholds** — so the card and the notification never disagree
   about when a window became worth worrying about.
 - **A card raises on hover** — two pixels and a soft shadow — rather than taking the tint
   `GtkFlowBoxChild` paints on its own square allocation, which shows as a hard edge around

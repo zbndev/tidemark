@@ -75,8 +75,8 @@ impl Kind {
     /// already gone out**, because it is the primary key of the dedup row.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Threshold(Threshold::Warning) => "threshold-80",
-            Self::Threshold(Threshold::Danger) => "threshold-95",
+            Self::Threshold(Threshold::Warning) => "threshold-70",
+            Self::Threshold(Threshold::Danger) => "threshold-90",
             Self::Reset => "reset",
         }
     }
@@ -340,12 +340,12 @@ mod tests {
 
     #[test]
     fn a_window_below_the_first_threshold_says_nothing() {
-        assert!(decide(79.9, false, &[]).is_empty());
+        assert!(decide(69.9, false, &[]).is_empty());
     }
 
     #[test]
     fn the_first_threshold_is_due_the_moment_it_is_reached() {
-        let decided = decide(80.0, false, &[]);
+        let decided = decide(70.0, false, &[]);
         assert_eq!(kinds(&decided), vec![Kind::Threshold(Threshold::Warning)]);
         assert_eq!(
             decided[0].settles,
@@ -409,8 +409,8 @@ mod tests {
     /// notification that has already gone out.
     #[test]
     fn every_kind_is_filed_under_a_stable_name() {
-        assert_eq!(Kind::Threshold(Threshold::Warning).as_str(), "threshold-80");
-        assert_eq!(Kind::Threshold(Threshold::Danger).as_str(), "threshold-95");
+        assert_eq!(Kind::Threshold(Threshold::Warning).as_str(), "threshold-70");
+        assert_eq!(Kind::Threshold(Threshold::Danger).as_str(), "threshold-90");
         assert_eq!(Kind::Reset.as_str(), "reset");
     }
 

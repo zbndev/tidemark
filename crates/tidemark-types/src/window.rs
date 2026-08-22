@@ -11,10 +11,10 @@ use std::time::Duration;
 /// card and the notification that interrupts you must never disagree about when a window
 /// became worth worrying about, and a comment in each crate saying "keep these in step" is
 /// not a mechanism. See `CONTEXT.md` § Notifications.
-pub const WARNING_AT: f64 = 80.0;
+pub const WARNING_AT: f64 = 70.0;
 
 /// Consumption at which a window is nearly gone. See [`WARNING_AT`].
-pub const DANGER_AT: f64 = 95.0;
+pub const DANGER_AT: f64 = 90.0;
 
 /// How long a window lasts, in whole seconds. Never zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

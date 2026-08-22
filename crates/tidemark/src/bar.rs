@@ -276,9 +276,9 @@ mod tests {
 
     #[test]
     fn the_bar_changes_colour_where_the_notifications_fire() {
-        assert_eq!(tone(79.9), Tone::Normal);
+        assert_eq!(tone(69.9), Tone::Normal);
         assert_eq!(tone(WARNING_AT), Tone::Warning);
-        assert_eq!(tone(94.9), Tone::Warning);
+        assert_eq!(tone(89.9), Tone::Warning);
         assert_eq!(tone(DANGER_AT), Tone::Danger);
     }
 }

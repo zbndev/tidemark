@@ -863,7 +863,7 @@ mod tests {
         let history = history();
         assert!(
             !history
-                .notice_sent("test", "default", &key(), 1, "threshold-80")
+                .notice_sent("test", "default", &key(), 1, "threshold-70")
                 .expect("looked up")
         );
     }
@@ -872,11 +872,11 @@ mod tests {
     fn a_recorded_notice_reads_back_as_sent() {
         let mut history = history();
         history
-            .record_notice("test", "default", &key(), 1, "threshold-80", at(0))
+            .record_notice("test", "default", &key(), 1, "threshold-70", at(0))
             .expect("recorded");
         assert!(
             history
-                .notice_sent("test", "default", &key(), 1, "threshold-80")
+                .notice_sent("test", "default", &key(), 1, "threshold-70")
                 .expect("looked up")
         );
     }
@@ -885,11 +885,11 @@ mod tests {
     fn one_kind_of_notice_says_nothing_about_another() {
         let mut history = history();
         history
-            .record_notice("test", "default", &key(), 1, "threshold-80", at(0))
+            .record_notice("test", "default", &key(), 1, "threshold-70", at(0))
             .expect("recorded");
         assert!(
             !history
-                .notice_sent("test", "default", &key(), 1, "threshold-95")
+                .notice_sent("test", "default", &key(), 1, "threshold-90")
                 .expect("looked up")
         );
     }
@@ -898,11 +898,11 @@ mod tests {
     fn the_next_segment_arms_the_same_notice_again() {
         let mut history = history();
         history
-            .record_notice("test", "default", &key(), 1, "threshold-80", at(0))
+            .record_notice("test", "default", &key(), 1, "threshold-70", at(0))
             .expect("recorded");
         assert!(
             !history
-                .notice_sent("test", "default", &key(), 2, "threshold-80")
+                .notice_sent("test", "default", &key(), 2, "threshold-70")
                 .expect("looked up")
         );
     }
@@ -935,14 +935,14 @@ mod tests {
         {
             let mut history = History::open(&path).expect("opened");
             history
-                .record_notice("test", "default", &key(), 1, "threshold-80", at(0))
+                .record_notice("test", "default", &key(), 1, "threshold-70", at(0))
                 .expect("recorded");
         }
         {
             let history = History::open(&path).expect("reopened");
             assert!(
                 history
-                    .notice_sent("test", "default", &key(), 1, "threshold-80")
+                    .notice_sent("test", "default", &key(), 1, "threshold-70")
                     .expect("looked up")
             );
         }
@@ -960,7 +960,7 @@ mod tests {
             .ingest(&snapshot(POLL, 1.0, Some(HOUR + 5 * HOUR)))
             .expect("ingested");
         history
-            .record_notice("test", "default", &key(), 1, "threshold-95", at(0))
+            .record_notice("test", "default", &key(), 1, "threshold-90", at(0))
             .expect("recorded");
         history
             .record_notice("test", "default", &key(), 2, "reset", at(POLL))
@@ -972,7 +972,7 @@ mod tests {
 
         assert!(
             !history
-                .notice_sent("test", "default", &key(), 1, "threshold-95")
+                .notice_sent("test", "default", &key(), 1, "threshold-90")
                 .expect("looked up"),
             "a notice for a segment that closed ninety days ago is state nobody can use"
         );
