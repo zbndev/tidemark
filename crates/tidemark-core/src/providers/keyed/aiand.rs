@@ -26,8 +26,10 @@
 //! newest-first, the first priced row's currency decides the display currency, and
 //! only rows in that currency are summed. A row without a cost (the recorded failed
 //! request), or without a currency, is skipped; a cost that is neither null nor a
-//! decimal string fails the fetch — the one place this port is stricter than the
-//! source, whose guard silently skips such a row and under-reports the spend.
+//! decimal string fails the fetch — a fraction longer than nine decimal places
+//! included, which the i128-nanos scale cannot hold. That is the one place this port
+//! is stricter than the source, whose guard silently skips such a row and
+//! under-reports the spend.
 //!
 //! # Statuses
 //!

@@ -50,9 +50,13 @@
 //!
 //! # What ships untested
 //!
-//! No recorded body exercises the 100-page cap, a quoted token count (the plugin accepts
+//! No recorded body exercises the 100-page cap (the orchestration test below reaches it
+//! through spliced recorded pages), a quoted token count (the plugin accepts
 //! numeric strings where the Swift decoder would not; the plugin is the contract and
-//! that acceptance is ported), or a credit body with no grants object. The error-path
+//! that acceptance is ported), a credit body with no grants object, or an empty string
+//! where a number belongs: `flexible_number` refuses it where the plugin's `Number("")`
+//! reads 0 — an unrecorded edge, taken deliberately (an empty cost amount is exempt and
+//! reads as no amount, as the source's optional check does). The error-path
 //! `{"partial":` bodies are constructed, as the porting procedure allows; no number in a
 //! passing assertion is invented.
 
@@ -249,7 +253,8 @@ impl OpenAiApi {
 
     /// Every page of one endpoint: each 31-day range in turn, each following its cursor
     /// until it runs out, repeating or losing one being malformed, and no range allowed
-    /// past [`MAX_PAGES`] pages.
+    /// past [`MAX_PAGES`] pages. The loop's state lives in the pure [`Walk`] below; this
+    /// driver only builds, sends, parses and feeds.
     async fn pages<T, P>(
         &self,
         url: &str,
@@ -262,25 +267,20 @@ impl OpenAiApi {
     {
         let mut buckets = Vec::new();
         for range in ranges {
-            let mut page: Option<String> = None;
-            let mut seen: Vec<String> = Vec::new();
-            for _ in 0..MAX_PAGES {
+            let mut walk = Walk::default();
+            loop {
                 let body = super::request(
                     &self.client,
-                    self.page_request(url, group_by, *range, page.as_deref())?,
+                    self.page_request(url, group_by, *range, walk.cursor())?,
                 )
                 .await?;
                 let parsed = parse(&body)?;
                 buckets.extend(parsed.data);
-                page = match next_cursor(parsed.has_more, parsed.next_page.as_deref(), &mut seen)? {
-                    Some(cursor) => Some(cursor),
-                    None => break,
-                };
-            }
-            if page.is_some() {
-                return Err(ProviderError::malformed(format!(
-                    "the OpenAI pagination exceeded {MAX_PAGES} pages"
-                )));
+                if walk.step(parsed.has_more, parsed.next_page.as_deref())? == Step::Done {
+                    // Natural termination: the walk holds no cursor, so the next
+                    // range begins — not the cap error.
+                    break;
+                }
             }
         }
         Ok(buckets)
@@ -472,6 +472,61 @@ fn next_cursor(
     }
     seen.push(cursor.to_owned());
     Ok(Some(cursor.to_owned()))
+}
+
+/// The pagination loop's state for one 31-day range, pure so the loop's orchestration —
+/// advancing, terminating, capping — runs without a network: the transport feeds each
+/// served page's tail to [`Walk::step`] and sends [`Walk::cursor`] as the next request's
+/// `page`, stopping when a step ends the range. The cursor bookkeeping lives here and
+/// nowhere else, so a range that ends naturally is left cursorless — the source clears
+/// its `nextPage` before continuing, and this is that clearing, made structural.
+#[derive(Default)]
+struct Walk {
+    /// The cursor the next page request carries: none before the first advance and
+    /// after natural termination.
+    page: Option<String>,
+    /// Cursors already served, so a repeat is caught.
+    seen: Vec<String>,
+    /// Pages served, counted against [`MAX_PAGES`].
+    served: usize,
+}
+
+/// What one served page says about the next request of its range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// Follow the walk's cursor.
+    Advance,
+    /// No more rows: the range ended naturally, cap intact.
+    Done,
+}
+
+impl Walk {
+    /// Feeds one served page and names the next step: follow the cursor, or the range
+    /// is done. A page that loses or repeats its cursor is malformed, as is a page that
+    /// still wants more once [`MAX_PAGES`] pages have been served.
+    fn step(&mut self, has_more: bool, next_page: Option<&str>) -> Result<Step, ProviderError> {
+        self.served += 1;
+        match next_cursor(has_more, next_page, &mut self.seen)? {
+            Some(cursor) => {
+                if self.served >= MAX_PAGES {
+                    return Err(ProviderError::malformed(format!(
+                        "the OpenAI pagination exceeded {MAX_PAGES} pages"
+                    )));
+                }
+                self.page = Some(cursor);
+                Ok(Step::Advance)
+            }
+            None => {
+                self.page = None;
+                Ok(Step::Done)
+            }
+        }
+    }
+
+    /// The cursor the next page request carries.
+    fn cursor(&self) -> Option<&str> {
+        self.page.as_deref()
+    }
 }
 
 /// Reads the legacy credit-grants body. Pure. The three totals must be present and
@@ -839,13 +894,16 @@ fn display_name(raw: Option<&str>, fallback: &str) -> String {
 }
 
 /// The source's `cleaned()`: trimmed, one pair of surrounding quotes stripped, trimmed
-/// again; empty is no value.
+/// again; empty is no value — a lone quote included, which strips to nothing, as the
+/// source's dropFirst/dropLast reduces it.
 fn cleaned(raw: Option<&String>) -> Option<String> {
     let mut value = raw?.trim();
-    if (value.starts_with('"') && value.ends_with('"') && value.len() > 1)
-        || (value.starts_with('\'') && value.ends_with('\'') && value.len() > 1)
-    {
-        value = value[1..value.len() - 1].trim();
+    let quoted = (value.starts_with('"') && value.ends_with('"'))
+        || (value.starts_with('\'') && value.ends_with('\''));
+    if quoted {
+        // `get`, not indexing: a lone quote's 1..0 is not a range, and it strips to
+        // nothing.
+        value = value.get(1..value.len() - 1).unwrap_or("").trim();
     }
     (!value.is_empty()).then(|| value.to_owned())
 }
@@ -1290,9 +1348,85 @@ mod tests {
     }
 
     #[test]
+    fn the_walk_advances_then_ends_naturally_cursorless() {
+        // Spliced orchestration fixture, not a recorded body: the recorded costs page 1
+        // serves twice — its cursor respelled for the second serving — and the recorded
+        // page 2 terminates the range. No number is asserted that a recorded page did
+        // not carry; the walk's shape is what is under test.
+        let mut walk = Walk::default();
+        assert_eq!(walk.cursor(), None, "a range starts cursorless");
+        let first = parse_costs_page(COSTS_PAGE_1).expect("parses");
+        assert_eq!(
+            walk.step(first.has_more, first.next_page.as_deref())
+                .expect("advances"),
+            Step::Advance
+        );
+        assert_eq!(walk.cursor(), Some("costs_page_2"));
+        let second = parse_costs_page(&COSTS_PAGE_1.replace("costs_page_2", "costs_page_3"))
+            .expect("parses");
+        assert_eq!(
+            walk.step(second.has_more, second.next_page.as_deref())
+                .expect("advances again"),
+            Step::Advance
+        );
+        assert_eq!(walk.cursor(), Some("costs_page_3"));
+        let last = parse_costs_page(COSTS_PAGE_2).expect("parses");
+        assert_eq!(
+            walk.step(last.has_more, last.next_page.as_deref())
+                .expect("terminates"),
+            Step::Done
+        );
+        // The regression this pins: a range that ends naturally holds no cursor, so
+        // it cannot be mistaken for one that outran the cap.
+        assert_eq!(walk.cursor(), None);
+    }
+
+    #[test]
+    fn the_walk_refuses_a_page_that_still_wants_more_at_the_cap() {
+        // Spliced orchestration fixture, not a recorded body: the recorded costs page 1
+        // answered under ninety-nine fresh cursors, then once too many. No recorded
+        // body walks this far; only the cap's firing is asserted.
+        let mut walk = Walk::default();
+        for index in 1..MAX_PAGES {
+            let served =
+                parse_costs_page(&COSTS_PAGE_1.replace("costs_page_2", &format!("costs_{index}")))
+                    .expect("parses");
+            assert_eq!(
+                walk.step(served.has_more, served.next_page.as_deref())
+                    .expect("advances under the cap"),
+                Step::Advance,
+                "page {index}"
+            );
+        }
+        let hundredth =
+            parse_costs_page(&COSTS_PAGE_1.replace("costs_page_2", "costs_past_the_cap"))
+                .expect("parses");
+        let error = walk
+            .step(hundredth.has_more, hundredth.next_page.as_deref())
+            .expect_err("must refuse the page past the cap");
+        assert!(matches!(error, ProviderError::Malformed(_)), "{error:?}");
+        assert!(format!("{error}").contains("exceeded"), "{error}");
+    }
+
+    #[test]
+    fn the_walk_refuses_a_cursor_it_already_served() {
+        // Spliced orchestration fixture, not a recorded body: the recorded
+        // repeating-cursor body, served back to back.
+        let repeating = parse_costs_page(REPEATING_CURSOR).expect("parses");
+        let mut walk = Walk::default();
+        walk.step(repeating.has_more, repeating.next_page.as_deref())
+            .expect("serves once");
+        let error = walk
+            .step(repeating.has_more, repeating.next_page.as_deref())
+            .expect_err("must refuse the repeat");
+        assert!(matches!(error, ProviderError::Malformed(_)), "{error:?}");
+        assert!(format!("{error}").contains("repeated"), "{error}");
+    }
+
+    #[test]
     fn ninety_days_of_history_is_three_ranges_per_endpoint() {
         // The recorded pagination test: 90 days at the recorded now (UTC midnight of
-        // 2023-11-15) is 6 requests whose limits are 31, 31, 28 — twice.
+        // 2023-11-17) is 6 requests whose limits are 31, 31, 28 — twice.
         let ranges = daily_ranges(now(), 90);
         let limits: Vec<i64> = ranges.iter().map(|range| range.limit).collect();
         assert_eq!(limits, [31, 31, 28]);
@@ -1379,6 +1513,11 @@ mod tests {
         )
         .expect("builds");
         assert_eq!(api.project.as_deref(), Some("proj_abc"));
+
+        // A lone quote — either spelling — is no project: the source's
+        // hasPrefix/hasSuffix plus dropFirst/dropLast reduces it to nothing.
+        assert_eq!(cleaned(Some(&'"'.to_string())), None);
+        assert_eq!(cleaned(Some(&"'".to_string())), None);
     }
 
     #[test]
