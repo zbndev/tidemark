@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 use zbus::object_server::SignalEmitter;
 
 use crate::engine::{Command, Engine, Publication};
-use crate::service::{Daemon, Published};
+use crate::service::{Daemon, Published, PublishedUpdate};
 
 /// Commands from D-Bus clients. Small: a burst of refreshes is a user hammering a button,
 /// and the loop collapses them into one poll anyway.
@@ -39,6 +39,18 @@ const COMMAND_QUEUE: usize = 16;
 
 /// Finished statuses waiting to be published. One per account per poll.
 const UPDATE_QUEUE: usize = 64;
+
+/// Applies one successful check and returns the signal payload only when state changed.
+async fn publish_result(
+    published: &PublishedUpdate,
+    result: Result<Option<String>, update::CheckError>,
+) -> Result<Option<String>, update::CheckError> {
+    let next = result?;
+    Ok(published
+        .replace(next.clone())
+        .await
+        .then(|| next.unwrap_or_default()))
+}
 
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
@@ -108,6 +120,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let (commands, mut command_queue) = mpsc::channel(COMMAND_QUEUE);
     let (updates, mut update_queue) = mpsc::channel::<Publication>(UPDATE_QUEUE);
     let published = Published::default();
+    let published_update = PublishedUpdate::default();
 
     let connection = zbus::connection::Builder::session()?
         .name(ids::DAEMON_BUS_NAME)?
@@ -115,6 +128,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             ids::OBJECT_PATH,
             Daemon::new(
                 published.clone(),
+                published_update.clone(),
                 catalog,
                 configured,
                 commands.clone(),
@@ -160,6 +174,32 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    let release_checker = match update::Checker::production() {
+        Ok(checker) => {
+            let published_update = published_update.clone();
+            let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH)?;
+            Some(tokio::spawn(async move {
+                tokio::time::sleep(update::INITIAL_DELAY).await;
+                loop {
+                    match publish_result(&published_update, checker.check().await).await {
+                        Ok(Some(version)) => {
+                            if let Err(error) = Daemon::update_changed(&emitter, &version).await {
+                                tracing::warn!(%error, "could not announce update availability");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => tracing::info!(%error, "release check failed"),
+                    }
+                    tokio::time::sleep(update::INTERVAL).await;
+                }
+            }))
+        }
+        Err(error) => {
+            tracing::info!(%error, "release checker is unavailable");
+            None
+        }
+    };
+
     let mut term = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let signals = tokio::spawn({
@@ -195,6 +235,47 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // ordering is what makes the last status of the session reach its clients.
     drop(engine);
     let _ = publisher.await;
+    if let Some(release_checker) = release_checker {
+        release_checker.abort();
+    }
     signals.abort();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failed_release_check_preserves_the_previous_update() {
+        let published = PublishedUpdate::default();
+        assert!(published.replace(Some("0.2.0".into())).await);
+
+        let result = publish_result(&published, Err(update::CheckError::Version)).await;
+
+        assert!(result.is_err());
+        assert_eq!(published.get().await, "0.2.0");
+    }
+
+    #[tokio::test]
+    async fn only_a_changed_release_result_needs_a_signal() {
+        let published = PublishedUpdate::default();
+
+        assert_eq!(
+            publish_result(&published, Ok(Some("0.3.0".into())))
+                .await
+                .unwrap(),
+            Some("0.3.0".into())
+        );
+        assert_eq!(
+            publish_result(&published, Ok(Some("0.3.0".into())))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            publish_result(&published, Ok(None)).await.unwrap(),
+            Some(String::new())
+        );
+    }
 }
