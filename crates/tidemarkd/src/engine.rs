@@ -219,6 +219,31 @@ impl Account {
         }
     }
 
+    /// An account with no credential at all, whose client is built from its settings.
+    ///
+    /// For a provider that answers without one — a gateway running on this machine. There
+    /// is no stored key to wait for, so the client is built on the first poll and again
+    /// whenever the settings change, by the same [`Rebuild`] the credential-owning
+    /// providers use. Built lazily rather than at registration so that a base URL the user
+    /// has mistyped leaves this one account `Unreachable`, rather than refusing to load
+    /// the rest of them.
+    pub fn keyless(provider: ProviderId, account: AccountId, rebuild: Rebuild) -> Self {
+        let mut status = ProviderStatus::pending(&provider, &account);
+        describe(&mut status, CredentialKind::None);
+        Self {
+            status,
+            provider,
+            account,
+            factory: None,
+            rebuild: Some(rebuild),
+            client: None,
+            failures: 0,
+            retry_after: None,
+            last_change_at: None,
+            due: Instant::now(),
+        }
+    }
+
     /// How to build this account's client again when its settings change.
     ///
     /// Only for [`Account::with_client`] accounts: one built by a [`Factory`] is already
@@ -965,7 +990,7 @@ pub fn stored_kind(credential: CredentialKind) -> Option<Kind> {
     match credential {
         CredentialKind::Key => Some(Kind::Key),
         CredentialKind::OAuth => Some(Kind::Token),
-        CredentialKind::External => None,
+        CredentialKind::External | CredentialKind::None => None,
     }
 }
 

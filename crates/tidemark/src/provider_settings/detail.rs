@@ -420,6 +420,10 @@ impl ProviderDetail {
         match self.definition.credential_kind() {
             Some(CredentialKind::Key) => self.build_key_rows(),
             Some(CredentialKind::OAuth) => self.build_sign_in_row(),
+            // Nothing to paste and nobody to sign in to: the whole group would be an empty
+            // box under a heading that promised a control. Configuring the account is its
+            // settings alone, which are a group of their own.
+            Some(CredentialKind::None) => self.authentication.set_visible(false),
             Some(CredentialKind::External) | None => {
                 let status = self.status.borrow();
                 let row = adw::ActionRow::builder()

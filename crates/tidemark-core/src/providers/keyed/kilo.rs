@@ -55,7 +55,8 @@ use serde_json::{Map, Value};
 use std::fmt;
 use std::sync::Arc;
 use tidemark_types::{
-    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window,
+    WindowKey,
 };
 
 /// The slug this provider's history is filed under. Never changes once shipped.
@@ -1011,6 +1012,7 @@ fn encode_query(value: &str) -> String {
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "Kilo",
+    credential: CredentialKind::Key,
     credential_hint: "Kilo dashboard → Settings → API keys.",
     options: &[OptionSchema {
         name: ORGANIZATION,

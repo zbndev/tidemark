@@ -45,7 +45,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use tidemark_types::{
-    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window,
+    WindowKey,
 };
 
 /// The slug this provider's history is filed under. Never changes once shipped.
@@ -349,6 +350,7 @@ fn token_total(tokens: Option<&Tokens>) -> i64 {
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "LLM Proxy",
+    credential: CredentialKind::Key,
     credential_hint: "LLM Proxy admin console → API keys.",
     options: &[OptionSchema {
         name: BASE_URL,

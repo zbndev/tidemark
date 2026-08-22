@@ -43,7 +43,9 @@ use crate::providers::{BoxFuture, Credential, Provider, ProviderError, http};
 use serde::Deserialize;
 use std::fmt;
 use std::sync::Arc;
-use tidemark_types::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp};
+use tidemark_types::{
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp,
+};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// The slug this provider's history is filed under. Never changes once shipped.
@@ -62,6 +64,7 @@ const LOOKBACK_SECS: i64 = 30 * 86_400;
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "Fireworks",
+    credential: CredentialKind::Key,
     credential_hint: "app.fireworks.ai → Account Settings → API keys. The key alone is not enough: the account id from the accounts URL is a second, required setting.",
     options: &[OptionSchema {
         name: ACCOUNT,

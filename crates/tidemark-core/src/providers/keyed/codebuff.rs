@@ -43,8 +43,8 @@ use serde_json::{Map, Value};
 use std::fmt;
 use std::sync::Arc;
 use tidemark_types::{
-    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
-    WindowLength,
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window,
+    WindowKey, WindowLength,
 };
 
 /// The slug this provider's history is filed under. Never changes once shipped.
@@ -428,6 +428,7 @@ pub fn subscription_url() -> String {
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "Codebuff",
+    credential: CredentialKind::Key,
     credential_hint: "codebuff.com → Settings → API keys.",
     options: &[],
     build,

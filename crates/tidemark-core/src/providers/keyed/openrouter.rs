@@ -44,7 +44,8 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
 use tidemark_types::{
-    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window,
+    WindowKey,
 };
 
 /// The slug this provider's history is filed under. Never changes once shipped.
@@ -61,6 +62,7 @@ const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "OpenRouter",
+    credential: CredentialKind::Key,
     credential_hint: "openrouter.ai/settings/keys → Create Key.",
     options: &[OptionSchema {
         name: BASE_URL,

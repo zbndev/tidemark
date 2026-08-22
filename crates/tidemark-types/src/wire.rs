@@ -144,6 +144,10 @@ pub enum CredentialKind {
     /// Neither: the credential belongs to something else on the machine, and Tidemark
     /// reads it where that thing keeps it. Nothing to enter and nothing to sign out of.
     External,
+    /// No credential at all: the provider answers anyone who can reach it, which in
+    /// practice means a service already running on this machine. Configuring the account
+    /// is its settings alone, and there is nothing for a credentials dialog to offer.
+    None,
 }
 
 impl CredentialKind {
@@ -153,13 +157,14 @@ impl CredentialKind {
             Self::Key => "key",
             Self::OAuth => "oauth",
             Self::External => "external",
+            Self::None => "none",
         }
     }
 
     /// Parses a kind off the wire. `None` for anything this build does not know, which a
     /// client should treat as "no credential interface" rather than guessing at one.
     pub fn from_wire(value: &str) -> Option<Self> {
-        [Self::Key, Self::OAuth, Self::External]
+        [Self::Key, Self::OAuth, Self::External, Self::None]
             .into_iter()
             .find(|candidate| candidate.as_wire() == value)
     }
@@ -466,6 +471,22 @@ mod tests {
         let (decoded, _): (ProviderDefinition, _) = encoded.deserialize().expect("decodes");
         assert_eq!(decoded, original);
         assert_eq!(decoded.credential_kind(), Some(CredentialKind::OAuth));
+    }
+
+    #[test]
+    fn every_credential_kind_makes_the_round_trip_it_travels_as() {
+        // The strings are the wire, so a kind that did not come back is a client drawing
+        // the wrong dialog — or, for a provider with no credential, drawing one at all.
+        for kind in [
+            CredentialKind::Key,
+            CredentialKind::OAuth,
+            CredentialKind::External,
+            CredentialKind::None,
+        ] {
+            assert_eq!(CredentialKind::from_wire(kind.as_wire()), Some(kind));
+        }
+        assert_eq!(CredentialKind::None.as_wire(), "none");
+        assert_eq!(CredentialKind::from_wire("quota-frozen"), None);
     }
 
     #[test]

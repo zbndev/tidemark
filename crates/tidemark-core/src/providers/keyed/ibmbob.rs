@@ -59,7 +59,8 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
 use tidemark_types::{
-    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window,
+    WindowKey,
 };
 
 /// The slug this provider's history is filed under. Never changes once shipped.
@@ -75,6 +76,7 @@ const TRUSTED_SUFFIX: &str = ".bob.ibm.com";
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "IBM Bob",
+    credential: CredentialKind::Key,
     credential_hint: "bob.ibm.com → Settings → API keys. A Bob API key or an IBM IAM JWT.",
     options: &[],
     build,

@@ -44,7 +44,9 @@ use crate::providers::{BoxFuture, Credential, Provider, ProviderError, http};
 use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
-use tidemark_types::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp};
+use tidemark_types::{
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp,
+};
 
 /// The slug this provider's history is filed under. Never changes once shipped.
 pub const PROVIDER_ID: &str = "groq";
@@ -59,6 +61,7 @@ const DEFAULT_BASE_URL: &str = "https://api.groq.com/v1";
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "Groq",
+    credential: CredentialKind::Key,
     credential_hint: "console.groq.com → API Keys. A Groq API key with metrics access.",
     options: &[OptionSchema {
         name: BASE_URL,

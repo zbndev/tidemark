@@ -43,7 +43,9 @@ use crate::providers::{BoxFuture, Credential, Provider, ProviderError, http};
 use serde::Deserialize;
 use std::fmt;
 use std::sync::Arc;
-use tidemark_types::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp};
+use tidemark_types::{
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp,
+};
 
 /// The slug this provider's history is filed under. Never changes once shipped.
 pub const PROVIDER_ID: &str = "aiand";
@@ -63,6 +65,7 @@ const MAX_PAGES: usize = 10;
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "ai&",
+    credential: CredentialKind::Key,
     credential_hint: "console.aiand.com → API keys.",
     options: &[],
     build,

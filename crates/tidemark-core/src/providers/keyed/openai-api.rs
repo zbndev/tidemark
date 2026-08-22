@@ -68,7 +68,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use tidemark_types::{
-    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window,
+    WindowKey,
 };
 use time::OffsetDateTime;
 
@@ -103,6 +104,7 @@ const MAX_PAGES: usize = 100;
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "OpenAI",
+    credential: CredentialKind::Key,
     credential_hint: "platform.openai.com → Settings → API keys. An organization Admin key reads organization usage; project and service-account keys do not.",
     options: &[
         OptionSchema {

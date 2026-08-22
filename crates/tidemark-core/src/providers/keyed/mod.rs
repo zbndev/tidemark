@@ -73,7 +73,7 @@ use super::{BoxFuture, Credential, Provider, ProviderError, http};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
-use tidemark_types::{AccountId, ProviderId, Snapshot, Timestamp};
+use tidemark_types::{AccountId, CredentialKind, ProviderId, Snapshot, Timestamp};
 
 /// The settings of one account, as `config.toml` holds them.
 pub type Options = BTreeMap<String, String>;
@@ -179,7 +179,13 @@ pub struct HandSpec {
     pub id: &'static str,
     /// What to call it in front of a person.
     pub title: &'static str,
-    /// One sentence saying which page the key is on.
+    /// How the account is authenticated, and therefore what the credentials dialog offers.
+    /// [`CredentialKind::Key`] for all but the local gateways, which answer without a
+    /// credential and declare [`CredentialKind::None`]; the registry publishes this rather
+    /// than assuming a key, and builds the account to match.
+    pub credential: CredentialKind,
+    /// One sentence saying which page the key is on. Empty for a provider that needs no
+    /// credential, which has no page to send anyone to.
     pub credential_hint: &'static str,
     /// What the user may choose. A required option is refused by `build`, named in the
     /// message, exactly as [`Keyed::new`] refuses one.

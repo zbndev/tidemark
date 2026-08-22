@@ -28,7 +28,7 @@ use tidemark_core::providers::keyed::{
     self, aiand, codebuff, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo, litellm,
     llmproxy, openai_api, openrouter, poe, sub2api, xai,
 };
-use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex};
+use tidemark_core::providers::{Credential, Provider, ProviderError, antigravity, claude, codex};
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
     AccountId, CredentialKind, OptionChoice, ProviderDefinition, ProviderId, ProviderOption,
@@ -80,8 +80,11 @@ static OAUTH: &[(&str, &str, &str, &str)] = &[
 /// build time rather than inside an endpoint closure: LLM Proxy and sub2api. Each
 /// entry is the provider's own [`keyed::HandSpec`], which carries everything a
 /// `Spec` carries except the single endpoint, and says how to build a client from
-/// the stored key and the account's settings. The credential is the same pasted key
-/// as the catalog's, `CredentialKind::Key`, so the credentials dialog is unchanged.
+/// the stored key and the account's settings. Each entry says how it is authenticated:
+/// the same pasted key as the catalog's, `CredentialKind::Key`, for all of them so far,
+/// so the credentials dialog is unchanged — but a provider that answers without a
+/// credential says `CredentialKind::None` here and is published, and built, with no key
+/// field at all.
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &aiand::SPEC,
     &codebuff::SPEC,
@@ -154,15 +157,28 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
         external_fallback: None,
         options: options(spec.id, config),
     }));
-    definitions.extend(HAND_WRITTEN.iter().map(|spec| ProviderDefinition {
+    definitions.extend(
+        HAND_WRITTEN
+            .iter()
+            .map(|spec| hand_written_definition(spec, config)),
+    );
+    definitions
+}
+
+/// One hand-written provider as the settings dialog sees it.
+///
+/// Written apart from [`catalog`] so that the mapping can be checked against a spec of a
+/// test's own — above all the credential kind, the one field of the table that is not the
+/// same for every entry in it.
+fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderDefinition {
+    ProviderDefinition {
         provider: spec.id.to_owned(),
         title: spec.title.to_owned(),
-        credential: CredentialKind::Key.as_wire().to_owned(),
+        credential: spec.credential.as_wire().to_owned(),
         credential_hint: spec.credential_hint.to_owned(),
         external_fallback: None,
         options: options(spec.id, config),
-    }));
-    definitions
+    }
 }
 
 /// Builds one configured account, or returns `None` for a slug this build does not support.
@@ -418,12 +434,22 @@ fn keyed_account(spec: &'static keyed::Spec) -> Account {
 /// builder says what to do with them. It, too, resolves its URLs at build time and refuses
 /// a required option that is unset, naming it.
 fn hand_written_account(spec: &'static keyed::HandSpec) -> Account {
+    if spec.credential == CredentialKind::None {
+        // Nothing is stored and nothing is asked for, so there is no key to hand the
+        // builder — it is given a blank one and ignores it. The settings are the whole of
+        // what this account is, which is why it is built from them alone.
+        return Account::keyless(
+            ProviderId::new(spec.id),
+            AccountId::default(),
+            Box::new(move |options| (spec.build)(Credential::new(String::new()), options)),
+        );
+    }
     Account::new(
         ProviderId::new(spec.id),
         AccountId::default(),
         Box::new(move |credential, options| (spec.build)(credential, options)),
     )
-    .with_credential(CredentialKind::Key)
+    .with_credential(spec.credential)
     .with_hint(spec.credential_hint)
 }
 
@@ -535,6 +561,61 @@ mod tests {
             .find(|option| option.name == ANTIGRAVITY_SOURCE)
             .expect("the usage source is published");
         assert_eq!(source.value, "cli");
+    }
+
+    // Two specs of the tests' own, so the mapping can be checked without waiting for a
+    // provider of each kind to exist in the table.
+    static KEYLESS_SPEC: keyed::HandSpec = keyed::HandSpec {
+        id: "test-keyless",
+        title: "Test Keyless",
+        credential: CredentialKind::None,
+        credential_hint: "",
+        options: &[],
+        build: |_, _| Err(ProviderError::Local("not built in a test".into())),
+    };
+
+    static KEY_SPEC: keyed::HandSpec = keyed::HandSpec {
+        id: "test-keyed",
+        title: "Test Keyed",
+        credential: CredentialKind::Key,
+        credential_hint: "Test console \u{2192} API keys.",
+        options: &[],
+        build: |_, _| Err(ProviderError::Local("not built in a test".into())),
+    };
+
+    #[test]
+    fn a_provider_with_no_credential_is_published_without_a_hint() {
+        // Nothing is stored and nothing is asked for, so there is no page to send anyone
+        // to: the definition carries "none" and an empty hint, which is what tells the
+        // settings dialog to draw no credential row at all.
+        let published = hand_written_definition(&KEYLESS_SPEC, &empty_config());
+        assert_eq!(published.credential, "none");
+        assert_eq!(published.credential_kind(), Some(CredentialKind::None));
+        assert!(published.credential_hint.is_empty());
+        assert_eq!(published.external_fallback, None);
+    }
+
+    #[test]
+    fn a_key_provider_is_published_exactly_as_before() {
+        // The kind travelling from the spec rather than being assumed must not have moved
+        // the pasted-key providers, which are every other entry in the table.
+        let published = hand_written_definition(&KEY_SPEC, &empty_config());
+        assert_eq!(published.credential, "key");
+        assert_eq!(published.credential_kind(), Some(CredentialKind::Key));
+        assert_eq!(published.credential_hint, KEY_SPEC.credential_hint);
+    }
+
+    #[test]
+    fn an_account_with_no_credential_is_built_from_its_settings_alone() {
+        // `Account::new` would ask the keyring for a key that was never stored and report
+        // `NoCredential` forever, so a keyless account is built without a factory at all —
+        // and without a hint, there being nowhere to send anyone for a credential.
+        let account = hand_written_account(&KEYLESS_SPEC);
+        assert_eq!(
+            account.status().credential.as_deref(),
+            Some(CredentialKind::None.as_wire())
+        );
+        assert_eq!(account.status().credential_hint, None);
     }
 
     #[test]
@@ -664,8 +745,8 @@ mod tests {
     #[test]
     fn every_hand_written_spec_reaches_the_published_catalog() {
         // The second table is hand-maintained, so each of its entries is checked for the
-        // same agreement the catalog gets as a whole: same title, same pasted-key
-        // credential, same hint, same options — and it must build an account at all.
+        // same agreement the catalog gets as a whole: same title, the credential the spec
+        // itself declares, same hint, same options — and it must build an account at all.
         let config = empty_config();
         let published = catalog(&config);
         for spec in HAND_WRITTEN {
@@ -674,7 +755,7 @@ mod tests {
                 .find(|definition| definition.provider == spec.id)
                 .unwrap_or_else(|| panic!("{} is in the table but not published", spec.id));
             assert_eq!(entry.title, spec.title);
-            assert_eq!(entry.credential, CredentialKind::Key.as_wire());
+            assert_eq!(entry.credential, spec.credential.as_wire());
             assert_eq!(entry.credential_hint, spec.credential_hint);
             assert_eq!(entry.options.len(), spec.options.len());
             assert!(

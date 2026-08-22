@@ -43,7 +43,9 @@ use crate::providers::{BoxFuture, Credential, Provider, ProviderError, http};
 use serde_json::{Map, Value};
 use std::fmt;
 use std::sync::Arc;
-use tidemark_types::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp};
+use tidemark_types::{
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp,
+};
 
 /// The slug this provider's history is filed under. Never changes once shipped.
 pub const PROVIDER_ID: &str = "deepgram";
@@ -350,6 +352,7 @@ pub fn breakdown_url(base: &str, project: &str) -> String {
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "Deepgram",
+    credential: CredentialKind::Key,
     credential_hint: "Deepgram console → API keys.",
     options: &[
         OptionSchema {

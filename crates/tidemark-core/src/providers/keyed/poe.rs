@@ -36,7 +36,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
-use tidemark_types::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp};
+use tidemark_types::{
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp,
+};
 use time::OffsetDateTime;
 
 /// The slug this provider's history is filed under. Never changes once shipped.
@@ -60,6 +62,7 @@ const HISTORY_WINDOW_SECS: i64 = 30 * 86_400;
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "Poe",
+    credential: CredentialKind::Key,
     credential_hint: "poe.com → Settings → API keys.",
     options: &[],
     build,

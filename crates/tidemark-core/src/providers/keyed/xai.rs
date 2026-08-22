@@ -42,7 +42,9 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
-use tidemark_types::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp};
+use tidemark_types::{
+    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp,
+};
 use time::OffsetDateTime;
 
 /// The slug this provider's history is filed under. Never changes once shipped.
@@ -58,6 +60,7 @@ const BASE_URL: &str = "https://management-api.x.ai/v1/billing/teams";
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "xAI",
+    credential: CredentialKind::Key,
     credential_hint: "xAI Console → Settings → Management Keys. A management key is not an inference API key.",
     options: &[OptionSchema {
         name: TEAM,
