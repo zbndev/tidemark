@@ -36,6 +36,7 @@ pub mod clinepass;
 pub mod crof;
 pub mod deepinfra;
 pub mod elevenlabs;
+pub mod factory;
 pub mod fireworks;
 pub mod groq;
 pub mod ibmbob;
