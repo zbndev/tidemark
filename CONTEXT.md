@@ -429,9 +429,12 @@ GTK present and then fails to start. `scripts/check-package-deps.sh` turns that 
 into a failed build, and both package jobs run it.
 
 An upgrade restarts the user's daemon: both formats' maintainer scripts call
-`data/restart-user-daemon`, which reaches each real user manager through
-`--machine=<user>@.host` rather than talking to root's. `scripts/test-package-upgrade.sh`
-proves it against a real systemd, and is run by hand rather than in CI.
+`data/restart-user-daemon`, which uses `runuser` plus the user's runtime directory to reach
+each real user manager rather than talking to root's. Fedora's `.host` machine transport
+cannot reach the user manager in the systemd container even with `systemd-machined`
+running, so it is deliberately not part of this path. `scripts/test-package-upgrade.sh`
+proves the restart against real systemd user managers and real `dpkg` / `rpm`
+transactions; it is run by hand rather than in CI.
 
 ## Non-goals
 

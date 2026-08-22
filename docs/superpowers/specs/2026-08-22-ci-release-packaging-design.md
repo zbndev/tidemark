@@ -1,6 +1,6 @@
 # CI and Release Packaging Design
 
-- Status: approved
+- Status: implemented (version-mismatch banner deferred by the owner)
 - Date: 2026-08-22
 - Implements: implementation step 17
 
@@ -25,8 +25,6 @@ written in English.
 - Make a package upgrade restart the user's `tidemarkd.service`, through the existing
   `data/restart-user-daemon`, in both formats.
 - Prove that once, against a real systemd and a real package transaction.
-- Let the GUI notice that it is talking to a daemon of a different version, since no
-  package script can restart a program living in the user's tray.
 
 ## Non-goals
 
@@ -37,6 +35,8 @@ written in English.
 - `lintian` / `rpmlint` gates. Worth adding later; nothing here depends on them.
 - Debian. Trixie ships GTK 4.18 and forky has not released.
 - Publishing a release automatically. The workflow creates a draft; a human publishes it.
+- The version-mismatch banner originally designed for the GUI. It remains a separate,
+  owner-deferred follow-up and is not required for the package/release path.
 
 ## Target Set
 
@@ -61,7 +61,7 @@ no cross-distribution glibc question to get wrong.
 |---|---|---|
 | Checks | `ubuntu-26.04` runner | Real GTK 4.22 / libadwaita 1.9 from `apt`. No container layer. |
 | `.deb` | `ubuntu-26.04` runner | Oldest supported Ubuntu target; builds natively on it. |
-| `.rpm` | `ubuntu-latest` runner, `container: fedora:44` | GitHub has no Fedora-hosted runner and does not plan one (`actions/runner-images` issue 2307). A Fedora container on an Ubuntu runner is the standard route; the alternative is a self-hosted machine. |
+| `.rpm` | `ubuntu-26.04` runner, `container: fedora:44` | GitHub has no Fedora-hosted runner and does not plan one (`actions/runner-images` issue 2307). A Fedora container on the current Ubuntu runner is the standard route; the alternative is a self-hosted machine. |
 
 Docker therefore appears in one job, because there it is the only option, and nowhere
 else.
@@ -107,9 +107,10 @@ third-party trademarks, and a card without a mark is a state the interface alrea
 `.deb` and `%config(noreplace)` in the `.rpm`. It lives under `/etc`, and an upgrade must
 not discard an edit.
 
-Dependencies not discoverable from the ELF are added by hand, and only those: the D-Bus
-daemon (zbus is pure Rust, so `libdbus` is never linked and `find-requires` cannot see it)
-and `hicolor-icon-theme`.
+Dependencies not discoverable from the ELF are added by hand: the D-Bus daemon (zbus is
+pure Rust, so `libdbus` is never linked and `find-requires` cannot see it),
+`hicolor-icon-theme`, and Fedora's `util-linux`, which supplies `runuser`. Ubuntu marks
+`util-linux` Essential, so the `.deb` does not repeat it.
 
 `options=(!lto)` in `PKGBUILD` is not carried over. It exists because makepkg exports its
 own `CFLAGS`, which makes the `cc` crate compile `aws-lc-sys` to GCC LTO bitcode that
@@ -134,9 +135,10 @@ of its own.
 
 `cargo-deb`'s `systemd-units` feature is deliberately unused. It generates
 `dh_installsystemd`-shaped code for the **system** scope, and `tidemarkd.service` is a
-**user** unit: it would issue `daemon-reload` and `enable` against root's manager, which is
-precisely the failure the `--machine=<user>@.host` transport inside `restart-user-daemon`
-exists to avoid.
+**user** unit: it would issue `daemon-reload` and `enable` against root's manager. The
+shared helper instead enumerates users and invokes `systemctl --user` through `runuser`
+with each user's `XDG_RUNTIME_DIR`. Fedora's `.host` machine transport was tested and
+rejected after it failed even with `systemd-machined` running.
 
 Two ordering facts are recorded so they are not rediscovered. On an rpm upgrade the new
 package's `%post` runs *before* the old package's `%postun`, so the restart lives only in
@@ -147,6 +149,9 @@ configure` runs after the new files are unpacked, which is the correct point.
 activation starts the new binary when Tidemark is next opened.
 
 ## Version Mismatch in the Client
+
+**Deferred at the owner's request.** The design below is retained for the follow-up; no
+part of packaging or release creation depends on it.
 
 The package restarts the daemon. Nothing can restart the GUI, which lives in the user's
 tray and belongs to them, so an upgrade can leave a new daemon talking to an old front
@@ -215,8 +220,8 @@ Step 4 is the assertion the whole step exists for, stated semantically rather th
 proxy: the running daemon is the new code. It is worth the one extra relink that building
 a second version costs — only the version string changes, so dependencies stay cached.
 
-It also asserts the negative: on a *fresh* install `try-restart` starts nothing, and the
-unit remains D-Bus-activatable.
+It also asserts the negative: a *fresh* install starts nothing. D-Bus activation remains
+covered by the existing desktop-integration checks rather than this transaction test.
 
 What this leaves uncovered is stated rather than hidden. CI keeps the cheap stub-based
 `scripts/test-restart-user-daemon.sh`, which covers `restart-user-daemon` itself but not
@@ -225,8 +230,7 @@ by nothing else; if the maintainer scripts are later edited, whoever edits them 
 script. This is the accepted cost of not running a systemd-in-Docker transaction on every
 release.
 
-The version-mismatch banner is covered by unit tests on the comparison and on the resulting
-banner state. No live-bus test.
+The deferred version-mismatch banner has no tests in this pass.
 
 ## Documentation
 

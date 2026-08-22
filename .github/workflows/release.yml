@@ -28,6 +28,12 @@ jobs:
       - name: The tag must agree with Cargo.toml
         run: scripts/check-tag-version.sh "${GITHUB_REF_NAME}"
 
+      - name: Confirm the toolkit meets the floor
+        run: |
+          pkg-config --atleast-version=4.22 gtk4
+          pkg-config --atleast-version=1.9 libadwaita-1
+          pkg-config --modversion gtk4 libadwaita-1
+
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo fmt --all --check
@@ -78,7 +84,7 @@ jobs:
     # auto-req scans the payload transitively, so the requires list is the build host's
     # whole shared-library closure. Built anywhere but Fedora it names libraries Fedora
     # numbers differently, and the package will not install.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container: fedora:44
     steps:
       - name: Bootstrap the container
@@ -107,7 +113,7 @@ jobs:
   # A draft, not a publication: a person decides when it goes out.
   release:
     needs: [checks, deb, rpm]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/download-artifact@v5
         with:

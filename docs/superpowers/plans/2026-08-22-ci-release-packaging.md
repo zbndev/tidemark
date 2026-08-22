@@ -4,6 +4,13 @@
 
 **Goal:** GitHub Actions checks every change against the real toolkit floor, a `v*` tag builds a `.deb` and an `.rpm` into a draft release, and a package upgrade demonstrably leaves the *new* `tidemarkd` running.
 
+> **Execution note, 2026-08-22:** Tasks 1–4 and 6–8 are implemented. Task 5 is deferred
+> below at the owner's request. The command blocks remain the pre-execution plan; where
+> investigation changed an assumption, the implemented files and the Step 17 log are
+> authoritative. In particular, the first-run message moved from `/usr/share/doc` to
+> `/usr/lib/tidemark`, the restart helper uses `runuser` instead of Fedora's broken
+> `.host` transport, and every GitHub-hosted job now uses `ubuntu-26.04`.
+
 **Architecture:** Checks and the `.deb` build run natively on the `ubuntu-26.04` runner; the `.rpm` builds in a `fedora:44` container because GitHub has no Fedora runner. Packages are produced by `cargo-deb` and `cargo-generate-rpm` from metadata in `crates/tidemark/Cargo.toml`, both deriving dependencies from the built ELF. Both formats' maintainer scripts call the one existing `data/restart-user-daemon`. The upgrade is proven once, by hand, with a script that runs systemd inside Docker; it has no CI trigger.
 
 **Tech Stack:** GitHub Actions, `cargo-deb`, `cargo-generate-rpm`, Docker, systemd user units, D-Bus (`zbus`), GTK 4.22 / libadwaita 1.9.
@@ -1276,6 +1283,9 @@ Checked against the spec, section by section.
 - **Test Strategy** → Task 6 (the manual proof, its assertion and its negative case), Task 5 Steps 1–4 (the banner's unit tests), Task 1 (the stub restart test staying in CI).
 - **Documentation** → Task 8.
 
-Names used across tasks and checked for consistency: `CLIENT_VERSION`, `version_notice`, `Update::Version`, `data/packaging/message.txt` installed as `/usr/share/doc/tidemark/first-run.txt`, `/usr/lib/tidemark/restart-user-daemon`, `scripts/check-tag-version.sh`, `scripts/test-package-upgrade.sh`.
+Implemented names checked for consistency: `data/packaging/message.txt` installed as
+`/usr/lib/tidemark/first-run.txt`, `/usr/lib/tidemark/restart-user-daemon`,
+`scripts/check-tag-version.sh`, `scripts/test-package-upgrade.sh`. The banner names
+`CLIENT_VERSION`, `version_notice` and `Update::Version` remain deferred with Task 5.
 
 Ordering dependency worth naming: Task 4 Step 2 edits asset arrays that Tasks 2 and 3 create, so Task 4 must not run before both. Task 6 needs Tasks 2, 3 and 4 complete. Task 5 is independent of the packaging tasks and can be done at any point after Task 1.
