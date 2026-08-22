@@ -19,10 +19,13 @@ whose services the cards are about:
 | `tidemark-kimi-symbolic.svg` | Moonshot AI (Kimi) |
 | `tidemark-llmproxy-symbolic.svg` | The LLM Proxy project |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
+| `tidemark-openrouter-symbolic.svg` | OpenRouter |
+| `tidemark-poe-symbolic.svg` | Quora, Inc. (Poe) |
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
 | `tidemark-venice-symbolic.svg` | Venice AI |
 | `tidemark-warp-symbolic.svg` | Warp (warp.dev) |
+| `tidemark-xai-symbolic.svg` | xAI Corp. |
 | `tidemark-zai-symbolic.svg` | Z.ai (Zhipu AI) |
 | `tidemark-zenmux-symbolic.svg` | ZenMux |
 
@@ -35,14 +38,17 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the thirteen marks that CodexBar records as the provider icons of Amp,
-Chutes, ClawRouter, ClinePass, Crof, ElevenLabs, LLM Proxy, Neuralwatt, sub2api,
-Synthetic, Venice, Warp and ZenMux — the
+asset, and except the sixteen marks that CodexBar records as the provider icons of Amp,
+Chutes, ClawRouter, ClinePass, Crof, ElevenLabs, LLM Proxy, Neuralwatt, OpenRouter,
+Poe, sub2api,
+Synthetic, Venice, Warp, xAI and ZenMux — the
 ClinePass one, its file notes, is
 Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand). Each was reduced to a
-single-colour path set and stripped of the fills, gradients, masks
-and filters the originals carry — a symbolic icon is recoloured by the theme and cannot keep
-them. Each was then re-framed: its own bounding box measured, its longest side scaled to the
+single-colour path set and stripped of the fills, gradients, masks and filters the
+originals carry — a symbolic icon is recoloured by the theme and cannot keep
+them; the OpenRouter and xAI marks are drawn as strokes and keep them, a stroke being as
+single-colour as a fill. Each was then re-framed: its own bounding box measured, its
+longest side scaled to the
 same fraction of a square grid so that the set reads at one optical size, and the box shifted
 so the mark stands on the grid's floor rather than floating in its middle — which is
 what puts every mark's foot on the baseline of the name beside it. The shapes themselves are

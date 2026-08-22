@@ -1,0 +1,9 @@
+<!-- The xAI mark belongs to xAI Corp. Not covered by Tidemark's MIT licence; used nominatively
+     to identify the service a card reports on. See docs/TRADEMARKS.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
+  <g transform="translate(-2.89 -2.282) scale(1.2155)" fill="none" stroke="#000" stroke-width="2.6" stroke-linecap="round">
+    <path d="M4.5 4.5l11 15"/>
+    <path d="M15.5 4.5l-11 15"/>
+    <path d="M20 4.5v15"/>
+  </g>
+</svg>
