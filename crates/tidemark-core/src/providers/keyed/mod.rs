@@ -47,6 +47,7 @@ pub mod factory;
 pub mod fireworks;
 pub mod groq;
 pub mod ibmbob;
+pub mod kilo;
 pub mod kimi;
 pub mod litellm;
 pub mod llmproxy;
