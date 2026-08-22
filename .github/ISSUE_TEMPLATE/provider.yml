@@ -8,6 +8,8 @@ body:
       attributes:
           label: "Provider name and info"
           description: "Provider name and all possible info. Auth type (API key or OAuth), balance type (quota or credits), website link"
+      validation:
+          required: true
 
     - type: checkboxes
       attributes:
