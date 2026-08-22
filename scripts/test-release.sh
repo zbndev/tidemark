@@ -51,12 +51,14 @@ make_fixture() {
 
 # Runs the fixture's release.sh expecting failure, and proving it edited nothing.
 reject() {
+    before=$(git -C "$fixture" status --porcelain)
     if (cd "$fixture" && scripts/release.sh "$@" >/dev/null 2>&1); then
         printf 'expected scripts/release.sh %s to fail\n' "$*" >&2
         exit 1
     fi
-    [ -z "$(git -C "$fixture" status --porcelain)" ] || {
-        printf 'scripts/release.sh %s failed but edited the tree\n' "$*" >&2
+    after=$(git -C "$fixture" status --porcelain)
+    [ "$before" = "$after" ] || {
+        printf 'scripts/release.sh %s failed but changed the tree\n' "$*" >&2
         exit 1
     }
 }
@@ -76,4 +78,32 @@ reject 1..2
 reject .1.2
 cleanup
 
-printf 'argument validation holds\n'
+printf 'rejecting a release cut outside main\n'
+make_fixture
+git -C "$fixture" switch -q -c side
+reject "$next_version"
+git -C "$fixture" switch -q main
+
+printf 'rejecting a dirty tree\n'
+echo stray >>"$fixture/PKGBUILD"
+reject "$next_version"
+
+printf 'rejecting stale main\n'
+git -C "$fixture" commit -qam stale
+reject "$next_version"
+git -C "$fixture" push -q origin main
+
+printf 'rejecting a version that is not newer\n'
+reject "$current_version"
+
+printf 'rejecting a tag that exists locally\n'
+git -C "$fixture" tag "v$next_version"
+reject "$next_version"
+
+printf 'rejecting a tag that exists on origin only\n'
+git -C "$fixture" push -q origin "v$next_version"
+git -C "$fixture" tag -d "v$next_version" >/dev/null
+reject "$next_version"
+cleanup
+
+printf 'precondition guards hold\n'

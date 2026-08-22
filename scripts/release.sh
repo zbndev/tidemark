@@ -45,3 +45,34 @@ canonical() {
 [ $# -eq 1 ] || die 'usage: scripts/release.sh X.X.X'
 new=$1
 canonical "$new" || die "$new is not a canonical version (X.X.X, no leading zeroes)"
+
+# True when canonical $1 is strictly greater than canonical $2. Numeric, not
+# lexicographic: 0.1.10 is newer than 0.1.9.
+greater() {
+    a_head=${1%%.*}
+    b_head=${2%%.*}
+    [ "$a_head" -lt "$b_head" ] && return 1
+    [ "$a_head" -gt "$b_head" ] && return 0
+    [ "$1" = "$a_head" ] && return 1
+    greater "${1#*.}" "${2#*.}"
+}
+
+[ "$(git rev-parse --abbrev-ref HEAD)" = main ] || die 'releases are cut from main'
+
+[ -z "$(git status --porcelain)" ] || die 'the working tree is not clean'
+
+git fetch -q origin main
+[ "$(git rev-parse main)" = "$(git rev-parse origin/main)" ] \
+    || die 'main is not up to date with origin/main; merge or rebase first'
+
+current=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+[ -n "$current" ] || die 'no version found under [workspace.package] in Cargo.toml'
+canonical "$current" || die "the manifest version $current is not canonical"
+greater "$new" "$current" || die "$new is not newer than the manifest's $current"
+
+if git rev-parse -q --verify "refs/tags/v$new" >/dev/null; then
+    die "tag v$new already exists locally"
+fi
+if git ls-remote --tags --exit-code origin "refs/tags/v$new" >/dev/null 2>&1; then
+    die "tag v$new already exists on origin"
+fi
