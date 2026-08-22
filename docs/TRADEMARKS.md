@@ -55,7 +55,8 @@ Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand), and the Op
 is the blossom CodexBar files under its codex name. Each was reduced to a
 single-colour path set and stripped of the fills, gradients, masks and filters the
 originals carry — a symbolic icon is recoloured by the theme and cannot keep
-them; the OpenRouter and xAI marks are drawn as strokes and keep them, a stroke being as
+them; the ai&, ClawRouter, Fireworks, LiteLLM, OpenRouter, Synthetic and xAI marks are
+drawn as strokes and keep them, a stroke being as
 single-colour as a fill. Each was then re-framed: its own bounding box measured, its
 longest side scaled to the
 same fraction of a square grid so that the set reads at one optical size, and the box shifted

@@ -7,13 +7,16 @@
 //! # A self-hosted relay with no home
 //!
 //! sub2api is software other people run; there is no default host, so the base URL is
-//! a *required* free-text option and [`Keyed::new`](super::Keyed::new) refuses to build
-//! without one, naming the setting. The shared reader enforces HTTPS — plain HTTP
-//! stands for loopback only, which is how a local instance is reached. `/v1/usage` is
-//! appended as the plugin appends it (a host already ending in `/v1` or `/v1/usage` is
-//! left alone), with the `days=30` window the recorded request carries. CodexBar also
-//! sends the machine's timezone for the server to bucket `usage.today` by; a daemon
-//! has no user timezone to speak of, so this port states UTC.
+//! a *required* free-text option and the account's `build` refuses to build without
+//! one, naming the setting. The shared reader enforces the whole rule —
+//! HTTPS, with plain HTTP standing for loopback only, which is how a local instance
+//! is reached — and a value it refuses is refused at build time, as a
+//! [`ProviderError::Local`] the card can state, rather than inside an endpoint
+//! closure where it would panic. `/v1/usage` is appended as the plugin appends it (a
+//! host already ending in `/v1` or `/v1/usage` is left alone), with the `days=30`
+//! window the recorded request carries. CodexBar also sends the machine's timezone
+//! for the server to bucket `usage.today` by; a daemon has no user timezone to speak
+//! of, so this port states UTC.
 //!
 //! # Two ways to be limited
 //!
@@ -55,9 +58,13 @@
 //! each rate limit's `remaining`) are deserialized for the same check and then read
 //! by no one, exactly as in the plugin.
 
-use super::{Auth, Method, OptionSchema, Spec, base_url};
-use crate::providers::{ProviderError, length_title, parse_rfc3339};
+use super::{HandSpec, OptionSchema, Options, base_url, redact_query, required};
+use crate::providers::{
+    BoxFuture, Credential, Provider, ProviderError, http, length_title, parse_rfc3339,
+};
 use serde::Deserialize;
+use std::fmt;
+use std::sync::Arc;
 use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
     WindowLength,
@@ -65,6 +72,9 @@ use tidemark_types::{
 
 /// The slug this provider's history is filed under. Never changes once shipped.
 pub const PROVIDER_ID: &str = "sub2api";
+
+/// Name of the base-URL setting under `[provider.sub2api]`.
+pub const BASE_URL: &str = "base_url";
 
 /// The `rate_limits` names this parser knows a length for; anything else keeps its own
 /// name and carries no length.
@@ -482,43 +492,122 @@ fn whole(value: Option<f64>, field: &str) -> Result<i64, ProviderError> {
     }
 }
 
-/// sub2api as the keyed mechanism sees it.
-pub static SPEC: Spec = Spec {
+/// sub2api as the settings dialog sees it.
+pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "sub2api",
-    endpoint: |options| {
-        let mut base =
-            base_url(options, "base_url", "").expect("a required option was checked at build time");
-        if !(base.ends_with("/v1") || base.ends_with("/v1/usage")) {
-            base.push_str("/v1");
-        }
-        if !base.ends_with("/usage") {
-            base.push_str("/usage");
-        }
-        // The 30-day window is the request CodexBar recorded. CodexBar also sends the
-        // machine's timezone for server-side bucketing; a daemon has none to state.
-        format!("{base}?days=30&timezone=UTC")
-    },
-    method: Method::Get,
-    auth: Auth::Bearer,
-    headers: &[("Accept", "application/json")],
-    parse,
     credential_hint: "sub2api group page → API keys.",
     options: &[OptionSchema {
-        name: "base_url",
+        name: BASE_URL,
         title: "Base URL",
         description: Some("Host of the sub2api instance to poll; HTTPS, or HTTP on loopback."),
         default: "",
         choices: &[],
         required: true,
     }],
+    build,
 };
+
+/// Builds a pollable client from the stored key and the account's settings. The base
+/// URL is required — sub2api has no default host — and resolved here, so a changed one
+/// takes effect on the next build and a value the shared reader refuses is a
+/// [`ProviderError::Local`] naming the setting, not a panic mid-fetch.
+fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Sub2Api::new(credential, options)?))
+}
+
+/// One sub2api deployment: the key, and the `/v1/usage` URL it is polled at.
+pub struct Sub2Api {
+    client: reqwest::Client,
+    credential: Credential,
+    url: String,
+}
+
+impl Sub2Api {
+    /// Builds a client. The URL is resolved once, here, because a setting that changed
+    /// the host would otherwise take effect only on the next daemon restart.
+    pub fn new(credential: Credential, options: &Options) -> Result<Self, ProviderError> {
+        // `required` proved a value exists and `base_url` the HTTPS-or-loopback rule on
+        // it, the same two checks a catalogued spec's build makes; both name the setting
+        // when they refuse.
+        let raw = required(options, BASE_URL, "Base URL")?;
+        let base = base_url(&Options::from([(BASE_URL.to_owned(), raw)]), BASE_URL, "")?;
+        Ok(Self {
+            client: http::client()?,
+            credential,
+            url: usage_url(&base),
+        })
+    }
+
+    /// The `/v1/usage` URL this instance polls.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The request this instance would send, built but not sent, so that the placement
+    /// of the key is testable without a server.
+    fn usage_request(&self) -> Result<reqwest::Request, ProviderError> {
+        self.client
+            .get(&self.url)
+            .bearer_auth(self.credential.expose())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .build()
+            .map_err(|error| ProviderError::Client(redact_query(error)))
+    }
+
+    async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
+        if self.credential.is_blank() {
+            return Err(ProviderError::Credential { status: 401 });
+        }
+        let body = super::request(&self.client, self.usage_request()?).await?;
+        parse(&body, Timestamp::now())
+    }
+}
+
+impl fmt::Debug for Sub2Api {
+    /// Written by hand: a derived impl would print the credential the first time anything
+    /// traced a client.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sub2Api")
+            .field("id", &PROVIDER_ID)
+            .field("url", &self.url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Provider for Sub2Api {
+    fn id(&self) -> ProviderId {
+        ProviderId::new(PROVIDER_ID)
+    }
+
+    fn account(&self) -> AccountId {
+        AccountId::default()
+    }
+
+    fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+        Box::pin(self.fetch_inner())
+    }
+}
+
+/// The `/v1/usage` URL of a deployment base, appended as the plugin appends it: a base
+/// already ending in `/v1` or `/v1/usage` is left alone, anything else gains `/v1`, and
+/// then `/usage`. Pure, so the recorded URL spellings stay reachable from a test.
+fn usage_url(base: &str) -> String {
+    let mut base = base.to_owned();
+    if !(base.ends_with("/v1") || base.ends_with("/v1/usage")) {
+        base.push_str("/v1");
+    }
+    if !base.ends_with("/usage") {
+        base.push_str("/usage");
+    }
+    // The 30-day window is the request CodexBar recorded. CodexBar also sends the
+    // machine's timezone for server-side bucketing; a daemon has none to state.
+    format!("{base}?days=30&timezone=UTC")
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::ProviderError;
-    use crate::providers::keyed::Options;
     use tidemark_types::{DetailRow, DetailSection, Snapshot, Timestamp, Window};
 
     /// Recorded by CodexBar, `Sub2APIPluginGoldenTests.swift` and
@@ -954,8 +1043,12 @@ mod tests {
         );
     }
 
-    fn endpoint(base: &str) -> String {
-        (SPEC.endpoint)(&Options::from([("base_url".to_owned(), base.to_owned())]))
+    fn options(base: &str) -> Options {
+        Options::from([(BASE_URL.to_owned(), base.to_owned())])
+    }
+
+    fn built(base: &str) -> Result<Sub2Api, ProviderError> {
+        Sub2Api::new(Credential::new("sk-test"), &options(base))
     }
 
     #[test]
@@ -963,38 +1056,109 @@ mod tests {
         // CodexBar's own request test: a bare host, one already carrying /v1, and one
         // already complete all reach the same path.
         assert_eq!(
-            endpoint("https://api.example.com"),
+            built("https://api.example.com").expect("builds").url(),
             "https://api.example.com/v1/usage?days=30&timezone=UTC"
         );
         assert_eq!(
-            endpoint("https://api.example.com/v1"),
+            built("https://api.example.com/v1").expect("builds").url(),
             "https://api.example.com/v1/usage?days=30&timezone=UTC"
         );
         assert_eq!(
-            endpoint("https://api.example.com/v1/usage"),
+            built("https://api.example.com/v1/usage")
+                .expect("builds")
+                .url(),
             "https://api.example.com/v1/usage?days=30&timezone=UTC"
         );
         assert_eq!(
-            endpoint("http://127.0.0.1:8080"),
+            built("http://127.0.0.1:8080").expect("builds").url(),
             "http://127.0.0.1:8080/v1/usage?days=30&timezone=UTC",
             "loopback HTTP is how a self-hosted sub2api is reached"
         );
     }
 
     #[test]
-    fn the_spec_polls_with_a_bearer_key_and_requires_the_base_url() {
-        use crate::providers::keyed::{Auth, Method};
+    fn a_base_url_the_shared_reader_refuses_fails_the_build_naming_the_setting() {
+        // A set-but-invalid value — plain HTTP to a remote host, or the likelier
+        // scheme-less typo — must refuse the account's build as a `Local` the card can
+        // state. The daemon's factory calls this same `build`, so proving it here is
+        // proving the daemon cannot panic on these inputs.
+        for bad in ["http://remote.host", "myproxy.example.com"] {
+            let Err(error) = build(Credential::new("sk-test"), &options(bad)) else {
+                panic!("{bad} must refuse the build, not panic");
+            };
+            assert!(
+                matches!(error, ProviderError::Local(ref message)
+                    if message.contains("base_url") && message.contains("https://")),
+                "{error} for {bad}"
+            );
+            assert!(
+                built(bad).is_err(),
+                "the constructor and the builder refuse the same values"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_base_url_names_itself_rather_than_malforming_the_url() {
+        // Without this refusal the user would see "Unreachable: relative URL without a
+        // base" on every poll, with nothing pointing at the settings field that fixes it.
+        let Err(error) = build(Credential::new("sk-test"), &Options::new()) else {
+            panic!("the required option is unset, so the build must refuse")
+        };
+        assert!(
+            matches!(error, ProviderError::Local(ref message)
+                if message == "Base URL is not set for this account"),
+            "{error}"
+        );
+        let Err(blank) = build(Credential::new("sk-test"), &options("  ")) else {
+            panic!("a blank value is an unset value, so the build must refuse")
+        };
+        assert!(
+            matches!(blank, ProviderError::Local(ref message) if message.contains("Base URL")),
+            "{blank}"
+        );
+    }
+
+    #[test]
+    fn the_request_polls_with_a_bearer_key() {
+        let sub2api = built("https://api.example.com").expect("builds");
+        let request = sub2api.usage_request().expect("builds");
+        assert_eq!(request.method(), reqwest::Method::GET);
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .expect("present"),
+            "Bearer sk-test"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::ACCEPT)
+                .expect("present"),
+            "application/json",
+            "the recorded request carries this header"
+        );
+    }
+
+    #[test]
+    fn the_spec_publishes_one_required_option() {
         assert_eq!(SPEC.id, PROVIDER_ID);
         assert_eq!(SPEC.title, "sub2api");
-        assert_eq!(SPEC.auth, Auth::Bearer);
-        assert_eq!(SPEC.method, Method::Get);
         assert_eq!(SPEC.options.len(), 1);
         let option = &SPEC.options[0];
         assert_eq!(option.name, "base_url");
         assert!(
             option.required,
-            "no default host exists; the mechanism refuses to build without one"
+            "no default host exists; the build refuses without one"
         );
         assert!(option.choices.is_empty(), "free text");
+    }
+
+    #[test]
+    fn a_sub2api_client_never_prints_its_credential() {
+        let sub2api = built("https://api.example.com").expect("builds");
+        let rendered = format!("{sub2api:?}");
+        assert!(!rendered.contains("sk-test"), "{rendered}");
     }
 }

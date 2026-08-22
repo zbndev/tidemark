@@ -4,8 +4,9 @@
 //! key-authenticated provider. The three OAuth providers — Antigravity, Claude and Codex
 //! — are registered by hand here, because each of them acquires its credential its own
 //! way; so are the hand-written key providers below, whose fetch is more than one
-//! request and so cannot be a `keyed::Spec`. Nothing else in the daemon names a
-//! key-authenticated provider.
+//! request or whose build refuses a required option's value, neither of which a
+//! `keyed::Spec` can say. Nothing else in the daemon names a key-authenticated
+//! provider.
 //!
 //! An entry says three things beyond how to build a client. **How the account is
 //! authenticated** decides what the credentials dialog offers — a key field, a sign-in
@@ -24,8 +25,8 @@ use std::sync::Arc;
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
-    self, aiand, deepinfra, factory, fireworks, groq, ibmbob, litellm, openai_api, openrouter, poe,
-    xai,
+    self, aiand, deepinfra, factory, fireworks, groq, ibmbob, litellm, llmproxy, openai_api,
+    openrouter, poe, sub2api, xai,
 };
 use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex};
 use tidemark_core::secrets::Secrets;
@@ -71,11 +72,13 @@ static OAUTH: &[(&str, &str, &str, &str)] = &[
 /// two-request management ladder, OpenAI pages two Admin API
 /// endpoints, OpenRouter reads credits and key
 /// quota, Poe pages through a usage history, xAI reads a prepaid balance and a spend
-/// history. Each entry is the provider's own [`keyed::HandSpec`], which carries
-/// everything a `Spec` carries except the single endpoint, and says how to build a
-/// client from the stored key and the account's settings. The credential is the same
-/// pasted key as the catalog's, `CredentialKind::Key`, so the credentials dialog is
-/// unchanged.
+/// history — and those whose single request hangs from a required base URL with no
+/// default host, where the shared reader's refusal of a bad value must happen at
+/// build time rather than inside an endpoint closure: LLM Proxy and sub2api. Each
+/// entry is the provider's own [`keyed::HandSpec`], which carries everything a
+/// `Spec` carries except the single endpoint, and says how to build a client from
+/// the stored key and the account's settings. The credential is the same pasted key
+/// as the catalog's, `CredentialKind::Key`, so the credentials dialog is unchanged.
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &aiand::SPEC,
     &deepinfra::SPEC,
@@ -84,9 +87,11 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &groq::SPEC,
     &ibmbob::SPEC,
     &litellm::SPEC,
+    &llmproxy::SPEC,
     &openai_api::SPEC,
     &openrouter::SPEC,
     &poe::SPEC,
+    &sub2api::SPEC,
     &xai::SPEC,
 ];
 

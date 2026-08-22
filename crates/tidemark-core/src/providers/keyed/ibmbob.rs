@@ -75,7 +75,7 @@ const TRUSTED_SUFFIX: &str = ".bob.ibm.com";
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "IBM Bob",
-    credential_hint: "bob.ibm.com → Settings → API keys. A Bob API key or a IBM IAM JWT.",
+    credential_hint: "bob.ibm.com → Settings → API keys. A Bob API key or an IBM IAM JWT.",
     options: &[],
     build,
 };

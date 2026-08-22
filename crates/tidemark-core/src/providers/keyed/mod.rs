@@ -24,9 +24,13 @@
 //! false — a paged history, a balance plus a quota — are still key-authenticated, still
 //! JSON, still a pasted key, so they live in this module too, but as [`HandSpec`]s with
 //! their own `impl Provider`, each request going through [`request`] so the transport
-//! rules below travel with the function. They register in a second table in
-//! `tidemarkd::registry`, beside [`CATALOG`]; everything the settings dialog needs from
-//! them is the same shape as a `Spec`'s, so the dialog does not distinguish the tables.
+//! rules below travel with the function. So does a provider whose build must *refuse* a
+//! setting a [`Spec`] can only check for emptiness: `Keyed::new` screens an empty
+//! value, but a base URL that is set and invalid — scheme-less, or plain HTTP to a
+//! remote host — would otherwise surface inside `Spec::endpoint`, where the only way
+//! out is a panic. They register in a second table in `tidemarkd::registry`, beside
+//! [`CATALOG`]; everything the settings dialog needs from them is the same shape as a
+//! `Spec`'s, so the dialog does not distinguish the tables.
 
 pub mod aiand;
 pub mod amp;
@@ -154,13 +158,14 @@ pub type Builder = fn(Credential, &Options) -> Result<Arc<dyn Provider>, Provide
 /// the stored key.
 ///
 /// For the providers whose fetch is not one request — a paged history, a balance plus a
-/// quota. Each keeps its own `impl Provider` in a module of this one and sends every
-/// request through [`request`], so the parts that are easy to forget (status mapping,
-/// `Retry-After`, the redaction of any `reqwest` error) travel with the function rather
-/// than with each provider. These register in a second table in `tidemarkd::registry`,
-/// not in [`CATALOG`], because a `Spec` says the fetch is one request; the settings
-/// dialog sees the same fields either way, so a hand-written provider needs no stanza of
-/// its own there.
+/// quota — or whose build refuses a required option's *value*, not just its absence, so
+/// the refusal cannot live in [`Spec::endpoint`]. Each keeps its own `impl Provider` in
+/// a module of this one and sends every request through [`request`], so the parts that
+/// are easy to forget (status mapping, `Retry-After`, the redaction of any `reqwest`
+/// error) travel with the function rather than with each provider. These register in a
+/// second table in `tidemarkd::registry`, not in [`CATALOG`], because a `Spec` says the
+/// fetch is one request; the settings dialog sees the same fields either way, so a
+/// hand-written provider needs no stanza of its own there.
 #[derive(Debug)]
 pub struct HandSpec {
     /// The stable slug this provider's history is filed under. Never changes once shipped.
@@ -381,8 +386,9 @@ impl Provider for Keyed {
 /// are shown.
 ///
 /// Adding a provider is a file beside this one and a line here. Nothing else in the
-/// workspace names it. The multi-request providers are [`HandSpec`]s registered in a
-/// second table in `tidemarkd::registry`, not here.
+/// workspace names it. The multi-request providers — and the ones whose build refuses a
+/// required option's value — are [`HandSpec`]s registered in a second table in
+/// `tidemarkd::registry`, not here.
 pub static CATALOG: &[&Spec] = &[
     &amp::SPEC,
     &chutes::SPEC,
@@ -391,9 +397,7 @@ pub static CATALOG: &[&Spec] = &[
     &crof::SPEC,
     &elevenlabs::SPEC,
     &kimi::SPEC,
-    &llmproxy::SPEC,
     &neuralwatt::SPEC,
-    &sub2api::SPEC,
     &synthetic::SPEC,
     &venice::SPEC,
     &warp::SPEC,
@@ -601,9 +605,11 @@ mod tests {
 
     #[test]
     fn an_unset_required_option_names_itself_rather_than_malforming_the_url() {
-        // Sub2API, LiteLLM and LLMProxy have no default host: without this check the user
-        // would see "Unreachable: relative URL without a base" on every poll, with nothing
-        // pointing at the settings field that fixes it.
+        // No catalogued spec carries a required option today — the self-hosted ones are
+        // HandSpecs, whose builds refuse the option's *value* too — but this is the
+        // mechanism's own guard: without it a future spec with no default host would say
+        // "Unreachable: relative URL without a base" on every poll, with nothing pointing
+        // at the settings field that fixes it.
         let error = Keyed::new(&SELF_HOSTED, Credential::new("sk-6"), &options(&[]))
             .expect_err("the required option is unset");
         assert!(
