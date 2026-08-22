@@ -62,6 +62,10 @@ impl MockDaemon {
         self.statuses.clone()
     }
 
+    async fn get_update(&self) -> String {
+        "0.2.0".into()
+    }
+
     async fn refresh(&self, provider: &str) -> fdo::Result<()> {
         println!("refresh({provider:?})");
         Ok(())
@@ -77,6 +81,9 @@ impl MockDaemon {
         emitter: &SignalEmitter<'_>,
         status: ProviderStatus,
     ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn update_changed(emitter: &SignalEmitter<'_>, version: &str) -> zbus::Result<()>;
 }
 
 fn window(title: &str, length: u64, used: f64, resets_in: Option<i64>) -> Window {

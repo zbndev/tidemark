@@ -84,6 +84,7 @@ pub struct MainWindow {
     message: adw::StatusPage,
     grid: gtk::FlowBox,
     refresh: gtk::Button,
+    release: gtk::Button,
     providers: gtk::Button,
     cards: RefCell<Vec<Rc<Card>>>,
     definitions: RefCell<Vec<ProviderDefinition>>,
@@ -148,6 +149,10 @@ impl MainWindow {
             .tooltip_text("Check every provider now")
             .sensitive(false)
             .build();
+        let release = gtk::Button::builder()
+            .icon_name("software-update-available-symbolic")
+            .visible(false)
+            .build();
         let providers = gtk::Button::builder()
             .icon_name("dialog-password-symbolic")
             .tooltip_text("Providers and credentials")
@@ -156,6 +161,7 @@ impl MainWindow {
 
         let header = adw::HeaderBar::new();
         header.pack_end(&refresh);
+        header.pack_end(&release);
         header.pack_start(&providers);
 
         let view = adw::ToolbarView::builder().content(&stack).build();
@@ -175,6 +181,7 @@ impl MainWindow {
             message,
             grid,
             refresh,
+            release,
             providers,
             cards: RefCell::new(Vec::new()),
             definitions: RefCell::new(Vec::new()),
@@ -187,6 +194,7 @@ impl MainWindow {
 
         main.install_sort();
         main.connect_refresh_button();
+        main.connect_update_button();
         main.connect_providers_button();
         main.start_clock();
         main.start_tray(background);
@@ -205,11 +213,12 @@ impl MainWindow {
     /// Acts on one message from the daemon.
     fn handle(self: &Rc<Self>, update: Update) {
         match update {
-            Update::Connected(proxy, daemon_version, definitions, statuses) => {
+            Update::Connected(proxy, daemon_version, available, definitions, statuses) => {
                 *self.daemon.borrow_mut() = Some(proxy);
                 *self.definitions.borrow_mut() = definitions;
                 self.refresh.set_sensitive(true);
                 self.providers.set_sensitive(true);
+                self.show_update(&available);
                 self.show_all(statuses);
 
                 let offer_restart = daemon_version.as_deref().is_some_and(|version| {
@@ -251,10 +260,12 @@ impl MainWindow {
             }
             Update::Changed(status) => self.show_one(status),
             Update::Removed { provider, account } => self.show_removed(&provider, &account),
+            Update::Available(version) => self.show_update(&version),
             Update::Waiting(reason) => {
                 *self.daemon.borrow_mut() = None;
                 self.refresh.set_sensitive(false);
                 self.providers.set_sensitive(false);
+                self.show_update("");
                 self.show_message("network-offline-symbolic", "Waiting for Tidemark", &reason);
             }
         }
@@ -515,6 +526,29 @@ impl MainWindow {
                 main.refresh_now();
             }
         });
+    }
+
+    /// Opens the fixed release list; the daemon-provided value controls visibility only.
+    fn connect_update_button(self: &Rc<Self>) {
+        let weak: Weak<Self> = Rc::downgrade(self);
+        self.release.connect_clicked(move |_| {
+            let Some(main) = weak.upgrade() else {
+                return;
+            };
+            let parent = main.window.clone();
+            glib::spawn_future_local(async move {
+                let launcher = gtk::UriLauncher::new(update::RELEASES_URL);
+                if let Err(error) = launcher.launch_future(Some(&parent)).await {
+                    tracing::warn!(%error, "could not open the Tidemark releases page");
+                }
+            });
+        });
+    }
+
+    fn show_update(&self, version: &str) {
+        let tooltip = update::update_tooltip(version);
+        self.release.set_tooltip_text(tooltip.as_deref());
+        self.release.set_visible(tooltip.is_some());
     }
 
     /// Polls every account now. The header button and the tray menu both mean this, and

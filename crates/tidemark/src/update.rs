@@ -5,6 +5,12 @@ use std::process::Command;
 
 use semver::{Error, Version};
 
+pub(crate) const RELEASES_URL: &str = "https://github.com/zbndev/tidemark/releases";
+
+pub(crate) fn update_tooltip(version: &str) -> Option<String> {
+    (!version.is_empty()).then(|| format!("Tidemark {version} is available"))
+}
+
 /// Remembers which daemon release this client has already offered to restart into.
 #[derive(Debug)]
 pub struct UpdateNotice {
@@ -61,7 +67,20 @@ pub fn restart() -> io::Error {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{UpdateNotice, restart_command};
+    use super::{UpdateNotice, restart_command, update_tooltip};
+
+    #[test]
+    fn an_empty_update_has_no_button_copy() {
+        assert_eq!(update_tooltip(""), None);
+    }
+
+    #[test]
+    fn an_available_update_names_the_daemon_selected_version() {
+        assert_eq!(
+            update_tooltip("0.12.3").as_deref(),
+            Some("Tidemark 0.12.3 is available")
+        );
+    }
 
     #[test]
     fn a_newer_daemon_is_offered_even_when_lexical_order_would_disagree() {

@@ -51,6 +51,9 @@ pub trait Daemon {
     /// Every account the daemon watches.
     fn get_status(&self) -> zbus::Result<Vec<ProviderStatus>>;
 
+    /// A newer published application release, or an empty string when none is known.
+    fn get_update(&self) -> zbus::Result<String>;
+
     /// Stored points in the current segment of one window, oldest first.
     fn current_segment(
         &self,
@@ -106,6 +109,10 @@ pub trait Daemon {
     /// One configured account was removed.
     #[zbus(signal)]
     fn provider_removed(&self, provider: &str, account: &str) -> zbus::Result<()>;
+
+    /// Availability of a newer published application release changed.
+    #[zbus(signal)]
+    fn update_changed(&self, version: &str) -> zbus::Result<()>;
 }
 
 /// What the window is told.
@@ -119,6 +126,7 @@ pub enum Update {
     Connected(
         DaemonProxy<'static>,
         Option<String>,
+        String,
         Vec<ProviderDefinition>,
         Vec<ProviderStatus>,
     ),
@@ -126,6 +134,8 @@ pub enum Update {
     Changed(ProviderStatus),
     /// One configured account was removed.
     Removed { provider: String, account: String },
+    /// Availability of a newer published application release changed.
+    Available(String),
     /// There is nothing to show, with the reason to put on the screen.
     Waiting(String),
 }
@@ -165,6 +175,7 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
     let mut owner = pin!(proxy.inner().receive_owner_changed().await?);
     let mut changes = pin!(proxy.receive_provider_changed().await?);
     let mut removals = pin!(proxy.receive_provider_removed().await?);
+    let mut updates = pin!(proxy.receive_update_changed().await?);
 
     load(&proxy, on).await;
 
@@ -178,6 +189,9 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
             }
             if let Poll::Ready(removal) = removals.as_mut().poll_next(context) {
                 return Poll::Ready(Event::Removed(removal));
+            }
+            if let Poll::Ready(update) = updates.as_mut().poll_next(context) {
+                return Poll::Ready(Event::Available(update));
             }
             Poll::Pending
         })
@@ -205,8 +219,15 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
                 }),
                 Err(error) => tracing::warn!(%error, "a ProviderRemoved signal did not parse"),
             },
-            // Either stream ending means the connection is finished with.
-            Event::Owner(None) | Event::Changed(None) | Event::Removed(None) => return Ok(()),
+            Event::Available(Some(signal)) => match signal.args() {
+                Ok(args) => on(Update::Available(args.version.to_owned())),
+                Err(error) => tracing::warn!(%error, "an UpdateChanged signal did not parse"),
+            },
+            // Any stream ending means the connection is finished with.
+            Event::Owner(None)
+            | Event::Changed(None)
+            | Event::Removed(None)
+            | Event::Available(None) => return Ok(()),
         }
     }
 }
@@ -222,10 +243,15 @@ async fn load(proxy: &DaemonProxy<'static>, on: &impl Fn(Update)) {
     };
     let definitions = proxy.list_providers().await;
     let statuses = proxy.get_status().await;
+    let available = proxy.get_update().await.unwrap_or_else(|error| {
+        tracing::info!(%error, "the daemon did not answer GetUpdate; hiding update availability");
+        String::new()
+    });
     match (definitions, statuses) {
         (Ok(definitions), Ok(statuses)) => on(Update::Connected(
             proxy.clone(),
             version,
+            available,
             definitions,
             statuses,
         )),
@@ -241,6 +267,7 @@ enum Event {
     Owner(Option<Option<zbus::names::UniqueName<'static>>>),
     Changed(Option<ProviderChanged>),
     Removed(Option<ProviderRemoved>),
+    Available(Option<UpdateChanged>),
 }
 
 #[cfg(test)]
@@ -359,8 +386,9 @@ mod tests {
             .await;
 
             match seen.into_inner() {
-                Some(Update::Connected(_, version, definitions, statuses)) => {
+                Some(Update::Connected(_, version, available, definitions, statuses)) => {
                     assert_eq!(version, None);
+                    assert_eq!(available, "");
                     assert!(definitions.is_empty());
                     assert!(statuses.is_empty());
                 }
