@@ -62,4 +62,6 @@ jobs:
         run: scripts/test-restart-user-daemon.sh
 
       - name: Shell
-        run: shellcheck scripts/*.sh data/restart-user-daemon
+        run: |
+          shellcheck scripts/*.sh data/restart-user-daemon \
+            data/packaging/deb/postinst data/packaging/rpm/post-install.sh

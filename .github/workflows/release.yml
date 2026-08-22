@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Nothing is built until the tree passes the same checks a pull request does, and until
+  # the tag agrees with the manifest.
+  checks:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the toolkit and the shell-check tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config \
+            dbus-daemon desktop-file-utils appstream shellcheck
+
+      - name: The tag must agree with Cargo.toml
+        run: scripts/check-tag-version.sh "${GITHUB_REF_NAME}"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: dbus-run-session -- cargo test --workspace
+      - run: scripts/check-layering.sh
+      - run: scripts/check-desktop-integration.sh
+      - run: scripts/test-restart-user-daemon.sh
+      - run: |
+          shellcheck scripts/*.sh data/restart-user-daemon \
+            data/packaging/deb/postinst data/packaging/rpm/post-install.sh
+
+  deb:
+    needs: checks
+    # Ubuntu 26.04 is the oldest release meeting the GTK 4.22 floor, so building on it
+    # makes it the oldest supported target. glibc is forward- but not backward-compatible,
+    # which is the whole reason each format is built on its own target rather than on one
+    # shared build host.
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install the toolkit
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config dpkg-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-deb --locked
+      - run: cargo build --release --locked --workspace
+      - run: cargo deb --no-build -p tidemark
+      # cargo-deb only *warns* when dpkg-shlibdeps cannot run, and a package declaring no
+      # libraries installs happily and then fails to start. This turns that into a failure.
+      - name: The dependencies must come from the ELF
+        run: scripts/check-package-deps.sh target/debian/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: target/debian/*.deb
+          if-no-files-found: error
+
+  rpm:
+    needs: checks
+    # GitHub has no Fedora-hosted runner and does not plan one (actions/runner-images
+    # issue 2307). A Fedora container on an Ubuntu runner is the standard route; the only
+    # alternative is a self-hosted machine. This is the one place Docker appears.
+    #
+    # It is also a correctness requirement, not just a convenience: cargo-generate-rpm's
+    # auto-req scans the payload transitively, so the requires list is the build host's
+    # whole shared-library closure. Built anywhere but Fedora it names libraries Fedora
+    # numbers differently, and the package will not install.
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Bootstrap the container
+        run: |
+          dnf install -y git gcc gtk4-devel libadwaita-devel sqlite-devel \
+            pkgconf-pkg-config rpm-build
+      - uses: actions/checkout@v5
+      - name: Install rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-generate-rpm --locked
+      - run: cargo build --release --locked --workspace
+      - run: cargo generate-rpm -p crates/tidemark
+      - name: The dependencies must come from the ELF
+        run: scripts/check-package-deps.sh target/generate-rpm/*.rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: target/generate-rpm/*.rpm
+          if-no-files-found: error
+
+  # Depends on all three, so a failure anywhere means no release object is created at all.
+  # A draft, not a publication: a person decides when it goes out.
+  release:
+    needs: [checks, deb, rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+      - run: ls -l artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: artifacts/*
+          fail_on_unmatched_files: true
