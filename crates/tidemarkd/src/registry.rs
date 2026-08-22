@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
-    self, aiand, deepinfra, fireworks, litellm, openai_api, openrouter, poe, xai,
+    self, aiand, deepinfra, fireworks, ibmbob, litellm, openai_api, openrouter, poe, xai,
 };
 use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex};
 use tidemark_core::secrets::Secrets;
@@ -64,7 +64,8 @@ static OAUTH: &[(&str, &str, &str, &str)] = &[
 /// The hand-written key-authenticated providers: those whose fetch is more than one
 /// request, so a `keyed::Spec` cannot describe them — ai& pages a request log,
 /// DeepInfra reads a checklist and a month's usage, Fireworks reads a rolling billing
-/// window, LiteLLM walks a two-request management ladder, OpenAI pages two Admin API
+/// window, IBM Bob reads a profile then per-team regional budgets, LiteLLM walks a
+/// two-request management ladder, OpenAI pages two Admin API
 /// endpoints, OpenRouter reads credits and key
 /// quota, Poe pages through a usage history, xAI reads a prepaid balance and a spend
 /// history. Each entry is the provider's own [`keyed::HandSpec`], which carries
@@ -76,6 +77,7 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &aiand::SPEC,
     &deepinfra::SPEC,
     &fireworks::SPEC,
+    &ibmbob::SPEC,
     &litellm::SPEC,
     &openai_api::SPEC,
     &openrouter::SPEC,
@@ -528,7 +530,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 26);
+        assert_eq!(definitions.len(), 27);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(
