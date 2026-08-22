@@ -26,6 +26,7 @@ whose services the cards are about:
 | `tidemark-kimi-symbolic.svg` | Moonshot AI (Kimi) |
 | `tidemark-litellm-symbolic.svg` | The LiteLLM project |
 | `tidemark-llmproxy-symbolic.svg` | The LLM Proxy project |
+| `tidemark-minimax-symbolic.svg` | MiniMax |
 | `tidemark-moonshot-symbolic.svg` | Moonshot AI |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
 | `tidemark-openai-api-symbolic.svg` | OpenAI |
@@ -49,10 +50,10 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the twenty-five marks that CodexBar records as the provider icons of
+asset, and except the twenty-six marks that CodexBar records as the provider icons of
 ai&, Amp, Chutes, ClawRouter, ClinePass, Crof, DeepInfra, DeepSeek, ElevenLabs, Factory,
-Fireworks, Groq, IBM Bob, LiteLLM, LLM Proxy, Neuralwatt, OpenAI, OpenCode Go, OpenRouter,
-Poe, sub2api, Synthetic, Venice, Warp and ZenMux — and except the xAI mark, which is
+Fireworks, Groq, IBM Bob, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, OpenAI, OpenCode Go,
+OpenRouter, Poe, sub2api, Synthetic, Venice, Warp and ZenMux — and except the xAI mark, which is
 xAI's own, taken from
 [File:XAI Logo.svg](https://commons.wikimedia.org/wiki/File:XAI_Logo.svg) on Wikimedia
 Commons: the icon CodexBar files under `xai` is three strokes in the shape of an X and a

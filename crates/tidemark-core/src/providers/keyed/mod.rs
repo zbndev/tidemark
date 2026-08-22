@@ -48,6 +48,7 @@ pub mod ibmbob;
 pub mod kimi;
 pub mod litellm;
 pub mod llmproxy;
+pub mod minimax;
 pub mod moonshot;
 pub mod neuralwatt;
 // The slug carries a hyphen, which a module name cannot; the file keeps the slug so the
@@ -401,6 +402,7 @@ pub static CATALOG: &[&Spec] = &[
     &deepseek::SPEC,
     &elevenlabs::SPEC,
     &kimi::SPEC,
+    &minimax::SPEC,
     &moonshot::SPEC,
     &neuralwatt::SPEC,
     &opencodego::SPEC,
