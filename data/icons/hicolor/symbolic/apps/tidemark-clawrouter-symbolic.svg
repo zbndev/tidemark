@@ -1,11 +1,12 @@
 <!-- The ClawRouter mark belongs to the OpenClaw project. Not covered by Tidemark's MIT licence; used
      nominatively to identify the service a card reports on. See docs/TRADEMARKS.md. -->
+<!-- Drawn as filled outlines, not strokes: GTK's symbolic renderer paints fill only. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
-  <g transform="translate(-1.5385 -1.1154) scale(0.84615)" stroke="#000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-    <circle cx="8" cy="7" r="3" stroke="none"/>
-    <circle cx="24" cy="8" r="3" stroke="none"/>
-    <circle cx="24" cy="24" r="3" stroke="none"/>
-    <path d="M8 10v6c0 4.4 3.6 8 8 8h5" fill="none"/>
-    <path d="M11 8h10" fill="none"/>
+  <g transform="translate(-1.5385 -1.1154) scale(0.84615)">
+    <circle cx="8" cy="7" r="3"/>
+    <circle cx="24" cy="8" r="3"/>
+    <circle cx="24" cy="24" r="3"/>
+    <path d="M 8,8.5 A 1.5,1.5 0 0 0 6.5,10 v 6 c 0,5.2182 4.2818,9.5 9.5,9.5 h 5 A 1.5,1.5 0 0 0 22.5,24 1.5,1.5 0 0 0 21,22.5 H 16 C 12.4182,22.5 9.5,19.5818 9.5,16 V 10 A 1.5,1.5 0 0 0 8,8.5 Z"/>
+    <path d="M 11,6.5 A 1.5,1.5 0 0 0 9.5,8 1.5,1.5 0 0 0 11,9.5 H 21 A 1.5,1.5 0 0 0 22.5,8 1.5,1.5 0 0 0 21,6.5 Z"/>
   </g>
 </svg>

@@ -16,6 +16,14 @@
 //! mirrors that layout in `data/icons`, so running uninstalled works with
 //! `XDG_DATA_DIRS=$PWD/data:$XDG_DATA_DIRS` and no code of its own.
 //!
+//! # Fills only
+//!
+//! That loader paints `fill` and nothing else. A `stroke` is not recoloured, it is not drawn
+//! at all: a mark whose geometry is strokes renders as an empty card, which is what the xAI
+//! mark did until its three lines were outlined into filled paths. Every file here is
+//! therefore filled geometry, and `scripts/check-desktop-integration.sh` refuses one that
+//! carries a `stroke` attribute rather than leaving the next mark to be found blank by eye.
+//!
 //! # A missing mark is a normal state
 //!
 //! A provider we have no mark for gets a card without one, and so does an installation that

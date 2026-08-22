@@ -1,12 +1,18 @@
 <!-- The Fireworks mark belongs to Fireworks AI. Not covered by Tidemark's MIT licence; used
      nominatively to identify the service a card reports on. See docs/TRADEMARKS.md. -->
+<!-- Drawn as filled outlines, not strokes: GTK's symbolic renderer paints fill only. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
-  <g transform="translate(0 0.5)" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/>
-    <path d="M5.3 5.3l2.8 2.8M15.9 15.9l2.8 2.8"/>
-    <path d="M18.7 5.3l-2.8 2.8M8.1 15.9l-2.8 2.8"/>
-    <circle cx="12" cy="12" r="2.4"/>
-    <circle cx="18.5" cy="6" r="1" fill="#000" stroke="none"/>
-    <circle cx="6" cy="18.5" r="0.8" fill="#000" stroke="none"/>
+  <g transform="translate(0 0.5)">
+    <path d="M11 2.5L11 6.5A1 1 0 0 0 13 6.5L13 2.5A1 1 0 0 0 11 2.5Z"/>
+    <path d="M11 17.5L11 21.5A1 1 0 0 0 13 21.5L13 17.5A1 1 0 0 0 11 17.5Z"/>
+    <path d="M2.5 13L6.5 13A1 1 0 0 0 6.5 11L2.5 11A1 1 0 0 0 2.5 13Z"/>
+    <path d="M17.5 13L21.5 13A1 1 0 0 0 21.5 11L17.5 11A1 1 0 0 0 17.5 13Z"/>
+    <path d="M4.593 6.007L7.393 8.807A1 1 0 0 0 8.807 7.393L6.007 4.593A1 1 0 0 0 4.593 6.007Z"/>
+    <path d="M15.193 16.607L17.993 19.407A1 1 0 0 0 19.407 17.993L16.607 15.193A1 1 0 0 0 15.193 16.607Z"/>
+    <path d="M17.993 4.593L15.193 7.393A1 1 0 0 0 16.607 8.807L19.407 6.007A1 1 0 0 0 17.993 4.593Z"/>
+    <path d="M7.393 15.193L4.593 17.993A1 1 0 0 0 6.007 19.407L8.807 16.607A1 1 0 0 0 7.393 15.193Z"/>
+    <path d="M8.6 12A3.4 3.4 0 1 1 15.4 12A3.4 3.4 0 1 1 8.6 12ZM10.6 12A1.4 1.4 0 1 0 13.4 12A1.4 1.4 0 1 0 10.6 12Z"/>
+    <circle cx="18.5" cy="6" r="1"/>
+    <circle cx="6" cy="18.5" r="0.8"/>
   </g>
 </svg>

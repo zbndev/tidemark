@@ -23,3 +23,11 @@ done
 
 hidpi_icon=data/icons/hicolor/512x512@2/apps/io.github.zbndev.Tidemark.png
 file "$hidpi_icon" | grep -Fq 'PNG image data, 1024 x 1024,'
+
+# GTK's symbolic renderer paints `fill` and ignores `stroke` entirely, so a mark drawn with
+# strokes renders as a blank card. Outline the strokes instead; see crates/tidemark/src/mark.rs.
+stroked=$(grep -lE 'stroke[=:]' data/icons/hicolor/symbolic/apps/*.svg || true)
+if [ -n "$stroked" ]; then
+    printf 'symbolic marks must be drawn as filled outlines, not strokes:\n%s\n' "$stroked" >&2
+    exit 1
+fi
