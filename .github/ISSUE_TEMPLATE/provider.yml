@@ -1,0 +1,18 @@
+name: Add a provider
+description: Request to Add a Provider
+labels: ["add a provider"]
+title: "[PROVIDER] "
+body:
+
+    - type: textarea
+      attributes:
+          label: "Provider name and info"
+          description: "Provider name and all possible info. Auth type (API key or OAuth), balance type (quota or credits), website link"
+
+    - type: checkboxes
+      attributes:
+          label: Reminder
+          options:
+              - label: I fully realize that the project author does not have a subscription to this provider and will have to try adding it "blindly"
+                required: true
+
