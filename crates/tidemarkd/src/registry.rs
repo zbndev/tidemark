@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
-use tidemark_core::providers::keyed::{self, aiand, openai_api, openrouter, poe, xai};
+use tidemark_core::providers::keyed::{self, aiand, fireworks, openai_api, openrouter, poe, xai};
 use tidemark_core::providers::{Provider, ProviderError, antigravity, claude, codex};
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
@@ -60,15 +60,17 @@ static OAUTH: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// The hand-written key-authenticated providers: those whose fetch is more than one
-/// request, so a `keyed::Spec` cannot describe them — ai& pages a request log, OpenAI
-/// pages two Admin API endpoints, OpenRouter reads credits and key quota, Poe pages
-/// through a usage history, xAI reads a prepaid balance and a spend history. Each entry
-/// is the provider's own [`keyed::HandSpec`], which carries everything a `Spec` carries
-/// except the single endpoint, and says how to build a client from the stored key and
-/// the account's settings. The credential is the same pasted key as the catalog's,
+/// request, so a `keyed::Spec` cannot describe them — ai& pages a request log,
+/// Fireworks reads a rolling billing window, OpenAI pages two Admin API endpoints,
+/// OpenRouter reads credits and key quota, Poe pages through a usage history, xAI
+/// reads a prepaid balance and a spend history. Each entry is the provider's own
+/// [`keyed::HandSpec`], which carries everything a `Spec` carries except the single
+/// endpoint, and says how to build a client from the stored key and the account's
+/// settings. The credential is the same pasted key as the catalog's,
 /// `CredentialKind::Key`, so the credentials dialog is unchanged.
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &aiand::SPEC,
+    &fireworks::SPEC,
     &openai_api::SPEC,
     &openrouter::SPEC,
     &poe::SPEC,
@@ -520,7 +522,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 23);
+        assert_eq!(definitions.len(), 24);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(

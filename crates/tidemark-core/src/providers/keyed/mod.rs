@@ -35,6 +35,7 @@ pub mod clawrouter;
 pub mod clinepass;
 pub mod crof;
 pub mod elevenlabs;
+pub mod fireworks;
 pub mod kimi;
 pub mod llmproxy;
 pub mod neuralwatt;
