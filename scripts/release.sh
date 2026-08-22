@@ -14,6 +14,12 @@ set -eu
 project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_root"
 
+edited=
+committed=
+trap 'if [ -n "$edited" ] && [ -z "$committed" ]; then
+        printf "release.sh: edits are still in the working tree; revert with: git checkout -- .\n" >&2
+    fi' EXIT
+
 die() {
     printf 'release.sh: %s\n' "$1" >&2
     exit 1
@@ -76,3 +82,56 @@ fi
 if git ls-remote --tags --exit-code origin "refs/tags/v$new" >/dev/null 2>&1; then
     die "tag v$new already exists on origin"
 fi
+
+edited=1
+
+# The one number everything else derives from.
+sed -i "/^\[workspace\.package\]/,/^\[/ s/^version = \".*\"\$/version = \"$new\"/" Cargo.toml
+
+# ^0.1.0 does not match 0.2.0: the inter-crate requirements move with the workspace or
+# the build breaks.
+sed -i '/^tidemark-types = { version = /s/version = "[^"]*"/version = "'"$new"'"/' \
+    crates/tidemark-core/Cargo.toml
+sed -i '/^tidemark-core = { version = /s/version = "[^"]*"/version = "'"$new"'"/' \
+    crates/tidemarkd/Cargo.toml
+
+# release.yml builds with --locked, so members' lock entries must move with the manifests.
+# --offline: external dependencies are untouched, the registry is never consulted.
+cargo update --workspace --offline --quiet
+
+# AppStream wants the newest release first. Notes prose is human work, added by hand.
+entry="    <release version=\"$new\" date=\"$(date +%F)\" />"
+sed -i "/^  <releases>$/a\\$entry" \
+    data/metainfo/io.github.zbndev.Tidemark.metainfo.xml
+
+# The PKGBUILD's header comment says the version comes from the workspace manifest and is
+# bumped alongside it.
+sed -i "s/^pkgver=.*/pkgver=$new/; s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+
+# A sed that matched nothing becomes a loud failure here, not a broken release.
+grep -q "^version = \"$new\"\$" Cargo.toml
+grep -q "^tidemark-types = { version = \"$new\"" crates/tidemark-core/Cargo.toml
+grep -q "^tidemark-core = { version = \"$new\"" crates/tidemarkd/Cargo.toml
+grep -q "<release version=\"$new\" date=" data/metainfo/io.github.zbndev.Tidemark.metainfo.xml
+grep -q "^pkgver=$new\$" PKGBUILD
+
+# The exact contract the tag push is about to be judged by in CI.
+scripts/check-tag-version.sh "v$new"
+if command -v appstreamcli >/dev/null 2>&1; then
+    appstreamcli validate --pedantic --no-net \
+        data/metainfo/io.github.zbndev.Tidemark.metainfo.xml
+fi
+
+git add Cargo.toml Cargo.lock crates/tidemark-core/Cargo.toml crates/tidemarkd/Cargo.toml \
+    data/metainfo/io.github.zbndev.Tidemark.metainfo.xml PKGBUILD
+git commit -m "chore: bump to v$new"
+git tag -a "v$new" -m "Tidemark v$new"
+committed=1
+
+if ! git push origin main "v$new"; then
+    printf 'release.sh: the push failed, but the commit and tag are local; push them, e.g.: git push origin main v%s\n' \
+        "$new" >&2
+    exit 1
+fi
+
+printf 'release.sh: v%s is pushed; the Release workflow is drafting the release\n' "$new"

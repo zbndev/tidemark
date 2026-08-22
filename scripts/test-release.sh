@@ -25,8 +25,9 @@ trap cleanup EXIT
 make_fixture() {
     fixture=$(mktemp -d "${TMPDIR:-/tmp}/tidemark-release-test.XXXXXX")
 
-    mkdir -p "$fixture/scripts" "$fixture/data/metainfo" "$fixture/crates/tidemark-types" \
-        "$fixture/crates/tidemark-core" "$fixture/crates/tidemarkd" "$fixture/crates/tidemark"
+    mkdir -p "$fixture/scripts" "$fixture/data/metainfo" "$fixture/crates/tidemark-types/src" \
+        "$fixture/crates/tidemark-core/src" "$fixture/crates/tidemarkd/src" \
+        "$fixture/crates/tidemark/src"
     cp "$project_root/Cargo.toml" "$project_root/Cargo.lock" \
         "$project_root/rust-toolchain.toml" "$project_root/PKGBUILD" "$fixture/"
     cp "$project_root/crates/tidemark-types/Cargo.toml" "$fixture/crates/tidemark-types/"
@@ -37,6 +38,13 @@ make_fixture() {
         "$fixture/data/metainfo/"
     cp "$project_root/scripts/release.sh" "$project_root/scripts/check-tag-version.sh" \
         "$fixture/scripts/"
+
+    # `cargo update` must be able to load the workspace, and target auto-discovery needs
+    # these; empty stubs do — nothing ever compiles in the fixture.
+    : >"$fixture/crates/tidemark-types/src/lib.rs"
+    : >"$fixture/crates/tidemark-core/src/lib.rs"
+    : >"$fixture/crates/tidemarkd/src/main.rs"
+    : >"$fixture/crates/tidemark/src/main.rs"
 
     git -C "$fixture" init -q -b main
     git -C "$fixture" config user.name fixture
@@ -106,4 +114,49 @@ git -C "$fixture" tag -d "v$next_version" >/dev/null
 reject "$next_version"
 cleanup
 
-printf 'precondition guards hold\n'
+metainfo=data/metainfo/io.github.zbndev.Tidemark.metainfo.xml
+
+printf 'cutting a full release\n'
+make_fixture
+(cd "$fixture" && scripts/release.sh "$next_version") >/dev/null 2>&1
+
+[ "$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' \
+    "$fixture/Cargo.toml")" = "$next_version" ]
+grep -q "^tidemark-types = { version = \"$next_version\", path = \"../tidemark-types\" }\$" \
+    "$fixture/crates/tidemark-core/Cargo.toml"
+grep -q "^tidemark-core = { version = \"$next_version\", path = \"../tidemark-core\" }\$" \
+    "$fixture/crates/tidemarkd/Cargo.toml"
+for crate in tidemark-types tidemark-core tidemarkd tidemark; do
+    grep -A1 "^name = \"$crate\"$" "$fixture/Cargo.lock" \
+        | grep -q "^version = \"$next_version\"\$"
+done
+release_line=$(sed -n '/^  <releases>$/{
+n
+p
+}' "$fixture/$metainfo")
+[ "$release_line" = "    <release version=\"$next_version\" date=\"$(date +%F)\" />" ]
+grep -q "^pkgver=$next_version\$" "$fixture/PKGBUILD"
+grep -q '^pkgrel=1$' "$fixture/PKGBUILD"
+
+[ "$(git -C "$fixture" log -1 --format=%s)" = "chore: bump to v$next_version" ]
+[ "$(git -C "$fixture" diff --name-only HEAD~1 HEAD | sort)" = "$(printf '%s\n' \
+    Cargo.lock Cargo.toml PKGBUILD \
+    crates/tidemark-core/Cargo.toml crates/tidemarkd/Cargo.toml \
+    "$metainfo" | sort)" ]
+[ "$(git -C "$fixture" for-each-ref "refs/tags/v$next_version" \
+    --format='%(objecttype)')" = tag ]
+[ "$(git --git-dir="$fixture.origin.git" rev-parse "v$next_version^{commit}")" \
+    = "$(git -C "$fixture" rev-parse HEAD)" ]
+cleanup
+
+printf '0.1.10 is newer than 0.1.9, numerically\n'
+make_fixture
+sed -i "/^\[workspace\.package\]/,/^\[/ s/^version = \"\(.*\)\"\$/version = \"0.1.9\"/" \
+    "$fixture/Cargo.toml"
+git -C "$fixture" commit -qam 'fixture at 0.1.9'
+git -C "$fixture" push -q origin main
+(cd "$fixture" && scripts/release.sh 0.1.10) >/dev/null 2>&1
+[ "$(git -C "$fixture" log -1 --format=%s)" = 'chore: bump to v0.1.10' ]
+cleanup
+
+printf 'the happy paths hold\n'
