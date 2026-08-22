@@ -2638,7 +2638,7 @@ dependencies = [
 
 [[package]]
 name = "tidemark"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-channel",
  "gtk4",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "tidemark-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "fs4",
@@ -2675,7 +2675,7 @@ dependencies = [
 
 [[package]]
 name = "tidemark-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "zvariant",
@@ -2683,7 +2683,7 @@ dependencies = [
 
 [[package]]
 name = "tidemarkd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "reqwest",
  "semver",
