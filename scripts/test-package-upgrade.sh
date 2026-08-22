@@ -4,7 +4,7 @@ set -eu
 # Proves that installing a newer package leaves the *new* tidemarkd running, in both
 # package formats, against a real systemd and a real package transaction.
 #
-#   scripts/test-package-upgrade.sh [output directory]
+#   scripts/test-package-upgrade.sh [work directory]
 #
 # Run by hand. This has no GitHub Actions trigger on purpose: it needs systemd as PID 1 in
 # a privileged container, and the thing it guards changes about once a release. See
@@ -17,81 +17,69 @@ set -eu
 # distribution's libraries, and cargo-generate-rpm's auto-req scans the payload
 # *transitively*, so an rpm built on Arch asks for libgstreamer, libcups and
 # libxml2.so.16 — libraries neither binary links and which Fedora numbers differently.
-# The package would not install, or would install and not start, and either way the
-# question this script exists to answer would go unanswered.
 #
 # # Why the assertion is the Version property
 #
 # A changed PID says something restarted. The daemon's own Version property, read over the
 # user's session bus, says the thing now running is the new code. That is the claim being
-# tested, so it is the one asserted.
+# tested, so it is the one asserted. The PID is reported too, as corroboration.
 #
-# Both stages are cached: the build images are Docker layers and each target directory is a
-# named volume, so a second run costs a relink rather than a full compile.
+# # Notes earned the hard way
+#
+# * The build containers run with --network host. Docker's bridge network has no working
+#   NAT on at least one development machine. An earlier diagnostic pipeline around the
+#   quiet build also masked that failure's exit status; these builds are not piped.
+# * The test images carry the runtime dependencies already, so the upgrade transaction
+#   needs no network and runs `dpkg -i` / `rpm -U` rather than an apt or dnf resolver.
+#   That keeps the maintainer scripts the only thing under test.
+# * Packages reach the test container through a bind mount, never `docker cp` into /tmp:
+#   systemd mounts /tmp as a tmpfs over the image layer, so a copied file vanishes.
 
-output=${1:-/tmp/tidemark-upgrade}
-mkdir -p "$output"
-output=$(CDPATH='' cd -- "$output" && pwd)
+work=${1:-/tmp/tidemark-upgrade}
+mkdir -p "$work"
+work=$(CDPATH='' cd -- "$work" && pwd)
 
 project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 old_version=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' \
     "$project_root/Cargo.toml")
-# A version that differs only in its last component, so the second build is a relink.
+# Differs only in the last component, so the second build is a relink, not a rebuild.
 new_version="${old_version%.*}.$(( ${old_version##*.} + 1 ))"
 
-printf 'building %s and %s of each package\n' "$old_version" "$new_version"
+printf 'proving the upgrade from %s to %s\n' "$old_version" "$new_version"
 
-# ---------------------------------------------------------------------------------------
-# Build stage: one image per distribution, carrying the toolkit and the packaging tool.
-# ---------------------------------------------------------------------------------------
-
-build_image() {
-    distribution=$1
-    docker build -q -t "tidemark-build-$distribution" - >/dev/null
-}
+# git archive rather than a bind mount: it carries exactly the committed tree, without the
+# host's target/ directory, and makes the build reproduce what CI builds.
+git -C "$project_root" archive --format=tar HEAD >"$work/source.tar"
 
 build_packages() {
     distribution=$1
     package_command=$2
-    artifacts=$3
+    old_artifact=$3
+    new_artifact=$4
 
-    volume="tidemark-upgrade-target-$distribution"
-    docker volume create "$volume" >/dev/null
+    printf '\n--- building the %s packages ---\n' "$distribution"
+    docker volume create "tidemark-target-$distribution" >/dev/null
 
-    # git archive rather than a bind mount: it carries exactly the committed tree, without
-    # the host's target/ directory, and makes the build reproduce what CI builds.
-    git -C "$project_root" archive --format=tar HEAD >"$output/source.tar"
-
-    docker run --rm \
-        -v "$volume":/build/target \
-        -v "$output":/out \
-        "tidemark-build-$distribution" sh -eux -c "
-            mkdir -p /build && cd /build
-            tar -xf /out/source.tar
-
+    docker run --rm --network host \
+        -v "tidemark-target-$distribution":/build/target \
+        -v "$work":/out \
+        "tidemark-build-$distribution" sh -eu -c "
+            mkdir -p /build && cd /build && tar -xf /out/source.tar
             cargo build --release --locked --workspace
             $package_command
-            cp $artifacts /out/
+            cp $old_artifact /out/
 
-            # Only the version string changes, so this is a relink rather than a rebuild.
             sed -i '0,/^version = \"$old_version\"\$/s//version = \"$new_version\"/' Cargo.toml
             cargo build --release --workspace
             $package_command
-            cp $artifacts /out/
-        "
-
-    rm -f "$output/source.tar"
+            cp $new_artifact /out/
+        " >/dev/null
 }
 
-# ---------------------------------------------------------------------------------------
-# Test stage: systemd as PID 1, a lingering user, and two real package transactions.
-# ---------------------------------------------------------------------------------------
-
-read_version() {
-    container=$1
-    uid=$(docker exec "$container" id -u tester)
-    docker exec -u tester "$container" env "XDG_RUNTIME_DIR=/run/user/$uid" \
+# The daemon's own account of what it is, over the user's session bus.
+daemon_version() {
+    docker exec -u tester "$1" env "XDG_RUNTIME_DIR=/run/user/$2" \
         busctl --user get-property \
             io.github.zbndev.Tidemark.Daemon \
             /io/github/zbndev/Tidemark \
@@ -100,11 +88,9 @@ read_version() {
         | sed 's/^s "//; s/"$//' | tr -d '\r\n'
 }
 
-as_tester() {
-    container=$1
-    shift
-    uid=$(docker exec "$container" id -u tester)
-    docker exec -u tester "$container" env "XDG_RUNTIME_DIR=/run/user/$uid" "$@"
+daemon_pid() {
+    docker exec -u tester "$1" env "XDG_RUNTIME_DIR=/run/user/$2" systemctl --user \
+        show -p MainPID --value tidemarkd.service | tr -d '\r\n'
 }
 
 run_case() {
@@ -116,62 +102,78 @@ run_case() {
 
     container=$(docker run -d --rm --privileged --cgroupns=host \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-        -v "$output":/packages:ro \
-        "tidemark-test-$distribution" /usr/sbin/init)
+        -v "$work":/packages:ro \
+        "tidemark-test-$distribution" /sbin/init)
     # shellcheck disable=SC2064  # $container must expand now, not when the trap fires.
     trap "docker rm -f $container >/dev/null 2>&1 || true" EXIT
 
-    docker exec "$container" sh -c \
-        'for _ in $(seq 90); do systemctl is-system-running >/dev/null 2>&1 && break; sleep 1; done'
+    for _ in $(seq 45); do
+        case $(docker exec "$container" systemctl is-system-running 2>/dev/null || true) in
+            running | degraded) break ;;
+        esac
+        sleep 2
+    done
 
-    # Lingering gives tester a user manager without a login session, which is what makes
-    # `systemctl --user --machine=tester@.host` reachable from the root transaction.
+    # Lingering gives tester a user manager and runtime directory without a login session.
+    # The package transaction then reaches that manager through runuser.
     docker exec "$container" useradd -m tester
     docker exec "$container" loginctl enable-linger tester
-    docker exec "$container" sh -c \
-        'for _ in $(seq 60); do systemctl is-active "user@$(id -u tester).service" >/dev/null 2>&1 && break; sleep 1; done'
+    uid=$(docker exec "$container" id -u tester | tr -d '\r\n')
+    for _ in $(seq 30); do
+        docker exec "$container" systemctl is-active "user@$uid.service" >/dev/null 2>&1 && break
+        sleep 2
+    done
 
-    docker exec "$container" sh -c "$install_old"
+    docker exec "$container" sh -c "$install_old" >/dev/null
 
-    # A fresh install must not start anything: post-install runs no restart, and try-restart
-    # on the upgrade path leaves an inactive unit inactive.
-    if as_tester "$container" systemctl --user is-active --quiet tidemarkd.service; then
+    # A fresh install must start nothing: there is no restart on that path, and try-restart
+    # leaves an inactive unit inactive. D-Bus activation is what starts it in real use.
+    if docker exec -u tester "$container" env "XDG_RUNTIME_DIR=/run/user/$uid" \
+        systemctl --user is-active --quiet tidemarkd.service; then
         printf 'a fresh install left the daemon running; nothing should have started it\n' >&2
         exit 1
     fi
     printf 'fresh install: the daemon is not running, as intended\n'
 
-    as_tester "$container" systemctl --user start tidemarkd.service
-    reported=$(read_version "$container")
-    [ "$reported" = "$old_version" ] || {
+    docker exec -u tester "$container" env "XDG_RUNTIME_DIR=/run/user/$uid" \
+        systemctl --user start tidemarkd.service
+    sleep 3
+
+    before_version=$(daemon_version "$container" "$uid")
+    before_pid=$(daemon_pid "$container" "$uid")
+    [ "$before_version" = "$old_version" ] || {
         printf 'before the upgrade the daemon reported "%s", expected "%s"\n' \
-            "$reported" "$old_version" >&2
+            "$before_version" "$old_version" >&2
         exit 1
     }
-    printf 'before: %s\n' "$reported"
+    printf 'before: version %s, pid %s\n' "$before_version" "$before_pid"
 
-    docker exec "$container" sh -c "$install_new"
+    docker exec "$container" sh -c "$install_new" >/dev/null
 
     # try-restart returns before the unit is back up.
     sleep 5
-    reported=$(read_version "$container")
-    [ "$reported" = "$new_version" ] || {
+    after_version=$(daemon_version "$container" "$uid")
+    after_pid=$(daemon_pid "$container" "$uid")
+    [ "$after_version" = "$new_version" ] || {
         printf 'after the upgrade the daemon reported "%s", expected "%s"\n' \
-            "$reported" "$new_version" >&2
+            "$after_version" "$new_version" >&2
         printf 'the package replaced the files and left the old daemon running\n' >&2
         exit 1
     }
-    printf 'after:  %s\n' "$reported"
+    printf 'after:  version %s, pid %s\n' "$after_version" "$after_pid"
 
     trap - EXIT
     docker rm -f "$container" >/dev/null
 }
 
 # ---------------------------------------------------------------------------------------
-# Ubuntu
+# Images. Docker layers make a second run cheap; the target directories are named volumes,
+# so the second version costs a relink rather than a compile.
 # ---------------------------------------------------------------------------------------
 
-build_image ubuntu <<'DOCKERFILE'
+printf '\n--- images ---\n'
+
+docker build --network host -q -t tidemark-build-ubuntu - >/dev/null <<'DOCKERFILE'
 FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive PATH=/root/.cargo/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -182,21 +184,16 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 RUN cargo install cargo-deb --locked
 DOCKERFILE
 
-docker build -q -t tidemark-test-ubuntu - >/dev/null <<'DOCKERFILE'
+docker build --network host -q -t tidemark-test-ubuntu - >/dev/null <<'DOCKERFILE'
 FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        systemd systemd-sysv dbus-user-session \
+        systemd systemd-sysv dbus-user-session dbus-daemon \
+        libgtk-4-1 libadwaita-1-0 libsqlite3-0 hicolor-icon-theme \
     && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 
-build_packages ubuntu 'cargo deb --no-build -p tidemark' 'target/debian/*.deb'
-
-# ---------------------------------------------------------------------------------------
-# Fedora
-# ---------------------------------------------------------------------------------------
-
-build_image fedora <<'DOCKERFILE'
+docker build --network host -q -t tidemark-build-fedora - >/dev/null <<'DOCKERFILE'
 FROM fedora:44
 ENV PATH=/root/.cargo/bin:$PATH
 RUN dnf install -y gcc curl git pkgconf-pkg-config rpm-build \
@@ -205,23 +202,31 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 RUN cargo install cargo-generate-rpm --locked
 DOCKERFILE
 
-docker build -q -t tidemark-test-fedora - >/dev/null <<'DOCKERFILE'
+docker build --network host -q -t tidemark-test-fedora - >/dev/null <<'DOCKERFILE'
 FROM fedora:44
-RUN dnf install -y systemd dbus-daemon && dnf clean all
+RUN dnf install -y systemd dbus-daemon gtk4 libadwaita sqlite-libs hicolor-icon-theme \
+        util-linux \
+    && dnf clean all
 DOCKERFILE
-
-build_packages fedora 'cargo generate-rpm -p crates/tidemark' 'target/generate-rpm/*.rpm'
 
 # ---------------------------------------------------------------------------------------
 
-ls -1 "$output"
+build_packages ubuntu 'cargo deb --no-build -p tidemark' \
+    "target/debian/tidemark_${old_version}-1_amd64.deb" \
+    "target/debian/tidemark_${new_version}-1_amd64.deb"
+
+build_packages fedora 'cargo generate-rpm -p crates/tidemark' \
+    "target/generate-rpm/tidemark-${old_version}-1.x86_64.rpm" \
+    "target/generate-rpm/tidemark-${new_version}-1.x86_64.rpm"
+
+rm -f "$work/source.tar"
 
 run_case ubuntu \
-    "apt-get update && apt-get install -y /packages/tidemark_${old_version}-1_amd64.deb" \
-    "apt-get install -y /packages/tidemark_${new_version}-1_amd64.deb"
+    "dpkg -i /packages/tidemark_${old_version}-1_amd64.deb" \
+    "dpkg -i /packages/tidemark_${new_version}-1_amd64.deb"
 
 run_case fedora \
-    "dnf install -y /packages/tidemark-${old_version}-1.x86_64.rpm" \
-    "dnf upgrade -y /packages/tidemark-${new_version}-1.x86_64.rpm"
+    "rpm -i /packages/tidemark-${old_version}-1.x86_64.rpm" \
+    "rpm -U /packages/tidemark-${new_version}-1.x86_64.rpm"
 
-printf '\nboth formats restart the daemon on upgrade\n'
+printf '\nboth formats restart the daemon into the new binary on upgrade\n'
