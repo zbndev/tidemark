@@ -39,6 +39,7 @@ pub mod clawrouter;
 pub mod clinepass;
 pub mod crof;
 pub mod deepinfra;
+pub mod deepseek;
 pub mod elevenlabs;
 pub mod factory;
 pub mod fireworks;
@@ -397,6 +398,7 @@ pub static CATALOG: &[&Spec] = &[
     &clawrouter::SPEC,
     &clinepass::SPEC,
     &crof::SPEC,
+    &deepseek::SPEC,
     &elevenlabs::SPEC,
     &kimi::SPEC,
     &moonshot::SPEC,
