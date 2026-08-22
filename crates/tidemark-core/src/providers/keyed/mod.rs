@@ -52,6 +52,7 @@ pub mod neuralwatt;
 // provider is greppable by its storage key.
 #[path = "openai-api.rs"]
 pub mod openai_api;
+pub mod opencodego;
 pub mod openrouter;
 pub mod poe;
 pub mod sub2api;
@@ -398,6 +399,7 @@ pub static CATALOG: &[&Spec] = &[
     &elevenlabs::SPEC,
     &kimi::SPEC,
     &neuralwatt::SPEC,
+    &opencodego::SPEC,
     &synthetic::SPEC,
     &venice::SPEC,
     &warp::SPEC,
