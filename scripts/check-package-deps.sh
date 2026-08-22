@@ -26,6 +26,11 @@ case "$package" in
             | sed -n 's/^Depends: //p')
         ;;
     *.rpm)
+        command -v rpm >/dev/null || {
+            printf 'rpm is not installed, so this package cannot be read here.\n' >&2
+            printf 'Run this on Fedora, or in a fedora container with the file mounted.\n' >&2
+            exit 1
+        }
         dependencies=$(rpm -qRp "$package" | tr '\n' ' ')
         ;;
     *)
@@ -34,14 +39,19 @@ case "$package" in
         ;;
 esac
 
-printf 'dependencies: %s\n' "$dependencies"
+# An .rpm's requires run to a couple of hundred entries, so report the shape and the
+# entries that matter rather than printing the lot into a CI log.
+printf '%s entries\n' "$(printf '%s' "$dependencies" | tr ' ,' '\n' | grep -c .)"
 
-# The interface links GTK, libadwaita and the C library; a list naming none of them was not
-# derived from the binary, whatever else it contains.
+# The interface links GTK and libadwaita; a list naming neither was not derived from the
+# binary, whatever else it contains.
 status=0
 for library in gtk adwaita; do
     case "$dependencies" in
-        *"$library"*) ;;
+        *"$library"*)
+            printf '  %s: %s\n' "$library" \
+                "$(printf '%s' "$dependencies" | tr ' ,' '\n' | grep -i "$library" | tr '\n' ' ')"
+            ;;
         *)
             printf 'nothing matching "%s" in the dependencies\n' "$library" >&2
             status=1

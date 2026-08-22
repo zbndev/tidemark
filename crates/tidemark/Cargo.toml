@@ -47,8 +47,9 @@ priority = "optional"
 extended-description = "Tidemark tracks how much of each AI provider's rate-limit window is burned, when it resets, and whether the current pace reaches it. A polling daemon runs as a systemd user unit; the GTK4 interface reads it over D-Bus."
 # $auto is dpkg-shlibdeps over the built ELF, so GTK, libadwaita and SQLite are named the
 # way Ubuntu names them rather than the way a hand-written list guesses. The two appended
-# by hand are the two no ELF can reveal: zbus is pure Rust, so libdbus is never linked,
-# and an icon theme leaves no trace in a binary at all. They match the
+# by hand are the two no ELF scan can reveal: the D-Bus *daemon* is a running service
+# rather than a library either binary links (readelf shows neither with libdbus in its
+# DT_NEEDED), and an icon theme leaves no trace in a binary at all. They match the
 # [package.metadata.generate-rpm.requires] table below, under Debian's names.
 depends = "$auto, dbus-user-session, hicolor-icon-theme"
 conf-files = ["/etc/xdg/autostart/io.github.zbndev.Tidemark.desktop"]
@@ -81,3 +82,58 @@ assets = [
     ["../../docs/TRADEMARKS.md", "usr/share/doc/tidemark/TRADEMARKS.md", "644"],
     ["../../README.md", "usr/share/doc/tidemark/README.md", "644"],
 ]
+
+# The RPM. Same shape and the same asset list as [package.metadata.deb] above; the two are
+# separate because the dependency names are, and a single hand-written manifest for both
+# would only look unified.
+#
+# auto-req scans the payload's ELFs *transitively*, not just their DT_NEEDED entries, so
+# the requires list is the build host's whole shared-library closure. Measured on
+# 2026-08-22: built on Arch it asked for libxml2.so.16 and libxcb, which neither binary
+# links and which are Arch's versions of libraries Fedora may number differently. This
+# package is therefore only correct when built on Fedora — not as a principle but because
+# a build anywhere else produces requires the target cannot satisfy.
+# scripts/check-package-deps.sh refuses a result the scan did not populate at all.
+[package.metadata.generate-rpm]
+summary = "Track AI provider quota limits"
+license = "MIT"
+url = "https://github.com/zbndev/tidemark"
+auto-req = "find-requires"
+post_install_script = "../../data/packaging/rpm/post-install.sh"
+post_install_script_prog = ["/bin/sh", "-e"]
+assets = [
+    { source = "target/release/tidemark", dest = "/usr/bin/tidemark", mode = "755" },
+    { source = "target/release/tidemarkd", dest = "/usr/bin/tidemarkd", mode = "755" },
+    { source = "../../data/tidemarkd.service", dest = "/usr/lib/systemd/user/tidemarkd.service", mode = "644" },
+    { source = "../../data/icons/hicolor/16x16/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/16x16/apps/io.github.zbndev.Tidemark.png", mode = "644" },
+    { source = "../../data/icons/hicolor/22x22/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/22x22/apps/io.github.zbndev.Tidemark.png", mode = "644" },
+    { source = "../../data/icons/hicolor/24x24/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/24x24/apps/io.github.zbndev.Tidemark.png", mode = "644" },
+    { source = "../../data/icons/hicolor/32x32/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/32x32/apps/io.github.zbndev.Tidemark.png", mode = "644" },
+    { source = "../../data/icons/hicolor/48x48/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/48x48/apps/io.github.zbndev.Tidemark.png", mode = "644" },
+    { source = "../../data/icons/hicolor/64x64/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/64x64/apps/io.github.zbndev.Tidemark.png", mode = "644" },
+    { source = "../../data/icons/hicolor/128x128/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/128x128/apps/io.github.zbndev.Tidemark.png", mode = "644" },
+    { source = "../../data/icons/hicolor/256x256/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/256x256/apps/io.github.zbndev.Tidemark.png", mode = "644" },
+    { source = "../../data/icons/hicolor/512x512/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/512x512/apps/io.github.zbndev.Tidemark.png", mode = "644" },
+    { source = "../../data/icons/hicolor/512x512@2/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/512x512@2/apps/io.github.zbndev.Tidemark.png", mode = "644" },
+    # Their owners' trademarks, not under this package's licence, which is why TRADEMARKS.md
+    # installs beside LICENSE. Dropping both lines stays a supported configuration.
+    { source = "../../data/icons/hicolor/symbolic/apps/tidemark-*-symbolic.svg", dest = "/usr/share/icons/hicolor/symbolic/apps/", mode = "644" },
+    { source = "../../data/applications/io.github.zbndev.Tidemark.desktop", dest = "/usr/share/applications/io.github.zbndev.Tidemark.desktop", mode = "644" },
+    { source = "../../data/autostart/io.github.zbndev.Tidemark.desktop", dest = "/etc/xdg/autostart/io.github.zbndev.Tidemark.desktop", mode = "644", config = "noreplace" },
+    { source = "../../data/metainfo/io.github.zbndev.Tidemark.metainfo.xml", dest = "/usr/share/metainfo/io.github.zbndev.Tidemark.metainfo.xml", mode = "644" },
+    { source = "../../data/dbus-1/services/io.github.zbndev.Tidemark.Daemon.service", dest = "/usr/share/dbus-1/services/io.github.zbndev.Tidemark.Daemon.service", mode = "644" },
+    { source = "../../data/restart-user-daemon", dest = "/usr/lib/tidemark/restart-user-daemon", mode = "755" },
+    { source = "../../data/packaging/message.txt", dest = "/usr/share/doc/tidemark/first-run.txt", mode = "644" },
+    # The .deb gets these from cargo-deb's own license-file and doc handling; rpm has no
+    # such field, so they are listed.
+    { source = "../../LICENSE", dest = "/usr/share/licenses/tidemark/LICENSE", mode = "644", doc = true },
+    { source = "../../docs/TRADEMARKS.md", dest = "/usr/share/licenses/tidemark/TRADEMARKS.md", mode = "644", doc = true },
+    { source = "../../README.md", dest = "/usr/share/doc/tidemark/README.md", mode = "644", doc = true },
+]
+
+# Not discoverable from the ELF: zbus is pure Rust, so libdbus is never linked, and an icon
+# theme leaves no trace in a binary. The Debian names of the same two are appended to
+# `depends` above.
+[package.metadata.generate-rpm.requires]
+dbus-common = "*"
+hicolor-icon-theme = "*"
