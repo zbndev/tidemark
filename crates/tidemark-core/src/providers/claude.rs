@@ -14,7 +14,7 @@
 //! account straight back to the CLI file. The stored document has the *same shape* as the
 //! CLI's, which is why one parser reads both.
 
-use super::{BoxFuture, Credential, Provider, ProviderError, http, parse_rfc3339};
+use super::{BoxFuture, Credential, Provider, ProviderError, http, parse_rfc3339, title_case};
 use crate::oauth;
 use crate::oauth_file::{
     CredentialFile, CredentialFileError, Field, LockedCredentialFile, UpdateOutcome,
@@ -22,7 +22,7 @@ use crate::oauth_file::{
 use crate::secrets::{self, Secrets};
 use serde::Deserialize;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tidemark_types::{
     AccountId, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window, WindowKey,
@@ -33,6 +33,8 @@ use tidemark_types::{
 pub const PROVIDER_ID: &str = "claude";
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// Where the plan is published. See [`Claude::profile_plan`] for why it is asked at all.
+const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const REFRESH_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const BETA_HEADER: &str = "oauth-2025-04-20";
@@ -71,7 +73,9 @@ pub fn oauth_client() -> oauth::Client {
 /// Deliberately the *same shape the CLI writes*, so that everything downstream — the
 /// parser, the expiry rule, the plan line — is one implementation rather than two. What is
 /// not carried over is anything the token response did not say: an absent
-/// `subscriptionType` stays absent, and the card simply shows no plan.
+/// `subscriptionType` stays absent, and the plan is resolved from the account's own
+/// profile at poll time instead. See [`Claude::profile_plan`] — measured, the token
+/// endpoint never names one, so this is the ordinary case rather than the exception.
 pub fn document_from_login(
     response: &serde_json::Value,
     now_ms: i64,
@@ -124,6 +128,10 @@ pub struct Claude {
     own: Option<Arc<dyn Secrets>>,
     usage_url: String,
     refresh_url: String,
+    profile_url: String,
+    /// The plan the account's profile named, remembered for as long as the daemon runs.
+    /// See [`Claude::profile_plan`].
+    plan: OnceLock<String>,
 }
 
 impl Claude {
@@ -140,6 +148,7 @@ impl Claude {
             CredentialFile::new(path.clone(), path).coordinated_by(write_lock),
             USAGE_URL.to_owned(),
             REFRESH_URL.to_owned(),
+            PROFILE_URL.to_owned(),
         )?;
         claude.own = own;
         Ok(claude)
@@ -149,6 +158,7 @@ impl Claude {
         credentials: CredentialFile,
         usage_url: String,
         refresh_url: String,
+        profile_url: String,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
             client: http::client()?,
@@ -156,6 +166,8 @@ impl Claude {
             own: None,
             usage_url,
             refresh_url,
+            profile_url,
+            plan: OnceLock::new(),
         })
     }
 
@@ -176,7 +188,14 @@ impl Claude {
         http::check(status, retry_after.as_deref())?;
         let body = response.text().await.map_err(ProviderError::Transport)?;
         let mut snapshot = parse(&body, Timestamp::now())?;
-        if let Some(plan) = plan.filter(|plan| !plan.trim().is_empty()) {
+        // Asked after the reading, never before it: the plan is one line on the card and
+        // the windows are the point of the poll, so nothing about the plan may delay or
+        // fail one.
+        let plan = match plan.as_deref().and_then(plan_label) {
+            Some(plan) => Some(plan),
+            None => self.profile_plan(&access_token).await,
+        };
+        if let Some(plan) = plan {
             snapshot.details.insert(
                 0,
                 DetailSection {
@@ -189,6 +208,39 @@ impl Claude {
             );
         }
         Ok(snapshot)
+    }
+
+    /// The plan, asked of the account's own profile, when the credential did not name one.
+    ///
+    /// A login performed from Tidemark never carries one. Measured against the live
+    /// endpoints: `/v1/oauth/token` answers with tokens and expiries and nothing about the
+    /// account, and `/api/oauth/usage` states no plan either — the profile is the only
+    /// place it is published. Only the CLI's file has it, because the CLI writes it there
+    /// after its own login, and a card that showed the tier for one credential and not the
+    /// other would be describing the credential rather than the subscription.
+    ///
+    /// Asked at most once per process, and never allowed to affect the reading: a profile
+    /// that refuses, hangs or answers nonsense leaves the plan line off the card exactly as
+    /// an unnamed plan does, and is asked again on the next poll.
+    async fn profile_plan(&self, access_token: &Credential) -> Option<String> {
+        if let Some(plan) = self.plan.get() {
+            return Some(plan.clone());
+        }
+        let response = self
+            .client
+            .get(&self.profile_url)
+            .bearer_auth(access_token.expose())
+            .header("anthropic-beta", BETA_HEADER)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let plan = plan_from_profile(&response.text().await.ok()?)?;
+        let _ = self.plan.set(plan.clone());
+        Some(plan)
     }
 
     /// The access token to spend, and the plan to put on the card.
@@ -440,6 +492,40 @@ struct Envelope {
     extra_usage: Option<ExtraUsage>,
     #[serde(default)]
     spend: Option<Spend>,
+}
+
+/// The plan named by an `/api/oauth/profile` body. Pure, like every other parser here.
+///
+/// `organizationType` is the field the CLI's own `subscriptionType` is derived from, and it
+/// is the only one read: `hasClaudePro` and `hasClaudeMax` sit beside it in the same body
+/// saying the same thing less precisely, and a Max account is `claude_max` here.
+fn plan_from_profile(body: &str) -> Option<String> {
+    let profile: Profile = serde_json::from_str(body).ok()?;
+    plan_label(profile.organization?.organization_type.as_deref()?)
+}
+
+/// A plan name as the card shows it.
+///
+/// Two spellings arrive for one subscription — the CLI file says `pro`, the profile says
+/// `claude_pro` — and the vendor prefix is redundant on a card that already carries the
+/// provider's name, so it goes. What is left is re-cased and not translated, per
+/// [`title_case`]: an unrecognised tier is still the provider's own word for it.
+fn plan_label(raw: &str) -> Option<String> {
+    let named = raw.trim();
+    let named = named.strip_prefix("claude_").unwrap_or(named);
+    (!named.is_empty()).then(|| title_case(named))
+}
+
+#[derive(Debug, Deserialize)]
+struct Profile {
+    #[serde(default)]
+    organization: Option<Organization>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Organization {
+    #[serde(default)]
+    organization_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1016,6 +1102,7 @@ mod tests {
                 .coordinated_by(credentials.dir.join(".storage-write.lock")),
             format!("{base}/usage"),
             format!("{base}/token"),
+            format!("{base}/profile"),
         )
         .expect("provider builds");
 
@@ -1026,7 +1113,10 @@ mod tests {
 
         assert_eq!(snapshot.windows[0].used_percent, 31.0);
         assert_eq!(snapshot.details[0].title, DetailSection::PLAN);
-        assert_eq!(snapshot.details[0].rows[0].value, "pro");
+        assert_eq!(
+            snapshot.details[0].rows[0].value, "Pro",
+            "the file named the plan, so the profile is never asked"
+        );
         let refresh_request = requests.recv().expect("refresh request captured");
         assert!(
             refresh_request.starts_with("POST /token "),
@@ -1116,6 +1206,7 @@ mod tests {
             CredentialFile::new(credentials.path.clone(), credentials.path.clone()),
             format!("{base}/usage"),
             format!("{base}/token"),
+            format!("{base}/profile"),
         )
         .expect("provider builds");
         provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
@@ -1126,7 +1217,7 @@ mod tests {
             .expect("the stored login is enough");
 
         assert_eq!(snapshot.windows[0].used_percent, 12.0);
-        assert_eq!(snapshot.details[0].rows[0].value, "max");
+        assert_eq!(snapshot.details[0].rows[0].value, "Max");
         let usage_request = requests.recv().expect("one request");
         assert!(
             usage_request.contains("authorization: Bearer from-the-tidemark-login"),
@@ -1165,6 +1256,7 @@ mod tests {
             CredentialFile::new(credentials.path.clone(), credentials.path.clone()),
             format!("{base}/usage"),
             format!("{base}/token"),
+            format!("{base}/profile"),
         )
         .expect("provider builds");
         provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
@@ -1229,5 +1321,133 @@ mod tests {
         let error =
             document_from_login(&json!({"token_type": "bearer"}), 0).expect_err("no tokens");
         assert!(matches!(error, ProviderError::Malformed(_)), "{error}");
+    }
+
+    #[test]
+    fn a_login_with_no_plan_in_it_takes_the_tier_from_the_profile_once() {
+        const USAGE: &str = r#"{
+          "limits":[
+            {"kind":"session","group":"session","percent":18,"severity":"normal",
+             "resets_at":"2026-08-23T00:29:59Z","scope":null,"is_active":true}
+          ],
+          "spend":null,"extra_usage":null
+        }"#;
+        // Recorded from the live endpoint, trimmed to what is read.
+        const PROFILE: &str = r#"{
+          "account":{"uuid":"fixture","has_claude_max":false,"has_claude_pro":true},
+          "organization":{"uuid":"fixture","organization_type":"claude_pro",
+            "billing_type":"apple_subscription","rate_limit_tier":"default_claude_ai"}
+        }"#;
+        // What a login performed here actually stores: tokens and expiries, no plan —
+        // the token endpoint names none.
+        let secrets = FakeSecrets::holding(json!({"claudeAiOauth": {
+            "accessToken": "signed-in-here",
+            "refreshToken": "own-refresh",
+            "expiresAt": 4_102_444_800_000_i64
+        }}));
+        let credentials = TestCredentials::expired();
+        // Three answers for two polls: the profile is asked on the first and never again,
+        // so a second lookup would find the listener gone and drop the plan line.
+        let (base, requests, server) = local_server(vec![USAGE, PROFILE, USAGE]);
+        let mut provider = Claude::with_endpoints(
+            CredentialFile::new(credentials.path.clone(), credentials.path.clone()),
+            format!("{base}/usage"),
+            format!("{base}/token"),
+            format!("{base}/profile"),
+        )
+        .expect("provider builds");
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+
+        let first = runtime
+            .block_on(provider.fetch_inner())
+            .expect("the login is enough");
+        assert_eq!(first.windows[0].used_percent, 18.0);
+        assert_eq!(first.details[0].title, DetailSection::PLAN);
+        assert_eq!(first.details[0].rows[0].value, "Pro");
+
+        let second = runtime
+            .block_on(provider.fetch_inner())
+            .expect("the login is still enough");
+        assert_eq!(
+            second.details[0].rows[0].value, "Pro",
+            "the answer is remembered rather than asked for again"
+        );
+
+        let targets: Vec<String> = (0..3)
+            .map(|_| {
+                let request = requests.recv().expect("request captured");
+                let target = request
+                    .split_whitespace()
+                    .nth(1)
+                    .expect("a request target")
+                    .to_owned();
+                assert!(
+                    request.contains("authorization: Bearer signed-in-here"),
+                    "{request}"
+                );
+                target
+            })
+            .collect();
+        assert_eq!(targets, ["/usage", "/profile", "/usage"]);
+        server.join().expect("server stopped");
+        assert!(requests.try_recv().is_err(), "nothing else was asked");
+    }
+
+    #[test]
+    fn a_profile_that_names_no_plan_costs_the_reading_nothing() {
+        const USAGE: &str = r#"{
+          "limits":[
+            {"kind":"session","group":"session","percent":18,"severity":"normal",
+             "resets_at":"2026-08-23T00:29:59Z","scope":null,"is_active":true}
+          ],
+          "spend":null,"extra_usage":null
+        }"#;
+        let secrets = FakeSecrets::holding(json!({"claudeAiOauth": {
+            "accessToken": "signed-in-here",
+            "expiresAt": 4_102_444_800_000_i64
+        }}));
+        let credentials = TestCredentials::expired();
+        let (base, _requests, server) = local_server(vec![USAGE, "{}"]);
+        let mut provider = Claude::with_endpoints(
+            CredentialFile::new(credentials.path.clone(), credentials.path.clone()),
+            format!("{base}/usage"),
+            format!("{base}/token"),
+            format!("{base}/profile"),
+        )
+        .expect("provider builds");
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+
+        let snapshot = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect("a plan is a line on the card, not a precondition for the numbers");
+        assert_eq!(snapshot.windows[0].used_percent, 18.0);
+        assert!(snapshot.details.is_empty(), "{:?}", snapshot.details);
+        server.join().expect("server stopped");
+    }
+
+    #[test]
+    fn one_subscription_reads_the_same_whichever_credential_named_it() {
+        assert_eq!(
+            plan_from_profile(r#"{"organization":{"organization_type":"claude_max"}}"#).as_deref(),
+            Some("Max")
+        );
+        // The profile's spelling and the CLI file's land on one word.
+        assert_eq!(plan_label("claude_pro").as_deref(), Some("Pro"));
+        assert_eq!(plan_label("pro").as_deref(), Some("Pro"));
+        assert_eq!(plan_label("   "), None);
+        // A tier we do not recognise is still the provider's own word for it.
+        assert_eq!(plan_label("claude_max_20x").as_deref(), Some("Max 20x"));
+
+        for body in [
+            r#"{"organization":{"organization_type":null}}"#,
+            r#"{"organization":null}"#,
+            // The booleans beside it are deliberately not read; see `plan_from_profile`.
+            r#"{"account":{"has_claude_pro":true}}"#,
+            "not json at all",
+        ] {
+            assert_eq!(plan_from_profile(body), None, "{body}");
+        }
     }
 }
