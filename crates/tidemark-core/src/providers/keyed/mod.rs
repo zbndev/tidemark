@@ -37,6 +37,10 @@ pub mod elevenlabs;
 pub mod kimi;
 pub mod llmproxy;
 pub mod neuralwatt;
+// The slug carries a hyphen, which a module name cannot; the file keeps the slug so the
+// provider is greppable by its storage key.
+#[path = "openai-api.rs"]
+pub mod openai_api;
 pub mod openrouter;
 pub mod poe;
 pub mod sub2api;
