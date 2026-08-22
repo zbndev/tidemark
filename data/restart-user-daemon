@@ -2,14 +2,18 @@
 set -eu
 
 # Package transactions run as root, so an unqualified `systemctl --user` would talk to
-# root's manager rather than to the logged-in desktop users. The `.host` transport reaches
-# each user's real manager through PID 1. `try-restart` leaves an inactive daemon inactive;
-# D-Bus activation will start it when Tidemark is next opened.
+# root's manager rather than to the logged-in desktop users. Run systemctl with each
+# user's credentials and runtime directory so it connects to that user's real manager.
+# `try-restart` leaves an inactive daemon inactive; D-Bus activation will start it when
+# Tidemark is next opened.
 loginctl_command=${TIDEMARK_LOGINCTL:-/usr/bin/loginctl}
+runuser_command=${TIDEMARK_RUNUSER:-runuser}
 systemctl_command=${TIDEMARK_SYSTEMCTL:-/usr/bin/systemctl}
 
-"$loginctl_command" list-users --no-legend --no-pager | while read -r _uid user _linger _state; do
+"$loginctl_command" list-users --no-legend --no-pager | while read -r uid user _linger _state; do
     [ -n "$user" ] || continue
-    "$systemctl_command" --user --machine="${user}@.host" daemon-reload || true
-    "$systemctl_command" --user --machine="${user}@.host" try-restart tidemarkd.service || true
+    "$runuser_command" -u "$user" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
+        "$systemctl_command" --user daemon-reload || true
+    "$runuser_command" -u "$user" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
+        "$systemctl_command" --user try-restart tidemarkd.service || true
 done

@@ -131,9 +131,11 @@ assets = [
     { source = "../../README.md", dest = "/usr/share/doc/tidemark/README.md", mode = "644", doc = true },
 ]
 
-# Not discoverable from the ELF: zbus is pure Rust, so libdbus is never linked, and an icon
-# theme leaves no trace in a binary. The Debian names of the same two are appended to
-# `depends` above.
+# Not discoverable from the ELF: zbus is pure Rust, so libdbus is never linked, an icon
+# theme leaves no trace in a binary, and the root-owned upgrade script uses runuser to
+# reach each desktop user's systemd manager. Debian's util-linux is Essential; Fedora
+# splits enough of it out that the RPM must require the full package explicitly.
 [package.metadata.generate-rpm.requires]
 dbus-common = "*"
 hicolor-icon-theme = "*"
+util-linux = "*"
