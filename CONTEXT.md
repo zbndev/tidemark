@@ -80,7 +80,10 @@ cookies — a deliberate scope boundary, not a coincidence.
 
 Codex reports `rate_limit.primary_window` / `secondary_window` — slots rather than lanes,
 each declaring its own length — plus a `code_review_rate_limit` of the same shape and named
-`additional_rate_limits[]`. The three are separate pools, not lengths of one.
+`additional_rate_limits[]`. The three are separate pools, not lengths of one. One extra
+pool is dropped rather than drawn: `metered_feature: "base_model_inference"`, shown by
+OpenAI as *gpt-reserve*, whose weekly window resets at `captured_at + 604800` on every
+poll and so measures nothing.
 Antigravity reports two model groups (Gemini, Claude+GPT) × two windows. "OpenAI" here
 means the ChatGPT/Codex subscription, not the API Platform billing dashboard — the latter
 has spend, not reset windows, and does not fit this model.

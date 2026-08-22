@@ -17,6 +17,18 @@
 //! `additional_rate_limits[]` all carry the same primary/secondary pair. They are different
 //! *pools* rather than different lengths of one pool, so each keeps its own key prefix and
 //! a weekly window in one cannot collide with a weekly window in another.
+//!
+//! # The pool that is not a quota
+//!
+//! One `additional_rate_limits[]` entry is a reserve rather than an allowance and is
+//! dropped: `metered_feature: "base_model_inference"`, displayed by OpenAI as
+//! *gpt-reserve*. Observed on 2026-08-22 on a `plus` account, its window declared
+//! `limit_window_seconds: 604800` at `used_percent: 0` with `reset_at` exactly
+//! `captured_at + 604800` — the whole account's `rate_limit` in the same response said
+//! 560287 seconds to its own weekly reset, so the reserve's seven days restart on every
+//! poll and can never elapse. A bar over that measures nothing: it would sit permanently
+//! empty beside the real weekly window with a pace mark pinned to zero, and read as a
+//! second week of headroom the account does not have. See [`RESERVE_FEATURE`].
 
 use super::{BoxFuture, Credential, Provider, ProviderError, http, length_title, title_case};
 use crate::oauth;
@@ -36,6 +48,16 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// The slug this provider's history is filed under. Never changes once shipped.
 pub const PROVIDER_ID: &str = "codex";
+
+/// The `metered_feature` of the reserve pool, dropped before it becomes a window.
+///
+/// Matched on the feature slug rather than on the `limit_name` OpenAI shows it under
+/// ("gpt-reserve"), for the same reason every pool here is keyed on the slug: the label
+/// is vendor copy and can be reworded between two responses, while the slug is what the
+/// limit is. Should OpenAI turn this feature into a real allowance, the bar comes back by
+/// deleting one line — and until it declares a window that actually elapses, there is
+/// nothing here to draw.
+const RESERVE_FEATURE: &str = "base_model_inference";
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
@@ -418,6 +440,15 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
             serde_json::from_value(entry.clone()).map_err(|error| {
                 ProviderError::malformed(format!("an extra rate limit is not readable: {error}"))
             })?;
+        // Not a limit anyone spends against; see the module docs.
+        if extra
+            .metered_feature
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|feature| feature == RESERVE_FEATURE)
+        {
+            continue;
+        }
         let name = extra
             .limit_name
             .as_deref()
