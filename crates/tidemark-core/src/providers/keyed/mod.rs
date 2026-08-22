@@ -28,6 +28,7 @@
 //! `tidemarkd::registry`, beside [`CATALOG`]; everything the settings dialog needs from
 //! them is the same shape as a `Spec`'s, so the dialog does not distinguish the tables.
 
+pub mod aiand;
 pub mod amp;
 pub mod chutes;
 pub mod clawrouter;
