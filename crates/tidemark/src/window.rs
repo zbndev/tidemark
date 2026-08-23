@@ -11,12 +11,14 @@
 //! data — the relative timestamps, and the pace marks, which keep moving while nothing else
 //! changes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use tidemark_types::{ProviderDefinition, ProviderStatus, Timestamp};
+use tidemark_types::{
+    DataInfo, Preferences as AppPreferences, ProviderDefinition, ProviderStatus, Timestamp, ids,
+};
 
 use crate::about;
 use crate::bus::{self, DaemonProxy, Update};
@@ -24,6 +26,7 @@ use crate::card::Card;
 use crate::detail::DetailDialog;
 use crate::grid::CardGrid;
 use crate::model;
+use crate::preferences::PreferencesDialog;
 use crate::provider_settings::ProviderSettings;
 use crate::tray::{self, Tray};
 use crate::update::{self, UpdateNotice};
@@ -41,6 +44,10 @@ fn account_index(statuses: &[ProviderStatus], provider: &str, account: &str) -> 
     statuses
         .iter()
         .position(|status| status.provider == provider && status.account == account)
+}
+
+fn should_minimize_on_close(tray_available: bool, preference: bool) -> bool {
+    tray_available && preference
 }
 
 #[derive(Debug)]
@@ -85,6 +92,7 @@ pub struct MainWindow {
     refresh: gtk::Button,
     release: gtk::Button,
     providers: gtk::Button,
+    preferences_action: gio::SimpleAction,
     /// The cards in the order they are on screen. The one order this process has: the tray
     /// menu and the settings list are both drawn from it, and it is what a drag permutes.
     cards: RefCell<Vec<Rc<Card>>>,
@@ -94,8 +102,12 @@ pub struct MainWindow {
     /// page. `None` while nothing is answering on the bus.
     daemon_version: RefCell<Option<String>>,
     update_notice: RefCell<UpdateNotice>,
+    preferences: RefCell<AppPreferences>,
+    data_info: RefCell<DataInfo>,
+    minimize_on_close: Cell<bool>,
     /// The provider dialog while it is open, so live catalog and status changes reach it.
     provider_settings: DialogSlot<ProviderSettings>,
+    preferences_dialog: DialogSlot<PreferencesDialog>,
     /// The account detail dialog while it is open, so its chart follows daemon updates.
     detail_dialog: DialogSlot<DetailDialog>,
     /// The panel icon, once a status-notifier host has accepted it. `None` in a session
@@ -154,7 +166,12 @@ impl MainWindow {
         // looks for About without being told where it is. `primary` is what makes F10 open
         // it, which is the shortcut the shell's own menus answer to.
         let menu = gio::Menu::new();
-        menu.append(Some("_About Tidemark"), Some("win.about"));
+        let preferences_section = gio::Menu::new();
+        preferences_section.append(Some("_Preferences"), Some("win.preferences"));
+        menu.append_section(None, &preferences_section);
+        let about_section = gio::Menu::new();
+        about_section.append(Some("_About Tidemark"), Some("win.about"));
+        menu.append_section(None, &about_section);
         let primary_menu = gtk::MenuButton::builder()
             .icon_name("open-menu-symbolic")
             .tooltip_text("Main Menu")
@@ -181,6 +198,9 @@ impl MainWindow {
             .content(&view)
             .build();
 
+        let preferences_action = gio::SimpleAction::new("preferences", None);
+        preferences_action.set_enabled(false);
+
         let main = Rc::new(Self {
             window,
             stack,
@@ -189,12 +209,24 @@ impl MainWindow {
             refresh,
             release,
             providers,
+            preferences_action,
             cards: RefCell::new(Vec::new()),
             definitions: RefCell::new(Vec::new()),
             daemon: RefCell::new(None),
             daemon_version: RefCell::new(None),
             update_notice: RefCell::new(UpdateNotice::new(env!("CARGO_PKG_VERSION"))),
+            preferences: RefCell::new(AppPreferences::default()),
+            data_info: RefCell::new(DataInfo {
+                config_path: String::new(),
+                history_path: String::new(),
+                history_bytes: 0,
+                key_schema: ids::SECRET_SCHEMA.into(),
+                token_schema: ids::TOKEN_SCHEMA.into(),
+                release_check_available: false,
+            }),
+            minimize_on_close: Cell::new(true),
             provider_settings: DialogSlot::default(),
+            preferences_dialog: DialogSlot::default(),
             detail_dialog: DialogSlot::default(),
             tray: RefCell::new(None),
         });
@@ -203,6 +235,7 @@ impl MainWindow {
         main.connect_refresh_button();
         main.connect_update_button();
         main.connect_providers_button();
+        main.connect_preferences_action();
         main.connect_about_action();
         main.start_clock();
         main.start_tray(background);
@@ -221,12 +254,23 @@ impl MainWindow {
     /// Acts on one message from the daemon.
     fn handle(self: &Rc<Self>, update: Update) {
         match update {
-            Update::Connected(proxy, daemon_version, available, definitions, statuses) => {
+            Update::Connected(
+                proxy,
+                daemon_version,
+                available,
+                preferences,
+                data,
+                definitions,
+                statuses,
+            ) => {
                 *self.daemon.borrow_mut() = Some(proxy);
                 self.daemon_version.replace(daemon_version.clone());
                 *self.definitions.borrow_mut() = definitions;
+                self.preferences_action.set_enabled(true);
                 self.refresh.set_sensitive(true);
                 self.providers.set_sensitive(true);
+                self.apply_preferences(preferences);
+                self.apply_data(data);
                 self.show_update(&available);
                 self.show_all(statuses);
 
@@ -271,9 +315,12 @@ impl MainWindow {
             Update::Removed { provider, account } => self.show_removed(&provider, &account),
             Update::Reordered(providers) => self.show_order(&providers),
             Update::Available(version) => self.show_update(&version),
+            Update::Preferences(preferences) => self.apply_preferences(preferences),
+            Update::Data(data) => self.apply_data(data),
             Update::Waiting(reason) => {
                 *self.daemon.borrow_mut() = None;
                 self.daemon_version.replace(None);
+                self.preferences_action.set_enabled(false);
                 self.refresh.set_sensitive(false);
                 self.providers.set_sensitive(false);
                 self.show_update("");
@@ -497,6 +544,54 @@ impl MainWindow {
         });
     }
 
+    fn connect_preferences_action(self: &Rc<Self>) {
+        let weak: Weak<Self> = Rc::downgrade(self);
+        self.preferences_action.connect_activate(move |_, _| {
+            let Some(main) = weak.upgrade() else {
+                return;
+            };
+            if let Some(dialog) = main.preferences_dialog.get() {
+                dialog.apply(&main.preferences.borrow(), &main.data_info.borrow());
+                return;
+            }
+            let Some(proxy) = main.daemon.borrow().clone() else {
+                return;
+            };
+            let on_closed = {
+                let weak = weak.clone();
+                move || {
+                    if let Some(main) = weak.upgrade() {
+                        main.preferences_dialog.clear();
+                    }
+                }
+            };
+            let dialog = PreferencesDialog::present(
+                &main.window,
+                proxy,
+                main.preferences.borrow().clone(),
+                main.data_info.borrow().clone(),
+                on_closed,
+            );
+            assert!(main.preferences_dialog.insert_if_empty(dialog));
+        });
+        self.window.add_action(&self.preferences_action);
+    }
+
+    fn apply_preferences(&self, preferences: AppPreferences) {
+        self.minimize_on_close.set(preferences.minimize_on_close);
+        *self.preferences.borrow_mut() = preferences;
+        if let Some(dialog) = self.preferences_dialog.get() {
+            dialog.apply(&self.preferences.borrow(), &self.data_info.borrow());
+        }
+    }
+
+    fn apply_data(&self, data: DataInfo) {
+        *self.data_info.borrow_mut() = data;
+        if let Some(dialog) = self.preferences_dialog.get() {
+            dialog.apply(&self.preferences.borrow(), &self.data_info.borrow());
+        }
+    }
+
     /// Installs `win.about`, the one entry in the primary menu.
     ///
     /// A window action rather than an application one: what the dialog reports — which
@@ -716,12 +811,19 @@ impl MainWindow {
     }
 
     /// Turns the close button into a hide, now that there is an icon to get back from.
-    fn close_to_tray(&self) {
-        self.window.connect_close_request(|window| {
+    fn close_to_tray(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        self.window.connect_close_request(move |window| {
+            let Some(main) = weak.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            if !should_minimize_on_close(main.tray.borrow().is_some(), main.minimize_on_close.get())
+            {
+                return glib::Propagation::Proceed;
+            }
             window.set_visible(false);
-            // The window stays in the application's window list while it is merely hidden,
-            // which is what keeps the process alive with nothing on screen. `Quit` in the
-            // tray menu is the way out, and the only one.
+            // A working tray is already guaranteed by the only caller. The preference is
+            // read at close time, so changing it needs no reconnect or restart.
             glib::Propagation::Stop
         });
     }
@@ -762,7 +864,7 @@ mod tests {
 
     use tidemark_types::{AccountId, ProviderId, ProviderStatus};
 
-    use super::{DialogSlot, account_index};
+    use super::{DialogSlot, account_index, should_minimize_on_close};
 
     fn status(provider: &str, account: &str) -> ProviderStatus {
         ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))
@@ -782,5 +884,11 @@ mod tests {
         assert!(!slot.insert_if_empty(Rc::new(2)));
         slot.clear();
         assert!(slot.insert_if_empty(Rc::new(3)));
+    }
+    #[test]
+    fn close_hides_only_when_both_the_tray_and_preference_allow_it() {
+        assert!(should_minimize_on_close(true, true));
+        assert!(!should_minimize_on_close(true, false));
+        assert!(!should_minimize_on_close(false, true));
     }
 }

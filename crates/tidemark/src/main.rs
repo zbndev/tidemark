@@ -22,6 +22,7 @@ mod format;
 mod grid;
 mod mark;
 mod model;
+mod preferences;
 mod provider_settings;
 mod style;
 mod tray;

@@ -255,6 +255,64 @@ impl History {
         Ok(removed)
     }
 
+    /// Deletes history older than an explicit retention cutoff.
+    ///
+    /// An open segment and its latest observed state survive even when the daemon has been
+    /// offline longer than the retention period. The next reading still needs that state
+    /// to decide whether a reset happened while it was away.
+    pub fn prune_before(&mut self, cutoff: Timestamp) -> Result<usize, StorageError> {
+        let transaction = self.connection.transaction()?;
+        let removed = transaction.execute(
+            "DELETE FROM point WHERE captured_at < ?1",
+            params![cutoff.as_unix()],
+        )?;
+        transaction.execute(
+            r"
+            DELETE FROM notice
+            WHERE EXISTS (
+                SELECT 1 FROM segment
+                WHERE segment.provider = notice.provider
+                  AND segment.account  = notice.account
+                  AND segment.window   = notice.window
+                  AND segment.segment  = notice.segment
+                  AND segment.ended_at IS NOT NULL
+                  AND segment.ended_at < ?1
+            )
+            ",
+            params![cutoff.as_unix()],
+        )?;
+        transaction.execute(
+            "DELETE FROM segment WHERE ended_at IS NOT NULL AND ended_at < ?1",
+            params![cutoff.as_unix()],
+        )?;
+        transaction.commit()?;
+        Ok(removed)
+    }
+
+    /// Removes every stored reading, segment, notice and last-observed window state.
+    ///
+    /// The deletes commit as one transaction: a database that refuses halfway keeps
+    /// everything, so the caller can retry instead of inheriting a half-cleared history.
+    /// Compaction runs only after the commit, and its failure is logged rather than
+    /// reported — the deletion is already durable, and a failed VACUUM is not a failed
+    /// clear.
+    pub fn clear(&mut self) -> Result<(), StorageError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute_batch(
+            r"
+            DELETE FROM notice;
+            DELETE FROM point;
+            DELETE FROM window_state;
+            DELETE FROM segment;
+            ",
+        )?;
+        transaction.commit()?;
+        if let Err(error) = self.connection.execute_batch("VACUUM") {
+            tracing::warn!(%error, "history cleared but could not be compacted");
+        }
+        Ok(())
+    }
+
     /// Whether a notification of this kind has already gone out for this segment.
     ///
     /// Kinds are the daemon's vocabulary rather than the database's: what is stored is
@@ -981,6 +1039,99 @@ mod tests {
                 .notice_sent("test", "default", &key(), 2, "reset")
                 .expect("looked up"),
             "the segment still open must keep its notices"
+        );
+    }
+    #[test]
+    fn pruning_drops_points_before_the_retention_cutoff() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 10.0, Some(5 * HOUR)))
+            .expect("old point");
+        history
+            .ingest(&snapshot(2 * HOUR, 20.0, Some(5 * HOUR)))
+            .expect("new point");
+
+        assert_eq!(history.prune_before(at(HOUR)).expect("pruned"), 1);
+        let points = history.points("test", "default", &key(), 1).expect("read");
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].used_percent, 20.0);
+    }
+
+    #[test]
+    fn clearing_history_removes_points_segments_state_and_notices() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 72.0, Some(5 * HOUR)))
+            .expect("ingested");
+        history
+            .record_notice("test", "default", &key(), 1, "threshold-70", at(0))
+            .expect("recorded");
+
+        history.clear().expect("cleared");
+
+        assert_eq!(history.point_count().expect("points counted"), 0);
+        assert_eq!(
+            history
+                .segment_count("test", "default", &key())
+                .expect("segments counted"),
+            0
+        );
+        assert!(
+            !history
+                .notice_sent("test", "default", &key(), 1, "threshold-70")
+                .expect("notice checked")
+        );
+        assert_eq!(
+            history
+                .current_segment("test", "default", &key())
+                .expect("state checked"),
+            None
+        );
+    }
+
+    /// A clear the database refuses partway through must keep everything: the caller will
+    /// retry, and a half-cleared database would forget notices that still apply while the
+    /// segments they belong to survive.
+    #[test]
+    fn a_clear_that_fails_partway_keeps_everything_stored() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 72.0, Some(5 * HOUR)))
+            .expect("ingested");
+        history
+            .record_notice("test", "default", &key(), 1, "threshold-70", at(0))
+            .expect("recorded");
+        history
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER pinned_segment BEFORE DELETE ON segment
+                 BEGIN SELECT RAISE(FAIL, 'segments are pinned'); END;",
+            )
+            .expect("trigger installed");
+
+        assert!(
+            history.clear().is_err(),
+            "a pinned segment refuses the clear"
+        );
+
+        assert_eq!(history.point_count().expect("points counted"), 1);
+        assert_eq!(
+            history
+                .segment_count("test", "default", &key())
+                .expect("segments counted"),
+            1
+        );
+        assert!(
+            history
+                .notice_sent("test", "default", &key(), 1, "threshold-70")
+                .expect("notice checked"),
+            "a notice whose segment survived the failed clear must survive too"
+        );
+        assert_eq!(
+            history
+                .current_segment("test", "default", &key())
+                .expect("state checked"),
+            Some(1)
         );
     }
 }

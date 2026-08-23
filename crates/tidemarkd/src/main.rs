@@ -16,6 +16,8 @@ mod notify;
 mod registry;
 mod scheduler;
 mod service;
+mod startup;
+#[cfg(feature = "update-check")]
 mod update;
 
 use std::error::Error;
@@ -27,7 +29,7 @@ use tidemark_core::secrets::Secrets;
 use tidemark_core::storage::History;
 use tidemark_types::ids;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use zbus::object_server::SignalEmitter;
 
 use crate::engine::{Command, Engine, Publication};
@@ -40,16 +42,47 @@ const COMMAND_QUEUE: usize = 16;
 /// Finished statuses waiting to be published. One per account per poll.
 const UPDATE_QUEUE: usize = 64;
 
-/// Applies one successful check and returns the signal payload only when state changed.
+#[cfg(feature = "update-check")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseWait {
+    Ready,
+    Disabled,
+    Closed,
+}
+
+#[cfg(feature = "update-check")]
+async fn wait_for_release_check(
+    enabled: &mut watch::Receiver<bool>,
+    delay: std::time::Duration,
+) -> ReleaseWait {
+    loop {
+        if !*enabled.borrow_and_update() {
+            if enabled.changed().await.is_err() {
+                return ReleaseWait::Closed;
+            }
+            continue;
+        }
+        return tokio::select! {
+            _ = tokio::time::sleep(delay) => ReleaseWait::Ready,
+            changed = enabled.changed() => {
+                if changed.is_err() {
+                    ReleaseWait::Closed
+                } else {
+                    ReleaseWait::Disabled
+                }
+            }
+        };
+    }
+}
+/// Applies one finished check, whatever its outcome. Whether the result may still be
+/// published is decided inside [`PublishedUpdate::publish`], against the same lock a
+/// disable takes — never against an enabled flag copied before an await.
+#[cfg(feature = "update-check")]
 async fn publish_result(
     published: &PublishedUpdate,
     result: Result<Option<String>, update::CheckError>,
 ) -> Result<Option<String>, update::CheckError> {
-    let next = result?;
-    Ok(published
-        .replace(next.clone())
-        .await
-        .then(|| next.unwrap_or_default()))
+    Ok(published.publish(result?).await)
 }
 
 fn main() -> std::process::ExitCode {
@@ -94,6 +127,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // and the first thing this daemon would do with the wrong region is report a rejected
     // key. Once running, a later bad edit is reported and the previous settings stand.
     let config = Config::at(config_path.clone())?;
+    let preferences = config.preferences()?;
     let secrets: Arc<dyn Secrets> = Arc::new(keyring::Keyring::default());
     let accounts = registry::accounts(&secrets, &config)?;
     let configured = accounts
@@ -121,6 +155,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let (updates, mut update_queue) = mpsc::channel::<Publication>(UPDATE_QUEUE);
     let published = Published::default();
     let published_update = PublishedUpdate::default();
+    let release_check_enabled = preferences.release_check && cfg!(feature = "update-check");
+    // The checker's sleep/wake control and the publishable state start from the same
+    // durable preference.
+    published_update.set_enabled(release_check_enabled).await;
+    let (release_checks, release_check_changes) = watch::channel(release_check_enabled);
+    #[cfg(feature = "update-check")]
+    let mut release_check_changes = release_check_changes;
+    #[cfg(not(feature = "update-check"))]
+    let _release_check_changes = release_check_changes;
 
     let connection = zbus::connection::Builder::session()?
         .name(ids::DAEMON_BUS_NAME)?
@@ -133,6 +176,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 configured,
                 commands.clone(),
                 Arc::clone(&secrets),
+            )
+            .with_preferences(
+                config_path.clone(),
+                history_path.clone(),
+                Arc::new(startup::System),
+                release_checks.clone(),
+                cfg!(feature = "update-check"),
             ),
         )?
         .build()
@@ -180,14 +230,21 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    #[cfg(feature = "update-check")]
     let release_checker = match update::Checker::production() {
         Ok(checker) => {
             let published_update = published_update.clone();
             let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH)?;
             Some(tokio::spawn(async move {
-                tokio::time::sleep(update::INITIAL_DELAY).await;
+                let mut delay = update::INITIAL_DELAY;
                 loop {
-                    match publish_result(&published_update, checker.check().await).await {
+                    match wait_for_release_check(&mut release_check_changes, delay).await {
+                        ReleaseWait::Ready => {}
+                        ReleaseWait::Disabled => continue,
+                        ReleaseWait::Closed => return,
+                    }
+                    let result = checker.check().await;
+                    match publish_result(&published_update, result).await {
                         Ok(Some(version)) => {
                             if let Err(error) = Daemon::update_changed(&emitter, &version).await {
                                 tracing::warn!(%error, "could not announce update availability");
@@ -196,7 +253,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         Ok(None) => {}
                         Err(error) => tracing::info!(%error, "release check failed"),
                     }
-                    tokio::time::sleep(update::INTERVAL).await;
+                    delay = update::INTERVAL;
                 }
             }))
         }
@@ -205,6 +262,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
             None
         }
     };
+    #[cfg(not(feature = "update-check"))]
+    let release_checker: Option<tokio::task::JoinHandle<()>> = None;
 
     let mut term = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -248,14 +307,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "update-check"))]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn a_failed_release_check_preserves_the_previous_update() {
         let published = PublishedUpdate::default();
-        assert!(published.replace(Some("0.2.0".into())).await);
+        published.set_enabled(true).await;
+        assert_eq!(
+            published.publish(Some("0.2.0".into())).await,
+            Some("0.2.0".into())
+        );
 
         let result = publish_result(&published, Err(update::CheckError::Version)).await;
 
@@ -266,7 +329,7 @@ mod tests {
     #[tokio::test]
     async fn only_a_changed_release_result_needs_a_signal() {
         let published = PublishedUpdate::default();
-
+        published.set_enabled(true).await;
         assert_eq!(
             publish_result(&published, Ok(Some("0.3.0".into())))
                 .await
@@ -283,5 +346,42 @@ mod tests {
             publish_result(&published, Ok(None)).await.unwrap(),
             Some(String::new())
         );
+    }
+    #[tokio::test]
+    async fn disabling_release_checks_interrupts_the_wait() {
+        let (enabled, mut changes) = tokio::sync::watch::channel(true);
+        let waiting = tokio::spawn(async move {
+            wait_for_release_check(&mut changes, std::time::Duration::from_secs(30)).await
+        });
+        tokio::task::yield_now().await;
+
+        enabled.send_replace(false);
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), waiting)
+            .await
+            .expect("disable wakes the wait")
+            .expect("task did not panic");
+    }
+    #[tokio::test]
+    async fn a_result_from_before_a_disable_stays_unpublished() {
+        let published = PublishedUpdate::default();
+        published.set_enabled(true).await;
+        assert_eq!(
+            published.publish(Some("0.2.0".into())).await,
+            Some("0.2.0".into())
+        );
+
+        // The daemon disables checks: the flag and the known release are cleared in one
+        // write, and a check that started earlier and finishes afterwards is dropped
+        // under that same lock rather than through an enabled flag it copied beforehand.
+        assert!(published.set_enabled(false).await);
+
+        assert_eq!(
+            publish_result(&published, Ok(Some("0.3.0".into())))
+                .await
+                .expect("the check itself succeeded"),
+            None
+        );
+        assert_eq!(published.get().await, "");
     }
 }

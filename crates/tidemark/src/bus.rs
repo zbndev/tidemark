@@ -25,7 +25,7 @@ use std::future::poll_fn;
 use std::pin::pin;
 use std::task::Poll;
 
-use tidemark_types::{ProviderDefinition, ProviderStatus};
+use tidemark_types::{DataInfo, Preferences, ProviderDefinition, ProviderStatus, ids};
 use zbus::export::futures_core::Stream;
 
 /// How long to wait before trying the session bus again after a failure. Only reached when
@@ -53,6 +53,11 @@ pub trait Daemon {
 
     /// A newer published application release, or an empty string when none is known.
     fn get_update(&self) -> zbus::Result<String>;
+    /// Application-wide preferences stored by the daemon.
+    fn get_preferences(&self) -> zbus::Result<Preferences>;
+
+    /// Paths and storage facts for the Preferences data page.
+    fn get_data_info(&self) -> zbus::Result<DataInfo>;
 
     /// Stored points in the current segment of one window, oldest first.
     fn current_segment(
@@ -98,6 +103,12 @@ pub trait Daemon {
         enabled: bool,
     ) -> zbus::Result<()>;
 
+    fn set_release_check(&self, enabled: bool) -> zbus::Result<()>;
+    fn set_minimize_on_close(&self, enabled: bool) -> zbus::Result<()>;
+    fn set_startup_mode(&self, mode: &str) -> zbus::Result<()>;
+    fn set_history_retention(&self, retention: &str) -> zbus::Result<()>;
+    fn clear_history(&self) -> zbus::Result<()>;
+
     /// Puts the configured providers in the order the user arranged the cards in.
     fn set_order(&self, providers: &[String]) -> zbus::Result<()>;
 
@@ -117,6 +128,14 @@ pub trait Daemon {
     #[zbus(signal)]
     fn order_changed(&self, providers: Vec<String>) -> zbus::Result<()>;
 
+    /// Application preferences changed.
+    #[zbus(signal)]
+    fn preferences_changed(&self, preferences: Preferences) -> zbus::Result<()>;
+
+    /// Paths or storage facts changed.
+    #[zbus(signal)]
+    fn data_changed(&self, data: DataInfo) -> zbus::Result<()>;
+
     /// Availability of a newer published application release changed.
     #[zbus(signal)]
     fn update_changed(&self, version: &str) -> zbus::Result<()>;
@@ -134,6 +153,8 @@ pub enum Update {
         DaemonProxy<'static>,
         Option<String>,
         String,
+        Preferences,
+        DataInfo,
         Vec<ProviderDefinition>,
         Vec<ProviderStatus>,
     ),
@@ -145,6 +166,10 @@ pub enum Update {
     Reordered(Vec<String>),
     /// Availability of a newer published application release changed.
     Available(String),
+    /// Application-wide preferences changed.
+    Preferences(Preferences),
+    /// Paths or storage facts changed.
+    Data(DataInfo),
     /// There is nothing to show, with the reason to put on the screen.
     Waiting(String),
 }
@@ -186,6 +211,8 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
     let mut removals = pin!(proxy.receive_provider_removed().await?);
     let mut orders = pin!(proxy.receive_order_changed().await?);
     let mut updates = pin!(proxy.receive_update_changed().await?);
+    let mut preference_changes = pin!(proxy.receive_preferences_changed().await?);
+    let mut data_changes = pin!(proxy.receive_data_changed().await?);
 
     load(&proxy, on).await;
 
@@ -205,6 +232,12 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
             }
             if let Poll::Ready(update) = updates.as_mut().poll_next(context) {
                 return Poll::Ready(Event::Available(update));
+            }
+            if let Poll::Ready(preferences) = preference_changes.as_mut().poll_next(context) {
+                return Poll::Ready(Event::Preferences(preferences));
+            }
+            if let Poll::Ready(data) = data_changes.as_mut().poll_next(context) {
+                return Poll::Ready(Event::Data(data));
             }
             Poll::Pending
         })
@@ -240,12 +273,22 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
                 Ok(args) => on(Update::Available(args.version.to_owned())),
                 Err(error) => tracing::warn!(%error, "an UpdateChanged signal did not parse"),
             },
+            Event::Preferences(Some(signal)) => match signal.args() {
+                Ok(args) => on(Update::Preferences(args.preferences)),
+                Err(error) => tracing::warn!(%error, "a PreferencesChanged signal did not parse"),
+            },
+            Event::Data(Some(signal)) => match signal.args() {
+                Ok(args) => on(Update::Data(args.data)),
+                Err(error) => tracing::warn!(%error, "a DataChanged signal did not parse"),
+            },
             // Any stream ending means the connection is finished with.
             Event::Owner(None)
             | Event::Changed(None)
             | Event::Removed(None)
             | Event::Reordered(None)
-            | Event::Available(None) => return Ok(()),
+            | Event::Available(None)
+            | Event::Preferences(None)
+            | Event::Data(None) => return Ok(()),
         }
     }
 }
@@ -265,11 +308,45 @@ async fn load(proxy: &DaemonProxy<'static>, on: &impl Fn(Update)) {
         tracing::info!(%error, "the daemon did not answer GetUpdate; hiding update availability");
         String::new()
     });
+    let preferences = match proxy.get_preferences().await {
+        Ok(preferences) => preferences,
+        // A daemon from before the method existed. That is the one failure compiled-in
+        // defaults are the right answer to: there is nothing on the other end that could
+        // have an opinion yet.
+        Err(error) if unknown_method(&error) => {
+            tracing::info!(%error, "the daemon predates GetPreferences; using defaults");
+            Preferences::default()
+        }
+        // Anything else is a daemon that has the method and could not answer it — a
+        // config.toml that does not parse, most likely. Defaults here would put a
+        // configuration the user never wrote on screen and invite them to edit it, so
+        // the failure goes on screen instead.
+        Err(error) => {
+            tracing::warn!(%error, "the daemon could not read its preferences");
+            on(Update::Waiting(format!(
+                "The daemon could not read its preferences: {error}"
+            )));
+            return;
+        }
+    };
+    let data = proxy.get_data_info().await.unwrap_or_else(|error| {
+        tracing::info!(%error, "the daemon did not answer GetDataInfo; hiding storage facts");
+        DataInfo {
+            config_path: String::new(),
+            history_path: String::new(),
+            history_bytes: 0,
+            key_schema: ids::SECRET_SCHEMA.into(),
+            token_schema: ids::TOKEN_SCHEMA.into(),
+            release_check_available: false,
+        }
+    });
     match (definitions, statuses) {
         (Ok(definitions), Ok(statuses)) => on(Update::Connected(
             proxy.clone(),
             version,
             available,
+            preferences,
+            data,
             definitions,
             statuses,
         )),
@@ -280,6 +357,21 @@ async fn load(proxy: &DaemonProxy<'static>, on: &impl Fn(Update)) {
     }
 }
 
+/// Whether an error says the method itself is not there.
+///
+/// It is the one answer that separates an older daemon, which a client may speak for with
+/// its own defaults, from a current daemon reporting a real failure, which it may not.
+/// zbus delivers an error reply as [`zbus::Error::MethodError`] carrying the wire name;
+/// the [`zbus::fdo`] form is matched too so a locally built error classifies the same way.
+fn unknown_method(error: &zbus::Error) -> bool {
+    const UNKNOWN_METHOD: &str = "org.freedesktop.DBus.Error.UnknownMethod";
+    match error {
+        zbus::Error::MethodError(name, _, _) => name.as_str() == UNKNOWN_METHOD,
+        zbus::Error::FDO(error) => matches!(error.as_ref(), zbus::fdo::Error::UnknownMethod(_)),
+        _ => false,
+    }
+}
+
 /// One of the streams the [`serve`] loop watches produced something.
 enum Event {
     Owner(Option<Option<zbus::names::UniqueName<'static>>>),
@@ -287,6 +379,8 @@ enum Event {
     Removed(Option<ProviderRemoved>),
     Reordered(Option<OrderChanged>),
     Available(Option<UpdateChanged>),
+    Preferences(Option<PreferencesChanged>),
+    Data(Option<DataChanged>),
 }
 
 #[cfg(test)]
@@ -294,9 +388,10 @@ mod tests {
     use std::cell::RefCell;
     use std::process;
 
-    use tidemark_types::{ProviderDefinition, ProviderStatus, ids};
+    use tidemark_types::{Preferences, ProviderDefinition, ProviderStatus, ids};
 
     use super::{DaemonProxy, Update, load};
+    use zbus::fdo;
 
     #[derive(Debug)]
     struct VersionService(&'static str);
@@ -320,6 +415,26 @@ mod tests {
 
         fn get_status(&self) -> Vec<ProviderStatus> {
             Vec::new()
+        }
+    }
+    /// A daemon that implements `GetPreferences` but cannot read its own storage.
+    #[derive(Debug)]
+    struct FailingPreferencesService;
+
+    #[zbus::interface(name = "io.github.zbndev.Tidemark.Daemon1")]
+    impl FailingPreferencesService {
+        fn list_providers(&self) -> Vec<ProviderDefinition> {
+            Vec::new()
+        }
+
+        fn get_status(&self) -> Vec<ProviderStatus> {
+            Vec::new()
+        }
+
+        fn get_preferences(&self) -> fdo::Result<Preferences> {
+            Err(fdo::Error::Failed(
+                "the preferences in config.toml do not parse".into(),
+            ))
         }
     }
 
@@ -405,13 +520,103 @@ mod tests {
             .await;
 
             match seen.into_inner() {
-                Some(Update::Connected(_, version, available, definitions, statuses)) => {
+                Some(Update::Connected(
+                    _,
+                    version,
+                    available,
+                    preferences,
+                    data,
+                    definitions,
+                    statuses,
+                )) => {
                     assert_eq!(version, None);
                     assert_eq!(available, "");
+                    assert_eq!(preferences, Preferences::default());
+                    assert!(!data.release_check_available);
                     assert!(definitions.is_empty());
                     assert!(statuses.is_empty());
                 }
                 other => panic!("expected connected status, got {other:?}"),
+            }
+        });
+    }
+    #[test]
+    fn only_a_missing_get_preferences_is_answered_with_defaults() {
+        zbus::block_on(async {
+            let Ok(client_connection) = zbus::Connection::session().await else {
+                eprintln!("skipped: no session bus is reachable");
+                return;
+            };
+
+            // A daemon from before GetPreferences existed: the interface answers, the
+            // method does not, and compiled-in defaults are the compatibility answer.
+            let legacy = format!("io.github.zbndev.Tidemark.LegacyTest.p{}", process::id());
+            let _legacy = zbus::connection::Builder::session()
+                .expect("session bus address")
+                .name(legacy.as_str())
+                .expect("valid test bus name")
+                .serve_at(ids::OBJECT_PATH, StatusService)
+                .expect("valid test object")
+                .build()
+                .await
+                .expect("legacy test service");
+            let legacy_destination = zbus::names::OwnedBusName::try_from(legacy.as_str())
+                .expect("valid owned test destination");
+            let proxy = DaemonProxy::builder(&client_connection)
+                .destination(legacy_destination)
+                .expect("test destination")
+                .build()
+                .await
+                .expect("daemon proxy");
+            let seen = RefCell::new(None);
+
+            load(&proxy, &|update| {
+                seen.replace(Some(update));
+            })
+            .await;
+
+            match seen.into_inner() {
+                Some(Update::Connected(_, _, _, preferences, _, _, _)) => {
+                    assert_eq!(preferences, Preferences::default());
+                }
+                other => panic!("expected compatibility defaults, got {other:?}"),
+            }
+
+            // A daemon that has GetPreferences but fails to read: the error must reach
+            // the window rather than being replaced by defaults the user never wrote.
+            let broken = format!("io.github.zbndev.Tidemark.BrokenTest.p{}", process::id());
+            let _broken = zbus::connection::Builder::session()
+                .expect("session bus address")
+                .name(broken.as_str())
+                .expect("valid test bus name")
+                .serve_at(ids::OBJECT_PATH, FailingPreferencesService)
+                .expect("valid test object")
+                .build()
+                .await
+                .expect("broken test service");
+            let broken_destination = zbus::names::OwnedBusName::try_from(broken.as_str())
+                .expect("valid owned test destination");
+            let proxy = DaemonProxy::builder(&client_connection)
+                .destination(broken_destination)
+                .expect("test destination")
+                .build()
+                .await
+                .expect("daemon proxy");
+            let seen = RefCell::new(None);
+
+            load(&proxy, &|update| {
+                seen.replace(Some(update));
+            })
+            .await;
+
+            match seen.into_inner() {
+                Some(Update::Waiting(reason)) => {
+                    assert!(
+                        reason.contains("do not parse"),
+                        "the read failure should stay visible, got: {reason}"
+                    );
+                }
+                other => panic!("expected the read failure to stay visible, got {other:?}"),
             }
         });
     }

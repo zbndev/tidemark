@@ -19,8 +19,8 @@ pub use snapshot::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, pr
 pub use time::{AbsurdTimestamp, Timestamp};
 pub use window::{DANGER_AT, WARNING_AT, Window, WindowKey, WindowLength};
 pub use wire::{
-    CredentialKind, ExternalLogin, HistoryPoint, OptionChoice, ProviderDefinition, ProviderOption,
-    ProviderState, ProviderStatus, Remedy, WindowStatus,
+    CredentialKind, DataInfo, ExternalLogin, HistoryPoint, OptionChoice, Preferences,
+    ProviderDefinition, ProviderOption, ProviderState, ProviderStatus, Remedy, WindowStatus,
 };
 
 /// Identity constants. Changing any of these is a breaking change for installed units,
@@ -41,6 +41,8 @@ pub mod ids {
     pub const DAEMON_INTERFACE: &str = "io.github.zbndev.Tidemark.Daemon1";
     /// Secret Service schema for keys Tidemark owns.
     pub const SECRET_SCHEMA: &str = "io.github.zbndev.Tidemark.ProviderKey";
+    /// Secret Service schema for OAuth tokens created by a login through Tidemark.
+    pub const TOKEN_SCHEMA: &str = "io.github.zbndev.Tidemark.ProviderToken";
 }
 
 /// The value every outbound request identifies itself with.

@@ -32,21 +32,25 @@
 //! login silently fails on a machine with an unusual desktop.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use tidemark_core::config::Config;
 use tidemark_core::oauth::Login;
 use tidemark_core::providers::Credential;
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_types::{
-    AccountId, CredentialKind, HistoryPoint, ProviderDefinition, ProviderId, ProviderStatus,
+    AccountId, CredentialKind, DataInfo, HistoryPoint, Preferences, ProviderDefinition, ProviderId,
+    ProviderStatus, ids,
 };
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
 
-use crate::engine::{Command, stored_kind};
+use crate::engine::{Command, Preference, stored_kind};
 use crate::registry;
+use crate::startup::Startup;
 
 type AccountKey = (String, String);
 type AccountMutation = Arc<Mutex<()>>;
@@ -113,24 +117,48 @@ impl Published {
     }
 }
 
-/// The newer application release, when a successful check found one.
+/// The newer application release, when a successful check found one, and whether release
+/// checks are on at all.
+///
+/// One lock guards both, so a check that was already running when checks were disabled
+/// can never publish after the disable: the disable and the publication are ordered by
+/// the lock, not by an enabled flag copied before an await. The watch channel in
+/// [`PreferencesRuntime`](struct@crate::service) remains the checker's sleep-and-wake
+/// control; this is the state a client can observe.
 #[derive(Debug, Clone, Default)]
-pub struct PublishedUpdate(Arc<RwLock<Option<String>>>);
+pub struct PublishedUpdate(Arc<RwLock<UpdateState>>);
+
+#[derive(Debug, Default)]
+struct UpdateState {
+    enabled: bool,
+    release: Option<String>,
+}
 
 impl PublishedUpdate {
     /// The D-Bus representation: an empty string means no newer release is known.
     pub async fn get(&self) -> String {
-        self.0.read().await.clone().unwrap_or_default()
+        self.0.read().await.release.clone().unwrap_or_default()
     }
 
-    /// Replaces the known release and reports whether clients need a signal.
-    pub async fn replace(&self, next: Option<String>) -> bool {
+    /// Switches release checks on or off. Disabling forgets any known release in the
+    /// same write that latches the flag, so nothing published afterwards can bring it
+    /// back. Reports whether clients must be told a known release went away.
+    pub async fn set_enabled(&self, enabled: bool) -> bool {
         let mut held = self.0.write().await;
-        if *held == next {
-            return false;
+        held.enabled = enabled;
+        !enabled && held.release.take().is_some()
+    }
+
+    /// Applies one finished check and returns the signal payload only when clients need
+    /// one. A result that reaches this after checks were disabled is dropped here, under
+    /// the same lock the disable took.
+    pub async fn publish(&self, next: Option<String>) -> Option<String> {
+        let mut held = self.0.write().await;
+        if !held.enabled || held.release == next {
+            return None;
         }
-        *held = next;
-        true
+        held.release = next;
+        Some(held.release.clone().unwrap_or_default())
     }
 }
 
@@ -155,6 +183,15 @@ impl Pending {
     }
 }
 
+#[derive(Debug)]
+struct PreferencesRuntime {
+    config_path: PathBuf,
+    history_path: PathBuf,
+    startup: Arc<dyn Startup>,
+    release_checks: watch::Sender<bool>,
+    release_check_available: bool,
+}
+
 /// The object served at `/io/github/zbndev/Tidemark`.
 #[derive(Debug)]
 pub struct Daemon {
@@ -166,6 +203,8 @@ pub struct Daemon {
     secrets: Arc<dyn Secrets>,
     logins: Mutex<HashMap<AccountKey, Pending>>,
     mutations: Mutex<HashMap<AccountKey, AccountMutation>>,
+    preferences: Option<PreferencesRuntime>,
+    preference_mutation: Mutex<()>,
 }
 
 impl Daemon {
@@ -187,6 +226,89 @@ impl Daemon {
             secrets,
             logins: Mutex::new(HashMap::new()),
             mutations: Mutex::new(HashMap::new()),
+            preferences: None,
+            preference_mutation: Mutex::new(()),
+        }
+    }
+
+    /// Adds the paths and system integrations behind the application preferences API.
+    pub fn with_preferences(
+        mut self,
+        config_path: PathBuf,
+        history_path: PathBuf,
+        startup: Arc<dyn Startup>,
+        release_checks: watch::Sender<bool>,
+        release_check_available: bool,
+    ) -> Self {
+        self.preferences = Some(PreferencesRuntime {
+            config_path,
+            history_path,
+            startup,
+            release_checks,
+            release_check_available,
+        });
+        self
+    }
+
+    fn preferences_runtime(&self) -> fdo::Result<&PreferencesRuntime> {
+        self.preferences
+            .as_ref()
+            .ok_or_else(|| fdo::Error::Failed("application preferences are unavailable".into()))
+    }
+
+    async fn preference_request(&self, preference: Preference) -> fdo::Result<Preferences> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::SetPreference { preference, reply })
+            .await
+            .map_err(|_| fdo::Error::Failed("the poll loop has stopped".into()))?;
+        answer
+            .await
+            .map_err(|_| fdo::Error::Failed("the poll loop dropped the request".into()))?
+            .map_err(fdo::Error::Failed)
+    }
+
+    async fn publish_preferences(
+        &self,
+        emitter: &SignalEmitter<'_>,
+        preferences: Preferences,
+    ) -> fdo::Result<()> {
+        Self::preferences_changed(emitter, preferences).await?;
+        Ok(())
+    }
+
+    async fn change_startup_mode(&self, mode: &str) -> fdo::Result<Preferences> {
+        // The caller holds `preference_mutation` across this whole change and the
+        // `PreferencesChanged` that follows it, so no other mutation can commit between
+        // this one and its publication.
+        if !Preferences::valid_startup(mode) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "unknown startup mode {mode:?}"
+            )));
+        }
+        let runtime = self.preferences_runtime()?;
+        let previous = Config::at(runtime.config_path.clone())
+            .and_then(|config| config.preferences())
+            .map_err(|error| fdo::Error::Failed(error.to_string()))?;
+        if let Err(error) = runtime.startup.set_startup_mode(mode) {
+            if let Err(rollback_error) = runtime.startup.set_startup_mode(&previous.startup_mode) {
+                tracing::error!(%rollback_error, "could not roll back a startup preference");
+            }
+            return Err(fdo::Error::Failed(error));
+        }
+        match self
+            .preference_request(Preference::StartupMode(mode.into()))
+            .await
+        {
+            Ok(preferences) => Ok(preferences),
+            Err(error) => {
+                if let Err(rollback_error) =
+                    runtime.startup.set_startup_mode(&previous.startup_mode)
+                {
+                    tracing::error!(%rollback_error, "could not roll back a startup preference");
+                }
+                Err(error)
+            }
         }
     }
 
@@ -393,6 +515,29 @@ impl Daemon {
     /// The newer published application release, or an empty string when none is known.
     async fn get_update(&self) -> String {
         self.update.get().await
+    }
+
+    /// Application-wide preferences persisted in `config.toml`.
+    async fn get_preferences(&self) -> fdo::Result<Preferences> {
+        let runtime = self.preferences_runtime()?;
+        Config::at(runtime.config_path.clone())
+            .and_then(|config| config.preferences())
+            .map_err(|error| fdo::Error::Failed(error.to_string()))
+    }
+
+    /// Paths and storage facts for the Preferences data page.
+    async fn get_data_info(&self) -> fdo::Result<DataInfo> {
+        let runtime = self.preferences_runtime()?;
+        let mut wal = runtime.history_path.as_os_str().to_os_string();
+        wal.push("-wal");
+        Ok(DataInfo {
+            config_path: runtime.config_path.to_string_lossy().into_owned(),
+            history_path: runtime.history_path.to_string_lossy().into_owned(),
+            history_bytes: file_size(&runtime.history_path) + file_size(PathBuf::from(wal)),
+            key_schema: ids::SECRET_SCHEMA.into(),
+            token_schema: ids::TOKEN_SCHEMA.into(),
+            release_check_available: runtime.release_check_available,
+        })
     }
 
     /// Stored points in the open segment of one window.
@@ -679,6 +824,86 @@ impl Daemon {
         Ok(())
     }
 
+    /// Enables or disables the daemon's GitHub release checks.
+    async fn set_release_check(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        enabled: bool,
+    ) -> fdo::Result<()> {
+        let _guard = self.preference_mutation.lock().await;
+        let runtime = self.preferences_runtime()?;
+        if enabled && !runtime.release_check_available {
+            return Err(fdo::Error::NotSupported(
+                "this build has no release checker".into(),
+            ));
+        }
+        let preferences = self
+            .preference_request(Preference::ReleaseCheck(enabled))
+            .await?;
+        let release_forgotten = self.update.set_enabled(enabled).await;
+        runtime.release_checks.send_replace(enabled);
+        if release_forgotten {
+            Self::update_changed(&emitter, "").await?;
+        }
+        self.publish_preferences(&emitter, preferences).await
+    }
+
+    /// Chooses whether close hides a window that has a working tray icon.
+    async fn set_minimize_on_close(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        enabled: bool,
+    ) -> fdo::Result<()> {
+        let _guard = self.preference_mutation.lock().await;
+        let preferences = self
+            .preference_request(Preference::MinimizeOnClose(enabled))
+            .await?;
+        self.publish_preferences(&emitter, preferences).await
+    }
+
+    /// Chooses the one coherent login-start mode: app, daemon only, or off.
+    async fn set_startup_mode(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        mode: &str,
+    ) -> fdo::Result<()> {
+        // One lock spans the change, the engine round trip and the publication: releasing
+        // it between the commit and the signal would let a later mutation publish first
+        // and clients see an older snapshot after a newer one.
+        let _guard = self.preference_mutation.lock().await;
+        let preferences = self.change_startup_mode(mode).await?;
+        self.publish_preferences(&emitter, preferences).await
+    }
+
+    /// Sets the named history retention policy and prunes old rows immediately.
+    async fn set_history_retention(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        retention: &str,
+    ) -> fdo::Result<()> {
+        if !Preferences::valid_retention(retention) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "unknown history retention {retention:?}"
+            )));
+        }
+        let _guard = self.preference_mutation.lock().await;
+        let preferences = self
+            .preference_request(Preference::HistoryRetention(retention.into()))
+            .await?;
+        self.publish_preferences(&emitter, preferences).await
+    }
+
+    /// Deletes every historical reading and refreshes the published storage facts.
+    async fn clear_history(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> fdo::Result<()> {
+        self.config_request(|reply| Command::ClearHistory { reply })
+            .await?;
+        Self::data_changed(&emitter, self.get_data_info().await?).await?;
+        Ok(())
+    }
+
     /// Puts the configured providers in the order a client's user arranged them in.
     ///
     /// The order is the `providers` array in `config.toml` — the same array that says which
@@ -756,9 +981,26 @@ impl Daemon {
         providers: Vec<String>,
     ) -> zbus::Result<()>;
 
+    /// Application preferences changed.
+    #[zbus(signal)]
+    pub async fn preferences_changed(
+        emitter: &SignalEmitter<'_>,
+        preferences: Preferences,
+    ) -> zbus::Result<()>;
+
+    /// Paths or storage facts changed.
+    #[zbus(signal)]
+    pub async fn data_changed(emitter: &SignalEmitter<'_>, data: DataInfo) -> zbus::Result<()>;
+
     /// Availability of a newer published release changed; empty means there is none.
     #[zbus(signal)]
     pub async fn update_changed(emitter: &SignalEmitter<'_>, version: &str) -> zbus::Result<()>;
+}
+
+fn file_size(path: impl AsRef<std::path::Path>) -> u64 {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 /// The pair an in-progress login is filed under.
@@ -779,6 +1021,43 @@ mod tests {
     /// without a Secret Service and without a bus.
     #[derive(Debug, Default)]
     struct FakeSecrets(std::sync::Mutex<HashMap<(String, String, String), String>>);
+
+    #[derive(Debug, Default)]
+    struct FakeStartup {
+        attempts: std::sync::Mutex<Vec<String>>,
+        fail_next: std::sync::Mutex<bool>,
+    }
+
+    impl FakeStartup {
+        fn failing_once() -> Self {
+            Self {
+                attempts: std::sync::Mutex::new(Vec::new()),
+                fail_next: std::sync::Mutex::new(true),
+            }
+        }
+
+        fn attempts(&self) -> Vec<String> {
+            self.attempts
+                .lock()
+                .expect("no test panics holding this")
+                .clone()
+        }
+    }
+
+    impl Startup for FakeStartup {
+        fn set_startup_mode(&self, mode: &str) -> Result<(), String> {
+            self.attempts
+                .lock()
+                .expect("no test panics holding this")
+                .push(mode.to_owned());
+            let mut fail_next = self.fail_next.lock().expect("no test panics holding this");
+            if std::mem::take(&mut *fail_next) {
+                Err("simulated startup integration failure".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     impl FakeSecrets {
         fn held(&self) -> Vec<(String, String, String, String)> {
@@ -900,10 +1179,35 @@ mod tests {
     async fn update_publication_changes_only_when_the_value_changes() {
         let update = PublishedUpdate::default();
         assert_eq!(update.get().await, "");
-        assert!(update.replace(Some("0.2.0".into())).await);
-        assert!(!update.replace(Some("0.2.0".into())).await);
+        update.set_enabled(true).await;
+        assert_eq!(
+            update.publish(Some("0.2.0".into())).await,
+            Some("0.2.0".into())
+        );
+        assert_eq!(update.publish(Some("0.2.0".into())).await, None);
         assert_eq!(update.get().await, "0.2.0");
-        assert!(update.replace(None).await);
+        assert_eq!(update.publish(None).await, Some(String::new()));
+        assert_eq!(update.get().await, "");
+    }
+
+    #[tokio::test]
+    async fn a_disabled_release_check_drops_results_and_forgets_the_release() {
+        let update = PublishedUpdate::default();
+        update.set_enabled(true).await;
+        assert_eq!(
+            update.publish(Some("0.2.0".into())).await,
+            Some("0.2.0".into())
+        );
+
+        // Disabling both latches the flag and forgets the release in one write...
+        assert!(update.set_enabled(false).await);
+        assert_eq!(update.get().await, "");
+        // ...and a result that was already in flight lands nowhere.
+        assert_eq!(update.publish(Some("0.3.0".into())).await, None);
+        assert_eq!(update.get().await, "");
+
+        // Re-enabling starts from nothing until a check succeeds again.
+        assert!(!update.set_enabled(true).await);
         assert_eq!(update.get().await, "");
     }
 
@@ -1853,7 +2157,11 @@ mod tests {
         let published = Published::default();
         published.upsert(status("zai")).await;
         let published_update = PublishedUpdate::default();
-        assert!(published_update.replace(Some("0.2.0".into())).await);
+        published_update.set_enabled(true).await;
+        assert_eq!(
+            published_update.publish(Some("0.2.0".into())).await,
+            Some("0.2.0".into())
+        );
         let (commands, mut command_queue) = mpsc::channel(4);
 
         let Ok(server) = serve(Daemon::new(
@@ -1947,7 +2255,7 @@ mod tests {
         let mut update_signals = pin!(update_signals);
         let emitter = SignalEmitter::new(&server, ids::OBJECT_PATH).expect("a valid path");
 
-        assert!(published_update.replace(None).await);
+        assert!(published_update.set_enabled(false).await);
         Daemon::update_changed(&emitter, "")
             .await
             .expect("the update signal goes out");
@@ -2096,5 +2404,296 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+    #[tokio::test]
+    async fn application_preferences_and_data_are_read_from_the_daemons_paths() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-service-preferences-{}.toml",
+            std::process::id()
+        ));
+        let history_path = std::env::temp_dir().join(format!(
+            "tidemark-service-history-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let _ = std::fs::remove_file(&history_path);
+        let mut config = Config::at(config_path.clone()).expect("empty config");
+        config.set_release_check(false).expect("configured");
+        std::fs::write(&history_path, [0_u8; 32]).expect("history fixture");
+
+        let (commands, _queue) = mpsc::channel(4);
+        let (release_checks, _release_changes) = watch::channel(false);
+        let daemon = Daemon::new(
+            Published::default(),
+            PublishedUpdate::default(),
+            Vec::new(),
+            Vec::new(),
+            commands,
+            Arc::new(FakeSecrets::default()),
+        )
+        .with_preferences(
+            config_path.clone(),
+            history_path.clone(),
+            Arc::new(crate::startup::System),
+            release_checks,
+            true,
+        );
+
+        assert!(
+            !daemon
+                .get_preferences()
+                .await
+                .expect("preferences")
+                .release_check
+        );
+        let data = daemon.get_data_info().await.expect("data");
+        assert_eq!(data.config_path, config_path.to_string_lossy());
+        assert_eq!(data.history_path, history_path.to_string_lossy());
+        assert_eq!(data.history_bytes, 32);
+        assert!(data.release_check_available);
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_file(history_path);
+    }
+
+    #[tokio::test]
+    async fn a_preference_change_waits_for_the_engine_result() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let daemon = Arc::new(daemon);
+        let changing = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move {
+                daemon
+                    .preference_request(Preference::MinimizeOnClose(false))
+                    .await
+            }
+        });
+
+        let Command::SetPreference { preference, reply } =
+            commands.recv().await.expect("preference reaches engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert!(matches!(preference, Preference::MinimizeOnClose(false)));
+        assert!(!changing.is_finished(), "D-Bus waits for persistence");
+        let preferences = Preferences {
+            minimize_on_close: false,
+            ..Default::default()
+        };
+        reply
+            .send(Ok(preferences.clone()))
+            .expect("caller waits for reply");
+        assert_eq!(
+            changing
+                .await
+                .expect("task did not panic")
+                .expect("accepted"),
+            preferences
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_startup_integration_restores_the_previous_mode() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-service-startup-rollback-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let startup = Arc::new(FakeStartup::failing_once());
+        let (commands, _queue) = mpsc::channel(1);
+        let (release_checks, _release_changes) = watch::channel(true);
+        let daemon = Daemon::new(
+            Published::default(),
+            PublishedUpdate::default(),
+            Vec::new(),
+            Vec::new(),
+            commands,
+            Arc::new(FakeSecrets::default()),
+        )
+        .with_preferences(
+            config_path.clone(),
+            config_path.with_extension("db"),
+            startup.clone(),
+            release_checks,
+            true,
+        );
+
+        assert!(
+            daemon
+                .change_startup_mode(Preferences::STARTUP_DAEMON)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            startup.attempts(),
+            vec![
+                Preferences::STARTUP_DAEMON.to_owned(),
+                Preferences::STARTUP_APP.to_owned()
+            ]
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_startup_preference_restores_the_previous_integration() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-service-startup-persistence-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let startup = Arc::new(FakeStartup::default());
+        let (commands, mut queue) = mpsc::channel(1);
+        let (release_checks, _release_changes) = watch::channel(true);
+        let daemon = Arc::new(
+            Daemon::new(
+                Published::default(),
+                PublishedUpdate::default(),
+                Vec::new(),
+                Vec::new(),
+                commands,
+                Arc::new(FakeSecrets::default()),
+            )
+            .with_preferences(
+                config_path.clone(),
+                config_path.with_extension("db"),
+                startup.clone(),
+                release_checks,
+                true,
+            ),
+        );
+        let changing = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move {
+                daemon
+                    .change_startup_mode(Preferences::STARTUP_DAEMON)
+                    .await
+            }
+        });
+
+        let Command::SetPreference { preference, reply } = queue
+            .recv()
+            .await
+            .expect("startup preference reaches engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert!(matches!(
+            &preference,
+            Preference::StartupMode(mode) if mode == Preferences::STARTUP_DAEMON
+        ));
+        reply
+            .send(Err("simulated config failure".into()))
+            .expect("caller waits for reply");
+
+        assert!(changing.await.expect("task did not panic").is_err());
+        assert_eq!(
+            startup.attempts(),
+            vec![
+                Preferences::STARTUP_DAEMON.to_owned(),
+                Preferences::STARTUP_APP.to_owned()
+            ]
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+    /// The mutation lock is held from the commit to the `PreferencesChanged` that carries
+    /// it: a second mutation must not be able to commit while an older snapshot is still
+    /// unpublished, or clients can see the older state after the newer one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_startup_change_holds_the_mutation_guard_until_it_has_published() {
+        let Ok(connection) = zbus::Connection::session().await else {
+            eprintln!("skipped: no session bus reachable");
+            return;
+        };
+        for round in 0..4 {
+            let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH).expect("a valid path");
+            let flood_emitter =
+                SignalEmitter::new(&connection, ids::OBJECT_PATH).expect("a valid path");
+            let config_path = std::env::temp_dir().join(format!(
+                "tidemark-service-startup-order-{round}-{}.toml",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&config_path);
+            let (commands, mut queue) = mpsc::channel(2);
+            let (release_checks, _changes) = watch::channel(true);
+            let daemon = Arc::new(
+                Daemon::new(
+                    Published::default(),
+                    PublishedUpdate::default(),
+                    Vec::new(),
+                    Vec::new(),
+                    commands,
+                    Arc::new(FakeSecrets::default()),
+                )
+                .with_preferences(
+                    config_path.clone(),
+                    config_path.with_extension("db"),
+                    Arc::new(FakeStartup::default()),
+                    release_checks,
+                    true,
+                ),
+            );
+
+            let changing = {
+                let daemon = Arc::clone(&daemon);
+                tokio::spawn(async move {
+                    daemon
+                        .set_startup_mode(emitter, Preferences::STARTUP_DAEMON)
+                        .await
+                })
+            };
+            let Command::SetPreference { reply, .. } =
+                queue.recv().await.expect("the change reaches the engine")
+            else {
+                panic!("unexpected command");
+            };
+
+            // Every signal emission takes the process-wide single serial-number permit
+            // zbus hands out, so a crowd of concurrent emissions parks the publication
+            let flood = (0..400)
+                .map(|_| {
+                    let emitter = flood_emitter.clone();
+                    tokio::spawn(async move {
+                        let _ = Daemon::preferences_changed(&emitter, Preferences::default()).await;
+                    })
+                })
+                .collect::<Vec<_>>();
+            reply
+                .send(Ok(Preferences {
+                    startup_mode: Preferences::STARTUP_DAEMON.into(),
+                    ..Default::default()
+                }))
+                .expect("caller waits for reply");
+
+            // From the moment the engine has committed, the guard must stay held until
+            // the signal has gone out; a free lock while the change is still unfinished
+            // is an older snapshot still unpublished while a newer mutation could commit.
+            // The short wait after a catch only separates a real escape from the instant
+            // between a finished task's lock release and its completion flag.
+            let mut escaped = false;
+            for _ in 0..20_000 {
+                if let Ok(guard) = daemon.preference_mutation.try_lock() {
+                    drop(guard);
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    escaped = !changing.is_finished();
+                    break;
+                }
+                if changing.is_finished() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            for task in flood {
+                let _ = task.await;
+            }
+            changing
+                .await
+                .expect("task did not panic")
+                .expect("startup mode changed");
+            assert!(
+                !escaped,
+                "round {round}: publication left the mutation lock"
+            );
+            let _ = std::fs::remove_file(config_path);
+        }
     }
 }

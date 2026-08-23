@@ -17,8 +17,8 @@ use tidemark_core::providers::{Credential, Provider, ProviderError};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
 use tidemark_types::{
-    AccountId, CredentialKind, HistoryPoint, ProviderId, ProviderOption, ProviderState,
-    ProviderStatus, Snapshot, Timestamp, WindowKey, WindowStatus,
+    AccountId, CredentialKind, HistoryPoint, Preferences, ProviderId, ProviderOption,
+    ProviderState, ProviderStatus, Snapshot, Timestamp, WindowKey, WindowStatus,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -55,6 +55,15 @@ pub enum Publication {
     /// A sequence rather than a status, because that is what changed: the readings are
     /// exactly as they were, and a client redrawing a grid needs the positions.
     Reordered(Vec<String>),
+}
+
+/// One application-wide preference mutation.
+#[derive(Debug)]
+pub enum Preference {
+    ReleaseCheck(bool),
+    MinimizeOnClose(bool),
+    StartupMode(String),
+    HistoryRetention(String),
 }
 
 /// What the D-Bus interface asks the loop to do.
@@ -131,6 +140,15 @@ pub enum Command {
         window: String,
         /// Completion with oldest-first points, or a named account/storage error.
         reply: oneshot::Sender<Result<Vec<HistoryPoint>, String>>,
+    },
+    /// Persists one application-wide preference.
+    SetPreference {
+        preference: Preference,
+        reply: oneshot::Sender<Result<Preferences, String>>,
+    },
+    /// Deletes every stored historical reading and notification marker.
+    ClearHistory {
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Stop the loop.
     Shutdown,
@@ -503,6 +521,55 @@ impl Engine {
         Ok(())
     }
 
+    /// Persists one application preference in the same serial queue as every other config
+    /// mutation. Returning the complete set lets the service publish one coherent view.
+    ///
+    /// The immediate retention prune is maintenance after the commit, not part of it: a
+    /// database that will not prune must not report an already-durable preference as
+    /// failed — daily maintenance retries the pruning, and the caller's platform state
+    /// (release watch, startup integration) must follow the durable config.
+    pub async fn set_preference(&mut self, preference: Preference) -> Result<Preferences, String> {
+        let retention_changed = matches!(&preference, Preference::HistoryRetention(_));
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        match preference {
+            Preference::ReleaseCheck(enabled) => config.set_release_check(enabled),
+            Preference::MinimizeOnClose(enabled) => config.set_minimize_on_close(enabled),
+            Preference::StartupMode(mode) => config.set_startup_mode(&mode),
+            Preference::HistoryRetention(retention) => config.set_history_retention(&retention),
+        }
+        .map_err(|error| error.to_string())?;
+        let preferences = config.preferences().map_err(|error| error.to_string())?;
+        if retention_changed
+            && let Err(error) = self.prune_for_retention(&preferences.history_retention)
+        {
+            tracing::error!(%error, "could not apply history retention");
+        }
+        Ok(preferences)
+    }
+
+    fn prune_for_retention(&mut self, retention: &str) -> Result<(), String> {
+        let days = match retention {
+            Preferences::RETENTION_FOREVER => return Ok(()),
+            Preferences::RETENTION_SIX_MONTHS => 183,
+            Preferences::RETENTION_ONE_YEAR => 365,
+            _ => return Err(format!("unknown history retention {retention:?}")),
+        };
+        let cutoff = Timestamp::from_unix(Timestamp::now().as_unix() - days * 24 * 3600)
+            .map_err(|error| error.to_string())?;
+        let removed = self
+            .history
+            .prune_before(cutoff)
+            .map_err(|error| error.to_string())?;
+        if removed > 0 {
+            tracing::info!(removed, retention, "pruned history beyond retention");
+        }
+        Ok(())
+    }
+
+    fn clear_history(&mut self) -> Result<(), String> {
+        self.history.clear().map_err(|error| error.to_string())
+    }
+
     /// Reads the active history segment for one configured account/window pair.
     ///
     /// The engine owns the database, so even this short read goes through its command queue
@@ -572,6 +639,14 @@ impl Engine {
                     }
                     Some(Command::CurrentSegment { provider, account, window, reply }) => {
                         let result = self.current_segment(&provider, &account, &window);
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::SetPreference { preference, reply }) => {
+                        let result = self.set_preference(preference).await;
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::ClearHistory { reply }) => {
+                        let result = self.clear_history();
                         let _ = reply.send(result);
                     }
                     Some(Command::Shutdown) | None => return,
@@ -1043,6 +1118,16 @@ impl Engine {
             Ok(0) => {}
             Ok(removed) => tracing::info!(removed, "thinned history older than ninety days"),
             Err(error) => tracing::error!(%error, "could not thin the history"),
+        }
+        match Config::at(self.config_path.clone()).and_then(|config| config.preferences()) {
+            Ok(preferences) => {
+                if let Err(error) = self.prune_for_retention(&preferences.history_retention) {
+                    tracing::error!(%error, "could not apply history retention");
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "could not read history retention during maintenance")
+            }
         }
     }
 
@@ -2155,5 +2240,116 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+    #[tokio::test]
+    async fn application_preferences_are_serialized_through_the_engine() {
+        let mut harness = Harness::empty("application-preferences").await;
+
+        harness
+            .engine
+            .set_preference(Preference::ReleaseCheck(false))
+            .await
+            .expect("release check changed");
+        harness
+            .engine
+            .set_preference(Preference::MinimizeOnClose(false))
+            .await
+            .expect("close behavior changed");
+        harness
+            .engine
+            .set_preference(Preference::StartupMode(Preferences::STARTUP_DAEMON.into()))
+            .await
+            .expect("startup mode changed");
+        let preferences = harness
+            .engine
+            .set_preference(Preference::HistoryRetention(
+                Preferences::RETENTION_SIX_MONTHS.into(),
+            ))
+            .await
+            .expect("history retention changed");
+
+        assert_eq!(
+            preferences,
+            Preferences {
+                release_check: false,
+                minimize_on_close: false,
+                startup_mode: Preferences::STARTUP_DAEMON.into(),
+                history_retention: Preferences::RETENTION_SIX_MONTHS.into(),
+            }
+        );
+        assert_eq!(
+            Config::at(harness.config_path)
+                .expect("reloaded")
+                .preferences()
+                .expect("readable"),
+            preferences
+        );
+    }
+    #[tokio::test]
+    async fn daily_maintenance_applies_the_configured_history_retention() {
+        let mut harness = Harness::empty("retention-maintenance").await;
+        let mut config = Config::at(harness.config_path.clone()).expect("config opens");
+        config
+            .set_history_retention(Preferences::RETENTION_SIX_MONTHS)
+            .expect("retention configured");
+        let mut old = snapshot(42.0, 3600);
+        old.captured_at =
+            Timestamp::from_unix(Timestamp::now().as_unix() - 200 * 24 * 3600).expect("valid");
+        harness.engine.history.ingest(&old).expect("history seeded");
+
+        harness.engine.thin_if_due();
+
+        assert_eq!(harness.engine.history.point_count().expect("counted"), 0);
+    }
+    #[tokio::test]
+    async fn a_committed_preference_is_not_failed_by_a_retention_prune() {
+        let dir =
+            std::env::temp_dir().join(format!("tidemark-engine-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        let history_path = dir.join("history.db");
+        let config_path = dir.join("config.toml");
+        Config::at(config_path.clone()).expect("config opens");
+        let (updates, _queue) = mpsc::channel(64);
+        let notices = Arc::new(Recorder::default());
+        let mut engine = Engine::new(
+            Vec::new(),
+            History::open(&history_path).expect("file-backed history opens"),
+            unlocked(),
+            updates,
+            config_path.clone(),
+            Arc::clone(&notices) as Arc<dyn Notifier>,
+        );
+
+        // A second connection holds the database's one write lock, so the immediate
+        // prune that follows a preference commit cannot write.
+        let competing = rusqlite::Connection::open(&history_path).expect("second connection");
+        competing
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("write lock held");
+
+        let preferences = engine
+            .set_preference(Preference::HistoryRetention(
+                Preferences::RETENTION_SIX_MONTHS.into(),
+            ))
+            .await
+            .expect("the commit itself succeeded");
+
+        competing
+            .execute_batch("ROLLBACK")
+            .expect("write lock freed");
+        assert!(preferences.minimize_on_close);
+        assert_eq!(
+            preferences.history_retention,
+            Preferences::RETENTION_SIX_MONTHS
+        );
+        assert_eq!(
+            Config::at(config_path.clone())
+                .expect("config rereads")
+                .preferences()
+                .expect("readable"),
+            preferences
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
