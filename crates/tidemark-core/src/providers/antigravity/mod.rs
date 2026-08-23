@@ -47,7 +47,9 @@ use tidemark_types::{
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use super::{BoxFuture, Credential, Provider, ProviderError, http, length_title, title_case};
+use super::{
+    BoxFuture, Credential, Provider, ProviderError, Source, http, length_title, title_case,
+};
 use crate::secrets::{self, Secrets};
 use agy::Agy;
 
@@ -106,48 +108,13 @@ impl LocalQuota for AgyQuota {
     }
 }
 
-/// Which of Antigravity's two quota sources this account reads.
+/// An Antigravity account, reading whichever of its two sources [`Source`] selects.
 ///
 /// Two sources rather than a source and a fallback, because neither subsumes the other.
 /// The local `agy` server is the vendor's own live session and needs `agy` installed and
 /// logged in; the login is Tidemark's own and works on a machine with no `agy` at all —
 /// but only for an account Google entitles to the Cloud Code quota RPCs, which it answers
-/// `RESOURCE_EXHAUSTED` for accounts it does not. Neither is the right default everywhere,
-/// so the choice is the user's and [`Source::Auto`] is what it does when they have not made
-/// one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Source {
-    /// The local server first, the login when it cannot answer.
-    #[default]
-    Auto,
-    /// Only the login Tidemark performed.
-    OAuth,
-    /// Only the local `agy` server.
-    Cli,
-}
-
-impl Source {
-    /// The mode a stored setting names, defaulting to [`Source::Auto`].
-    ///
-    /// An unrecognised value is the default rather than an error: the settings file is
-    /// hand-editable, and a typo should cost the default rather than the account.
-    pub fn from_value(value: Option<&str>) -> Self {
-        match value {
-            Some(OAUTH_SOURCE) => Self::OAuth,
-            Some(CLI_SOURCE) => Self::Cli,
-            _ => Self::Auto,
-        }
-    }
-}
-
-/// The stored spelling of [`Source::Auto`].
-pub const AUTO_SOURCE: &str = "auto";
-/// The stored spelling of [`Source::OAuth`].
-pub const OAUTH_SOURCE: &str = "oauth";
-/// The stored spelling of [`Source::Cli`].
-pub const CLI_SOURCE: &str = "cli";
-
-/// An Antigravity account, reading whichever of its two sources [`Source`] selects.
+/// `RESOURCE_EXHAUSTED` for accounts it does not.
 #[derive(Debug)]
 pub struct Antigravity {
     client: reqwest::Client,
@@ -1328,16 +1295,6 @@ mod tests {
 
         let error = block_on(provider.fetch_inner()).expect_err("nothing to ask");
         assert!(matches!(error, ProviderError::NoCredential), "{error:?}");
-    }
-
-    #[test]
-    fn a_source_is_read_from_its_stored_spelling_and_an_unknown_one_is_auto() {
-        assert_eq!(Source::from_value(Some("oauth")), Source::OAuth);
-        assert_eq!(Source::from_value(Some("cli")), Source::Cli);
-        assert_eq!(Source::from_value(Some("auto")), Source::Auto);
-        // Hand-editable file: a typo costs the default, not a card that will not start.
-        assert_eq!(Source::from_value(Some("nonsense")), Source::Auto);
-        assert_eq!(Source::from_value(None), Source::Auto);
     }
 
     #[test]

@@ -28,40 +28,83 @@ use tidemark_core::providers::keyed::{
     self, aiand, codebuff, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo, litellm,
     llmproxy, openai_api, openrouter, poe, sub2api, wayfinder, xai,
 };
-use tidemark_core::providers::{Credential, Provider, ProviderError, antigravity, claude, codex};
+use tidemark_core::providers::{
+    AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
+    antigravity, claude, codex,
+};
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
-    AccountId, CredentialKind, OptionChoice, ProviderDefinition, ProviderId, ProviderOption,
+    AccountId, CredentialKind, ExternalLogin, OptionChoice, ProviderDefinition, ProviderId,
+    ProviderOption, ProviderStatus,
 };
 
 use crate::engine::Account;
 
-/// Name of Antigravity's usage-source setting under `[provider.antigravity]`.
-pub const ANTIGRAVITY_SOURCE: &str = "source";
+/// Name of the setting, under `[provider.<slug>]`, that says which of an OAuth provider's
+/// two credentials this account reads. One key serves all three: it was Antigravity's
+/// alone when Antigravity was the only provider with two credentials, so a
+/// `[provider.antigravity] source = "…"` written then keeps working untouched.
+pub const AUTH_SOURCE: &str = "source";
 
-/// The three OAuth providers: slug, title, credential hint, external fallback. Written out
-/// because each acquires its credential its own way; everything that varies beyond these
-/// four strings is decided where they are used.
-static OAUTH: &[(&str, &str, &str, &str)] = &[
-    (
-        antigravity::PROVIDER_ID,
-        "Antigravity",
-        "Sign in with Google through Tidemark",
-        "agy session",
-    ),
-    (
-        "claude",
-        "Claude",
-        "Sign in through Tidemark",
-        "Claude Code login",
-    ),
-    (
-        codex::PROVIDER_ID,
-        "Codex",
-        "Sign in through Tidemark",
-        "Codex CLI login",
-    ),
+/// One of the three OAuth providers: everything about it that varies, named. The same
+/// entry feeds the catalog, the settings schema and the account builders, and bare
+/// strings in a row are one transposition away from telling the user Tidemark writes back
+/// to a file it only reads.
+struct OAuthEntry {
+    /// Provider slug.
+    slug: &'static str,
+    /// Display title.
+    title: &'static str,
+    /// One sentence on where the credential comes from.
+    credential_hint: &'static str,
+    /// What the local login is called, in the words its own program uses.
+    external_label: &'static str,
+    /// Where the local login lives, for a person: a path, or a sentence about a process.
+    external_location: &'static str,
+    /// What to run to create one.
+    external_command: &'static str,
+    /// Whether Tidemark refreshes this credential in place and writes the rotated token
+    /// back where it found it (ADR 0001), or only ever reads it.
+    writes_back: bool,
+}
+
+/// The three OAuth providers, written out because each acquires its credential its own
+/// way; everything that varies between them is in this table, and everything else is
+/// decided where the entries are used.
+static OAUTH: &[OAuthEntry] = &[
+    OAuthEntry {
+        slug: antigravity::PROVIDER_ID,
+        title: "Antigravity",
+        credential_hint: "Sign in with Google through Tidemark, or read a signed-in agy session.",
+        external_label: "agy session",
+        external_location: "a signed-in agy server on this machine",
+        external_command: "agy",
+        writes_back: false,
+    },
+    OAuthEntry {
+        slug: claude::PROVIDER_ID,
+        title: "Claude",
+        credential_hint: "Sign in through Tidemark, or read Claude Code's own login.",
+        external_label: "Claude Code login",
+        external_location: "~/.claude/.credentials.json",
+        external_command: "claude",
+        writes_back: true,
+    },
+    OAuthEntry {
+        slug: codex::PROVIDER_ID,
+        title: "Codex",
+        credential_hint: "Sign in through Tidemark, or read the Codex CLI's own login.",
+        external_label: "Codex CLI login",
+        external_location: "~/.codex/auth.json",
+        external_command: "codex login",
+        writes_back: true,
+    },
 ];
+
+/// The table entry for an OAuth provider, or `None` for a provider with one credential.
+fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
+    OAUTH.iter().find(|entry| entry.slug == provider)
+}
 
 /// The hand-written key-authenticated providers: those whose fetch is more than one
 /// request, so a `keyed::Spec` cannot describe them — ai& pages a request log,
@@ -115,10 +158,8 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
 /// `None` for a slug this build knows nothing about; the caller falls back to capitalising
 /// the slug, which is all an unknown slug can honestly be called.
 pub fn title(provider: &str) -> Option<&'static str> {
-    OAUTH
-        .iter()
-        .find(|(slug, ..)| *slug == provider)
-        .map(|(_, title, ..)| *title)
+    oauth_entry(provider)
+        .map(|entry| entry.title)
         .or_else(|| {
             keyed::CATALOG
                 .iter()
@@ -143,13 +184,19 @@ pub fn title(provider: &str) -> Option<&'static str> {
 pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
     let mut definitions: Vec<ProviderDefinition> = OAUTH
         .iter()
-        .map(|(provider, title, hint, fallback)| ProviderDefinition {
-            provider: (*provider).to_owned(),
-            title: (*title).to_owned(),
+        .map(|entry| ProviderDefinition {
+            provider: entry.slug.to_owned(),
+            title: entry.title.to_owned(),
             credential: CredentialKind::OAuth.as_wire().to_owned(),
-            credential_hint: (*hint).to_owned(),
-            external_fallback: Some((*fallback).to_owned()),
-            options: options(provider, config),
+            credential_hint: entry.credential_hint.to_owned(),
+            external: Some(ExternalLogin {
+                option: AUTH_SOURCE.to_owned(),
+                label: entry.external_label.to_owned(),
+                location: entry.external_location.to_owned(),
+                command: entry.external_command.to_owned(),
+                writes_back: entry.writes_back,
+            }),
+            options: options(entry.slug, config),
         })
         .collect();
     definitions.extend(keyed::CATALOG.iter().map(|spec| ProviderDefinition {
@@ -157,7 +204,7 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
         title: spec.title.to_owned(),
         credential: CredentialKind::Key.as_wire().to_owned(),
         credential_hint: spec.credential_hint.to_owned(),
-        external_fallback: None,
+        external: None,
         options: options(spec.id, config),
     }));
     definitions.extend(
@@ -179,7 +226,7 @@ fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderD
         title: spec.title.to_owned(),
         credential: spec.credential.as_wire().to_owned(),
         credential_hint: spec.credential_hint.to_owned(),
-        external_fallback: None,
+        external: None,
         options: options(spec.id, config),
     }
 }
@@ -192,8 +239,8 @@ pub fn account(
 ) -> Result<Option<Account>, ProviderError> {
     let account = match provider {
         antigravity::PROVIDER_ID => Some(antigravity_account(secrets, config)?),
-        "claude" => Some(claude_account(secrets)?),
-        codex::PROVIDER_ID => Some(codex_account(secrets)?),
+        claude::PROVIDER_ID => Some(claude_account(secrets, config)?),
+        codex::PROVIDER_ID => Some(codex_account(secrets, config)?),
         other => keyed::CATALOG
             .iter()
             .find(|spec| spec.id == other)
@@ -253,8 +300,8 @@ pub fn notify(provider: &str, config: &Config) -> Vec<String> {
 /// from `keyed::CATALOG`, or from the hand-written table for the providers that are not a
 /// `Spec`; either way the row is the same shape.
 pub fn options(provider: &str, config: &Config) -> Vec<ProviderOption> {
-    if provider == antigravity::PROVIDER_ID {
-        return vec![antigravity_source_option(config)];
+    if let Some(entry) = oauth_entry(provider) {
+        return vec![auth_source_option(entry, config)];
     }
     keyed::CATALOG
         .iter()
@@ -300,53 +347,100 @@ fn published_option(
     }
 }
 
-/// Antigravity's two quota sources, and letting the user say which one this account reads.
+/// The choice between an OAuth provider's two credentials: the login Tidemark performed
+/// itself, and the one the vendor's own program already holds on this machine.
 ///
-/// Published as a choice rather than decided here because neither source is right
-/// everywhere: `agy` is the vendor's own live session but has to be installed and logged
-/// in, while the login works on a machine with no `agy` and only for an account Google
-/// entitles to the Cloud Code quota RPCs.
-fn antigravity_source_option(config: &Config) -> ProviderOption {
-    let choices = vec![
-        OptionChoice {
-            value: antigravity::AUTO_SOURCE.to_owned(),
-            title: "Automatic".to_owned(),
-        },
-        OptionChoice {
-            value: antigravity::OAUTH_SOURCE.to_owned(),
-            title: "Google sign-in".to_owned(),
-        },
-        OptionChoice {
-            value: antigravity::CLI_SOURCE.to_owned(),
-            title: "Local agy session".to_owned(),
-        },
-    ];
+/// Exactly two choices, in a fixed order. `auto` is deliberately not among them: it
+/// survives as what an untouched `config.toml` means — which is why the value below may
+/// legitimately be a string the choices do not contain — but the user can only ever write
+/// one of the two concrete values. A control that offered "automatic" would let them
+/// re-ask for the silent picking this row exists to replace.
+///
+/// No description: the dialog draws this row itself, in the authentication group, with
+/// its own explanation, and a sentence here would be shown twice.
+fn auth_source_option(entry: &OAuthEntry, config: &Config) -> ProviderOption {
     ProviderOption {
-        name: ANTIGRAVITY_SOURCE.to_owned(),
-        title: "Usage source".to_owned(),
-        description: Some(
-            "Automatic reads the local agy session and falls back to the Google sign-in."
-                .to_owned(),
-        ),
-        value: source_value(config).0.to_owned(),
-        choices,
+        name: AUTH_SOURCE.to_owned(),
+        title: "Credential".to_owned(),
+        description: None,
+        value: config
+            .option(entry.slug, AUTH_SOURCE)
+            .unwrap_or(AUTO_SOURCE)
+            .to_owned(),
+        choices: vec![
+            OptionChoice {
+                value: OAUTH_SOURCE.to_owned(),
+                title: "Tidemark login".to_owned(),
+            },
+            OptionChoice {
+                value: CLI_SOURCE.to_owned(),
+                title: entry.external_label.to_owned(),
+            },
+        ],
     }
 }
 
-/// The stored usage source, and the client's own enum for it.
-fn source_value(config: &Config) -> (&'static str, antigravity::Source) {
-    match config.option(antigravity::PROVIDER_ID, ANTIGRAVITY_SOURCE) {
-        Some(antigravity::OAUTH_SOURCE) => (antigravity::OAUTH_SOURCE, antigravity::Source::OAuth),
-        Some(antigravity::CLI_SOURCE) => (antigravity::CLI_SOURCE, antigravity::Source::Cli),
-        _ => (antigravity::AUTO_SOURCE, antigravity::Source::Auto),
+/// Which of a provider's two credentials its account reads, from the stored setting.
+/// Anything unrecognised — including the unset default — is [`Source::Auto`]: the Tidemark login when there
+/// is one, the vendor program's otherwise — the behaviour these accounts have always had.
+fn source_value(provider: &str, config: &Config) -> Source {
+    Source::from_value(config.option(provider, AUTH_SOURCE))
+}
+
+/// Whether the local login a provider can read instead of a Tidemark login exists on this
+/// machine — `None` for a provider that has no such login at all.
+///
+/// This proves existence, not usability: the file existing is not the same as it holding
+/// a usable credential, and an installed `agy` is not the same as a signed-in one. The
+/// poll state says the rest. The answer exists so the dialog can offer the choice before
+/// anything has been polled.
+pub fn external_present(provider: &str) -> Option<bool> {
+    match provider {
+        claude::PROVIDER_ID => {
+            Some(claude::cli_credentials_path().is_some_and(|path| path.exists()))
+        }
+        codex::PROVIDER_ID => Some(codex::cli_credentials_path().is_some_and(|path| path.exists())),
+        antigravity::PROVIDER_ID => Some(antigravity::agy::is_available()),
+        _ => None,
     }
+}
+
+/// Which credential the next poll will use, resolving an unset setting the way the
+/// provider itself resolves [`Source::Auto`]. `None` for a provider with one credential.
+///
+/// The stored value is read off the published options rather than the file: the engine
+/// has already refreshed them, and re-reading `config.toml` here could disagree with them
+/// for the length of a reload. The `Auto` branches mirror the clients' own control flow
+/// rather than approximating it: Claude and Codex reach the vendor file only when the
+/// Secret Service answered that nothing is stored — a held token wins, and a locked
+/// keyring errors out before the file is ever opened — while Antigravity tries the local
+/// server first whenever `agy` is installed.
+pub fn auth_source(provider: &str, status: &ProviderStatus) -> Option<String> {
+    oauth_entry(provider)?;
+    let stored = status
+        .options
+        .iter()
+        .find(|option| option.name == AUTH_SOURCE)
+        .map(|option| option.value.as_str());
+    let resolved = match Source::from_value(stored) {
+        Source::OAuth => OAUTH_SOURCE,
+        Source::Cli => CLI_SOURCE,
+        Source::Auto => match provider {
+            claude::PROVIDER_ID | codex::PROVIDER_ID if status.has_credential == Some(false) => {
+                CLI_SOURCE
+            }
+            antigravity::PROVIDER_ID if status.external_present == Some(true) => CLI_SOURCE,
+            _ => OAUTH_SOURCE,
+        },
+    };
+    Some(resolved.to_owned())
 }
 
 /// The OAuth client to run a login against, for a provider that has one.
 pub fn oauth_client(provider: &str) -> Option<oauth::Client> {
     match provider {
         antigravity::PROVIDER_ID => Some(antigravity::oauth::client()),
-        "claude" => Some(claude::oauth_client()),
+        claude::PROVIDER_ID => Some(claude::oauth_client()),
         codex::PROVIDER_ID => Some(codex::oauth_client()),
         _ => None,
     }
@@ -364,7 +458,7 @@ pub async fn login_document(
 ) -> Result<serde_json::Value, ProviderError> {
     match provider {
         antigravity::PROVIDER_ID => antigravity::oauth::complete_login(response, now_ms).await,
-        "claude" => claude::document_from_login(response, now_ms),
+        claude::PROVIDER_ID => claude::document_from_login(response, now_ms),
         codex::PROVIDER_ID => codex::document_from_login(response),
         _ => Err(ProviderError::Local(format!(
             "{provider} does not sign in through Tidemark"
@@ -378,14 +472,12 @@ fn antigravity_account(
 ) -> Result<Account, ProviderError> {
     Ok(Account::with_client(Arc::new(antigravity::Antigravity::new(
         Some(Arc::clone(secrets)),
-        source_value(config).1,
+        source_value(antigravity::PROVIDER_ID, config),
     )?))
     .with_rebuild({
         let secrets = Arc::clone(secrets);
         Box::new(move |options| {
-            let source = antigravity::Source::from_value(
-                options.get(ANTIGRAVITY_SOURCE).map(String::as_str),
-            );
+            let source = Source::from_value(options.get(AUTH_SOURCE).map(String::as_str));
             Ok(Arc::new(antigravity::Antigravity::new(
                 Some(Arc::clone(&secrets)),
                 source,
@@ -393,27 +485,45 @@ fn antigravity_account(
         })
     })
     .with_credential(CredentialKind::OAuth)
-    .with_hint("Sign in with Google through Tidemark"))
+    .with_hint("Sign in with Google through Tidemark, or read a signed-in agy session."))
 }
 
-fn claude_account(secrets: &Arc<dyn Secrets>) -> Result<Account, ProviderError> {
-    Ok(
-        Account::with_client(Arc::new(claude::Claude::new(Some(Arc::clone(secrets)))?))
-            .with_credential(CredentialKind::OAuth)
-            .with_hint(
-                "Uses Claude Code's own login when there is one. Sign in here to give Tidemark an account of its own.",
-            ),
-    )
+fn claude_account(secrets: &Arc<dyn Secrets>, config: &Config) -> Result<Account, ProviderError> {
+    Ok(Account::with_client(Arc::new(claude::Claude::new(
+        Some(Arc::clone(secrets)),
+        source_value(claude::PROVIDER_ID, config),
+    )?))
+    .with_rebuild({
+        let secrets = Arc::clone(secrets);
+        Box::new(move |options| {
+            let source = Source::from_value(options.get(AUTH_SOURCE).map(String::as_str));
+            Ok(
+                Arc::new(claude::Claude::new(Some(Arc::clone(&secrets)), source)?)
+                    as Arc<dyn Provider>,
+            )
+        })
+    })
+    .with_credential(CredentialKind::OAuth)
+    .with_hint("Sign in through Tidemark, or read Claude Code's own login."))
 }
 
-fn codex_account(secrets: &Arc<dyn Secrets>) -> Result<Account, ProviderError> {
-    Ok(
-        Account::with_client(Arc::new(codex::Codex::new(Some(Arc::clone(secrets)))?))
-            .with_credential(CredentialKind::OAuth)
-            .with_hint(
-                "Uses the Codex CLI's own login when there is one. Sign in here to give Tidemark an account of its own.",
-            ),
-    )
+fn codex_account(secrets: &Arc<dyn Secrets>, config: &Config) -> Result<Account, ProviderError> {
+    Ok(Account::with_client(Arc::new(codex::Codex::new(
+        Some(Arc::clone(secrets)),
+        source_value(codex::PROVIDER_ID, config),
+    )?))
+    .with_rebuild({
+        let secrets = Arc::clone(secrets);
+        Box::new(move |options| {
+            let source = Source::from_value(options.get(AUTH_SOURCE).map(String::as_str));
+            Ok(
+                Arc::new(codex::Codex::new(Some(Arc::clone(&secrets)), source)?)
+                    as Arc<dyn Provider>,
+            )
+        })
+    })
+    .with_credential(CredentialKind::OAuth)
+    .with_hint("Sign in through Tidemark, or read the Codex CLI's own login."))
 }
 
 /// Every key-authenticated account is built the same way: the engine hands over the stored
@@ -535,35 +645,210 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_publishes_its_three_usage_sources() {
-        let config = empty_config();
-        let published = options(antigravity::PROVIDER_ID, &config);
-        let source = published
-            .iter()
-            .find(|option| option.name == ANTIGRAVITY_SOURCE)
-            .expect("the usage source is published");
-        let values: Vec<&str> = source
-            .choices
-            .iter()
-            .map(|choice| choice.value.as_str())
-            .collect();
-        assert_eq!(values, ["auto", "oauth", "cli"]);
-        assert_eq!(source.value, "auto", "auto is what an unset file means");
+    fn every_oauth_provider_publishes_its_two_credentials_as_the_choice() {
+        let published = catalog(&empty_config());
+        for entry in OAUTH {
+            let definition = published
+                .iter()
+                .find(|definition| definition.provider == entry.slug)
+                .unwrap_or_else(|| panic!("{} is in the table but not published", entry.slug));
+            let external = definition
+                .external
+                .as_ref()
+                .expect("an OAuth provider has two credentials to name");
+            assert_eq!(external.option, AUTH_SOURCE);
+            assert_eq!(external.label, entry.external_label);
+            assert_eq!(external.location, entry.external_location);
+            assert_eq!(external.command, entry.external_command);
+            assert_eq!(external.writes_back, entry.writes_back);
+            let option = definition
+                .options
+                .iter()
+                .find(|option| option.name == AUTH_SOURCE)
+                .expect("the credential choice is published");
+            assert_eq!(option.title, "Credential");
+            assert_eq!(option.description, None);
+            let choices: Vec<(&str, &str)> = option
+                .choices
+                .iter()
+                .map(|choice| (choice.value.as_str(), choice.title.as_str()))
+                .collect();
+            assert_eq!(
+                choices,
+                [
+                    (OAUTH_SOURCE, "Tidemark login"),
+                    (CLI_SOURCE, entry.external_label)
+                ],
+                "auto is the unset default, never a choice, for {}",
+                entry.slug
+            );
+        }
     }
 
     #[test]
-    fn a_configured_usage_source_is_what_the_option_reports() {
-        let path = scratch_config(
-            "antigravity-source",
-            "providers = [\"antigravity\"]\n\n[provider.antigravity]\nsource = \"cli\"\n",
+    fn a_provider_with_one_credential_publishes_no_external_login() {
+        // The absent field is the whole signal a client dispatches on: no external login
+        // means no credential choice to draw.
+        for definition in catalog(&empty_config()) {
+            assert_eq!(
+                definition.external.is_some(),
+                oauth_entry(&definition.provider).is_some(),
+                "{} must publish an external login exactly when it has two credentials",
+                definition.provider
+            );
+        }
+    }
+
+    #[test]
+    fn the_credential_choice_reports_the_stored_value_verbatim() {
+        for slug in [
+            antigravity::PROVIDER_ID,
+            claude::PROVIDER_ID,
+            codex::PROVIDER_ID,
+        ] {
+            let published = options(slug, &empty_config());
+            let source = published
+                .iter()
+                .find(|option| option.name == AUTH_SOURCE)
+                .expect("the credential choice is published");
+            assert_eq!(
+                source.value, AUTO_SOURCE,
+                "auto is what an unset file means"
+            );
+
+            let path = scratch_config(
+                &format!("{slug}-source"),
+                &format!("providers = [\"{slug}\"]\n\n[provider.{slug}]\nsource = \"cli\"\n"),
+            );
+            let config = Config::at(path.clone()).expect("config reads");
+            let published = options(slug, &config);
+            let source = published
+                .iter()
+                .find(|option| option.name == AUTH_SOURCE)
+                .expect("the credential choice is published");
+            assert_eq!(source.value, CLI_SOURCE);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn the_oauth_accounts_rebuild_their_client_when_the_choice_changes() {
+        // Without a Rebuild the engine cannot drop the client on `set_option`, and a
+        // change of credential would take effect only on the next daemon restart.
+        let config = empty_config();
+        for slug in [
+            antigravity::PROVIDER_ID,
+            claude::PROVIDER_ID,
+            codex::PROVIDER_ID,
+        ] {
+            let account = account(slug, &secrets(), &config)
+                .expect("no error")
+                .expect("an OAuth provider builds an account");
+            assert!(
+                account.rebuildable(),
+                "{slug} must take a source change without a restart"
+            );
+        }
+    }
+
+    /// A status the way the engine hands one to `auth_source`: the published options
+    /// carrying the stored value — `None` meaning an unset file, which publishes `auto` —
+    /// and the two probe answers still to be filled in.
+    fn probed_status(provider: &str, stored: Option<&str>) -> ProviderStatus {
+        let mut status = ProviderStatus::pending(&ProviderId::new(provider), &AccountId::default());
+        status.options = vec![ProviderOption {
+            name: AUTH_SOURCE.to_owned(),
+            title: "Credential".to_owned(),
+            description: None,
+            value: stored.unwrap_or(AUTO_SOURCE).to_owned(),
+            choices: Vec::new(),
+        }];
+        status
+    }
+
+    #[test]
+    fn claude_says_which_credential_the_next_poll_will_use() {
+        for stored in [OAUTH_SOURCE, CLI_SOURCE] {
+            // A stored choice wins over whatever the probe found: it is read first.
+            let mut status = probed_status(claude::PROVIDER_ID, Some(stored));
+            status.has_credential = Some(false);
+            assert_eq!(
+                auth_source(claude::PROVIDER_ID, &status).as_deref(),
+                Some(stored)
+            );
+        }
+        for (has_credential, expected) in [
+            (Some(true), OAUTH_SOURCE),
+            (Some(false), CLI_SOURCE),
+            (None, OAUTH_SOURCE),
+        ] {
+            let mut status = probed_status(claude::PROVIDER_ID, None);
+            status.has_credential = has_credential;
+            assert_eq!(
+                auth_source(claude::PROVIDER_ID, &status).as_deref(),
+                Some(expected),
+                "auto reaches the vendor file only on Ok(None), not on a locked keyring"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_says_which_credential_the_next_poll_will_use() {
+        for stored in [OAUTH_SOURCE, CLI_SOURCE] {
+            let mut status = probed_status(codex::PROVIDER_ID, Some(stored));
+            status.has_credential = Some(false);
+            assert_eq!(
+                auth_source(codex::PROVIDER_ID, &status).as_deref(),
+                Some(stored)
+            );
+        }
+        for (has_credential, expected) in [
+            (Some(true), OAUTH_SOURCE),
+            (Some(false), CLI_SOURCE),
+            (None, OAUTH_SOURCE),
+        ] {
+            let mut status = probed_status(codex::PROVIDER_ID, None);
+            status.has_credential = has_credential;
+            assert_eq!(
+                auth_source(codex::PROVIDER_ID, &status).as_deref(),
+                Some(expected),
+                "auto reaches the vendor file only on Ok(None), not on a locked keyring"
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_says_which_credential_the_next_poll_will_use() {
+        for stored in [OAUTH_SOURCE, CLI_SOURCE] {
+            let mut status = probed_status(antigravity::PROVIDER_ID, Some(stored));
+            status.external_present = Some(true);
+            assert_eq!(
+                auth_source(antigravity::PROVIDER_ID, &status).as_deref(),
+                Some(stored)
+            );
+        }
+        for (external_present, expected) in [
+            (Some(true), CLI_SOURCE),
+            (Some(false), OAUTH_SOURCE),
+            (None, OAUTH_SOURCE),
+        ] {
+            let mut status = probed_status(antigravity::PROVIDER_ID, None);
+            status.external_present = external_present;
+            assert_eq!(
+                auth_source(antigravity::PROVIDER_ID, &status).as_deref(),
+                Some(expected),
+                "auto tries the local server first whenever agy is installed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_provider_with_one_credential_says_nothing_about_a_source() {
+        assert_eq!(
+            auth_source("zai", &probed_status("zai", None)),
+            None,
+            "there is no second credential for the next poll to use"
         );
-        let config = Config::at(path).expect("config reads");
-        let published = options(antigravity::PROVIDER_ID, &config);
-        let source = published
-            .iter()
-            .find(|option| option.name == ANTIGRAVITY_SOURCE)
-            .expect("the usage source is published");
-        assert_eq!(source.value, "cli");
     }
 
     // Two specs of the tests' own, so the mapping can be checked without waiting for a
@@ -595,7 +880,7 @@ mod tests {
         assert_eq!(published.credential, "none");
         assert_eq!(published.credential_kind(), Some(CredentialKind::None));
         assert!(published.credential_hint.is_empty());
-        assert_eq!(published.external_fallback, None);
+        assert_eq!(published.external, None);
     }
 
     #[test]
@@ -634,12 +919,15 @@ mod tests {
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(
-            definitions[0].external_fallback.as_deref(),
+            definitions[0]
+                .external
+                .as_ref()
+                .map(|external| external.label.as_str()),
             Some("agy session")
         );
         assert_eq!(
             definitions[0].credential_hint,
-            "Sign in with Google through Tidemark"
+            "Sign in with Google through Tidemark, or read a signed-in agy session."
         );
         assert!(
             definitions

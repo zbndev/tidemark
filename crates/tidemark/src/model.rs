@@ -118,7 +118,7 @@ mod tests {
             title: "ClinePass".to_owned(),
             credential: "key".to_owned(),
             credential_hint: "ClinePass console.".to_owned(),
-            external_fallback: None,
+            external: None,
             options: Vec::new(),
         }];
         let titles = titles(&definitions);

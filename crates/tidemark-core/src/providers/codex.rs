@@ -1,4 +1,20 @@
-//! Codex subscription quota over the OAuth credentials owned by the Codex CLI.
+//! Codex subscription quota, over one of two credentials.
+//!
+//! # Two sources, and the one this account reads
+//!
+//! One is the Codex CLI's own `auth.json`, read in place and refreshed back into it, per
+//! ADR 0001 — never created here, never replaced wholesale. The other is a login the user
+//! performed **from Tidemark**, stored in the Secret Service under
+//! [`crate::secrets::Kind::Token`] in the *same shape* the CLI writes, which is why one
+//! parser reads both.
+//!
+//! Which of them this account speaks with is the caller's choice, handed to
+//! [`Codex::new`] as a [`Source`]. [`Source::Auto`] is the historical rule: the Tidemark
+//! login when there is one, the CLI's file otherwise. The pinned sources treat the other
+//! credential as absent for refresh as much as for reading — [`Source::Cli`] rotates the
+//! file's tokens and never consults the keyring, [`Source::OAuth`] rotates the stored
+//! login and never opens the file, and a pinned login that is not there is
+//! [`ProviderError::NoCredential`].
 //!
 //! # The trap this provider exists to demonstrate
 //!
@@ -30,7 +46,9 @@
 //! empty beside the real weekly window with a pace mark pinned to zero, and read as a
 //! second week of headroom the account does not have. See [`RESERVE_FEATURE`].
 
-use super::{BoxFuture, Credential, Provider, ProviderError, http, length_title, title_case};
+use super::{
+    BoxFuture, Credential, Provider, ProviderError, Source, http, length_title, title_case,
+};
 use crate::oauth;
 use crate::oauth_file::{
     CredentialFile, CredentialFileError, Field, LockedCredentialFile, UpdateOutcome,
@@ -135,20 +153,25 @@ pub struct Codex {
     /// Where a login performed from Tidemark is kept, when the caller has somewhere to
     /// keep one.
     own: Option<Arc<dyn Secrets>>,
+    /// Which of the two credentials this account reads — see the module docs.
+    source: Source,
     usage_url: String,
     refresh_url: String,
 }
 
 impl Codex {
     /// Builds the canonical Codex account at `$CODEX_HOME/auth.json`, or `~/.codex`.
-    pub fn new(own: Option<Arc<dyn Secrets>>) -> Result<Self, ProviderError> {
-        let path = auth_path()?;
+    pub fn new(own: Option<Arc<dyn Secrets>>, source: Source) -> Result<Self, ProviderError> {
+        let path = cli_credentials_path().ok_or_else(|| {
+            ProviderError::Local("HOME does not name an absolute directory".into())
+        })?;
         let mut codex = Self::with_endpoints(
             CredentialFile::new(path.clone(), path),
             USAGE_URL.to_owned(),
             REFRESH_URL.to_owned(),
         )?;
         codex.own = own;
+        codex.source = source;
         Ok(codex)
     }
 
@@ -161,6 +184,7 @@ impl Codex {
             client: http::client()?,
             credentials,
             own: None,
+            source: Source::Auto,
             usage_url,
             refresh_url,
         })
@@ -204,34 +228,60 @@ impl Codex {
 
     /// Reads the credential, refreshing first when the token says it is spent.
     ///
-    /// A Tidemark login wins over the CLI file when there is one; see the module docs.
+    /// [`Source`] says which of the two is read; see the module docs. A pinned login that
+    /// is not there is [`ProviderError::NoCredential`], not a reason to open the file.
     async fn load(&self, now: i64) -> Result<CodexCredentials, ProviderError> {
-        if let Some(stored) = self.own_document().await? {
-            return self.own_credentials(stored, now, false).await;
+        match self.source {
+            Source::Cli => self.cli_file_credentials(now, false).await,
+            Source::OAuth => match self.own_document().await? {
+                Some(stored) => self.own_credentials(stored, now, false).await,
+                None => Err(ProviderError::NoCredential),
+            },
+            Source::Auto => {
+                if let Some(stored) = self.own_document().await? {
+                    return self.own_credentials(stored, now, false).await;
+                }
+                self.cli_file_credentials(now, false).await
+            }
         }
+    }
+
+    /// Refreshes whatever the selected source holds, regardless of what its expiry claims.
+    ///
+    /// This is the path an opaque access token takes: nothing local could have predicted
+    /// its death, so the provider's 401 is the announcement and this is the response. The
+    /// source that was not selected is not consulted here either — a pinned file is
+    /// refreshed without the keyring ever being asked.
+    async fn force_refresh(&self) -> Result<CodexCredentials, ProviderError> {
+        let now = Timestamp::now().as_unix();
+        match self.source {
+            Source::Cli => self.cli_file_credentials(now, true).await,
+            Source::OAuth => match self.own_document().await? {
+                Some(stored) => self.own_credentials(stored, now, true).await,
+                None => Err(ProviderError::NoCredential),
+            },
+            Source::Auto => {
+                if let Some(stored) = self.own_document().await? {
+                    return self.own_credentials(stored, now, true).await;
+                }
+                self.cli_file_credentials(now, true).await
+            }
+        }
+    }
+
+    /// The CLI's file, refreshed in place when forced or when the token says it is spent.
+    async fn cli_file_credentials(
+        &self,
+        now: i64,
+        force: bool,
+    ) -> Result<CodexCredentials, ProviderError> {
         let locked = self.credentials.lock().map_err(map_file_error)?;
         let document = locked.read_json().map_err(map_file_error)?;
         let credentials = CodexCredentials::from_document(&document)?;
-        if credentials.is_expired_at(now) {
+        if force || credentials.is_expired_at(now) {
             return self.refresh(&locked, credentials).await;
         }
         Ok(credentials)
-    }
-
-    /// Refreshes whatever is currently stored, regardless of what its expiry claims.
-    ///
-    /// This is the path an opaque access token takes: nothing local could have predicted
-    /// its death, so the provider's 401 is the announcement and this is the response.
-    async fn force_refresh(&self) -> Result<CodexCredentials, ProviderError> {
-        if let Some(stored) = self.own_document().await? {
-            return self
-                .own_credentials(stored, Timestamp::now().as_unix(), true)
-                .await;
-        }
-        let locked = self.credentials.lock().map_err(map_file_error)?;
-        let document = locked.read_json().map_err(map_file_error)?;
-        let credentials = CodexCredentials::from_document(&document)?;
-        self.refresh(&locked, credentials).await
     }
 
     /// The document of a login performed from Tidemark, if there is one.
@@ -399,16 +449,18 @@ impl Provider for Codex {
     }
 }
 
-/// Where the Codex CLI keeps its credentials.
-fn auth_path() -> Result<PathBuf, ProviderError> {
+/// Where the Codex CLI keeps its credentials: `$CODEX_HOME/auth.json` when that names
+/// an absolute directory, else `~/.codex/auth.json` — or `None` when neither is usable.
+///
+/// Free-standing rather than a method so that a caller can ask whether the CLI's login
+/// exists on this machine without building the provider.
+pub fn cli_credentials_path() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("CODEX_HOME").filter(|home| Path::new(home).is_absolute())
     {
-        return Ok(Path::new(&home).join("auth.json"));
+        return Some(Path::new(&home).join("auth.json"));
     }
-    let home = std::env::var_os("HOME")
-        .filter(|home| Path::new(home).is_absolute())
-        .ok_or_else(|| ProviderError::Local("HOME does not name an absolute directory".into()))?;
-    Ok(Path::new(&home).join(".codex/auth.json"))
+    let home = std::env::var_os("HOME").filter(|home| Path::new(home).is_absolute())?;
+    Some(Path::new(&home).join(".codex/auth.json"))
 }
 
 /// Turns a usage response into a snapshot.
@@ -1320,6 +1372,214 @@ mod tests {
             fs::read(&home.path).expect("still there"),
             before,
             "the CLI's file is not read from and not written to"
+        );
+    }
+
+    #[test]
+    fn cli_source_reads_the_file_even_when_a_login_is_stored() {
+        // Both credentials are live and carry different tokens and account ids: the
+        // request that leaves proves which one was read.
+        let home = TestHome::expired();
+        fs::write(
+            &home.path,
+            serde_json::to_vec_pretty(&json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "from-the-cli-file",
+                    "refresh_token": "file-refresh",
+                    "account_id": "acct-file"
+                }
+            }))
+            .expect("serialize"),
+        )
+        .expect("write a live CLI file");
+        let secrets = FakeSecrets::holding(json!({
+            "tokens": {"access_token": "from-the-tidemark-login", "refresh_token": "own-refresh", "account_id": "acct-own"}
+        }));
+        let (base, requests, server) = local_server(vec![USAGE]);
+        let mut provider = home.provider(&base);
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+        provider.source = Source::Cli;
+
+        let snapshot = block_on(provider.fetch_inner()).expect("the CLI file is enough");
+
+        assert_eq!(snapshot.windows.len(), 1);
+        let usage_request = requests.recv().expect("one request");
+        assert!(
+            usage_request.contains("authorization: Bearer from-the-cli-file"),
+            "{usage_request}"
+        );
+        assert!(
+            usage_request.contains("chatgpt-account-id: acct-file"),
+            "{usage_request}"
+        );
+        server.join().expect("server stopped");
+        assert!(requests.try_recv().is_err(), "nothing else was asked");
+    }
+
+    #[test]
+    fn oauth_source_reads_the_stored_login_even_when_the_cli_file_is_live() {
+        // The mirror image: both credentials live, the pinned source is the login.
+        let home = TestHome::expired();
+        fs::write(
+            &home.path,
+            serde_json::to_vec_pretty(&json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "from-the-cli-file",
+                    "refresh_token": "file-refresh",
+                    "account_id": "acct-file"
+                }
+            }))
+            .expect("serialize"),
+        )
+        .expect("write a live CLI file");
+        let before = fs::read(&home.path).expect("file readable");
+        let secrets = FakeSecrets::holding(json!({
+            "tokens": {"access_token": "from-the-tidemark-login", "refresh_token": "own-refresh", "account_id": "acct-own"}
+        }));
+        let (base, requests, server) = local_server(vec![USAGE]);
+        let mut provider = home.provider(&base);
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+        provider.source = Source::OAuth;
+
+        let snapshot = block_on(provider.fetch_inner()).expect("the stored login is enough");
+
+        assert_eq!(snapshot.windows.len(), 1);
+        let usage_request = requests.recv().expect("one request");
+        assert!(
+            usage_request.contains("authorization: Bearer from-the-tidemark-login"),
+            "{usage_request}"
+        );
+        assert!(
+            usage_request.contains("chatgpt-account-id: acct-own"),
+            "{usage_request}"
+        );
+        server.join().expect("server stopped");
+        assert_eq!(
+            fs::read(&home.path).expect("still there"),
+            before,
+            "the pinned source never wrote to the CLI's file"
+        );
+    }
+
+    #[test]
+    fn oauth_source_without_a_login_says_so_without_opening_the_cli_file() {
+        // The file on disk is not even JSON: if the pinned source so much as opened it,
+        // the outcome could not be `NoCredential`.
+        let home = TestHome::expired();
+        fs::write(&home.path, b"this is not the CLI's JSON").expect("corrupt file");
+        let mut provider = home.provider("http://127.0.0.1:9");
+        provider.own = Some(Arc::new(FakeSecrets::default()) as Arc<dyn crate::secrets::Secrets>);
+        provider.source = Source::OAuth;
+
+        let error = block_on(provider.fetch_inner())
+            .expect_err("a pinned login that is not there is no credential");
+        assert!(matches!(error, ProviderError::NoCredential), "{error:?}");
+    }
+
+    #[test]
+    fn cli_source_refreshes_the_file_without_reading_the_stored_login() {
+        const ROTATION: (u16, &str) = (
+            200,
+            r#"{"access_token":"rotated","refresh_token":"rotated-refresh"}"#,
+        );
+        // The file's opaque token is rejected, so the retry path refreshes — and under
+        // Source::Cli it must spend the file's refresh token, never the stored login's.
+        let home = TestHome::expired();
+        fs::write(
+            &home.path,
+            serde_json::to_vec_pretty(&json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "opaque-file-token",
+                    "refresh_token": "file-refresh",
+                    "account_id": "acct-file"
+                }
+            }))
+            .expect("serialize"),
+        )
+        .expect("write opaque credentials");
+        let secrets = FakeSecrets::holding(json!({
+            "tokens": {"access_token": "own-opaque", "refresh_token": "own-refresh", "account_id": "acct-own"}
+        }));
+        let (base, requests, server) = local_server(vec![(401, "{}"), ROTATION, USAGE]);
+        let mut provider = home.provider(&base);
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+        provider.source = Source::Cli;
+
+        let snapshot = block_on(provider.fetch_inner()).expect("one refresh, one retry");
+        assert_eq!(snapshot.windows.len(), 1);
+
+        let rejected = requests.recv().expect("the first usage request");
+        assert!(
+            rejected.contains("authorization: Bearer opaque-file-token"),
+            "{rejected}"
+        );
+        let refresh = requests.recv().expect("refresh request");
+        assert!(
+            refresh.contains("\"refresh_token\":\"file-refresh\""),
+            "{refresh}"
+        );
+        assert!(!refresh.contains("own-refresh"), "{refresh}");
+        let retried = requests.recv().expect("the retried usage request");
+        assert!(
+            retried.contains("authorization: Bearer rotated"),
+            "{retried}"
+        );
+        server.join().expect("server stopped");
+
+        assert_eq!(
+            home.document()["tokens"]["access_token"],
+            "rotated",
+            "the rotation landed in the CLI's file"
+        );
+        let stored = secrets.stored();
+        assert_eq!(
+            stored["tokens"]["access_token"], "own-opaque",
+            "the stored login was never read, so there was nothing to write back"
+        );
+    }
+
+    #[test]
+    fn oauth_source_refreshes_the_stored_login_without_touching_the_cli_file() {
+        const ROTATION: (u16, &str) = (
+            200,
+            r#"{"access_token":"rotated","refresh_token":"rotated-refresh"}"#,
+        );
+        // The file on disk is not even JSON: the 401 retry path under Source::OAuth
+        // refreshes the stored login and never opens it.
+        let home = TestHome::expired();
+        fs::write(&home.path, b"this is not the CLI's JSON").expect("corrupt file");
+        let secrets = FakeSecrets::holding(json!({
+            "tokens": {"access_token": "opaque-own", "refresh_token": "own-refresh", "account_id": "acct-own"}
+        }));
+        let (base, requests, server) = local_server(vec![(401, "{}"), ROTATION, USAGE]);
+        let mut provider = home.provider(&base);
+        provider.own = Some(Arc::clone(&secrets) as Arc<dyn crate::secrets::Secrets>);
+        provider.source = Source::OAuth;
+
+        let snapshot = block_on(provider.fetch_inner()).expect("one refresh, one retry");
+        assert_eq!(snapshot.windows.len(), 1);
+
+        let _rejected = requests.recv().expect("the rejected request");
+        let refresh = requests.recv().expect("refresh request");
+        assert!(
+            refresh.contains("\"refresh_token\":\"own-refresh\""),
+            "{refresh}"
+        );
+        let retried = requests.recv().expect("the retried usage request");
+        assert!(
+            retried.contains("authorization: Bearer rotated"),
+            "{retried}"
+        );
+        server.join().expect("server stopped");
+
+        let stored = secrets.stored();
+        assert_eq!(stored["tokens"]["access_token"], "rotated");
+        assert_eq!(
+            stored["tokens"]["refresh_token"], "rotated-refresh",
+            "the rotation landed back in the keyring"
         );
     }
 

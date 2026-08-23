@@ -4,8 +4,11 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
-use tidemark_types::{CredentialKind, ProviderDefinition, ProviderOption, ProviderStatus, Remedy};
+use tidemark_types::{
+    CredentialKind, ExternalLogin, ProviderDefinition, ProviderOption, ProviderStatus, Remedy,
+};
 
+use super::model::AuthSource;
 use super::{model, reason};
 use crate::bus::DaemonProxy;
 use crate::{format, mark};
@@ -40,6 +43,10 @@ pub(super) struct ProviderDetail {
     authentication: adw::PreferencesGroup,
     key: RefCell<Option<KeyRows>>,
     sign_in: RefCell<Option<SignInRow>>,
+    /// The CLI half, for a provider whose credential can come from another program here.
+    local: RefCell<Option<LocalRows>>,
+    /// The pill that picks between the two halves. Absent for a provider with one.
+    choice: RefCell<Option<SourceChoice>>,
     external: RefCell<Option<adw::ActionRow>>,
     options: RefCell<BTreeMap<String, Rc<OptionRow>>>,
     notifications: adw::PreferencesGroup,
@@ -61,6 +68,75 @@ struct SignInRow {
     button: gtk::Button,
     stack: gtk::Stack,
     url: Rc<RefCell<String>>,
+}
+
+/// The rows of the half that reads a login another program on this machine holds.
+///
+/// Built once and hidden, like the sign-in row beside it: the two halves are one group,
+/// and rebuilding a group under a pointer that is on it loses the click.
+#[derive(Debug)]
+struct LocalRows {
+    /// Where the login is, and whether it is there.
+    found: adw::ActionRow,
+    /// `Found` or `Not found`, blank while the daemon has not said.
+    presence: gtk::Label,
+    /// What to run to create one. Absent when there is no single command to name.
+    command: Option<adw::ActionRow>,
+    /// That Tidemark writes to a file it does not own. Absent when it only reads.
+    note: Option<gtk::Label>,
+}
+
+impl LocalRows {
+    fn set_visible(&self, visible: bool) {
+        self.found.set_visible(visible);
+        if let Some(command) = &self.command {
+            command.set_visible(visible);
+        }
+        if let Some(note) = &self.note {
+            note.set_visible(visible);
+        }
+    }
+}
+
+/// The credential pill, told apart from the daemon's answer about which half is in force.
+///
+/// The same discipline as [`OptionSelection`], for the same reason: the pill moves the
+/// moment it is clicked, the write happens afterwards, and a refused write must put it
+/// back without that looking like a second click. What is different here is that the two
+/// halves are two screens, so a rollback moves the rows as well as the pill.
+#[derive(Debug)]
+struct SourceChoice {
+    /// The setting a click writes, as the daemon named it.
+    option: String,
+    group: adw::ToggleGroup,
+    authoritative: Cell<AuthSource>,
+    suppress: Cell<bool>,
+}
+
+impl SourceChoice {
+    /// The write this click asks for, or `None` when the pill was moved by us — or moved
+    /// to something this build has no screen for, which a daemon newer than it could do.
+    fn clicked(&self) -> Option<AuthSource> {
+        let chosen = AuthSource::from_value(&self.group.active_name()?)?;
+        (!self.suppress.get()).then_some(chosen)
+    }
+
+    fn apply_authoritative(&self, source: AuthSource) {
+        self.authoritative.set(source);
+        self.set_without_signal(source);
+    }
+
+    fn rollback(&self) -> AuthSource {
+        let authoritative = self.authoritative.get();
+        self.set_without_signal(authoritative);
+        authoritative
+    }
+
+    fn set_without_signal(&self, source: AuthSource) {
+        self.suppress.set(true);
+        self.group.set_active_name(Some(source.as_value()));
+        self.suppress.set(false);
+    }
 }
 
 #[derive(Debug)]
@@ -268,6 +344,8 @@ impl ProviderDetail {
             authentication,
             key: RefCell::new(None),
             sign_in: RefCell::new(None),
+            local: RefCell::new(None),
+            choice: RefCell::new(None),
             external: RefCell::new(None),
             options: RefCell::new(BTreeMap::new()),
             notifications,
@@ -334,7 +412,53 @@ impl ProviderDetail {
             }
         }
         drop(rows);
+        self.apply_local(status);
         self.apply_notifications(status);
+    }
+
+    /// Puts the pill and the two halves where the daemon says the account is.
+    ///
+    /// The half in force is the daemon's answer rather than the one last looked at: an
+    /// account whose local login has just appeared, or whose Tidemark login has just been
+    /// signed out of, has moved, and a dialog still showing the other half would be
+    /// describing a credential nothing is using.
+    fn apply_local(self: &Rc<Self>, status: &ProviderStatus) {
+        let Some(source) = model::auth_source(&self.definition, status) else {
+            return;
+        };
+        if let Some(choice) = self.choice.borrow().as_ref() {
+            choice.apply_authoritative(source);
+        }
+        if let Some(local) = self.local.borrow().as_ref() {
+            match model::external_presence_text(status) {
+                Some(text) => {
+                    // Coloured rather than only worded: this is the one line that says
+                    // whether the half being looked at can work at all, and it sits at the
+                    // end of a row whose title and subtitle are both black.
+                    let colour = if status.external_present == Some(true) {
+                        "success"
+                    } else {
+                        "warning"
+                    };
+                    local.presence.set_label(text);
+                    local.presence.set_css_classes(&[colour]);
+                    local.presence.set_visible(true);
+                }
+                None => local.presence.set_visible(false),
+            }
+        }
+        self.show_source(source);
+    }
+
+    /// Shows one half and hides the other. A login in progress belongs to the Tidemark
+    /// half, so the pill is held still until it finishes; see [`ProviderDetail::set_waiting`].
+    fn show_source(&self, source: AuthSource) {
+        if let Some(sign_in) = self.sign_in.borrow().as_ref() {
+            sign_in.row.set_visible(source == AuthSource::Tidemark);
+        }
+        if let Some(local) = self.local.borrow().as_ref() {
+            local.set_visible(source == AuthSource::Cli);
+        }
     }
 
     /// Redraws the notification switches for the windows the account currently reports.
@@ -425,7 +549,22 @@ impl ProviderDetail {
     fn build_authentication(self: &Rc<Self>) {
         match self.definition.credential_kind() {
             Some(CredentialKind::Key) => self.build_key_rows(),
-            Some(CredentialKind::OAuth) => self.build_sign_in_row(),
+            // A provider whose credential can also come from a CLI on this machine gets
+            // both halves and a pill to pick one. It is the same group either way: the two
+            // are alternatives, not a control and its fallback, and drawing them as two
+            // groups would suggest a login could be on both at once. The pill is added
+            // first because the group stacks its rows in the order they arrive, and the
+            // control that decides which rows below it mean anything belongs above them.
+            Some(CredentialKind::OAuth) => {
+                let external = self.definition.external.clone();
+                if let Some(external) = &external {
+                    self.build_source_choice(external);
+                }
+                self.build_sign_in_row();
+                if let Some(external) = &external {
+                    self.build_local_rows(external);
+                }
+            }
             // Nothing to paste and nobody to sign in to: the whole group would be an empty
             // box under a heading that promised a control. Configuring the account is its
             // settings alone, which are a group of their own.
@@ -627,13 +766,208 @@ impl ProviderDetail {
         });
     }
 
+    /// The pill in the group's header that picks between the two credentials.
+    ///
+    /// Built from the setting the daemon named rather than from anything known here, so
+    /// the halves are labelled in the provider's own words — `Claude Code login`, not a
+    /// slug this crate would have to be taught. A choice this build has no screen for is
+    /// refused outright: half a pill is worse than none, because the half that is drawn
+    /// looks like the whole choice.
+    fn build_source_choice(self: &Rc<Self>, external: &ExternalLogin) {
+        let Some(option) = self
+            .definition
+            .options
+            .iter()
+            .find(|option| option.name == external.option)
+        else {
+            return;
+        };
+        let toggles: Vec<(AuthSource, &str)> = option
+            .choices
+            .iter()
+            .filter_map(|choice| {
+                Some((
+                    AuthSource::from_value(&choice.value)?,
+                    choice.title.as_str(),
+                ))
+            })
+            .collect();
+        if toggles.len() != option.choices.len() || toggles.len() < 2 {
+            return;
+        }
+
+        // Full width, in a row of its own at the top of the group, rather than tucked into
+        // the group's header. The two labels are the providers' own names for the two
+        // credentials — `Claude Code login` is not shortenable without becoming a guess —
+        // and in a header suffix they share what the heading and its description leave
+        // over, which was enough to ellipsize both of them.
+        let group = adw::ToggleGroup::builder()
+            .hexpand(true)
+            .homogeneous(true)
+            .build();
+        for (source, title) in &toggles {
+            group.add(
+                adw::Toggle::builder()
+                    .name(source.as_value())
+                    .label(*title)
+                    .build(),
+            );
+        }
+        let row = adw::PreferencesRow::builder()
+            .activatable(false)
+            .child(&group)
+            .build();
+        row.add_css_class("credential-choice");
+        self.authentication.add(&row);
+
+        group.connect_active_name_notify({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                let Some(detail) = weak.upgrade() else {
+                    return;
+                };
+                let asked = detail.choice.borrow().as_ref().and_then(|choice| {
+                    choice
+                        .clicked()
+                        .map(|source| (source, choice.option.clone()))
+                });
+                let Some((chosen, name)) = asked else {
+                    return;
+                };
+                // Moved before the write lands: the pill is the one control here whose
+                // two positions are two screens, and leaving the old screen under a
+                // pill that has already moved reads as the click having missed.
+                detail.show_source(chosen);
+                let status = detail.status.borrow();
+                let provider = status.provider.clone();
+                let account = status.account.clone();
+                drop(status);
+                let value = chosen.as_value().to_owned();
+                glib::spawn_future_local(async move {
+                    if let Err(error) = detail
+                        .proxy
+                        .set_option(&provider, &account, &name, &value)
+                        .await
+                    {
+                        let restored = detail.choice.borrow().as_ref().map(SourceChoice::rollback);
+                        if let Some(restored) = restored {
+                            detail.show_source(restored);
+                        }
+                        detail.toast(&reason(&error));
+                    }
+                });
+            }
+        });
+
+        *self.choice.borrow_mut() = Some(SourceChoice {
+            option: external.option.clone(),
+            group,
+            authoritative: Cell::new(AuthSource::Tidemark),
+            suppress: Cell::new(false),
+        });
+    }
+
+    /// The half that reads a login another program on this machine holds.
+    ///
+    /// Three things, in the order somebody with a problem needs them: whether the login is
+    /// there and where Tidemark looked, what to run if it is not, and — for the two
+    /// providers this is true of — that Tidemark refreshes the credential in place and
+    /// writes the new token back into a file it does not own. The last of those is ADR
+    /// 0001, and it is stated in the open rather than behind a disclosure: a program that
+    /// edits another program's credentials has to say so where the choice is made.
+    fn build_local_rows(self: &Rc<Self>, external: &ExternalLogin) {
+        // Markup off throughout: every string here is the daemon's, and a path is data.
+        let found = adw::ActionRow::builder()
+            .title(&external.label)
+            .subtitle(&external.location)
+            .use_markup(false)
+            .visible(false)
+            .build();
+        let presence = gtk::Label::builder()
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        let recheck = gtk::Button::builder()
+            .label("Check again")
+            .valign(gtk::Align::Center)
+            .build();
+        recheck.connect_clicked({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                let Some(detail) = weak.upgrade() else {
+                    return;
+                };
+                let provider = detail.status.borrow().provider.clone();
+                glib::spawn_future_local(async move {
+                    if let Err(error) = detail.proxy.refresh(&provider).await {
+                        detail.toast(&reason(&error));
+                    }
+                });
+            }
+        });
+        let suffix = gtk::Box::builder().spacing(8).build();
+        suffix.append(&presence);
+        suffix.append(&recheck);
+        found.add_suffix(&suffix);
+        self.authentication.add(&found);
+
+        let command = (!external.command.is_empty()).then(|| {
+            let row = adw::ActionRow::builder()
+                .title("Sign in with the CLI")
+                .subtitle(&external.command)
+                .use_markup(false)
+                .visible(false)
+                .build();
+            let copy = gtk::Button::builder()
+                .label("Copy")
+                .valign(gtk::Align::Center)
+                .build();
+            copy.connect_clicked({
+                let weak = Rc::downgrade(self);
+                let command = external.command.clone();
+                move |button| {
+                    button.clipboard().set_text(&command);
+                    if let Some(detail) = weak.upgrade() {
+                        detail.toast("Command copied. Run it in a terminal.");
+                    }
+                }
+            });
+            row.add_suffix(&copy);
+            self.authentication.add(&row);
+            row
+        });
+
+        let note = model::write_back_text(external).map(|text| {
+            let label = caption(&text);
+            label.set_visible(false);
+            self.authentication.add(&label);
+            label
+        });
+
+        *self.local.borrow_mut() = Some(LocalRows {
+            found,
+            presence,
+            command,
+            note,
+        });
+    }
+
+    /// The provider's own settings — every one except the credential choice, which the
+    /// authentication group above draws as a pill. Left in the list it would appear twice,
+    /// and the second one would be a menu offering the same two values under a heading
+    /// that says nothing about which credential is in use.
     fn build_options(self: &Rc<Self>, group: &adw::PreferencesGroup) {
         let status = self.status.borrow();
-        let options = if status.options.is_empty() {
+        let declared = if status.options.is_empty() {
             &self.definition.options
         } else {
             &status.options
         };
+        let auth_option = self.definition.auth_option();
+        let options: Vec<&ProviderOption> = declared
+            .iter()
+            .filter(|option| Some(option.name.as_str()) != auth_option)
+            .collect();
         group.set_visible(!options.is_empty());
         for option in options {
             let row = self.build_option_row(option);
@@ -749,6 +1083,12 @@ impl ProviderDetail {
             return false;
         }
         self.waiting.set(url.is_some());
+        // A login in progress belongs to the Tidemark half and holds a fixed loopback
+        // port. Letting the pill move under it would hide the Cancel button while the
+        // listener is still bound, which is the one way to leave that port held.
+        if let Some(choice) = self.choice.borrow().as_ref() {
+            choice.group.set_sensitive(url.is_none());
+        }
         let sign_in_rows = self.sign_in.borrow();
         let Some(sign_in) = sign_in_rows.as_ref() else {
             return true;
@@ -788,8 +1128,19 @@ fn caption(text: &str) -> gtk::Label {
         .build()
 }
 
+/// The sentence under the group's heading: what is wrong, and where the credential comes
+/// from.
+///
+/// The second half is dropped for a provider whose two credentials are drawn as a pill.
+/// The hint for those reads "sign in through Tidemark, or read Claude Code's own login",
+/// which is the pill spelled out in prose directly above the pill — and the width it took
+/// was width the two labels needed.
 fn describe(definition: &ProviderDefinition, status: &ProviderStatus) -> String {
-    let hint = &definition.credential_hint;
+    let hint = if definition.external.is_some() {
+        ""
+    } else {
+        definition.credential_hint.as_str()
+    };
     match format::chip(status) {
         Some(chip)
             if status
@@ -803,7 +1154,7 @@ fn describe(definition: &ProviderDefinition, status: &ProviderStatus) -> String 
                 format!("{detail} — {hint}")
             }
         }
-        _ => hint.clone(),
+        _ => hint.to_owned(),
     }
 }
 
@@ -819,7 +1170,7 @@ mod tests {
             title: "Z.ai".into(),
             credential: kind.as_wire().into(),
             credential_hint: "Z.ai dashboard → API keys.".into(),
-            external_fallback: None,
+            external: None,
             options: Vec::new(),
         }
     }

@@ -2,10 +2,10 @@
 //!
 //! Everything that libadwaita already names is used by name — `card`, `title-1`, `heading`,
 //! `caption`, `dim-label`, `warning`, `error` — so the window follows the system's accent
-//! colour, dark mode and font scaling without being told to. What is left is the two
-//! things Adwaita has no class for: the pill around a state chip, and the padding inside a
+//! colour, dark mode and font scaling without being told to. What is left is the three
+//! things Adwaita has no class for: the pill around a state chip, the padding inside a
 //! card, which `.card` deliberately does not set because it does not know what is going in
-//! it.
+//! it, and the padding around the credential pill, for the same reason.
 //!
 //! # The hover
 //!
@@ -87,6 +87,15 @@ pub(crate) const STYLE: &str = "
 .quota-footer {
     font-size: 0.9em;
     opacity: 0.45;
+}
+
+/* The credential pill sits in a preferences row of its own so that it gets the full width
+   of the group — a header suffix ellipsized both of its labels, and neither `Tidemark
+   login` nor `Claude Code login` can be shortened without becoming a guess. A plain
+   AdwPreferencesRow has no padding of its own, so the pill would otherwise touch the four
+   edges of the card it sits in. */
+.credential-choice {
+    padding: 8px;
 }
 ";
 

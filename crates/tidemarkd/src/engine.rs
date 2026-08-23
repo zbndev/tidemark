@@ -254,7 +254,7 @@ impl Account {
     }
 
     /// Whether dropping this account's client is safe, because it can be built again.
-    fn rebuildable(&self) -> bool {
+    pub(crate) fn rebuildable(&self) -> bool {
         self.factory.is_some() || self.rebuild.is_some()
     }
 
@@ -882,15 +882,25 @@ impl Engine {
     /// The client is dropped as well, so the credential is read again. A manual refresh is
     /// what the user reaches for straight after saving a key, and it would be a poor
     /// interface that answered it with the old one.
+    ///
+    /// The other login is looked for again for the same reason, and it is the more urgent
+    /// half: a refresh is also what the user reaches for straight after running `claude`
+    /// in a terminal, and the settings pane that sent them there is showing "Not found"
+    /// until somebody looks again. The keyring is *not* re-read here — that answer only
+    /// moves when Tidemark itself moves it, and every such path already probes.
     fn mark_due(&mut self, target: Option<&str>) {
         let now = Instant::now();
         for account in &mut self.accounts {
-            if target.is_none_or(|slug| account.provider.as_str() == slug) {
-                account.due = now;
-                if account.factory.is_some() {
-                    account.client = None;
-                }
+            if !target.is_none_or(|slug| account.provider.as_str() == slug) {
+                continue;
             }
+            account.due = now;
+            if account.factory.is_some() {
+                account.client = None;
+            }
+            let provider = account.provider.as_str().to_owned();
+            account.status.external_present = crate::registry::external_present(&provider);
+            account.status.auth_source = crate::registry::auth_source(&provider, &account.status);
         }
     }
 
@@ -929,36 +939,48 @@ impl Engine {
         self.probe_credentials(target).await;
     }
 
-    /// Records, for each account, whether Tidemark itself holds a credential for it.
+    /// Records, for each account, the two things a credentials dialog asks before anything
+    /// has been polled: whether Tidemark itself holds a credential for the account, and
+    /// whether the provider's other login — the vendor CLI's file, an `agy` session —
+    /// exists on this machine at all. From the two it then settles which credential the
+    /// next poll will use.
     ///
     /// Asked rather than inferred, and asked rarely — at startup and whenever a credential
-    /// changes — because the answer only moves when the user moves it. A locked keyring
-    /// leaves the answer unknown rather than answering "no": the dialog would otherwise
-    /// offer to replace a key that is there and simply out of reach.
+    /// changes — because the answers only move when the user moves them. A locked keyring
+    /// leaves the first answer unknown rather than answering "no": the dialog would
+    /// otherwise offer to replace a key that is there and simply out of reach. The second
+    /// proves existence, not usability — a file that exists may hold an expired token —
+    /// and it is asked even of accounts Tidemark holds nothing for, because for them it
+    /// is the whole answer.
     pub async fn probe_credentials(&mut self, target: Option<&str>) {
         for index in 0..self.accounts.len() {
             let account = &self.accounts[index];
             if !target.is_none_or(|slug| account.provider.as_str() == slug) {
                 continue;
             }
-            let Some(kind) = account.status.credential_kind().and_then(stored_kind) else {
-                // Nothing of ours to look for: the credential belongs to something else on
-                // the machine.
-                self.accounts[index].status.has_credential = None;
-                continue;
-            };
             let provider = account.provider.clone();
-            let name = account.account.clone();
-            let found = self.secrets.get(kind, &provider, &name).await;
-            let held = match found {
-                Ok(found) => Some(found.is_some()),
-                Err(SecretError::Locked) => None,
-                Err(error) => {
-                    tracing::debug!(provider = %provider, %error, "cannot see stored credentials");
-                    None
+            let kind = account.status.credential_kind().and_then(stored_kind);
+            let held = match kind {
+                Some(kind) => {
+                    let name = account.account.clone();
+                    match self.secrets.get(kind, &provider, &name).await {
+                        Ok(found) => Some(found.is_some()),
+                        Err(SecretError::Locked) => None,
+                        Err(error) => {
+                            tracing::debug!(provider = %provider, %error, "cannot see stored credentials");
+                            None
+                        }
+                    }
                 }
+                // Nothing of ours to look for: the credential belongs to something else
+                // on the machine.
+                None => None,
             };
             self.accounts[index].status.has_credential = held;
+            self.accounts[index].status.external_present =
+                crate::registry::external_present(provider.as_str());
+            self.accounts[index].status.auth_source =
+                crate::registry::auth_source(provider.as_str(), &self.accounts[index].status);
         }
     }
 

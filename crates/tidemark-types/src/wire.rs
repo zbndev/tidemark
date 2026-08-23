@@ -208,6 +208,33 @@ pub struct ProviderOption {
     pub choices: Vec<OptionChoice>,
 }
 
+/// The local CLI login a provider can read instead of a login performed in Tidemark.
+///
+/// Three of the providers have two credentials rather than one: a token Tidemark obtained
+/// itself, and the token some other program on this machine already holds. Which of the
+/// two is used was, for a long time, decided silently in the daemon. It is published here
+/// instead, in enough detail for a client to *say* what the other credential is, where it
+/// lives, how to create one, and whether Tidemark writes to it — because a program that
+/// reads and refreshes a file another program owns must say so where the user can see it.
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct ExternalLogin {
+    /// The setting that chooses between the two credentials, under `[provider.<slug>]`.
+    /// It is also one of [`ProviderDefinition::options`], and a client that draws the
+    /// choice itself must not draw it a second time among the ordinary settings.
+    pub option: String,
+    /// What the local login is called, in the words its own program uses — `Claude Code
+    /// login`, `agy session`.
+    pub label: String,
+    /// Where it lives, for a person: a path, or a sentence about a running process.
+    pub location: String,
+    /// What to run to create one. Empty when there is nothing single to name.
+    pub command: String,
+    /// Whether Tidemark refreshes this credential in place and writes the rotated token
+    /// back where it found it, per ADR 0001. `false` for a source Tidemark only reads.
+    pub writes_back: bool,
+}
+
 /// Presentation metadata for one provider in the daemon's catalog.
 #[derive(Debug, Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
 #[zvariant(signature = "a{sv}")]
@@ -216,13 +243,21 @@ pub struct ProviderDefinition {
     pub title: String,
     pub credential: String,
     pub credential_hint: String,
-    pub external_fallback: Option<String>,
+    /// The other credential this provider can read, for the providers that have one.
+    pub external: Option<ExternalLogin>,
     pub options: Vec<ProviderOption>,
 }
 
 impl ProviderDefinition {
     pub fn credential_kind(&self) -> Option<CredentialKind> {
         CredentialKind::from_wire(&self.credential)
+    }
+
+    /// The setting that chooses between this provider's two credentials, when it has two.
+    pub fn auth_option(&self) -> Option<&str> {
+        self.external
+            .as_ref()
+            .map(|external| external.option.as_str())
     }
 }
 
@@ -330,6 +365,20 @@ pub struct ProviderStatus {
     /// Where the user gets the credential from, in one sentence. Absent when the answer is
     /// obvious enough not to need one.
     pub credential_hint: Option<String>,
+    /// Whether the local CLI login named by [`ProviderDefinition::external`] exists on
+    /// this machine. Absent when the provider has no such login, or when the daemon could
+    /// not tell — which is not the same as "there is none", and must not be drawn as one.
+    pub external_present: Option<bool>,
+    /// Which of the two credentials the next poll will actually use, as an
+    /// [`ExternalLogin`] choice value — `oauth` or `cli`.
+    ///
+    /// Published rather than derived by the client, and deliberately separate from the
+    /// choosing setting's own value: that setting may legitimately be unset, and what an
+    /// unset setting resolves to is the provider's business. Antigravity's local server is
+    /// the session the user is working in and wins by default; Claude's and Codex's own
+    /// login wins over the file their CLI owns. A client that guessed would have to be
+    /// taught each of those rules, and would go stale the first time one changed.
+    pub auth_source: Option<String>,
     /// The provider's own settings, with their current values and alternatives.
     pub options: Vec<ProviderOption>,
     /// Keys of the windows whose notifications the user has switched on.
@@ -355,6 +404,8 @@ impl ProviderStatus {
             credential: None,
             has_credential: None,
             credential_hint: None,
+            external_present: None,
+            auth_source: None,
             options: Vec::new(),
             notify: Vec::new(),
         }
@@ -464,13 +515,35 @@ mod tests {
             title: "Antigravity".into(),
             credential: CredentialKind::OAuth.as_wire().into(),
             credential_hint: "Sign in with Google.".into(),
-            external_fallback: Some("agy session".into()),
+            external: Some(ExternalLogin {
+                option: "source".into(),
+                label: "agy session".into(),
+                location: "a running agy server".into(),
+                command: "agy".into(),
+                writes_back: false,
+            }),
             options: Vec::new(),
         };
         let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
         let (decoded, _): (ProviderDefinition, _) = encoded.deserialize().expect("decodes");
         assert_eq!(decoded, original);
         assert_eq!(decoded.credential_kind(), Some(CredentialKind::OAuth));
+        assert_eq!(decoded.auth_option(), Some("source"));
+    }
+
+    #[test]
+    fn a_provider_with_one_credential_names_no_choice() {
+        // The absent field is the whole signal a client dispatches on: no external login
+        // means no source pill, and a key provider must never grow one.
+        let definition = ProviderDefinition {
+            provider: "zai".into(),
+            title: "Z.ai".into(),
+            credential: CredentialKind::Key.as_wire().into(),
+            credential_hint: "Z.ai dashboard → API keys.".into(),
+            external: None,
+            options: Vec::new(),
+        };
+        assert_eq!(definition.auth_option(), None);
     }
 
     #[test]
