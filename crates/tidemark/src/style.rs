@@ -7,20 +7,22 @@
 //! card, which `.card` deliberately does not set because it does not know what is going in
 //! it, and the padding around the credential pill, for the same reason.
 //!
-//! # The hover
+//! # The hover, and the lift
 //!
-//! `GtkFlowBoxChild` tints its own allocation, which is a square behind a card with rounded
-//! corners: the tint shows in the four corners as a hard edge around them. So the child's
-//! tint is switched off and the card is raised instead — two pixels and a soft shadow, the
-//! platform's own idea of an elevated surface, and nothing that repaints text.
+//! A card raises on hover — two pixels and a soft shadow, the platform's own idea of an
+//! elevated surface, and nothing that repaints text. It is `translateY` and not `scale`
+//! because scaling a widget resamples the text in it, and a card is mostly text.
 //!
-//! The `:hover` is matched on the child rather than on the card, deliberately: the child
-//! keeps its allocation while the card inside it moves, so a pointer resting near the lower
-//! edge does not fall outside the widget it just raised and start it flickering.
+//! **The `:hover` is matched on the slot around the card and applied to the card inside
+//! it.** A CSS transform moves what GTK picks, so a card that lifted itself out from under
+//! the pointer would flicker; the slot keeps its allocation while the card inside it moves.
+//! That slot used to be a `GtkFlowBoxChild`, which also had to be told not to tint its own
+//! square allocation behind a card with rounded corners. An `AdwBin` paints nothing, so
+//! only the hover rule is left.
 //!
-//! It is `translateY` and not `scale` because scaling a widget resamples the text in it, and
-//! a card is mostly text. This is the one place where the interface says "you can click
-//! this" before Step 14 makes the click do anything.
+//! A card being dragged is lifted further and holds still: the hover transform is taken off
+//! it, because it is already off the surface and because the grid is moving it by
+//! allocation rather than by transform.
 //!
 //! `alpha(currentColor, …)` is what keeps the chip theme-aware: the background is derived
 //! from whatever colour the tone class put on the label, so a warning chip and an error
@@ -39,16 +41,27 @@ pub(crate) const STYLE: &str = "
     transition: transform 150ms ease-out, box-shadow 150ms ease-out;
 }
 
-/* The grid's children are the cards themselves, so the hover belongs to the card and its
-   rounded corners; left alone, GtkFlowBoxChild tints its own square allocation and the
-   corners of the card get a visible hard edge around them. */
-.quota-grid > flowboxchild:hover {
-    background: none;
-}
-
-.quota-grid > flowboxchild:hover > .quota-card {
+/* The slot keeps the pointer while the card inside it moves. */
+.quota-grid > .quota-slot:hover > .quota-card {
     transform: translateY(-2px);
     box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.18), 0 8px 20px 0 rgba(0, 0, 0, 0.34);
+}
+
+/* Held by the pointer: opaque, further off the surface, and not offset, because the grid is
+   already carrying it.
+
+   The background is the point. `.card` takes `@card_bg_color`, which in the dark style is
+   8% white *over whatever is behind it* — correct for a card lying on the window, and wrong
+   for one being carried over its neighbours, which then show through it. A lifted card is
+   opaque, and `@popover_bg_color` is the platform's own name for a surface floating above
+   the content rather than a colour of our invention. The foreground is deliberately left
+   alone: the bar's track and its pace mark take the inherited text colour, and changing it
+   would make them shift tone for the length of a drag. */
+.quota-grid > .quota-slot.dragging > .quota-card,
+.quota-grid > .quota-slot:hover.dragging > .quota-card {
+    background-color: @popover_bg_color;
+    transform: none;
+    box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.24), 0 16px 36px 0 rgba(0, 0, 0, 0.44);
 }
 
 .quota-bar {

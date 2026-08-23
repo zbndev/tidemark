@@ -182,6 +182,58 @@ impl Config {
         Ok(!already_configured)
     }
 
+    /// Rewrites the order of the configured providers.
+    ///
+    /// The array is a permutation, not a replacement: `order` must name every configured
+    /// provider exactly once. A list that names something else — a slug that is not
+    /// configured, a slug that is missing, the same slug twice — is refused with nothing
+    /// written, because a client whose idea of the set is out of date should read the set
+    /// again rather than have this function guess which half of the disagreement it meant.
+    ///
+    /// **Only the values move; the decoration stays where it was written.** A TOML array
+    /// has no notion of a comment belonging to an element: in the style this file's own
+    /// tests use — `"claude", # first survivor` — the comment about one element is part of
+    /// the *next* element's prefix, and in the style above it, part of its own. So a
+    /// permutation that carried decoration along would scramble both the comments and the
+    /// indentation, in opposite directions depending on which style the file uses. Moving
+    /// the strings inside the existing layout is the one behaviour that is predictable:
+    /// the file comes back byte-identical apart from the slugs.
+    pub fn set_provider_order(&mut self, order: &[String]) -> Result<bool, ConfigError> {
+        let configured = self.providers()?;
+        let mut wanted = order.to_vec();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let mut held = configured.clone();
+        held.sort_unstable();
+        if wanted.len() != order.len() || wanted != held {
+            return Err(ConfigError::InvalidProviders {
+                path: self.path.clone(),
+                reason: "the order must name every configured provider exactly once".to_owned(),
+            });
+        }
+        if configured == order {
+            return Ok(false);
+        }
+
+        self.normalize_providers(None)?;
+        let array = self
+            .document
+            .get_mut(PROVIDERS_KEY)
+            .and_then(Item::as_array_mut)
+            .ok_or_else(|| ConfigError::InvalidProviders {
+                path: self.path.clone(),
+                reason: "providers must be an array of strings".to_owned(),
+            })?;
+        // `Array::replace` keeps the decoration of the slot it writes into, which is
+        // exactly what is wanted here, and `order` was checked to be a permutation of the
+        // normalized array above, so this writes every slug back exactly once.
+        for (index, slug) in order.iter().enumerate() {
+            array.replace(index, slug.as_str());
+        }
+        self.write()?;
+        Ok(true)
+    }
+
     /// Removes a provider and its settings while normalizing any survivor duplicates.
     pub fn remove_provider(&mut self, provider: &str) -> Result<bool, ConfigError> {
         let providers = self.providers()?;
@@ -551,6 +603,116 @@ mod tests {
         assert!(!text.contains("[provider.zai]"), "{text}");
         let reread = Config::at(path.clone()).expect("parses again");
         assert_eq!(reread.providers().expect("readable"), ["claude", "future"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reordering_moves_only_the_slugs_and_leaves_the_layout_alone() {
+        let path = scratch("providers-reorder-layout");
+        std::fs::write(
+            &path,
+            "# root comment\n\
+             providers = [ # array heading\n\
+                 \"claude\",\n\
+                 \"zai\",\n\
+                 \"kimi\",\n\
+             ] # array tail\n\
+             \n\
+             [provider.zai]\n\
+             region = \"global\"\n",
+        )
+        .expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        assert!(
+            config
+                .set_provider_order(&["kimi".into(), "claude".into(), "zai".into()])
+                .expect("reordered")
+        );
+
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert_eq!(
+            text,
+            "# root comment\n\
+             providers = [ # array heading\n\
+                 \"kimi\",\n\
+                 \"claude\",\n\
+                 \"zai\",\n\
+             ] # array tail\n\
+             \n\
+             [provider.zai]\n\
+             region = \"global\"\n",
+            "the layout, the comments and the provider table must all survive"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reordering_a_single_line_array_keeps_it_on_one_line() {
+        let path = scratch("providers-reorder-inline");
+        std::fs::write(&path, "providers = [\"claude\", \"zai\"]\n").expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        assert!(
+            config
+                .set_provider_order(&["zai".into(), "claude".into()])
+                .expect("reordered")
+        );
+
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert_eq!(text, "providers = [\"zai\", \"claude\"]\n");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reordering_normalizes_duplicates_before_permuting() {
+        let path = scratch("providers-reorder-duplicates");
+        std::fs::write(&path, "providers = [\"claude\", \"zai\", \"claude\"]\n").expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        assert!(
+            config
+                .set_provider_order(&["zai".into(), "claude".into()])
+                .expect("reordered")
+        );
+
+        let reread = Config::at(path.clone()).expect("parses again");
+        assert_eq!(reread.providers().expect("readable"), ["zai", "claude"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_unchanged_order_is_not_a_write() {
+        let path = scratch("providers-reorder-noop");
+        std::fs::write(&path, "providers = [\"claude\", \"zai\"]\n").expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        assert!(
+            !config
+                .set_provider_order(&["claude".into(), "zai".into()])
+                .expect("accepted")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_order_that_is_not_a_permutation_is_refused_without_writing() {
+        let path = scratch("providers-reorder-refused");
+        let seed = "providers = [\"claude\", \"zai\"]\n";
+        std::fs::write(&path, seed).expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        for order in [
+            vec!["claude".to_owned()],
+            vec!["claude".to_owned(), "claude".to_owned()],
+            vec!["claude".to_owned(), "zai".to_owned(), "kimi".to_owned()],
+        ] {
+            assert!(
+                config.set_provider_order(&order).is_err(),
+                "{order:?} is not a permutation of the configured set"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&path).expect("readable"), seed);
         let _ = std::fs::remove_file(path);
     }
 

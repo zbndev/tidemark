@@ -145,10 +145,14 @@ whole window, or a Waybar module, or a line of CLI output. `AddProvider(provider
 and persists the provider's `default` account; `RemoveProvider(provider, account)` removes
 one. `ProviderChanged` carries the same status shape as `GetStatus` for an account that was
 added or updated, while `ProviderRemoved(provider, account)` tells long-running clients to
-drop its settings row and card. `Refresh(provider)` polls now, with an empty string meaning
-everything, re-reads the credential on the way, and looks again for the vendor login a
-provider can read instead of ours — a refresh is what a user reaches for straight after
-running `claude` in a terminal. `Version` says what is on the other end.
+drop its settings row and card. `SetOrder(providers)` rewrites the order the cards go in and
+`OrderChanged(providers)` announces it — a signal of its own rather than a burst of
+`ProviderChanged`, because a status carries no position: a client holding cards needs the
+sequence, not the readings again. `GetStatus` answers in that order from the moment it is
+emitted. `Refresh(provider)` polls now, with an empty string meaning everything, re-reads
+the credential on the way, and looks again for the vendor login a provider can read instead
+of ours — a refresh is what a user reaches for straight after running `claude` in a
+terminal. `Version` says what is on the other end.
 
 Credentials are the daemon's, so changing them is the daemon's too: `SetKey`, `SignOut`,
 `SetOption`, `SetWindowNotify`, and the two halves of a login. Nothing there is specific to the GUI — a
@@ -270,7 +274,18 @@ distribution-wide LTO off; `PKGBUILD` does it with `options=(!lto)`.
   the user explicitly signed in here; signing out removes it and hands the account back.
 - **Settings** — `config.toml` holds what is neither a secret nor a reading: Z.ai's region,
   the ordered `providers` array and the per-window notification opt-in (`[notify.<slug>]`,
-  a `windows` array of window keys) today, card order later. A missing file or missing
+  a `windows` array of window keys). **That `providers` array is the card order.** Not a
+  second key beside it: it is already ordered, already the user's set, already the order
+  `GetStatus` publishes in, and adding a provider already appends to it — which is exactly
+  what "a new card goes on the end" means. A separate `card_order` would be a second list to
+  keep in agreement with the first, and its first question — where a provider named in one
+  and absent from the other goes — has no good answer. Reordering **moves the values and
+  leaves the decoration where it was written**: a TOML array has no notion of a comment
+  belonging to an element, since in `"claude", # mine` the comment is part of the *next*
+  element's prefix and in the style above it part of its own, so carrying decoration along
+  would scramble comments and indentation in opposite directions depending on which style
+  the file uses. What comes back is the file byte for byte apart from the slugs. A missing
+  file or missing
   array has the same meaning as `providers = []`: a fresh installation has no configured
   accounts. It is edited rather than rewritten, so comments, ordering and keys a newer
   build added all survive a change made from the interface. A file that does not parse is
@@ -338,9 +353,28 @@ history that does not exist yet.
 
 ## Interface
 
-- **Grid of provider cards** (`GtkFlowBox`, 1–3 columns by width), sorted by urgency, with
-  user-defined order persisted to config. Reordering is manual `GtkDragSource` /
-  `GtkDropTarget` work — `GtkFlowBox` has no reorder API.
+- **Grid of provider cards**, one to three columns by width, **in the order the user put
+  them in**. Nothing else ever changes that order: there is no urgency sort underneath it,
+  a new account goes on the end, and the sequence is persisted by the daemon and
+  republished to every client. The grid the tray menu lists and the grid the settings
+  dialog lists are this one.
+- **The grid is a widget of ours, not a `GtkFlowBox`.** Reordering has to be *live* — the
+  cards a held card displaces move out of its way before the button is released, and move
+  back if the pointer changes its mind — and `gtk_flow_box_invalidate_sort()` sorts a
+  sequence and queues a resize, so a card that loses its place teleports. There is nothing
+  to interpolate, because the position *is* the allocation. Nothing in GTK 4.22 or
+  libadwaita 1.9 does this generally; the one upstream implementation of exactly this
+  behaviour is libadwaita's private `AdwTabGrid`, and `grid.rs` is its architecture: a
+  `GtkGestureDrag` on the container, a per-card offset in **index units** animated by an
+  `AdwTimedAnimation` restarted from its current value, an animation callback that queues an
+  allocation, and a `size_allocate` that turns a fractional index into a position.
+  `GtkDragSource` / `GtkDropTarget` are the wrong controllers for it: they carry a payload
+  and draw a detached icon, and an icon that is not in the grid cannot push anything.
+- **The order is committed on release, not on the way.** A file write and a D-Bus round trip
+  per pixel is not a design. The drop is applied locally first and sent afterwards, because
+  a grid that waited for the daemon before showing where the card landed would feel broken;
+  a refusal — the configured set moved while the card was in the air — puts the cards back
+  to what the daemon actually has.
 - **Empty state** — when there are no configured providers, the main window says
   `Welcome to Tidemark` and `Add a provider to start tracking your quota.` The providers
   button remains available while the daemon is connected.
@@ -370,11 +404,19 @@ history that does not exist yet.
   their colour rather than the one libadwaita would have picked. **It changes colour at 70%
   and 90% — the notification thresholds** — so the card and the notification never disagree
   about when a window became worth worrying about.
-- **A card raises on hover** — two pixels and a soft shadow — rather than taking the tint
-  `GtkFlowBoxChild` paints on its own square allocation, which shows as a hard edge around
-  the card's rounded corners. The `:hover` is matched on the child and the card is what
-  moves, so the pointer never falls off the widget it just raised. When the card becomes
-  clickable, `.card.activatable` supplies the platform's own hover and active states.
+- **A card raises on hover** — two pixels and a soft shadow. The `:hover` is matched on the
+  slot around the card and the card is what moves, because a CSS transform moves what GTK
+  picks and a card that lifted itself out from under the pointer would flicker. That slot
+  is an `AdwBin`; it was a `GtkFlowBoxChild`, which also tinted its own square allocation
+  behind a card with rounded corners and had to be told not to. `.card.activatable`
+  supplies the platform's own hover and active states.
+- **A card being carried is opaque.** `.card` takes `@card_bg_color`, which in the dark
+  style is 8% white over whatever is behind it — right for a card lying on the window, and
+  wrong for one crossing its neighbours, which then read straight through it. The dragged
+  card takes `@popover_bg_color`, the platform's own name for a surface floating above the
+  content, and a deeper shadow. Its foreground is deliberately left alone: the bar's track
+  and pace mark inherit the text colour, and changing it would make them shift tone for the
+  length of a drag.
 - **The grid is homogeneous.** Every card gets the same allocation, so cards in a row share
   a height and their footers line up; the cost is a short card in a single-column window
   carrying the height of the tallest one. The last row is left ragged: a filler card would

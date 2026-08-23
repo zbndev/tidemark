@@ -169,6 +169,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             tracing::warn!(%error, "could not announce a removal");
                         }
                     }
+                    Publication::Reordered(providers) => {
+                        published.reorder(&providers).await;
+                        if let Err(error) = Daemon::order_changed(&emitter, providers).await {
+                            tracing::warn!(%error, "could not announce a reorder");
+                        }
+                    }
                 }
             }
         }

@@ -81,6 +81,22 @@ impl Published {
         Some(statuses.remove(index))
     }
 
+    /// Puts the accounts in this provider order.
+    ///
+    /// Applied to the shared vector rather than left to the next `GetStatus` to sort,
+    /// because there is nothing for a client to sort by: the order is the user's and this
+    /// is where it is kept. An account whose provider the order does not name keeps its
+    /// place at the end — the sort is stable — so a sequence that has raced a removal
+    /// leaves the survivors alone instead of shuffling them.
+    pub async fn reorder(&self, providers: &[String]) {
+        self.0.write().await.sort_by_key(|status| {
+            providers
+                .iter()
+                .position(|slug| *slug == status.provider)
+                .unwrap_or(providers.len())
+        });
+    }
+
     /// Everything currently known.
     pub async fn all(&self) -> Vec<ProviderStatus> {
         self.0.read().await.clone()
@@ -663,6 +679,50 @@ impl Daemon {
         Ok(())
     }
 
+    /// Puts the configured providers in the order a client's user arranged them in.
+    ///
+    /// The order is the `providers` array in `config.toml` — the same array that says which
+    /// accounts exist, because it is already ordered and `AddProvider` already appends to
+    /// it. A second array beside it would only raise the question of what the position of a
+    /// provider named in one and not the other is.
+    ///
+    /// The list must name every configured provider exactly once. A client whose idea of
+    /// the set has been overtaken by an add or a remove is told so rather than having the
+    /// daemon guess: it can read `GetStatus` again and it will be sent `OrderChanged`
+    /// whenever anybody else succeeds.
+    ///
+    /// The identity is the provider slug and not the provider/account pair, because that
+    /// is the only identity the settings file has. v1 configures one `default` account per
+    /// provider; multi-account changes the shape of that array, and this call with it.
+    async fn set_order(&self, providers: Vec<String>) -> fdo::Result<()> {
+        let configured: Vec<String> = self
+            .statuses
+            .all()
+            .await
+            .into_iter()
+            .map(|status| status.provider)
+            .collect();
+        let mut wanted = providers.clone();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let mut held = configured.clone();
+        held.sort_unstable();
+        held.dedup();
+        if wanted.len() != providers.len() || wanted != held {
+            return Err(fdo::Error::InvalidArgs(
+                "the order must name every configured provider exactly once".into(),
+            ));
+        }
+
+        self.config_request(|reply| Command::SetOrder {
+            providers: providers.clone(),
+            reply,
+        })
+        .await?;
+        tracing::info!(?providers, "card order changed");
+        Ok(())
+    }
+
     /// The daemon's version, so a client can tell what it is talking to.
     #[zbus(property(emits_changed_signal = "false"))]
     async fn version(&self) -> String {
@@ -683,6 +743,17 @@ impl Daemon {
         emitter: &SignalEmitter<'_>,
         provider: &str,
         account: &str,
+    ) -> zbus::Result<()>;
+
+    /// The configured providers are now in this order.
+    ///
+    /// Its own signal rather than a burst of `ProviderChanged`, because a status has no
+    /// position in it: a client holding cards needs the sequence, not the readings again.
+    /// `GetStatus` answers in the same order from the moment this is emitted.
+    #[zbus(signal)]
+    pub async fn order_changed(
+        emitter: &SignalEmitter<'_>,
+        providers: Vec<String>,
     ) -> zbus::Result<()>;
 
     /// Availability of a newer published release changed; empty means there is none.
@@ -844,6 +915,48 @@ mod tests {
 
         assert!(published.remove("zai", "default").await.is_some());
         assert_eq!(published.all().await[0].provider, "kimi");
+    }
+
+    #[tokio::test]
+    async fn a_reorder_moves_the_published_accounts_into_that_sequence() {
+        let published = Published::default();
+        published.upsert(status("zai")).await;
+        published.upsert(status("kimi")).await;
+        published.upsert(status("claude")).await;
+
+        published
+            .reorder(&["claude".into(), "zai".into(), "kimi".into()])
+            .await;
+
+        let providers: Vec<String> = published
+            .all()
+            .await
+            .into_iter()
+            .map(|status| status.provider)
+            .collect();
+        assert_eq!(providers, ["claude", "zai", "kimi"]);
+    }
+
+    #[tokio::test]
+    async fn a_reorder_leaves_an_account_it_does_not_name_at_the_end() {
+        let published = Published::default();
+        published.upsert(status("zai")).await;
+        published.upsert(status("kimi")).await;
+        published.upsert(status("claude")).await;
+
+        published.reorder(&["claude".into()]).await;
+
+        let providers: Vec<String> = published
+            .all()
+            .await
+            .into_iter()
+            .map(|status| status.provider)
+            .collect();
+        assert_eq!(
+            providers,
+            ["claude", "zai", "kimi"],
+            "the unnamed survivors keep the order they were in"
+        );
     }
 
     fn key_account(provider: &str) -> ProviderStatus {
@@ -1624,6 +1737,51 @@ mod tests {
             .await
             .expect("setting task did not panic")
             .expect("engine accepted setting");
+    }
+
+    #[tokio::test]
+    async fn an_order_that_is_not_the_configured_set_is_refused_before_the_engine() {
+        let (daemon, _secrets, mut commands) =
+            daemon_over(vec![key_account("zai"), key_account("kimi")]).await;
+
+        for order in [
+            vec!["zai".to_owned()],
+            vec!["zai".to_owned(), "zai".to_owned()],
+            vec!["zai".to_owned(), "kimi".to_owned(), "claude".to_owned()],
+        ] {
+            assert!(
+                daemon.set_order(order.clone()).await.is_err(),
+                "{order:?} is not the configured set"
+            );
+        }
+        assert!(
+            commands.try_recv().is_err(),
+            "a refused order never reaches the engine"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_order_is_serialized_through_the_engine() {
+        let (daemon, _secrets, mut commands) =
+            daemon_over(vec![key_account("zai"), key_account("kimi")]).await;
+        let daemon = Arc::new(daemon);
+        let ordering = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.set_order(vec!["kimi".into(), "zai".into()]).await }
+        });
+
+        let Command::SetOrder { providers, reply } =
+            commands.recv().await.expect("order reaches engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(providers, ["kimi", "zai"]);
+        assert!(!ordering.is_finished(), "D-Bus waits for persistence");
+        reply.send(Ok(())).expect("caller waits for reply");
+        ordering
+            .await
+            .expect("ordering task did not panic")
+            .expect("engine accepted the order");
     }
 
     #[tokio::test]

@@ -50,6 +50,11 @@ pub enum Publication {
         /// Stable account name.
         account: String,
     },
+    /// Put the published accounts in this provider order.
+    ///
+    /// A sequence rather than a status, because that is what changed: the readings are
+    /// exactly as they were, and a client redrawing a grid needs the positions.
+    Reordered(Vec<String>),
 }
 
 /// What the D-Bus interface asks the loop to do.
@@ -106,6 +111,13 @@ pub enum Command {
         window: String,
         /// Whether the user wants to hear about it.
         enabled: bool,
+        /// Completion sent after persistence and in-memory state agree.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Reorder the configured providers, in the same queue as topology writes.
+    SetOrder {
+        /// Every configured provider slug, in the order the user put them in.
+        providers: Vec<String>,
         /// Completion sent after persistence and in-memory state agree.
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -422,6 +434,37 @@ impl Engine {
         Ok(())
     }
 
+    /// Puts the configured providers in the order the user dragged them into.
+    ///
+    /// The accounts vector is reordered as well as the file, so a live reorder and a
+    /// restart produce the same sequence: this vector is what [`Engine::announce`] walks,
+    /// and a daemon that persisted one order and kept publishing another would disagree
+    /// with itself for the rest of the session.
+    ///
+    /// Nothing about polling changes. An account keeps its `due` time and its backoff — a
+    /// card moving on a grid is not news about a credential.
+    pub async fn set_order(&mut self, providers: &[String]) -> Result<(), String> {
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        config
+            .set_provider_order(providers)
+            .map_err(|error| error.to_string())?;
+
+        self.accounts.sort_by_key(|account| {
+            providers
+                .iter()
+                .position(|slug| slug == account.provider.as_str())
+                // An account for a provider the order does not name cannot happen while
+                // the file is the only source of both, and sorting it to the end is what
+                // the grid does with one anyway.
+                .unwrap_or(providers.len())
+        });
+        let _ = self
+            .updates
+            .send(Publication::Reordered(providers.to_vec()))
+            .await;
+        Ok(())
+    }
+
     /// Changes one provider option as a serialized configuration transaction.
     pub async fn set_option(
         &mut self,
@@ -521,6 +564,10 @@ impl Engine {
                         let result = self
                             .set_window_notify(&provider, &account, &window, enabled)
                             .await;
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::SetOrder { providers, reply }) => {
+                        let result = self.set_order(&providers).await;
                         let _ = reply.send(result);
                     }
                     Some(Command::CurrentSegment { provider, account, window, reply }) => {
@@ -1383,6 +1430,30 @@ mod tests {
         ));
         let config = Config::at(harness.config_path.clone()).expect("parses");
         assert!(config.providers().expect("readable").is_empty());
+    }
+
+    #[tokio::test]
+    async fn reordering_persists_the_array_and_moves_the_accounts_with_it() {
+        let mut harness = Harness::configured("runtime-order", &["kimi", "zai", "claude"]).await;
+        let order = vec!["claude".to_owned(), "kimi".to_owned(), "zai".to_owned()];
+
+        harness.engine.set_order(&order).await.expect("reordered");
+
+        let slugs: Vec<&str> = harness
+            .engine
+            .accounts()
+            .iter()
+            .map(|account| account.provider().as_str())
+            .collect();
+        assert_eq!(
+            slugs,
+            ["claude", "kimi", "zai"],
+            "announce walks this vector, so it has to agree with the file"
+        );
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(config.providers().expect("readable"), order);
+        let publication = harness.updates.recv().await.expect("announced");
+        assert!(matches!(publication, Publication::Reordered(published) if published == order));
     }
 
     #[tokio::test]

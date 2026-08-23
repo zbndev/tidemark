@@ -1,11 +1,10 @@
 //! The window: a grid of cards, and the two things that can be there instead of it.
 //!
-//! `GtkFlowBox` does the columns, between one and three by width, as `CONTEXT.md`
-//! § Interface asks. Its known cost is the last row: with four cards in a three-wide grid,
-//! the fourth sits alone. That is accepted rather than papered over — a filler card would
-//! be an invitation to click on nothing — while *within* a row the heights are equalised,
-//! which `GtkFlowBox` does for free by stretching every child to the tallest, and which the
-//! card turns into something deliberate by pinning its footer to the bottom.
+//! The cards are in the order the user put them in and nothing else ever changes it: the
+//! daemon publishes the sequence, a drag on the grid asks it to publish a different one,
+//! and a new account goes on the end. [`crate::grid::CardGrid`] does the columns and the
+//! drag; this module owns the vector the sequence applies to and is the only thing that
+//! talks to the daemon about it.
 //!
 //! The window is also where "updates without user action" is made true: statuses arrive on
 //! a signal, and a timer redraws the parts that depend on the clock rather than on new
@@ -13,8 +12,6 @@
 //! changes.
 
 use std::cell::RefCell;
-use std::cmp::Ordering;
-
 use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
@@ -24,6 +21,7 @@ use tidemark_types::{ProviderDefinition, ProviderStatus, Timestamp};
 use crate::bus::{self, DaemonProxy, Update};
 use crate::card::Card;
 use crate::detail::DetailDialog;
+use crate::grid::CardGrid;
 use crate::model;
 use crate::provider_settings::ProviderSettings;
 use crate::tray::{self, Tray};
@@ -82,10 +80,12 @@ pub struct MainWindow {
     window: adw::ApplicationWindow,
     stack: gtk::Stack,
     message: adw::StatusPage,
-    grid: gtk::FlowBox,
+    grid: CardGrid,
     refresh: gtk::Button,
     release: gtk::Button,
     providers: gtk::Button,
+    /// The cards in the order they are on screen. The one order this process has: the tray
+    /// menu and the settings list are both drawn from it, and it is what a drag permutes.
     cards: RefCell<Vec<Rc<Card>>>,
     definitions: RefCell<Vec<ProviderDefinition>>,
     daemon: RefCell<Option<DaemonProxy<'static>>>,
@@ -105,26 +105,13 @@ impl MainWindow {
     /// accepted the tray icon; without one it exits rather than leaving an invisible
     /// process behind.
     pub fn present(app: &adw::Application, background: bool) {
-        let grid = gtk::FlowBox::builder()
-            .min_children_per_line(1)
-            .max_children_per_line(3)
-            .homogeneous(true)
-            .row_spacing(12)
-            .column_spacing(12)
-            .margin_top(12)
-            .margin_bottom(12)
-            .margin_start(12)
-            .margin_end(12)
-            .valign(gtk::Align::Start)
-            // Centred rather than stretched: `GtkFlowBox` gives every child the width of
-            // one column whatever the window is doing, so a filled row and a half-empty one
-            // both sit under the middle of the window instead of hugging its left edge.
-            .halign(gtk::Align::Center)
-            // Cards are not a list to pick from; the click that will matter opens a detail
-            // dialog, and that is the card's own gesture rather than a selection.
-            .selection_mode(gtk::SelectionMode::None)
-            .css_classes(["quota-grid"])
-            .build();
+        let grid = CardGrid::new();
+        grid.set_margin_top(12);
+        grid.set_margin_bottom(12);
+        grid.set_margin_start(12);
+        grid.set_margin_end(12);
+        grid.set_valign(gtk::Align::Start);
+        grid.add_css_class("quota-grid");
 
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -192,7 +179,7 @@ impl MainWindow {
             tray: RefCell::new(None),
         });
 
-        main.install_sort();
+        main.connect_reorder();
         main.connect_refresh_button();
         main.connect_update_button();
         main.connect_providers_button();
@@ -260,6 +247,7 @@ impl MainWindow {
             }
             Update::Changed(status) => self.show_one(status),
             Update::Removed { provider, account } => self.show_removed(&provider, &account),
+            Update::Reordered(providers) => self.show_order(&providers),
             Update::Available(version) => self.show_update(&version),
             Update::Waiting(reason) => {
                 *self.daemon.borrow_mut() = None;
@@ -303,7 +291,7 @@ impl MainWindow {
                 "Add a provider to start tracking your quota.",
             );
             self.cards.borrow_mut().clear();
-            self.grid.remove_all();
+            self.grid.clear();
             self.update_provider_settings();
             self.update_detail_from_statuses(&[]);
             return;
@@ -315,12 +303,13 @@ impl MainWindow {
             .map(|status| self.make_card(status, now))
             .collect();
 
-        self.grid.remove_all();
+        self.grid.clear();
         *self.cards.borrow_mut() = cards.clone();
         for card in &cards {
+            // Appended in the sequence the daemon published, which is the sequence the user
+            // arranged: there is nothing left to sort afterwards.
             self.grid.append(card.widget());
         }
-        self.grid.invalidate_sort();
         self.stack.set_visible_child_name(PAGE_GRID);
         self.update_provider_settings();
         self.update_detail_from_statuses(&statuses);
@@ -370,10 +359,6 @@ impl MainWindow {
                 self.grid.append(card.widget());
             }
         }
-
-        // The order may have changed with the numbers; the grid re-sorts what it already
-        // holds rather than being rebuilt.
-        self.grid.invalidate_sort();
         self.stack.set_visible_child_name(PAGE_GRID);
         self.update_provider_settings();
         if let Some(dialog) = self.detail_dialog.get()
@@ -383,7 +368,7 @@ impl MainWindow {
         }
     }
 
-    /// Everything the daemon has said, in the order the cards were built.
+    /// Everything the daemon has said, in the order the cards are on screen.
     fn statuses(&self) -> Vec<ProviderStatus> {
         self.cards
             .borrow()
@@ -489,26 +474,98 @@ impl MainWindow {
         });
     }
 
-    /// Teaches the grid the order the cards go in, once.
+    /// Mirrors a completed drag into the card vector and asks the daemon to keep it.
     ///
-    /// Sorting rather than re-inserting: `GtkFlowBox` keeps its children where they are and
-    /// only changes their positions, so a card that overtakes another does not lose focus,
-    /// its tooltip, or the pointer that happens to be over it. Rebuilding the grid instead
-    /// means re-parenting widgets a disposed wrapper still holds, which GTK reports as a
-    /// critical and which costs a redraw of everything on every poll.
-    fn install_sort(self: &Rc<Self>) {
+    /// The move is applied here first and sent afterwards. A grid that waited for a round
+    /// trip before showing where the card landed would feel broken on a loaded machine, and
+    /// the daemon's answer changes nothing when it succeeds: it echoes the same sequence
+    /// back as `OrderChanged`, which [`MainWindow::show_order`] recognises as a no-op.
+    ///
+    /// A refusal is the interesting case. It means the configured set moved underneath the
+    /// drag — an account added or removed while it was in the air — so the cards go back to
+    /// what the daemon actually has rather than staying somewhere nobody asked for.
+    fn connect_reorder(self: &Rc<Self>) {
         let weak: Weak<Self> = Rc::downgrade(self);
-        self.grid.set_sort_func(move |left, right| {
+        self.grid.connect_reordered(move |from, to| {
             let Some(main) = weak.upgrade() else {
-                return Ordering::Equal.into();
+                return;
             };
-            let cards = main.cards.borrow();
-            let of = |child: &gtk::FlowBoxChild| cards.iter().find(|card| card.widget() == child);
-            match (of(left), of(right)) {
-                (Some(left), Some(right)) => model::compare(&left.status(), &right.status()).into(),
-                _ => Ordering::Equal.into(),
+            {
+                let mut cards = main.cards.borrow_mut();
+                if from >= cards.len() || to >= cards.len() {
+                    return;
+                }
+                let moved = cards.remove(from);
+                cards.insert(to, moved);
             }
+            main.update_provider_settings();
+            main.update_tray();
+
+            let Some(proxy) = main.daemon.borrow().clone() else {
+                return;
+            };
+            let order: Vec<String> = main
+                .cards
+                .borrow()
+                .iter()
+                .map(|card| card.status().provider)
+                .collect();
+            let weak = Rc::downgrade(&main);
+            glib::spawn_future_local(async move {
+                if let Err(error) = proxy.set_order(&order).await {
+                    tracing::warn!(%error, "the daemon refused the new card order");
+                    let Some(main) = weak.upgrade() else {
+                        return;
+                    };
+                    match proxy.get_status().await {
+                        Ok(statuses) => main.show_order(
+                            &statuses
+                                .iter()
+                                .map(|status| status.provider.clone())
+                                .collect::<Vec<String>>(),
+                        ),
+                        Err(error) => {
+                            tracing::warn!(%error, "and did not say what the order actually is")
+                        }
+                    }
+                }
+            });
         });
+    }
+
+    /// Puts the cards in the order the daemon published.
+    ///
+    /// Ordering by provider slug, because that is the identity `config.toml` has: two
+    /// accounts of one provider — which v1 does not create — keep their relative places.
+    fn show_order(&self, providers: &[String]) {
+        let slugs: Vec<String> = self
+            .cards
+            .borrow()
+            .iter()
+            .map(|card| card.status().provider)
+            .collect();
+        let positions = model::arrangement(&slugs, providers);
+        if positions.iter().enumerate().all(|(at, held)| at == *held) {
+            return;
+        }
+        {
+            let mut cards = self.cards.borrow_mut();
+            let mut held: Vec<Option<Rc<Card>>> = cards.drain(..).map(Some).collect();
+            for position in positions {
+                if let Some(card) = held[position].take() {
+                    cards.push(card);
+                }
+            }
+        }
+        let order: Vec<gtk::Widget> = self
+            .cards
+            .borrow()
+            .iter()
+            .map(|card| card.widget().clone())
+            .collect();
+        self.grid.set_order(&order);
+        self.update_provider_settings();
+        self.update_tray();
     }
 
     /// Shows the message page instead of the grid.
