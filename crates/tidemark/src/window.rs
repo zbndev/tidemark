@@ -15,9 +15,10 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 use tidemark_types::{ProviderDefinition, ProviderStatus, Timestamp};
 
+use crate::about;
 use crate::bus::{self, DaemonProxy, Update};
 use crate::card::Card;
 use crate::detail::DetailDialog;
@@ -89,6 +90,9 @@ pub struct MainWindow {
     cards: RefCell<Vec<Rc<Card>>>,
     definitions: RefCell<Vec<ProviderDefinition>>,
     daemon: RefCell<Option<DaemonProxy<'static>>>,
+    /// What the daemon last said its version was, for the About dialog's troubleshooting
+    /// page. `None` while nothing is answering on the bus.
+    daemon_version: RefCell<Option<String>>,
     update_notice: RefCell<UpdateNotice>,
     /// The provider dialog while it is open, so live catalog and status changes reach it.
     provider_settings: DialogSlot<ProviderSettings>,
@@ -146,7 +150,22 @@ impl MainWindow {
             .sensitive(false)
             .build();
 
+        // The platform's primary menu: rightmost in the header, and the place a GNOME user
+        // looks for About without being told where it is. `primary` is what makes F10 open
+        // it, which is the shortcut the shell's own menus answer to.
+        let menu = gio::Menu::new();
+        menu.append(Some("_About Tidemark"), Some("win.about"));
+        let primary_menu = gtk::MenuButton::builder()
+            .icon_name("open-menu-symbolic")
+            .tooltip_text("Main Menu")
+            .menu_model(&menu)
+            .primary(true)
+            .build();
+
         let header = adw::HeaderBar::new();
+        // First packed is furthest right, so the menu leads and the buttons follow it
+        // inwards.
+        header.pack_end(&primary_menu);
         header.pack_end(&refresh);
         header.pack_end(&release);
         header.pack_start(&providers);
@@ -173,6 +192,7 @@ impl MainWindow {
             cards: RefCell::new(Vec::new()),
             definitions: RefCell::new(Vec::new()),
             daemon: RefCell::new(None),
+            daemon_version: RefCell::new(None),
             update_notice: RefCell::new(UpdateNotice::new(env!("CARGO_PKG_VERSION"))),
             provider_settings: DialogSlot::default(),
             detail_dialog: DialogSlot::default(),
@@ -183,6 +203,7 @@ impl MainWindow {
         main.connect_refresh_button();
         main.connect_update_button();
         main.connect_providers_button();
+        main.connect_about_action();
         main.start_clock();
         main.start_tray(background);
         if !background {
@@ -202,6 +223,7 @@ impl MainWindow {
         match update {
             Update::Connected(proxy, daemon_version, available, definitions, statuses) => {
                 *self.daemon.borrow_mut() = Some(proxy);
+                self.daemon_version.replace(daemon_version.clone());
                 *self.definitions.borrow_mut() = definitions;
                 self.refresh.set_sensitive(true);
                 self.providers.set_sensitive(true);
@@ -251,6 +273,7 @@ impl MainWindow {
             Update::Available(version) => self.show_update(&version),
             Update::Waiting(reason) => {
                 *self.daemon.borrow_mut() = None;
+                self.daemon_version.replace(None);
                 self.refresh.set_sensitive(false);
                 self.providers.set_sensitive(false);
                 self.show_update("");
@@ -472,6 +495,27 @@ impl MainWindow {
             );
             assert!(main.provider_settings.insert_if_empty(dialog));
         });
+    }
+
+    /// Installs `win.about`, the one entry in the primary menu.
+    ///
+    /// A window action rather than an application one: what the dialog reports — which
+    /// daemon answered, whether the panel took the icon — is this window's knowledge, and
+    /// an `app.` action would have to go looking for the window to find it.
+    fn connect_about_action(self: &Rc<Self>) {
+        let weak: Weak<Self> = Rc::downgrade(self);
+        let action = gio::SimpleAction::new("about", None);
+        action.connect_activate(move |_, _| {
+            let Some(main) = weak.upgrade() else {
+                return;
+            };
+            let info = about::debug_info(
+                main.daemon_version.borrow().as_deref(),
+                main.tray.borrow().is_some(),
+            );
+            about::present(&main.window, &info);
+        });
+        self.window.add_action(&action);
     }
 
     /// Mirrors a completed drag into the card vector and asks the daemon to keep it.

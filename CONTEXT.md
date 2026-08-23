@@ -448,6 +448,24 @@ history that does not exist yet.
   not own. That last sentence is ADR 0001, and it is stated in the open next to the choice
   rather than left to be discovered: a program that edits another program's credentials
   says so where the decision is made.
+- **The primary menu is the platform's, and so is the About dialog.** The header's
+  rightmost button opens the menu every GNOME application keeps there; its one entry today
+  is About Tidemark, and Preferences joins it when there is a setting that is neither a
+  provider's nor a credential's. The dialog is `AdwAboutDialog` with properties set and no
+  layout of ours: the icon over the name, the version pill, Details, Report an Issue and
+  Legal are what the platform draws from `application-icon`, `version`, `website`,
+  `issue-url`, `copyright` and `license-type`. The warranty sentence and the licence link
+  are GTK's own text for `MIT_X11` rather than a second copy of a legal notice to keep in
+  agreement — and the issue link goes to `/issues/new/choose`, because the repository has
+  templates and a report that skips them has to be asked for the version and the desktop
+  all over again.
+- **The one page that is ours is Troubleshooting**, and it is there so those questions are
+  answered before they are asked: the client's version, the version the daemon on the other
+  end reported, the GTK and libadwaita the process actually loaded, the desktop and session
+  type, and whether a status-notifier host took the icon — which is the difference between
+  a close button that hides the window and one that ends the program. Runtime values, not
+  the compiled floor: the floor is what we built against and no evidence at all about the
+  machine the bug is on.
 - **Tray** — a static StatusNotifierItem, owned by the interface process rather than by the
   daemon. Left click shows the window; the menu lists the configured accounts with the
   percentage of their shortest window, in the order the grid uses, and ends with Open,
