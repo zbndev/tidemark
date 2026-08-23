@@ -74,20 +74,18 @@ impl Entry {
     }
 }
 
-/// The accounts as the menu lists them: fullest first, and never inventing a number.
+/// The accounts as the menu lists them: the order the grid is in, which is the order the
+/// user dragged the cards into.
 ///
-/// The order is [`model::compare`], the same one the grid sorts by, so the panel and the
-/// window do not disagree about which account is the worrying one. The percentage is of
-/// [`tidemark_types::Snapshot::dominant_window`] — the shortest window — which is the same
-/// rule the card leads with.
+/// It sorts nothing. The window hands over its cards in the order they are on screen, and a
+/// panel that applied a rule of its own would be a second opinion about an order the user
+/// set by hand. The percentage is of [`tidemark_types::Snapshot::dominant_window`] — the
+/// shortest window — which is the same rule the card leads with.
 ///
 /// An account whose last poll did not produce a reading says what [`format::chip`] says on
 /// its card, so the two never spell one situation two ways.
 pub fn entries(statuses: &[ProviderStatus], titles: &model::Titles) -> Vec<Entry> {
-    let mut ordered: Vec<&ProviderStatus> = statuses.iter().collect();
-    ordered.sort_by(|left, right| model::compare(left, right));
-
-    ordered
+    statuses
         .iter()
         .map(|status| Entry {
             label: label(statuses, status, titles),
@@ -132,7 +130,10 @@ fn label(all: &[ProviderStatus], status: &ProviderStatus, titles: &model::Titles
 /// so a rate-limited account that has numbers shows them, and the chip is what says the
 /// numbers are not fresh. Only an account with no reading at all falls back to the chip.
 fn value(status: &ProviderStatus) -> String {
-    match model::urgency(status) {
+    let dominant = status
+        .to_snapshot()
+        .and_then(|snapshot| snapshot.dominant_window().map(|window| window.used_percent));
+    match dominant {
         Some(used) => present::percent(used),
         None => format::chip(status)
             .map(|chip| chip.text)
@@ -436,14 +437,18 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_is_in_the_same_order_as_the_grid() {
+    fn the_menu_is_in_the_order_it_was_given_and_not_one_of_its_own() {
         let statuses = [
             reading("kimi", "default", vec![window(18_000, 10.0)]),
             reading("zai", "default", vec![window(18_000, 90.0)]),
         ];
         let rows = entries(&statuses, &model::Titles::new());
-        assert_eq!(rows[0].line(), "Z.ai — 90%");
-        assert_eq!(rows[1].line(), "Kimi — 10%");
+        assert_eq!(
+            rows[0].line(),
+            "Kimi — 10%",
+            "the grid's order is the user's, and the panel does not have an opinion"
+        );
+        assert_eq!(rows[1].line(), "Z.ai — 90%");
     }
 
     #[test]
@@ -477,7 +482,7 @@ mod tests {
         let lines: Vec<String> = rows.iter().map(Entry::line).collect();
         assert_eq!(
             lines,
-            ["Z.ai (work) — 90%", "Kimi — 50%", "Z.ai (home) — 10%",]
+            ["Z.ai (work) — 90%", "Z.ai (home) — 10%", "Kimi — 50%"]
         );
     }
 

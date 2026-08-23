@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use tidemark_types::{ProviderDefinition, ProviderStatus, Snapshot, Window, WindowLength};
+use tidemark_types::{ProviderDefinition, Snapshot, Window, WindowLength};
 
 /// The catalog's spelling of each provider's name, by slug.
 pub type Titles = BTreeMap<String, String>;
@@ -53,30 +53,24 @@ pub fn ordered_windows(snapshot: &Snapshot) -> Vec<Window> {
     windows
 }
 
-/// How much attention an account is asking for, as the fraction of its dominant window that
-/// is gone. `None` for an account with no reading at all.
+/// The positions `slugs` take when arranged into `order`.
 ///
-/// This is only half of what `CONTEXT.md` § Interface eventually wants — the other half is
-/// the user's own order, which Step 15 persists to config and which will replace this as
-/// the outer sort. Until then the grid sorts itself, and an account that has never answered
-/// sits at the end rather than at the top, since a card with no numbers on it is not urgent,
-/// it is just empty.
-pub fn urgency(status: &ProviderStatus) -> Option<f64> {
-    status
-        .to_snapshot()?
-        .dominant_window()
-        .map(|window| window.used_percent)
-}
-
-/// Orders two cards for the grid: most consumed first, accounts with no reading last, ties
-/// broken by slug so that the grid does not shuffle between updates.
-pub fn compare(left: &ProviderStatus, right: &ProviderStatus) -> std::cmp::Ordering {
-    let key = |status: &ProviderStatus| urgency(status).unwrap_or(-1.0);
-    key(right)
-        .partial_cmp(&key(left))
-        .unwrap_or(std::cmp::Ordering::Equal)
-        .then_with(|| left.provider.cmp(&right.provider))
-        .then_with(|| left.account.cmp(&right.account))
+/// The user's order is the only order there is — nothing sorts the grid by urgency or by
+/// anything else, because an order that rearranged itself would not be the user's. So this
+/// is the whole of the rule: what the daemon published, applied to what the window holds.
+///
+/// Anything `order` does not name keeps its relative place at the end. That is a real case
+/// rather than defensiveness: the sequence arrives from another process and may have been
+/// sent before an account this client already knows about was added.
+pub fn arrangement(slugs: &[String], order: &[String]) -> Vec<usize> {
+    let mut positions: Vec<usize> = (0..slugs.len()).collect();
+    positions.sort_by_key(|index| {
+        order
+            .iter()
+            .position(|slug| *slug == slugs[*index])
+            .unwrap_or(order.len())
+    });
+    positions
 }
 
 #[cfg(test)]
@@ -103,12 +97,6 @@ mod tests {
             windows,
             details: Vec::new(),
         }
-    }
-
-    fn status(provider: &str, windows: Vec<Window>) -> ProviderStatus {
-        let mut status = ProviderStatus::pending(&ProviderId::new(provider), &AccountId::default());
-        status.set_reading(&snapshot(windows));
-        status
     }
 
     #[test]
@@ -164,39 +152,27 @@ mod tests {
     }
 
     #[test]
-    fn the_fullest_account_is_the_first_card() {
-        let mut cards = [
-            status("kimi", vec![window(Some(18_000), 10.0)]),
-            status("zai", vec![window(Some(18_000), 90.0)]),
-        ];
-        cards.sort_by(compare);
-        assert_eq!(cards[0].provider, "zai");
+    fn the_published_order_is_the_order_the_cards_take() {
+        let held = ["kimi".to_owned(), "zai".to_owned(), "claude".to_owned()];
+        let order = ["claude".to_owned(), "kimi".to_owned(), "zai".to_owned()];
+        assert_eq!(arrangement(&held, &order), [2, 0, 1]);
     }
 
     #[test]
-    fn an_account_with_nothing_to_show_sorts_last_rather_than_first() {
-        let waiting = ProviderStatus::pending(
-            &ProviderId::new("aaa-first-alphabetically"),
-            &AccountId::default(),
-        );
-        let mut cards = [waiting, status("zai", vec![window(Some(18_000), 0.0)])];
-        cards.sort_by(compare);
+    fn an_account_the_order_does_not_name_keeps_its_place_at_the_end() {
+        let held = ["kimi".to_owned(), "zai".to_owned(), "claude".to_owned()];
+        let order = ["claude".to_owned()];
         assert_eq!(
-            cards[0].provider, "zai",
-            "0% of a real reading outranks no reading at all"
+            arrangement(&held, &order),
+            [2, 0, 1],
+            "the unnamed accounts stay in the order they were already in"
         );
     }
 
     #[test]
-    fn equally_urgent_accounts_keep_a_stable_order() {
-        let mut cards = [
-            status("zai", vec![window(Some(18_000), 50.0)]),
-            status("codex", vec![window(Some(18_000), 50.0)]),
-        ];
-        cards.sort_by(compare);
-        let first = cards[0].provider.clone();
-        cards.sort_by(compare);
-        assert_eq!(cards[0].provider, first);
-        assert_eq!(first, "codex");
+    fn an_empty_order_moves_nothing() {
+        let held = ["kimi".to_owned(), "zai".to_owned()];
+        assert_eq!(arrangement(&held, &[]), [0, 1]);
+        assert!(arrangement(&[], &["zai".to_owned()]).is_empty());
     }
 }

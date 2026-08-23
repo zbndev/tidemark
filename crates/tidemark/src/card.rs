@@ -41,8 +41,8 @@ const MARK_GAP: i32 = 6;
 const PILL_PADDING: i32 = 2;
 
 /// Narrowest a card is allowed to get. Three of these plus spacing is what "three columns"
-/// costs, and it is what stops `GtkFlowBox` from packing three unreadable columns into a
-/// window that only has room for two.
+/// costs, and it is what stops the grid from packing three unreadable columns into a window
+/// that only has room for two.
 const MIN_WIDTH: i32 = 300;
 
 /// The account a card opens, retained separately from the readings that update in place.
@@ -79,7 +79,7 @@ struct Shown {
 /// A provider card.
 #[derive(Debug)]
 pub struct Card {
-    holder: gtk::FlowBoxChild,
+    slot: adw::Bin,
     mark: gtk::Image,
     name: gtk::Label,
     /// The provider's name as the catalog spells it, resolved once at construction: slugs
@@ -199,9 +199,9 @@ impl Card {
             .spacing(6)
             .build();
 
-        // Pinned to the bottom so that cards sharing a row line their footers up: GtkFlowBox
-        // stretches every child to the height of the tallest one in the row, and without
-        // this the extra space would fall in a different place on every card.
+        // Pinned to the bottom so that cards sharing a row line their footers up: the grid
+        // gives every card the height of the tallest one, and without this the extra space
+        // would fall in a different place on every card.
         let footer = gtk::Label::builder()
             .halign(gtk::Align::Start)
             .valign(gtk::Align::End)
@@ -221,15 +221,22 @@ impl Card {
         root.append(&rows);
         root.append(&footer);
 
-        // The card owns its `GtkFlowBoxChild` rather than letting the grid wrap it on
-        // insertion, so that the grid can reorder by sorting rather than by taking widgets
-        // out and putting them back: re-parenting a widget that a disposed wrapper still
-        // holds is a `Gtk-CRITICAL`, and it costs the focus and the pointer besides.
-        let holder = gtk::FlowBoxChild::builder()
+        // The card owns the widget the grid allocates rather than letting the grid wrap it,
+        // so that a reorder moves slots around a vector instead of taking widgets out of
+        // the tree and putting them back: re-parenting a widget that a disposed wrapper
+        // still holds is a `Gtk-CRITICAL`, and it costs the focus and the pointer besides.
+        //
+        // A plain `AdwBin` and not a `GtkFlowBoxChild`, which tinted its own square
+        // allocation behind a card with rounded corners and had to be told not to. What it
+        // is still for is the hover: `style.rs` matches `:hover` here and moves the card
+        // inside, because a CSS transform moves what GTK picks and a card that lifted
+        // itself out from under the pointer would flicker.
+        let slot = adw::Bin::builder()
             .child(&root)
             .focusable(true)
+            .css_classes([crate::grid::SLOT_CLASS])
             .build();
-        holder.set_cursor_from_name(Some("pointer"));
+        slot.set_cursor_from_name(Some("pointer"));
         let identity = CardIdentity::from(status);
         let invoke: Rc<dyn Fn()> = Rc::new({
             let on_activate = Rc::clone(&on_activate);
@@ -240,7 +247,7 @@ impl Card {
             let invoke = Rc::clone(&invoke);
             move |_, _, _, _| invoke()
         });
-        holder.add_controller(click);
+        slot.add_controller(click);
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed({
             let invoke = Rc::clone(&invoke);
@@ -256,10 +263,10 @@ impl Card {
                 }
             }
         });
-        holder.add_controller(keys);
+        slot.add_controller(keys);
 
         let card = Self {
-            holder,
+            slot,
             mark,
             name,
             provider_name,
@@ -283,9 +290,9 @@ impl Card {
         card
     }
 
-    /// The widget to put in the grid.
-    pub fn widget(&self) -> &gtk::FlowBoxChild {
-        &self.holder
+    /// The widget the grid allocates. Not the card itself: see the slot above.
+    pub fn widget(&self) -> &gtk::Widget {
+        self.slot.upcast_ref()
     }
 
     /// The status this card is showing.

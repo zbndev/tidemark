@@ -98,6 +98,9 @@ pub trait Daemon {
         enabled: bool,
     ) -> zbus::Result<()>;
 
+    /// Puts the configured providers in the order the user arranged the cards in.
+    fn set_order(&self, providers: &[String]) -> zbus::Result<()>;
+
     /// What the daemon on the other end is.
     #[zbus(property(emits_changed_signal = "false"))]
     fn version(&self) -> zbus::Result<String>;
@@ -109,6 +112,10 @@ pub trait Daemon {
     /// One configured account was removed.
     #[zbus(signal)]
     fn provider_removed(&self, provider: &str, account: &str) -> zbus::Result<()>;
+
+    /// The configured providers are now in this order.
+    #[zbus(signal)]
+    fn order_changed(&self, providers: Vec<String>) -> zbus::Result<()>;
 
     /// Availability of a newer published application release changed.
     #[zbus(signal)]
@@ -134,6 +141,8 @@ pub enum Update {
     Changed(ProviderStatus),
     /// One configured account was removed.
     Removed { provider: String, account: String },
+    /// The configured providers were put in this order.
+    Reordered(Vec<String>),
     /// Availability of a newer published application release changed.
     Available(String),
     /// There is nothing to show, with the reason to put on the screen.
@@ -175,6 +184,7 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
     let mut owner = pin!(proxy.inner().receive_owner_changed().await?);
     let mut changes = pin!(proxy.receive_provider_changed().await?);
     let mut removals = pin!(proxy.receive_provider_removed().await?);
+    let mut orders = pin!(proxy.receive_order_changed().await?);
     let mut updates = pin!(proxy.receive_update_changed().await?);
 
     load(&proxy, on).await;
@@ -189,6 +199,9 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
             }
             if let Poll::Ready(removal) = removals.as_mut().poll_next(context) {
                 return Poll::Ready(Event::Removed(removal));
+            }
+            if let Poll::Ready(order) = orders.as_mut().poll_next(context) {
+                return Poll::Ready(Event::Reordered(order));
             }
             if let Poll::Ready(update) = updates.as_mut().poll_next(context) {
                 return Poll::Ready(Event::Available(update));
@@ -219,6 +232,10 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
                 }),
                 Err(error) => tracing::warn!(%error, "a ProviderRemoved signal did not parse"),
             },
+            Event::Reordered(Some(signal)) => match signal.args() {
+                Ok(args) => on(Update::Reordered(args.providers)),
+                Err(error) => tracing::warn!(%error, "an OrderChanged signal did not parse"),
+            },
             Event::Available(Some(signal)) => match signal.args() {
                 Ok(args) => on(Update::Available(args.version.to_owned())),
                 Err(error) => tracing::warn!(%error, "an UpdateChanged signal did not parse"),
@@ -227,6 +244,7 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
             Event::Owner(None)
             | Event::Changed(None)
             | Event::Removed(None)
+            | Event::Reordered(None)
             | Event::Available(None) => return Ok(()),
         }
     }
@@ -262,11 +280,12 @@ async fn load(proxy: &DaemonProxy<'static>, on: &impl Fn(Update)) {
     }
 }
 
-/// One of the two streams produced something.
+/// One of the streams the [`serve`] loop watches produced something.
 enum Event {
     Owner(Option<Option<zbus::names::UniqueName<'static>>>),
     Changed(Option<ProviderChanged>),
     Removed(Option<ProviderRemoved>),
+    Reordered(Option<OrderChanged>),
     Available(Option<UpdateChanged>),
 }
 
