@@ -41,11 +41,10 @@ type MutationMap = SyncMutex<HashMap<SecretSlot, Arc<Mutex<()>>>>;
 /// `CONTEXT.md` § Identity. `xdg:schema` is the attribute name `libsecret` and other
 /// Secret Service clients use by convention to carry it — there is no dedicated field in
 /// the D-Bus API.
-pub const SCHEMA: &str = "io.github.zbndev.Tidemark.ProviderKey";
+pub use tidemark_types::ids::SECRET_SCHEMA as SCHEMA;
 
-/// The Secret Service schema a Tidemark-owned OAuth credential is filed under. Separate
-/// from [`SCHEMA`] for the reason in the module docs.
-pub const TOKEN_SCHEMA: &str = "io.github.zbndev.Tidemark.ProviderToken";
+/// The separate schema a Tidemark-owned OAuth credential is filed under.
+pub use tidemark_types::ids::TOKEN_SCHEMA;
 
 const ATTR_SCHEMA: &str = "xdg:schema";
 const ATTR_PROVIDER: &str = "provider";

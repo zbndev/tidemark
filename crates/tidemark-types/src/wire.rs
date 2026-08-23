@@ -316,6 +316,74 @@ impl WindowStatus {
     }
 }
 
+/// Paths and storage facts shown on the Preferences data page.
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct DataInfo {
+    pub config_path: String,
+    pub history_path: String,
+    pub history_bytes: u64,
+    pub key_schema: String,
+    pub token_schema: String,
+    /// False when a distribution built the daemon without its GitHub release checker.
+    pub release_check_available: bool,
+}
+
+/// Application preferences kept by the daemon in `config.toml`.
+///
+/// Strings are used for named choices so a newer daemon can add one without changing the
+/// D-Bus signature. Unknown choices are rejected by the daemon rather than guessed by a
+/// client.
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct Preferences {
+    /// Whether the daemon may ask GitHub for the latest release.
+    pub release_check: bool,
+    /// Whether the window's close button hides it when a tray icon can bring it back.
+    pub minimize_on_close: bool,
+    /// `app`, `daemon`, or `off`: the one coherent login-start behavior.
+    pub startup_mode: String,
+    /// `forever`, `six-months`, or `one-year`.
+    pub history_retention: String,
+}
+
+impl Preferences {
+    pub const STARTUP_APP: &'static str = "app";
+    pub const STARTUP_DAEMON: &'static str = "daemon";
+    pub const STARTUP_OFF: &'static str = "off";
+
+    pub const RETENTION_FOREVER: &'static str = "forever";
+    pub const RETENTION_SIX_MONTHS: &'static str = "six-months";
+    pub const RETENTION_ONE_YEAR: &'static str = "one-year";
+
+    /// Whether this build knows the named startup mode.
+    pub fn valid_startup(value: &str) -> bool {
+        matches!(
+            value,
+            Self::STARTUP_APP | Self::STARTUP_DAEMON | Self::STARTUP_OFF
+        )
+    }
+
+    /// Whether this build knows the named retention policy.
+    pub fn valid_retention(value: &str) -> bool {
+        matches!(
+            value,
+            Self::RETENTION_FOREVER | Self::RETENTION_SIX_MONTHS | Self::RETENTION_ONE_YEAR
+        )
+    }
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            release_check: true,
+            minimize_on_close: true,
+            startup_mode: Self::STARTUP_APP.into(),
+            history_retention: Self::RETENTION_FOREVER.into(),
+        }
+    }
+}
+
 /// One stored measurement from the current segment of a rate-limit window.
 ///
 /// The daemon, rather than a client, owns the database that holds these rows. This compact
@@ -714,5 +782,33 @@ mod tests {
             snapshot.dominant_window().expect("present").length,
             WindowLength::from_secs(18_000)
         );
+    }
+    #[test]
+    fn data_info_survives_the_bus() {
+        let original = DataInfo {
+            config_path: "/home/test/.config/tidemark/config.toml".into(),
+            history_path: "/home/test/.local/share/tidemark/history.db".into(),
+            history_bytes: 8192,
+            key_schema: "io.github.zbndev.Tidemark.ProviderKey".into(),
+            token_schema: "io.github.zbndev.Tidemark.ProviderToken".into(),
+            release_check_available: true,
+        };
+
+        let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
+        let (decoded, _): (DataInfo, _) = encoded.deserialize().expect("decodes again");
+        assert_eq!(decoded, original);
+    }
+    #[test]
+    fn preferences_survive_the_bus() {
+        let original = Preferences {
+            release_check: false,
+            minimize_on_close: false,
+            startup_mode: "daemon".into(),
+            history_retention: "one-year".into(),
+        };
+
+        let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
+        let (decoded, _): (Preferences, _) = encoded.deserialize().expect("decodes again");
+        assert_eq!(decoded, original);
     }
 }

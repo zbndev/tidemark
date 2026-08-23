@@ -228,7 +228,11 @@ distribution-wide LTO off; `PKGBUILD` does it with `options=(!lto)`.
   only when `used_percent` changes, plus an hourly anchor. Points older than 90 days are
   thinned to one per 15 minutes, except that the first and last point of every segment
   always survive — without them a thinned segment loses the two things worth keeping, where
-  it started and how full it got. Nothing is deleted outright.
+  it started and how full it got. The default retention is `forever`, so nothing is deleted
+  outright unless the user chooses six months or one year in Preferences. A shorter policy
+  deletes older points immediately and during daily maintenance. Clear History deletes
+  points, segments, notification deduplication and last-observed state, then compacts the
+  database; provider configuration and credentials are separate and survive.
 - **Last seen is not last written** — the reading segmentation compares against is the last
   one *observed*, which is not the last one *stored*. A window can roll over without
   consumption moving, and that transition is visible only in a reading no point was written
@@ -293,6 +297,20 @@ distribution-wide LTO off; `PKGBUILD` does it with `options=(!lto)`.
   provider-specific settings and both kinds of Tidemark-owned credential, then removes its
   account and card; quota history and vendor-owned credential files or `agy` sessions are
   retained.
+- **Application preferences use the same file, not GSettings.** `[general]` carries
+  `minimize_on_close` (default `true`) and `startup`, whose named modes are `app` (the
+  default: app and tray), `daemon` (daemon only), and `off`; `[updates] check` defaults to
+  `true`; `[history] retention` is `forever`, `six-months` or `one-year`. A present value
+  with the wrong type or an unknown named choice is an error, not a reason to guess.
+  Mutations travel over D-Bus and share the engine's serial configuration queue, so a
+  provider edit and a global preference cannot overwrite each other.
+- **The startup mode names one coherent desired state in `config.toml` and applies both
+  platform integrations.** Hiding the desktop client writes the standard per-user XDG
+  autostart override (`Hidden=true`); exposing it removes that override and reveals the
+  packaged `/etc/xdg/autostart` entry again. Daemon-only startup uses `systemctl --user
+  enable tidemarkd.service`; the other modes disable that unit without stopping the current
+  daemon, because launching the app already D-Bus-activates it. If either platform
+  integration or persistence fails, the previous platform mode is restored.
 
 ## Networking
 
@@ -448,11 +466,13 @@ history that does not exist yet.
   not own. That last sentence is ADR 0001, and it is stated in the open next to the choice
   rather than left to be discovered: a program that edits another program's credentials
   says so where the decision is made.
-- **The primary menu is the platform's, and so is the About dialog.** The header's
-  rightmost button opens the menu every GNOME application keeps there; its one entry today
-  is About Tidemark, and Preferences joins it when there is a setting that is neither a
-  provider's nor a credential's. The dialog is `AdwAboutDialog` with properties set and no
-  layout of ours: the icon over the name, the version pill, Details, Report an Issue and
+- **The primary menu is the platform's, and so are its dialogs.** The header's rightmost
+  button opens the menu every GNOME application keeps there. Preferences and About
+  Tidemark are separate sections; provider and credential management stays on its existing
+  header button because accounts are managed, not application preferences. Preferences is
+  an `AdwPreferencesDialog` with General, Updates and Data pages and standard rows. About
+  is an `AdwAboutDialog` with properties set and no layout of ours: the icon over the name,
+  the version pill, Details, Report an Issue and
   Legal are what the platform draws from `application-icon`, `version`, `website`,
   `issue-url`, `copyright` and `license-type`. The warranty sentence and the licence link
   are GTK's own text for `MIT_X11` rather than a second copy of a legal notice to keep in
@@ -472,14 +492,20 @@ history that does not exist yet.
   Refresh and Quit. The icon takes the `NeedsAttention` status at the same threshold the
   bar changes colour at and the notification fires at, so the panel cannot become a third
   opinion about when a window got worrying.
-- **Closing the window hides it; the tray is what the program minimises to.** The process
-  stays, the readings keep arriving, and Quit in the tray menu is the only way out. This is
-  conditional on the icon actually being accepted: when no status-notifier host answers, the
-  close button closes the program exactly as it did before, because hiding a window with
-  nothing left to bring it back is worse than having no tray.
-- **Desktop autostart uses that same condition.** `tidemark --background` builds the window
-  without showing it and stays only after a StatusNotifier host accepts the icon. On a
-  desktop without one it exits cleanly instead of leaving an invisible process behind.
+- **Closing the window hides it by default; the tray is what the program minimises to.**
+  `minimize_on_close = true` keeps the interface process alive, readings keep arriving, and
+  Quit in the tray menu is the way out. Switching it off makes close end the interface
+  process. Both choices remain conditional on the icon actually being accepted: when no
+  status-notifier host answers, close always ends the process because hiding a window with
+  nothing left to bring it back is worse than ignoring a preference.
+- **The `app` startup mode uses that same tray condition.** `tidemark --background` builds
+  the window without showing it and stays only after a StatusNotifier host accepts the
+  icon. On a desktop without one it exits cleanly instead of leaving an invisible process
+  behind.
+- **Release checks are optional twice.** `[updates] check = false` stops the hourly GitHub
+  request at runtime and clears any published update notice. The daemon's `update-check`
+  Cargo feature is enabled by default for upstream builds; a distribution can build with
+  `--no-default-features`, in which case Preferences shows the switch off and unavailable.
 - **`libayatana-appindicator-glib` is GPL-3** and cannot be linked into an MIT project. The
   protocol is spoken through `ksni`, which is Unlicense — public domain, so compatible —
   and which is built on the same zbus the interface already reaches the daemon over.

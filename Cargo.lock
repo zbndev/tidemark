@@ -2686,6 +2686,7 @@ name = "tidemarkd"
 version = "0.1.1"
 dependencies = [
  "reqwest",
+ "rusqlite",
  "semver",
  "serde_json",
  "thiserror",

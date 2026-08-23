@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
+use tidemark_types::Preferences;
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 use crate::paths;
@@ -36,6 +37,14 @@ const PROVIDERS_KEY: &str = "providers";
 /// declared nor enumerable.
 const NOTIFY_TABLE: &str = "notify";
 const NOTIFY_WINDOWS_KEY: &str = "windows";
+
+const GENERAL_TABLE: &str = "general";
+const MINIMIZE_ON_CLOSE_KEY: &str = "minimize_on_close";
+const STARTUP_KEY: &str = "startup";
+const UPDATES_TABLE: &str = "updates";
+const RELEASE_CHECK_KEY: &str = "check";
+const HISTORY_TABLE: &str = "history";
+const HISTORY_RETENTION_KEY: &str = "retention";
 
 /// Why the settings could not be read or written.
 #[derive(Debug, thiserror::Error)]
@@ -86,6 +95,18 @@ pub enum ConfigError {
         /// Whose list it is.
         provider: String,
     },
+    /// An application preference has a wrong type or an unknown named value.
+    #[error("{path}: [{table}] {key} {reason}")]
+    InvalidPreference {
+        /// The file.
+        path: PathBuf,
+        /// The table carrying the preference.
+        table: &'static str,
+        /// The key carrying the preference.
+        key: &'static str,
+        /// What was wrong with it.
+        reason: String,
+    },
 }
 
 /// The settings file, held open across edits.
@@ -116,6 +137,151 @@ impl Config {
                 source,
             })?;
         Ok(Self { path, document })
+    }
+
+    /// Reads the application-wide preferences, applying documented defaults only to
+    /// absent keys. A present value with the wrong type is refused rather than guessed.
+    pub fn preferences(&self) -> Result<Preferences, ConfigError> {
+        let defaults = Preferences::default();
+        let history_retention = self
+            .preference_string(HISTORY_TABLE, HISTORY_RETENTION_KEY)?
+            .unwrap_or(defaults.history_retention.as_str())
+            .to_owned();
+        if !Preferences::valid_retention(&history_retention) {
+            return Err(self.invalid_preference(
+                HISTORY_TABLE,
+                HISTORY_RETENTION_KEY,
+                format!("has unknown value {history_retention:?}"),
+            ));
+        }
+        let startup_mode = self
+            .preference_string(GENERAL_TABLE, STARTUP_KEY)?
+            .unwrap_or(defaults.startup_mode.as_str())
+            .to_owned();
+        if !Preferences::valid_startup(&startup_mode) {
+            return Err(self.invalid_preference(
+                GENERAL_TABLE,
+                STARTUP_KEY,
+                format!("has unknown value {startup_mode:?}"),
+            ));
+        }
+        Ok(Preferences {
+            release_check: self
+                .preference_bool(UPDATES_TABLE, RELEASE_CHECK_KEY)?
+                .unwrap_or(defaults.release_check),
+            minimize_on_close: self
+                .preference_bool(GENERAL_TABLE, MINIMIZE_ON_CLOSE_KEY)?
+                .unwrap_or(defaults.minimize_on_close),
+            startup_mode,
+            history_retention,
+        })
+    }
+
+    pub fn set_release_check(&mut self, enabled: bool) -> Result<(), ConfigError> {
+        self.set_preference(UPDATES_TABLE, RELEASE_CHECK_KEY, value(enabled))
+    }
+
+    pub fn set_minimize_on_close(&mut self, enabled: bool) -> Result<(), ConfigError> {
+        self.set_preference(GENERAL_TABLE, MINIMIZE_ON_CLOSE_KEY, value(enabled))
+    }
+
+    pub fn set_startup_mode(&mut self, mode: &str) -> Result<(), ConfigError> {
+        if !Preferences::valid_startup(mode) {
+            return Err(self.invalid_preference(
+                GENERAL_TABLE,
+                STARTUP_KEY,
+                format!("has unknown value {mode:?}"),
+            ));
+        }
+        self.set_preference(GENERAL_TABLE, STARTUP_KEY, value(mode))
+    }
+
+    pub fn set_history_retention(&mut self, retention: &str) -> Result<(), ConfigError> {
+        if !Preferences::valid_retention(retention) {
+            return Err(self.invalid_preference(
+                HISTORY_TABLE,
+                HISTORY_RETENTION_KEY,
+                format!("has unknown value {retention:?}"),
+            ));
+        }
+        self.set_preference(HISTORY_TABLE, HISTORY_RETENTION_KEY, value(retention))
+    }
+
+    fn preference_bool(
+        &self,
+        table: &'static str,
+        key: &'static str,
+    ) -> Result<Option<bool>, ConfigError> {
+        let Some(item) = self.preference(table, key)? else {
+            return Ok(None);
+        };
+        item.as_bool()
+            .map(Some)
+            .ok_or_else(|| self.invalid_preference(table, key, "must be true or false".into()))
+    }
+
+    fn preference_string(
+        &self,
+        table: &'static str,
+        key: &'static str,
+    ) -> Result<Option<&str>, ConfigError> {
+        let Some(item) = self.preference(table, key)? else {
+            return Ok(None);
+        };
+        item.as_str()
+            .map(Some)
+            .ok_or_else(|| self.invalid_preference(table, key, "must be a string".into()))
+    }
+
+    fn preference(
+        &self,
+        table: &'static str,
+        key: &'static str,
+    ) -> Result<Option<&Item>, ConfigError> {
+        let Some(table_item) = self.document.get(table) else {
+            return Ok(None);
+        };
+        let table_item = table_item
+            .as_table_like()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: table.into(),
+            })?;
+        Ok(table_item.get(key))
+    }
+
+    fn set_preference(
+        &mut self,
+        table: &'static str,
+        key: &'static str,
+        setting: Item,
+    ) -> Result<(), ConfigError> {
+        let table_item = self
+            .document
+            .entry(table)
+            .or_insert_with(|| Item::Table(Table::new()));
+        let table_item = table_item
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: table.into(),
+            })?;
+        table_item.insert(key, setting);
+        self.write()
+    }
+
+    fn invalid_preference(
+        &self,
+        table: &'static str,
+        key: &'static str,
+        reason: String,
+    ) -> ConfigError {
+        ConfigError::InvalidPreference {
+            path: self.path.clone(),
+            table,
+            key,
+            reason,
+        }
     }
 
     /// One provider setting, if the user has one.
@@ -975,5 +1141,66 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("read back");
         assert!(text.contains("# hand-written"), "{text}");
         assert!(text.contains("# the one that matters"), "{text}");
+    }
+    #[test]
+    fn a_first_run_has_safe_application_preferences() {
+        let path = scratch("preferences-defaults");
+        let _ = std::fs::remove_file(&path);
+        let config = Config::at(path).expect("loaded");
+
+        assert_eq!(
+            config.preferences().expect("readable"),
+            tidemark_types::Preferences::default()
+        );
+        assert!(config.preferences().expect("readable").release_check);
+        assert!(config.preferences().expect("readable").minimize_on_close);
+        assert_eq!(config.preferences().expect("readable").startup_mode, "app");
+        assert_eq!(
+            config.preferences().expect("readable").history_retention,
+            "forever"
+        );
+    }
+
+    #[test]
+    fn application_preferences_survive_a_round_trip_without_rewriting_the_file() {
+        let path = scratch("preferences-roundtrip");
+        std::fs::write(&path, "# belongs to the user\nproviders = []\n").expect("seeded");
+        let mut config = Config::at(path.clone()).expect("loaded");
+        let preferences = tidemark_types::Preferences {
+            release_check: false,
+            minimize_on_close: false,
+            startup_mode: "daemon".into(),
+            history_retention: "six-months".into(),
+        };
+
+        config.set_release_check(false).expect("release setting");
+        config.set_minimize_on_close(false).expect("close setting");
+        config.set_startup_mode("daemon").expect("startup mode");
+        config
+            .set_history_retention("six-months")
+            .expect("retention setting");
+
+        let reread = Config::at(path.clone()).expect("reloaded");
+        assert_eq!(reread.preferences().expect("readable"), preferences);
+        let text = std::fs::read_to_string(path).expect("read back");
+        assert!(text.starts_with("# belongs to the user\n"), "{text}");
+    }
+
+    #[test]
+    fn an_unknown_history_retention_is_refused() {
+        let path = scratch("preferences-retention");
+        std::fs::write(&path, "[history]\nretention = \"eventually\"\n").expect("seeded");
+        let config = Config::at(path).expect("valid TOML");
+
+        assert!(config.preferences().is_err());
+    }
+
+    #[test]
+    fn an_unknown_startup_mode_is_refused() {
+        let path = scratch("preferences-startup");
+        std::fs::write(&path, "[general]\nstartup = \"everything\"\n").expect("seeded");
+        let config = Config::at(path).expect("valid TOML");
+
+        assert!(config.preferences().is_err());
     }
 }
