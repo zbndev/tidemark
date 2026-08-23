@@ -7,10 +7,12 @@
 //! The pieces: `bus` talks to the daemon, `window` owns the order the cards are in,
 //! `grid` lays them out and lets the user drag them into a different one, `card` draws one
 //! account, `provider_settings` is the dialog that adds, edits and removes them,
-//! `bar` draws the quota bar and its pace mark, `mark` finds the provider's own logo,
-//! `model` decides what order things go in, `format` decides what they say, and `style`
-//! adds the handful of CSS rules libadwaita does not already provide.
+//! `about` is the primary menu's dialog, `bar` draws the quota bar and its pace mark,
+//! `mark` finds the provider's own logo, `model` decides what order things go in,
+//! `format` decides what they say, and `style` adds the handful of CSS rules libadwaita
+//! does not already provide.
 
+mod about;
 mod bar;
 mod bus;
 mod card;
