@@ -26,7 +26,7 @@ use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
     self, aiand, codebuff, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo, litellm,
-    llmproxy, openai_api, openrouter, poe, sub2api, wayfinder, xai,
+    llmproxy, nanogpt, openai_api, openrouter, poe, sub2api, wayfinder, xai,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -115,9 +115,9 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 /// auth/billing/usage ladder, Fireworks reads a rolling billing
 /// window, Groq reads four Prometheus rate queries, IBM Bob reads a profile then
 /// per-team regional budgets, Kilo reads a tRPC batch and then a profile, LiteLLM walks a
-/// two-request management ladder, OpenAI pages two Admin API
-/// endpoints, OpenRouter reads credits and key
-/// quota, Poe pages through a usage history, xAI reads a prepaid balance and a spend
+/// two-request management ladder, NanoGPT reads subscription quotas and a prepaid balance,
+/// OpenAI pages two Admin API endpoints, OpenRouter reads credits and key quota, Poe pages
+/// through a usage history, xAI reads a prepaid balance and a spend
 /// history — and those whose single request hangs from a required base URL with no
 /// default host, where the shared reader's refusal of a bad value must happen at
 /// build time rather than inside an endpoint closure: LLM Proxy and sub2api — and
@@ -142,6 +142,7 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &kilo::SPEC,
     &litellm::SPEC,
     &llmproxy::SPEC,
+    &nanogpt::SPEC,
     &openai_api::SPEC,
     &openrouter::SPEC,
     &poe::SPEC,
@@ -915,7 +916,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 37);
+        assert_eq!(definitions.len(), 38);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(

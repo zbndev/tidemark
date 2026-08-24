@@ -107,6 +107,7 @@ pub fn provider_label(slug: &str) -> String {
         "zai" => "Z.ai".to_owned(),
         "kimi" => "Kimi".to_owned(),
         "antigravity" => "Antigravity".to_owned(),
+        "nanogpt" => "NanoGPT".to_owned(),
         other => {
             let mut chars = other.chars();
             match chars.next() {
@@ -208,6 +209,7 @@ mod tests {
     fn known_providers_are_spelled_the_way_they_spell_themselves() {
         assert_eq!(ProviderId::new("zai").label(), "Z.ai");
         assert_eq!(provider_label("antigravity"), "Antigravity");
+        assert_eq!(provider_label("nanogpt"), "NanoGPT");
     }
 
     #[test]
