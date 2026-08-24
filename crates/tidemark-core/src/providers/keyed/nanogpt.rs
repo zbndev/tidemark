@@ -13,7 +13,8 @@
 //! Subscription `percentUsed` values are fractions in `[0, 1]`, not percentages. Daily is
 //! a real 24-hour window and is keyed by that length. Monthly reports its reset but not its
 //! start, so its length stays absent rather than manufacturing a billing-period duration.
-//! An active or grace subscription publishes both windows.
+//! An active or grace subscription publishes both windows; an inactive response may omit
+//! their usage objects and still contributes the separately fetched prepaid balance.
 //!
 //! A prepaid balance has no denominator. USD is therefore the first row of
 //! [`DetailSection::BALANCE`], which lets the card show the amount without inventing a bar;
@@ -120,8 +121,8 @@ struct Subscription {
     active: bool,
     state: SubscriptionState,
     limits: Limits,
-    daily: Quota,
-    monthly: Quota,
+    daily: Option<Quota>,
+    monthly: Option<Quota>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -213,19 +214,27 @@ fn parse(
 
     let mut windows = Vec::with_capacity(2);
     if subscription.active || subscription.state == SubscriptionState::Grace {
+        let daily = subscription
+            .daily
+            .as_ref()
+            .ok_or_else(|| ProviderError::malformed("active subscription has no daily usage"))?;
+        let monthly = subscription
+            .monthly
+            .as_ref()
+            .ok_or_else(|| ProviderError::malformed("active subscription has no monthly usage"))?;
         let day = WindowLength::from_secs(86_400).expect("one day is nonzero");
         windows.push(window(
             WindowKey::for_length(day),
             "Daily",
             Some(day),
-            &subscription.daily,
+            daily,
             subscription.limits.daily,
         )?);
         windows.push(window(
             WindowKey::named("monthly"),
             "Monthly",
             None,
-            &subscription.monthly,
+            monthly,
             subscription.limits.monthly,
         )?);
     }
@@ -354,6 +363,33 @@ mod tests {
 
         let snapshot = parse(&grace, BALANCE, at(1_738_000_000)).expect("parses");
         assert_eq!(snapshot.windows.len(), 2);
+    }
+
+    #[test]
+    fn an_inactive_subscription_may_omit_usage_windows() {
+        let inactive = r#"{
+          "active": false,
+          "limits": { "daily": 0, "monthly": 0 },
+          "state": "inactive"
+        }"#;
+
+        let snapshot = parse(inactive, BALANCE, at(1_738_000_000)).expect("parses");
+        assert!(snapshot.windows.is_empty());
+        assert_eq!(snapshot.details[0].rows[0].value, "$129.47");
+    }
+
+    #[test]
+    fn an_active_subscription_must_report_both_usage_windows() {
+        let missing = r#"{
+          "active": true,
+          "limits": { "daily": 5000, "monthly": 60000 },
+          "state": "active"
+        }"#;
+
+        assert!(matches!(
+            parse(missing, BALANCE, at(1_738_000_000)),
+            Err(super::ProviderError::Malformed { .. })
+        ));
     }
 
     #[test]
