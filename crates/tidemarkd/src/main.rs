@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use tidemark_core::config::Config;
 use tidemark_core::paths;
+use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::secrets::Secrets;
 use tidemark_core::storage::History;
 use tidemark_types::ids;
@@ -128,6 +129,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // key. Once running, a later bad edit is reported and the previous settings stand.
     let config = Config::at(config_path.clone())?;
     let preferences = config.preferences()?;
+    // Before the first client is built, because `registry::accounts` builds several of
+    // them: a `reqwest::Client` holds its proxy for life, and one built a line too early
+    // would keep talking around the proxy until the daemon was restarted.
+    http::set_proxy(Proxy::configured(&preferences).map_err(Box::<dyn Error>::from)?);
     let secrets: Arc<dyn Secrets> = Arc::new(keyring::Keyring::default());
     let accounts = registry::accounts(&secrets, &config)?;
     let configured = accounts

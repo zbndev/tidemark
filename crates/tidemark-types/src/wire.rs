@@ -345,6 +345,18 @@ pub struct Preferences {
     pub startup_mode: String,
     /// `forever`, `six-months`, or `one-year`.
     pub history_retention: String,
+    /// `off`, `http`, `https` or `socks5`: which kind of proxy every outbound request
+    /// and every child process the daemon starts goes through.
+    ///
+    /// `off` is not the same as "no proxy": it means nothing is configured here, and the
+    /// daemon's own environment — `HTTPS_PROXY` and friends — is left in charge, which is
+    /// what it was before this setting existed.
+    pub proxy_mode: String,
+    /// Host name or address of the proxy. Empty until one is set.
+    pub proxy_host: String,
+    /// Port the proxy listens on. Zero until one is set; a mode other than `off` needs a
+    /// real one.
+    pub proxy_port: u16,
 }
 
 impl Preferences {
@@ -355,6 +367,11 @@ impl Preferences {
     pub const RETENTION_FOREVER: &'static str = "forever";
     pub const RETENTION_SIX_MONTHS: &'static str = "six-months";
     pub const RETENTION_ONE_YEAR: &'static str = "one-year";
+
+    pub const PROXY_OFF: &'static str = "off";
+    pub const PROXY_HTTP: &'static str = "http";
+    pub const PROXY_HTTPS: &'static str = "https";
+    pub const PROXY_SOCKS5: &'static str = "socks5";
 
     /// Whether this build knows the named startup mode.
     pub fn valid_startup(value: &str) -> bool {
@@ -371,6 +388,14 @@ impl Preferences {
             Self::RETENTION_FOREVER | Self::RETENTION_SIX_MONTHS | Self::RETENTION_ONE_YEAR
         )
     }
+
+    /// Whether this build knows the named proxy mode.
+    pub fn valid_proxy_mode(value: &str) -> bool {
+        matches!(
+            value,
+            Self::PROXY_OFF | Self::PROXY_HTTP | Self::PROXY_HTTPS | Self::PROXY_SOCKS5
+        )
+    }
 }
 
 impl Default for Preferences {
@@ -380,6 +405,9 @@ impl Default for Preferences {
             minimize_on_close: true,
             startup_mode: Self::STARTUP_APP.into(),
             history_retention: Self::RETENTION_FOREVER.into(),
+            proxy_mode: Self::PROXY_OFF.into(),
+            proxy_host: String::new(),
+            proxy_port: 0,
         }
     }
 }
@@ -798,6 +826,7 @@ mod tests {
         let (decoded, _): (DataInfo, _) = encoded.deserialize().expect("decodes again");
         assert_eq!(decoded, original);
     }
+
     #[test]
     fn preferences_survive_the_bus() {
         let original = Preferences {
@@ -805,10 +834,27 @@ mod tests {
             minimize_on_close: false,
             startup_mode: "daemon".into(),
             history_retention: "one-year".into(),
+            proxy_mode: "socks5".into(),
+            proxy_host: "127.0.0.1".into(),
+            proxy_port: 1080,
         };
 
         let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
         let (decoded, _): (Preferences, _) = encoded.deserialize().expect("decodes again");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn only_the_four_named_proxy_modes_are_known() {
+        for mode in [
+            Preferences::PROXY_OFF,
+            Preferences::PROXY_HTTP,
+            Preferences::PROXY_HTTPS,
+            Preferences::PROXY_SOCKS5,
+        ] {
+            assert!(Preferences::valid_proxy_mode(mode), "{mode}");
+        }
+        assert!(!Preferences::valid_proxy_mode("socks4"));
+        assert!(!Preferences::valid_proxy_mode(""));
     }
 }

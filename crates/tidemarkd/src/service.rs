@@ -893,6 +893,34 @@ impl Daemon {
         self.publish_preferences(&emitter, preferences).await
     }
 
+    /// Points every outbound request and every child process at a proxy, or at none.
+    ///
+    /// Takes all three values together because they are one setting: applying a mode
+    /// before its host, or a host before its port, would put a proxy that cannot be
+    /// reached in front of every provider between the two calls.
+    async fn set_proxy(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        mode: &str,
+        host: &str,
+        port: u16,
+    ) -> fdo::Result<()> {
+        if !Preferences::valid_proxy_mode(mode) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "unknown proxy mode {mode:?}"
+            )));
+        }
+        let _guard = self.preference_mutation.lock().await;
+        let preferences = self
+            .preference_request(Preference::Proxy {
+                mode: mode.into(),
+                host: host.into(),
+                port,
+            })
+            .await?;
+        self.publish_preferences(&emitter, preferences).await
+    }
+
     /// Deletes every historical reading and refreshes the published storage facts.
     async fn clear_history(
         &self,

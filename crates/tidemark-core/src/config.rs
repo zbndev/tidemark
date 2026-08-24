@@ -45,6 +45,10 @@ const UPDATES_TABLE: &str = "updates";
 const RELEASE_CHECK_KEY: &str = "check";
 const HISTORY_TABLE: &str = "history";
 const HISTORY_RETENTION_KEY: &str = "retention";
+const PROXY_TABLE: &str = "proxy";
+const PROXY_MODE_KEY: &str = "mode";
+const PROXY_HOST_KEY: &str = "host";
+const PROXY_PORT_KEY: &str = "port";
 
 /// Why the settings could not be read or written.
 #[derive(Debug, thiserror::Error)]
@@ -165,6 +169,17 @@ impl Config {
                 format!("has unknown value {startup_mode:?}"),
             ));
         }
+        let proxy_mode = self
+            .preference_string(PROXY_TABLE, PROXY_MODE_KEY)?
+            .unwrap_or(defaults.proxy_mode.as_str())
+            .to_owned();
+        if !Preferences::valid_proxy_mode(&proxy_mode) {
+            return Err(self.invalid_preference(
+                PROXY_TABLE,
+                PROXY_MODE_KEY,
+                format!("has unknown value {proxy_mode:?}"),
+            ));
+        }
         Ok(Preferences {
             release_check: self
                 .preference_bool(UPDATES_TABLE, RELEASE_CHECK_KEY)?
@@ -174,6 +189,12 @@ impl Config {
                 .unwrap_or(defaults.minimize_on_close),
             startup_mode,
             history_retention,
+            proxy_mode,
+            proxy_host: self
+                .preference_string(PROXY_TABLE, PROXY_HOST_KEY)?
+                .unwrap_or(defaults.proxy_host.as_str())
+                .to_owned(),
+            proxy_port: self.preference_port(PROXY_TABLE, PROXY_PORT_KEY)?,
         })
     }
 
@@ -207,6 +228,27 @@ impl Config {
         self.set_preference(HISTORY_TABLE, HISTORY_RETENTION_KEY, value(retention))
     }
 
+    /// Writes the whole proxy setting as one edit.
+    ///
+    /// The three values are one decision: a mode with no host to reach, or a host the mode
+    /// does not use, is not a state worth persisting on the way to a state that makes
+    /// sense. Whether they agree is the caller's to check — this refuses only what this
+    /// build cannot read back.
+    pub fn set_proxy(&mut self, mode: &str, host: &str, port: u16) -> Result<(), ConfigError> {
+        if !Preferences::valid_proxy_mode(mode) {
+            return Err(self.invalid_preference(
+                PROXY_TABLE,
+                PROXY_MODE_KEY,
+                format!("has unknown value {mode:?}"),
+            ));
+        }
+        let table = self.preference_table_mut(PROXY_TABLE)?;
+        table.insert(PROXY_MODE_KEY, value(mode));
+        table.insert(PROXY_HOST_KEY, value(host));
+        table.insert(PROXY_PORT_KEY, value(i64::from(port)));
+        self.write()
+    }
+
     fn preference_bool(
         &self,
         table: &'static str,
@@ -233,6 +275,26 @@ impl Config {
             .ok_or_else(|| self.invalid_preference(table, key, "must be a string".into()))
     }
 
+    /// A TCP port, or zero for a port nobody has set yet.
+    ///
+    /// Refused rather than clamped when it is out of range: a `70000` in the file was
+    /// meant to be a port, and silently reading it as some other port is worse than
+    /// saying it is not one.
+    fn preference_port(
+        &self,
+        table: &'static str,
+        key: &'static str,
+    ) -> Result<u16, ConfigError> {
+        let Some(item) = self.preference(table, key)? else {
+            return Ok(0);
+        };
+        item.as_integer()
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or_else(|| {
+                self.invalid_preference(table, key, "must be a whole number of 0 to 65535".into())
+            })
+    }
+
     fn preference(
         &self,
         table: &'static str,
@@ -256,18 +318,24 @@ impl Config {
         key: &'static str,
         setting: Item,
     ) -> Result<(), ConfigError> {
-        let table_item = self
-            .document
+        self.preference_table_mut(table)?.insert(key, setting);
+        self.write()
+    }
+
+    /// The table one group of preferences lives in, created empty if it is not there yet.
+    fn preference_table_mut(
+        &mut self,
+        table: &'static str,
+    ) -> Result<&mut dyn toml_edit::TableLike, ConfigError> {
+        let path = self.path.clone();
+        self.document
             .entry(table)
-            .or_insert_with(|| Item::Table(Table::new()));
-        let table_item = table_item
+            .or_insert_with(|| Item::Table(Table::new()))
             .as_table_like_mut()
             .ok_or_else(|| ConfigError::NotATable {
-                path: self.path.clone(),
+                path,
                 table: table.into(),
-            })?;
-        table_item.insert(key, setting);
-        self.write()
+            })
     }
 
     fn invalid_preference(
@@ -1159,6 +1227,9 @@ mod tests {
             config.preferences().expect("readable").history_retention,
             "forever"
         );
+        assert_eq!(config.preferences().expect("readable").proxy_mode, "off");
+        assert!(config.preferences().expect("readable").proxy_host.is_empty());
+        assert_eq!(config.preferences().expect("readable").proxy_port, 0);
     }
 
     #[test]
@@ -1171,6 +1242,9 @@ mod tests {
             minimize_on_close: false,
             startup_mode: "daemon".into(),
             history_retention: "six-months".into(),
+            proxy_mode: "socks5".into(),
+            proxy_host: "127.0.0.1".into(),
+            proxy_port: 1080,
         };
 
         config.set_release_check(false).expect("release setting");
@@ -1179,6 +1253,9 @@ mod tests {
         config
             .set_history_retention("six-months")
             .expect("retention setting");
+        config
+            .set_proxy("socks5", "127.0.0.1", 1080)
+            .expect("proxy setting");
 
         let reread = Config::at(path.clone()).expect("reloaded");
         assert_eq!(reread.preferences().expect("readable"), preferences);
@@ -1199,6 +1276,25 @@ mod tests {
     fn an_unknown_startup_mode_is_refused() {
         let path = scratch("preferences-startup");
         std::fs::write(&path, "[general]\nstartup = \"everything\"\n").expect("seeded");
+        let config = Config::at(path).expect("valid TOML");
+
+        assert!(config.preferences().is_err());
+    }
+
+    #[test]
+    fn an_unknown_proxy_mode_is_refused_reading_and_writing() {
+        let path = scratch("preferences-proxy-mode");
+        std::fs::write(&path, "[proxy]\nmode = \"socks4\"\n").expect("seeded");
+        let mut config = Config::at(path).expect("valid TOML");
+
+        assert!(config.preferences().is_err());
+        assert!(config.set_proxy("gopher", "127.0.0.1", 1080).is_err());
+    }
+
+    #[test]
+    fn a_proxy_port_outside_the_range_is_refused_rather_than_clamped() {
+        let path = scratch("preferences-proxy-port");
+        std::fs::write(&path, "[proxy]\nmode = \"http\"\nport = 70000\n").expect("seeded");
         let config = Config::at(path).expect("valid TOML");
 
         assert!(config.preferences().is_err());

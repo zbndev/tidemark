@@ -300,6 +300,14 @@ async fn spawn(client: &reqwest::Client) -> Result<Server, ProviderError> {
         .process_group(0)
         // Something that looks like a terminal to a program that checks.
         .env("TERM", "xterm-256color");
+    // This process is the one place in this program that reaches a provider's servers
+    // without being one of our own clients: `agy` does its own HTTP. The proxy therefore
+    // has to arrive as environment, and it arrives *per command* — putting it on the
+    // daemon's own unit would mean a restart to change it, and a restart takes every card
+    // off the screen for as long as the first poll takes.
+    if let Some(proxy) = http::proxy() {
+        command.envs(proxy.child_env());
+    }
     if let Some(home) = std::env::var_os("HOME") {
         command.current_dir(&home);
     }
@@ -401,12 +409,17 @@ fn endpoint(port: u16, path: &str) -> String {
 /// bounded by the address: nothing built here is ever pointed at a name that resolves off
 /// this machine, so the certificate that is not checked is one that could only have been
 /// presented by a process on the same host.
+///
+/// `no_proxy` for the same reason, and it is not redundant: this builder is not
+/// [`http::builder`], but `system-proxy` would still have it read `HTTPS_PROXY` out of the
+/// environment and ask a proxy to connect to *our own* `127.0.0.1`.
 fn loopback_client() -> Result<reqwest::Client, ProviderError> {
     reqwest::Client::builder()
         .user_agent(tidemark_types::user_agent())
         .timeout(http::REQUEST_TIMEOUT)
         .connect_timeout(http::CONNECT_TIMEOUT)
         .tls_danger_accept_invalid_certs(true)
+        .no_proxy()
         .build()
         .map_err(ProviderError::Client)
 }

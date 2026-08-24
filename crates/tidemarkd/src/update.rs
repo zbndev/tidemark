@@ -49,10 +49,12 @@ impl Checker {
             HeaderName::from_static("x-github-api-version"),
             HeaderValue::from_static("2026-03-10"),
         );
-        let client = reqwest::Client::builder()
+        // The shared builder, so this goes through the user's proxy like everything else;
+        // the timeout is tightened over its default because nothing waits on this answer.
+        let client = tidemark_core::providers::http::builder()
+            .map_err(CheckError::Http)?
             .timeout(Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent(tidemark_types::user_agent())
             .default_headers(headers)
             .build()
             .map_err(CheckError::Http)?;
