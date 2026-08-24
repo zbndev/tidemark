@@ -1,4 +1,4 @@
-//! Application preferences: behavior, startup, updates and local data.
+//! Application preferences: behavior, startup, network, and local data.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -27,10 +27,29 @@ const STARTUP_VALUES: [&str; 3] = [
 /// What the startup values above are called on screen, in the same order.
 const STARTUP_LABELS: [&str; 3] = ["App and tray", "Daemon only", "Off"];
 
+const PROXY_VALUES: [&str; 4] = [
+    Preferences::PROXY_OFF,
+    Preferences::PROXY_HTTP,
+    Preferences::PROXY_HTTPS,
+    Preferences::PROXY_SOCKS5,
+];
+
+/// What the proxy modes above are called on screen, in the same order.
+const PROXY_LABELS: [&str; 4] = ["Off", "HTTP", "HTTPS", "SOCKS5"];
+
 #[derive(Debug, Clone, Copy)]
 enum SwitchKind {
     ReleaseCheck,
     MinimizeOnClose,
+}
+
+/// Whether an incomplete proxy is the user's mistake or just the middle of typing one in.
+#[derive(Debug, Clone, Copy)]
+enum Complaint {
+    /// A deliberate submit: mark the row that is wrong and say why.
+    Loud,
+    /// A mode was chosen and the rest is still to come: focus, do not scold.
+    Silent,
 }
 
 /// The standard libadwaita Preferences dialog and its authoritative daemon-backed state.
@@ -42,6 +61,9 @@ pub struct PreferencesDialog {
     minimize_on_close: adw::SwitchRow,
     startup: adw::ComboRow,
     retention: adw::ComboRow,
+    proxy_mode: adw::ComboRow,
+    proxy_host: adw::EntryRow,
+    proxy_port: adw::EntryRow,
     config_path: adw::ActionRow,
     history_path: adw::ActionRow,
     history_size: adw::ActionRow,
@@ -94,6 +116,41 @@ impl PreferencesDialog {
         general.add(&startup);
         dialog.add(&general);
 
+        let proxy_mode = adw::ComboRow::builder()
+            .title("Proxy")
+            .subtitle("Route every request and every helper process through a proxy.")
+            .model(&gtk::StringList::new(&PROXY_LABELS))
+            .expression(gtk::PropertyExpression::new(
+                gtk::StringObject::static_type(),
+                None::<gtk::Expression>,
+                "string",
+            ))
+            .use_subtitle(true)
+            .build();
+        // An apply button rather than a request per keystroke: `example.com` on the way to
+        // `proxy.example.com` is eleven proxies nobody asked for, and each one would drop
+        // every client the daemon holds.
+        let proxy_host = adw::EntryRow::builder()
+            .title("Host")
+            .show_apply_button(true)
+            .input_purpose(gtk::InputPurpose::Url)
+            .build();
+        let proxy_port = adw::EntryRow::builder()
+            .title("Port")
+            .show_apply_button(true)
+            .input_purpose(gtk::InputPurpose::Digits)
+            .build();
+        let proxy_group = adw::PreferencesGroup::builder()
+            .title("Proxy")
+            .description(
+                "Applies immediately, without restarting the background service. \
+                 Requests to this machine never go through it.",
+            )
+            .build();
+        proxy_group.add(&proxy_mode);
+        proxy_group.add(&proxy_host);
+        proxy_group.add(&proxy_port);
+
         let release_check = adw::SwitchRow::builder()
             .title("Check for updates")
             .subtitle("Ask GitHub for the latest Tidemark release once an hour.")
@@ -102,12 +159,16 @@ impl PreferencesDialog {
             .title("Release Updates")
             .build();
         release_group.add(&release_check);
-        let updates = adw::PreferencesPage::builder()
-            .title("Updates")
-            .icon_name("software-update-available-symbolic")
+
+        // The release check lives here rather than on a page of its own: it is one switch,
+        // and what it is a switch over is the network.
+        let network = adw::PreferencesPage::builder()
+            .title("Network")
+            .icon_name("network-workgroup-symbolic")
             .build();
-        updates.add(&release_group);
-        dialog.add(&updates);
+        network.add(&proxy_group);
+        network.add(&release_group);
+        dialog.add(&network);
 
         let retention = adw::ComboRow::builder()
             .title("Keep history")
@@ -168,6 +229,9 @@ impl PreferencesDialog {
             minimize_on_close,
             startup: startup_mode,
             retention,
+            proxy_mode,
+            proxy_host,
+            proxy_port,
             config_path,
             history_path,
             history_size,
@@ -182,6 +246,7 @@ impl PreferencesDialog {
         settings.connect_switch(&settings.minimize_on_close, SwitchKind::MinimizeOnClose);
         settings.connect_startup();
         settings.connect_retention();
+        settings.connect_proxy();
         settings.connect_clear(&clear);
         settings.apply(&preferences, &data);
 
@@ -217,6 +282,19 @@ impl PreferencesDialog {
             retention_index(&preferences.history_retention),
             &preferences.history_retention,
         );
+        apply_named_choice(
+            &self.proxy_mode,
+            &PROXY_LABELS,
+            proxy_index(&preferences.proxy_mode),
+            &preferences.proxy_mode,
+        );
+        self.proxy_host.set_text(&preferences.proxy_host);
+        // Zero is "unset" on the wire and has to read as empty here: a port row showing
+        // `0` invites the user to leave it, and `0` is not a port.
+        self.proxy_port.set_text(&match preferences.proxy_port {
+            0 => String::new(),
+            port => port.to_string(),
+        });
         self.suppress.set(false);
 
         self.release_check
@@ -235,6 +313,10 @@ impl PreferencesDialog {
             .set_subtitle(&format_bytes(data.history_bytes));
         self.key_schema.set_subtitle(&data.key_schema);
         self.token_schema.set_subtitle(&data.token_schema);
+        for row in [&self.proxy_host, &self.proxy_port] {
+            row.remove_css_class("error");
+        }
+        self.sync_proxy_editable();
     }
 
     fn connect_switch(self: &Rc<Self>, row: &adw::SwitchRow, kind: SwitchKind) {
@@ -349,6 +431,135 @@ impl PreferencesDialog {
         });
     }
 
+    /// All three proxy rows commit the same way, because they are one setting.
+    ///
+    /// The mode opens the two rows it needs and then tries; the host and the port commit
+    /// when their apply button is pressed or Enter ends the edit. Whichever of them the
+    /// user touched, the daemon is sent the whole triple.
+    fn connect_proxy(self: &Rc<Self>) {
+        self.proxy_mode.connect_selected_notify({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(settings) = weak.upgrade()
+                    && !settings.suppress.get()
+                {
+                    // Before the attempt, because choosing `SOCKS5` is what makes the host
+                    // typeable and the attempt below is what needs it typed.
+                    settings.sync_proxy_editable();
+                    settings.submit_proxy(Complaint::Silent);
+                }
+            }
+        });
+        for row in [&self.proxy_host, &self.proxy_port] {
+            row.connect_apply({
+                let weak = Rc::downgrade(self);
+                move |_| {
+                    if let Some(settings) = weak.upgrade()
+                        && !settings.suppress.get()
+                    {
+                        settings.submit_proxy(Complaint::Loud);
+                    }
+                }
+            });
+        }
+    }
+
+    /// Whether the host and the port can be typed into.
+    ///
+    /// The rule reads the **row** and not the stored preference, which is the whole point
+    /// of it: choosing `SOCKS5` before typing where the proxy is, is how this group gets
+    /// filled in, and that choice is deliberately not sent - so the stored mode is still
+    /// `off` at the moment the two rows it needs have to become editable. Deriving this
+    /// from storage locks them shut and leaves the setting unreachable.
+    ///
+    /// A mode this build cannot show empties its own row, and `selected` is then out of
+    /// range: nothing to describe, nothing to type.
+    fn sync_proxy_editable(&self) {
+        let editable = proxy_rows_editable(self.proxy_mode.selected());
+        for row in [&self.proxy_host, &self.proxy_port] {
+            row.set_sensitive(editable);
+        }
+    }
+
+    /// Sends the proxy the three rows currently describe.
+    ///
+    /// A mode with no host or no port yet is **not** sent. The daemon would refuse it and
+    /// be right to, but choosing `SOCKS5` before typing where it is, is the normal way to
+    /// fill this group in, and answering the first half of that with an error is answering
+    /// the wrong thing: the row that still needs typing is focused, and only a deliberate
+    /// submit of an incomplete one is marked as wrong.
+    fn submit_proxy(self: &Rc<Self>, complaint: Complaint) {
+        let Some(mode) = PROXY_VALUES.get(self.proxy_mode.selected() as usize) else {
+            return;
+        };
+        let mode = (*mode).to_owned();
+        let host = self.proxy_host.text().trim().to_owned();
+        let typed = self.proxy_port.text();
+        let typed = typed.trim();
+        for row in [&self.proxy_host, &self.proxy_port] {
+            row.remove_css_class("error");
+        }
+        let port = if typed.is_empty() {
+            Some(0)
+        } else {
+            typed.parse::<u16>().ok().filter(|port| *port != 0)
+        };
+        let Some(port) = port else {
+            self.proxy_port.add_css_class("error");
+            self.proxy_port.grab_focus();
+            if matches!(complaint, Complaint::Loud) {
+                self.toast("A proxy port is a number from 1 to 65535");
+            }
+            return;
+        };
+        if mode != Preferences::PROXY_OFF {
+            let incomplete = if host.is_empty() {
+                Some(&self.proxy_host)
+            } else if port == 0 {
+                Some(&self.proxy_port)
+            } else {
+                None
+            };
+            if let Some(row) = incomplete {
+                if matches!(complaint, Complaint::Loud) {
+                    row.add_css_class("error");
+                }
+                row.grab_focus();
+                return;
+            }
+        }
+
+        let settings = Rc::clone(self);
+        let rows = [
+            self.proxy_host.clone().upcast::<gtk::Widget>(),
+            self.proxy_port.clone().upcast(),
+            self.proxy_mode.clone().upcast(),
+        ];
+        for row in &rows {
+            row.set_sensitive(false);
+        }
+        glib::spawn_future_local(async move {
+            let result = settings.proxy.set_proxy(&mode, &host, port).await;
+            match result {
+                Ok(()) => {
+                    {
+                        let mut preferences = settings.preferences.borrow_mut();
+                        preferences.proxy_mode = mode;
+                        preferences.proxy_host = host;
+                        preferences.proxy_port = port;
+                    }
+                    settings.toast("Proxy updated");
+                }
+                Err(error) => settings.toast(&error.to_string()),
+            }
+            // Either way the rows are redrawn from the state that is now authoritative,
+            // which is also what restores their sensitivity for the new mode.
+            let preferences = settings.preferences.borrow().clone();
+            let data = settings.data.borrow().clone();
+            settings.apply(&preferences, &data);
+        });
+    }
+
     fn connect_clear(self: &Rc<Self>, button: &gtk::Button) {
         button.connect_clicked({
             let weak: Weak<Self> = Rc::downgrade(self);
@@ -450,6 +661,22 @@ fn startup_index(value: &str) -> Option<u32> {
         .map(|index| index as u32)
 }
 
+fn proxy_index(value: &str) -> Option<u32> {
+    PROXY_VALUES
+        .iter()
+        .position(|candidate| *candidate == value)
+        .map(|index| index as u32)
+}
+
+/// Whether the host and port rows belong to a proxy at all, for what the mode row has
+/// selected right now - including [`gtk::INVALID_LIST_POSITION`], which is what an unknown
+/// daemon value leaves behind.
+fn proxy_rows_editable(selected: u32) -> bool {
+    PROXY_VALUES
+        .get(selected as usize)
+        .is_some_and(|mode| *mode != Preferences::PROXY_OFF)
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
@@ -480,6 +707,32 @@ mod tests {
         assert_eq!(startup_index(Preferences::STARTUP_DAEMON), Some(1));
         assert_eq!(startup_index(Preferences::STARTUP_OFF), Some(2));
         assert_eq!(startup_index("everything"), None);
+    }
+
+    #[test]
+    fn every_proxy_mode_selects_its_named_row() {
+        assert_eq!(proxy_index(Preferences::PROXY_OFF), Some(0));
+        assert_eq!(proxy_index(Preferences::PROXY_HTTP), Some(1));
+        assert_eq!(proxy_index(Preferences::PROXY_HTTPS), Some(2));
+        assert_eq!(proxy_index(Preferences::PROXY_SOCKS5), Some(3));
+        assert_eq!(proxy_index("socks4"), None);
+        assert_eq!(PROXY_VALUES.len(), PROXY_LABELS.len());
+    }
+
+    /// The regression this exists for: the host and the port were derived from the
+    /// *stored* mode, which is still `off` while a just-chosen `SOCKS5` is waiting for the
+    /// host that would let it be stored. The two rows the user has to type into were the
+    /// two rows that stayed locked, and the setting could not be reached at all.
+    #[test]
+    fn choosing_a_proxy_opens_the_rows_it_needs_before_anything_is_stored() {
+        assert!(!proxy_rows_editable(0), "off has nothing to describe");
+        assert!(proxy_rows_editable(1), "http needs a host and a port");
+        assert!(proxy_rows_editable(2));
+        assert!(proxy_rows_editable(3), "socks5 needs a host and a port");
+        assert!(
+            !proxy_rows_editable(gtk::INVALID_LIST_POSITION),
+            "an unknown daemon mode empties its row and describes nothing"
+        );
     }
 
     #[test]
@@ -519,14 +772,19 @@ mod tests {
 
         for (labels, known, raw) in [
             (
-                &STARTUP_LABELS,
+                &STARTUP_LABELS[..],
                 startup_index(Preferences::STARTUP_DAEMON),
                 "launcher",
             ),
             (
-                &RETENTION_LABELS,
+                &RETENTION_LABELS[..],
                 retention_index(Preferences::RETENTION_ONE_YEAR),
                 "decade",
+            ),
+            (
+                &PROXY_LABELS[..],
+                proxy_index(Preferences::PROXY_SOCKS5),
+                "socks4",
             ),
         ] {
             let row = choice_row(labels);

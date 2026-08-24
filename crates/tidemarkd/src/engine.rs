@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tidemark_core::config::Config;
+use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::providers::{Credential, Provider, ProviderError};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
@@ -64,6 +65,13 @@ pub enum Preference {
     MinimizeOnClose(bool),
     StartupMode(String),
     HistoryRetention(String),
+    /// The one preference that changes how this process reaches the network, rather than
+    /// what it does with what it reaches.
+    Proxy {
+        mode: String,
+        host: String,
+        port: u16,
+    },
 }
 
 /// What the D-Bus interface asks the loop to do.
@@ -530,12 +538,20 @@ impl Engine {
     /// (release watch, startup integration) must follow the durable config.
     pub async fn set_preference(&mut self, preference: Preference) -> Result<Preferences, String> {
         let retention_changed = matches!(&preference, Preference::HistoryRetention(_));
+        // Built before anything is written. A mode with nowhere to reach is a mistake the
+        // user can still see on screen and correct; persisted first, it would instead
+        // become a stored setting that fails every poll from here on.
+        let proxy = match &preference {
+            Preference::Proxy { mode, host, port } => Some(Proxy::new(mode, host, *port)?),
+            _ => None,
+        };
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
         match preference {
             Preference::ReleaseCheck(enabled) => config.set_release_check(enabled),
             Preference::MinimizeOnClose(enabled) => config.set_minimize_on_close(enabled),
             Preference::StartupMode(mode) => config.set_startup_mode(&mode),
             Preference::HistoryRetention(retention) => config.set_history_retention(&retention),
+            Preference::Proxy { mode, host, port } => config.set_proxy(&mode, &host, port),
         }
         .map_err(|error| error.to_string())?;
         let preferences = config.preferences().map_err(|error| error.to_string())?;
@@ -544,7 +560,42 @@ impl Engine {
         {
             tracing::error!(%error, "could not apply history retention");
         }
+        if let Some(proxy) = proxy {
+            self.adopt_proxy(proxy);
+        }
         Ok(preferences)
+    }
+
+    /// Points this process at a new proxy without restarting it.
+    ///
+    /// Dropping the clients is the whole mechanism: a `reqwest::Client` holds the proxy it
+    /// was built with for the life of the client, and its pool holds sockets already
+    /// established through the old one. Every account can build its client again — from a
+    /// stored key or from its settings — so this costs one keyring read per account on the
+    /// next poll and nothing else. **No status is touched**: each card keeps its last good
+    /// reading and its state while the new client is built under it, which is the
+    /// difference between this and restarting the service.
+    ///
+    /// `agy` comes along for the ride. Dropping Antigravity's client shuts down the
+    /// subprocess, and the next poll spawns a new one — with the proxy in its environment,
+    /// because [`Proxy::child_env`] is read at spawn time.
+    fn adopt_proxy(&mut self, proxy: Option<Proxy>) {
+        if http::proxy() == proxy {
+            return;
+        }
+        http::set_proxy(proxy);
+        let now = Instant::now();
+        for account in &mut self.accounts {
+            if !account.rebuildable() {
+                continue;
+            }
+            account.client = None;
+            // The old proxy may be why this account was failing, so its backoff is not
+            // evidence about the new one.
+            account.failures = 0;
+            account.retry_after = None;
+            account.due = now;
+        }
     }
 
     fn prune_for_retention(&mut self, retention: &str) -> Result<(), String> {
@@ -2275,6 +2326,9 @@ mod tests {
                 minimize_on_close: false,
                 startup_mode: Preferences::STARTUP_DAEMON.into(),
                 history_retention: Preferences::RETENTION_SIX_MONTHS.into(),
+                proxy_mode: Preferences::PROXY_OFF.into(),
+                proxy_host: String::new(),
+                proxy_port: 0,
             }
         );
         assert_eq!(
@@ -2284,6 +2338,82 @@ mod tests {
                 .expect("readable"),
             preferences
         );
+    }
+
+    /// The proxy is the one preference that changes this process rather than a file, so
+    /// this checks all three things that has to mean: the value is in force, the clients
+    /// built against the old one are gone, and no card lost its reading over it.
+    #[tokio::test]
+    async fn a_proxy_change_is_adopted_without_restarting_anything() {
+        let mut harness = harness_with_config(
+            vec![
+                Account::with_client(Fake::new(vec![Ok(reading(0, 42.0, 3600))])).with_rebuild(
+                    Box::new(|_| {
+                        Ok(Fake::new(vec![Ok(reading(0, 42.0, 3600))]) as Arc<dyn Provider>)
+                    }),
+                ),
+            ],
+            std::env::temp_dir().join(format!("tidemark-engine-proxy-{}.toml", std::process::id())),
+        );
+        harness.engine.poll_due(Instant::now()).await;
+        let published = harness.engine.accounts()[0].status.clone();
+        assert!(harness.engine.accounts()[0].client.is_some());
+
+        let preferences = harness
+            .engine
+            .set_preference(Preference::Proxy {
+                mode: Preferences::PROXY_SOCKS5.into(),
+                host: "127.0.0.1".into(),
+                port: 1080,
+            })
+            .await
+            .expect("proxy set");
+
+        assert_eq!(preferences.proxy_mode, Preferences::PROXY_SOCKS5);
+        assert_eq!(
+            http::proxy().expect("in force").url(),
+            "socks5h://127.0.0.1:1080"
+        );
+        assert!(
+            harness.engine.accounts()[0].client.is_none(),
+            "a client built against the old proxy must not survive the change"
+        );
+        assert_eq!(
+            harness.engine.accounts()[0].status,
+            published,
+            "the reading on the card is not news about a proxy"
+        );
+
+        // Half a proxy is refused before it is written, so the one in force still stands.
+        let refused = harness
+            .engine
+            .set_preference(Preference::Proxy {
+                mode: Preferences::PROXY_HTTP.into(),
+                host: String::new(),
+                port: 8080,
+            })
+            .await;
+        assert!(refused.is_err());
+        assert_eq!(
+            Config::at(harness.config_path.clone())
+                .expect("reloaded")
+                .preferences()
+                .expect("readable")
+                .proxy_mode,
+            Preferences::PROXY_SOCKS5
+        );
+
+        // Back to none, so nothing else in this test binary inherits it.
+        harness
+            .engine
+            .set_preference(Preference::Proxy {
+                mode: Preferences::PROXY_OFF.into(),
+                host: String::new(),
+                port: 0,
+            })
+            .await
+            .expect("proxy cleared");
+        assert_eq!(http::proxy(), None);
     }
     #[tokio::test]
     async fn daily_maintenance_applies_the_configured_history_retention() {

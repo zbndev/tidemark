@@ -107,6 +107,11 @@ pub trait Daemon {
     fn set_minimize_on_close(&self, enabled: bool) -> zbus::Result<()>;
     fn set_startup_mode(&self, mode: &str) -> zbus::Result<()>;
     fn set_history_retention(&self, retention: &str) -> zbus::Result<()>;
+
+    /// All three proxy settings at once: they are one setting, and half of it applied is a
+    /// proxy nothing can be reached through.
+    fn set_proxy(&self, mode: &str, host: &str, port: u16) -> zbus::Result<()>;
+
     fn clear_history(&self) -> zbus::Result<()>;
 
     /// Puts the configured providers in the order the user arranged the cards in.

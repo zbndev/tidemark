@@ -300,7 +300,8 @@ distribution-wide LTO off; `PKGBUILD` does it with `options=(!lto)`.
 - **Application preferences use the same file, not GSettings.** `[general]` carries
   `minimize_on_close` (default `true`) and `startup`, whose named modes are `app` (the
   default: app and tray), `daemon` (daemon only), and `off`; `[updates] check` defaults to
-  `true`; `[history] retention` is `forever`, `six-months` or `one-year`. A present value
+  `true`; `[history] retention` is `forever`, `six-months` or `one-year`; `[proxy]` carries
+  `mode`, `host` and `port`, written as one edit because they are one setting. A present value
   with the wrong type or an unknown named choice is an error, not a reason to guess.
   Mutations travel over D-Bus and share the engine's serial configuration queue, so a
   provider edit and a global preference cannot overwrite each other.
@@ -319,6 +320,34 @@ Every request sets `User-Agent: Tidemark/<version>`. This is not cosmetic:
 `403 browser_signature_banned`. Identify honestly by product name — never impersonate a
 browser. We authenticate with real credentials to documented endpoints; there is no reason
 to look like anything other than what we are.
+
+**One proxy, set once, applied everywhere.** `[proxy]` in `config.toml` names a mode
+(`off`, `http`, `https`, `socks5`), a host and a port; `tidemark-core`'s `providers::http`
+holds it for the process, and every client this program builds starts from that one
+builder. `socks5` becomes a `socks5h://` URL, so names are resolved at the proxy — for
+anyone whose own resolver is the thing in the way, resolving here and handing the proxy an
+address would defeat the point.
+
+- **A subprocess is not an exception.** Antigravity's `agy` does its own HTTP, so the proxy
+  is handed to it as `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` in both spellings, at spawn
+  time, per command. **Not** on the systemd unit: an environment variable there takes
+  effect on a restart, and a restart takes every card off the screen until the first poll
+  comes back.
+- **A change is adopted without restarting anything.** `SetProxy` takes all three values as
+  one call — half a proxy applied is a proxy nothing can be reached through — validates the
+  URL before the file is written, then drops every provider client. A `reqwest::Client`
+  holds its proxy for life and its pool holds sockets opened through the old one, so the
+  clients are rebuilt from stored keys and settings on the next poll. **No status is
+  touched**: each card keeps its last good reading while the new client is built under it.
+  Dropping Antigravity's client shuts `agy` down, and the next poll spawns it again with
+  the new environment.
+- **Loopback is never proxied.** `localhost,127.0.0.0/8,::1` is excluded on our clients and
+  passed as `NO_PROXY` to children, and Antigravity's loopback client is built with
+  `no_proxy()` outright. Asking a proxy to reach `agy` on this machine asks it to connect
+  to itself.
+- **Off means "as before", not "direct".** With no mode set, `reqwest` reads the process
+  environment and a child inherits it, which is what this program did before the setting
+  existed.
 
 ## Polling
 
@@ -470,7 +499,10 @@ history that does not exist yet.
   button opens the menu every GNOME application keeps there. Preferences and About
   Tidemark are separate sections; provider and credential management stays on its existing
   header button because accounts are managed, not application preferences. Preferences is
-  an `AdwPreferencesDialog` with General, Updates and Data pages and standard rows. About
+  an `AdwPreferencesDialog` with General, Network and Data pages and standard rows. The
+  release-check switch lives on Network beside the proxy rather than on a page of its own:
+  it is one switch, and what it switches is whether this program reaches the network at all
+  on its own behalf. About
   is an `AdwAboutDialog` with properties set and no layout of ours: the icon over the name,
   the version pill, Details, Report an Issue and
   Legal are what the platform draws from `application-icon`, `version`, `website`,
@@ -479,6 +511,14 @@ history that does not exist yet.
   agreement — and the issue link goes to `/issues/new/choose`, because the repository has
   templates and a report that skips them has to be asked for the version and the desktop
   all over again.
+- **The three proxy rows are one form, and the mode row opens the other two.** Choosing
+  `SOCKS5` before typing where the proxy is, is how the group gets filled in, so the
+  choice alone is not sent - the daemon would refuse half a proxy and be right to - and the
+  host and the port become editable off the *row's* selection rather than off what is
+  stored. Deriving them from storage is a lock: the stored mode is still `off` at exactly
+  the moment the two rows that would change it have to be typed into. Nothing reaches the
+  daemon until all three are complete, and only a deliberate submit of an incomplete one is
+  marked wrong.
 - **The one page that is ours is Troubleshooting**, and it is there so those questions are
   answered before they are asked: the client's version, the version the daemon on the other
   end reported, the GTK and libadwaita the process actually loaded, the desktop and session
