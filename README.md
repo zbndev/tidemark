@@ -10,11 +10,11 @@
 ![GitHub Downloads](https://shieldcn.dev/github/downloads/zbndev/tidemark.svg?variant=secondary)
 ![GitHub Stars](https://www.shieldcn.dev/github/stars/zbndev/tidemark.svg?variant=secondary&size=sm&theme=zinc)
 
+</div>
+
 ---
 
-![Tidemark](./docs/screenshot.png)
-
-</div>
+https://github.com/user-attachments/assets/a62a06a9-6a5f-408e-8347-bb5146c45a9d
 
 ---
 
