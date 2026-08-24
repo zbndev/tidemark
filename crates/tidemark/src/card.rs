@@ -5,7 +5,7 @@
 //! a pace mark; the remaining windows as thin rows; and a line along the bottom saying when
 //! the reading was taken.
 //!
-//! Two rules are structural here rather than remembered.
+//! Three rules are structural here rather than remembered.
 //!
 //! **The last good reading stays on screen.** A card is never blanked because a poll
 //! failed; the numbers keep standing and the chip changes. The only card with no numbers on
@@ -14,6 +14,13 @@
 //! **A window the provider did not send is not drawn.** The rows are rebuilt from whatever
 //! arrived, so a provider that stops reporting a window loses a row without explanation,
 //! and one that starts reporting a new one gains it the same way.
+//!
+//! **Nothing a daemon says changes the size of a card.** Every string on a card arrives from
+//! another process — a provider's name, a plan, a window title, an error message — and every
+//! label that shows one either ellipsizes or wraps at any character, so a string too long
+//! for the space shortens itself. It has to: `grid::CardGrid` gives every cell the widest
+//! card's *minimum* width, so a label that answered "as wide as my text" would be answering
+//! for every card on screen.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -40,10 +47,20 @@ const MARK_GAP: i32 = 6;
 /// test below.
 const PILL_PADDING: i32 = 2;
 
-/// Narrowest a card is allowed to get. Three of these plus spacing is what "three columns"
-/// costs, and it is what stops the grid from packing three unreadable columns into a window
-/// that only has room for two.
+/// How wide a card is. Not a floor: the grid gives every cell exactly this, so three of
+/// these plus spacing is what "three columns" costs, and no card can widen its neighbours.
+///
+/// That is only true while **every line on a card can shorten itself** — the rule the
+/// `ellipsize`, `wrap_mode` and `width_chars` calls below exist for. A label that can do
+/// neither reports the width of its text as its minimum, `grid::CardGrid::cell_width` takes
+/// the widest minimum on screen, and one provider's long error message becomes every card's
+/// width. That is the bug this constant used to lose to.
 const MIN_WIDTH: i32 = 300;
+/// Most lines of a daemon message a card will lay out before ellipsizing it. Three is two
+/// more than any live message needs; what it stops is a paragraph deciding how tall every
+/// card in the row is. The whole of it stays readable in the provider's settings pane, which
+/// has the width and the scroller for it.
+const BLANK_LINES: i32 = 3;
 
 /// The account a card opens, retained separately from the readings that update in place.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,18 +125,29 @@ impl Card {
         provider_name: String,
         on_activate: Rc<dyn Fn(String, String)>,
     ) -> Self {
+        // All three ellipsize. None of them is expected to: a provider's name, its plan and
+        // a state chip all fit the row this build ships. They ellipsize because the three
+        // strings come from the *daemon* — a catalog entry, a plan the provider named, and,
+        // for a state this build has never heard of, that state verbatim — and a label that
+        // cannot shorten itself sets the width of every card in the grid. See `MIN_WIDTH`.
+        //
+        // Where the row does run short, GTK gives each label its minimum and shares what is
+        // left smallest-need-first, so the name is the last thing to lose characters.
         let name = gtk::Label::builder()
             .halign(gtk::Align::Start)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
             .css_classes(["heading"])
             .build();
         let plan = gtk::Label::builder()
             .halign(gtk::Align::Start)
             .valign(gtk::Align::End)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
             .css_classes(["caption", "quota-plan"])
             .build();
         let chip = gtk::Label::builder()
             .halign(gtk::Align::End)
             .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
             .css_classes(["caption", "quota-chip"])
             .build();
 
@@ -171,8 +199,12 @@ impl Card {
         // them. Presentation the provider owns: it is set, never parsed and never
         // reformatted. A provider that reports only a percentage leaves it hidden, so the
         // card keeps the height it has always had.
+        //
+        // One line, ellipsized: the provider decides how long this string is, and neither
+        // the card's width nor its height is the provider's to decide.
         let absolutes = gtk::Label::builder()
             .halign(gtk::Align::Start)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
             .css_classes(["caption", "dim-label"])
             .build();
 
@@ -187,9 +219,20 @@ impl Card {
 
         // Shown in place of the reading, never alongside it: an account that has never
         // answered has nothing to put a number on.
+        //
+        // The one place on a card where daemon prose is printed whole, and therefore the
+        // one that has to be told, twice, that it may not resize the card. `WordChar` is
+        // what breaks the strings these messages are actually made of — a D-Bus error name,
+        // a URL, a token with no space in it anywhere. Plain word wrapping cannot break any
+        // of those, so it asks for the width of the longest one instead, and asking is
+        // enough: a minimum width is a minimum for every card in the grid. `lines` with an
+        // ellipsis bounds the other axis; see `BLANK_LINES`.
         let blank = gtk::Label::builder()
             .halign(gtk::Align::Start)
             .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .lines(BLANK_LINES)
             .xalign(0.0)
             .css_classes(["dim-label"])
             .build();
@@ -342,7 +385,12 @@ impl Card {
             None => {
                 self.reading.set_visible(false);
                 self.blank.set_visible(true);
-                self.blank.set_label(&blank_message(status));
+                let message = blank_message(status);
+                // The card shows the first `BLANK_LINES` of it; the tooltip is where the
+                // rest of a long one is, so that truncating it costs nothing on the way to
+                // the settings pane.
+                self.blank.set_tooltip_text(Some(&message));
+                self.blank.set_label(&message);
                 self.rebuild_rows(&[])
             }
         };

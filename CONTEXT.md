@@ -468,6 +468,16 @@ history that does not exist yet.
   a height and their footers line up; the cost is a short card in a single-column window
   carrying the height of the tallest one. The last row is left ragged: a filler card would
   be something to click on that does nothing.
+- **A card's width is the card's, not the daemon's.** The cell is the widest card's
+  *minimum* width — its own width request — and never its natural width, because a natural
+  width is the width of whatever text arrived: a provider that answered with an error
+  message longer than a card, or a window title nobody sized a card for, used to set the
+  width of every card on screen and collapse three columns into one. So every label that
+  shows a string from the daemon ellipsizes, and the one that shows prose whole wraps at any
+  character and stops after three lines — a D-Bus error name and a URL have no space in them
+  to wrap at, and a label that cannot shorten itself asks for the width of its text as its
+  *minimum*. The rest of a long message is in the provider's settings pane, and in the
+  tooltip.
 - **A window the provider did not send is not drawn.** No placeholder, no explanation. The
   window set is whatever arrived; the card rearranges silently when it changes. Needs
   hysteresis in the daemon so a single malformed response does not make a window blink.

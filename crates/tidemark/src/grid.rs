@@ -290,7 +290,7 @@ mod imp {
             if count == 0 {
                 return (0, 0, -1, -1);
             }
-            let cell_width = self.natural_width();
+            let cell_width = self.cell_width();
             match orientation {
                 // One column is the minimum, because a card is as narrow as it is going to
                 // get. The natural width is however many columns there are cards for, up to
@@ -323,7 +323,7 @@ mod imp {
             if slots.is_empty() {
                 return;
             }
-            let cell_width = self.natural_width();
+            let cell_width = self.cell_width();
             let cell_height = self.natural_height(cell_width);
             let columns = columns(width, cell_width, SPACING, MAX_COLUMNS);
             self.columns.set(columns);
@@ -379,12 +379,23 @@ fn content_left(width: i32, columns: usize, cell_width: f64) -> f64 {
 }
 
 impl imp::CardGrid {
-    /// The widest card's natural width, which every cell gets.
-    fn natural_width(&self) -> i32 {
+    /// The width every cell gets: the widest card's **minimum** width.
+    ///
+    /// Minimum and not natural, and that is the whole of the rule that keeps cards the same
+    /// size. A card's natural width is a function of the text it was handed — a provider
+    /// that answers with a long error message, or a window title nobody sized the card for,
+    /// asks for a wider card — and every cell in this grid is the same width, so under
+    /// `natural` one long string from one daemon widened every card on screen. A minimum is
+    /// the card's own width request and nothing the daemon said, so a card that cannot fit
+    /// what it was given shortens it, which is what `card.rs` ellipsizes and wraps for.
+    ///
+    /// Height is still natural, below: a card that needs two lines gets two lines, and its
+    /// neighbours match it so the footers line up. Width is the axis with a right answer.
+    fn cell_width(&self) -> i32 {
         self.slots
             .borrow()
             .iter()
-            .map(|held| held.child.measure(gtk::Orientation::Horizontal, -1).1)
+            .map(|held| held.child.measure(gtk::Orientation::Horizontal, -1).0)
             .max()
             .unwrap_or(0)
     }
