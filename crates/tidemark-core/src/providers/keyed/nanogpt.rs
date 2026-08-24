@@ -2,24 +2,38 @@
 //!
 //! # The two requests
 //!
-//! NanoGPT documents `GET /api/subscription/v1/usage` for the subscription's daily and
-//! monthly usage units, and `POST /api/check-balance` for the account's USD and NANO
-//! balances. Both accept the same `x-api-key` header. They are independent and run
-//! concurrently; both are required because a subscription can coexist with pay-as-you-go
-//! credit and neither response describes the other.
+//! NanoGPT serves `GET /api/subscription/v1/usage` for metered allowances and
+//! `POST /api/check-balance` for the account's USD and NANO balances. Both accept the same
+//! `x-api-key` header. They are independent and run concurrently; both are required
+//! because metered allowances coexist with pay-as-you-go credit and neither response
+//! describes the other.
+//!
+//! # What the usage endpoint really returns
+//!
+//! Not what its reference documents. The published example is a fixed `daily`/`monthly`
+//! pair; a live account instead returns one object per metered pool, each named for its
+//! own period — `dailyImages`, `dailyInputTokens`, `weeklyInputTokens` — with the pools
+//! the account has no allowance for present but `null`, and a parallel `limits` object
+//! keyed by those same names. Requiring the documented fields rejected every real
+//! response with `missing field \`daily\``, so the reading is driven by what the body
+//! names rather than by fields this module hopes to find.
 //!
 //! # The reading
 //!
-//! Subscription `percentUsed` values are fractions in `[0, 1]`, not percentages. Daily is
-//! a real 24-hour window and is keyed by that length. Monthly reports its reset but not its
-//! start, so its length stays absent rather than manufacturing a billing-period duration.
-//! An active or grace subscription publishes both windows; an inactive response may omit
-//! their usage objects and still contributes the separately fetched prepaid balance.
+//! `percentUsed` values are fractions in `[0, 1]`, not percentages. The leading word of a
+//! metric name states the period, which is the only place a length appears: `daily` is a
+//! real 24-hour window, `weekly` a seven-day one, and `monthly` a billing month whose
+//! length is not fixed, so it is named rather than keyed by a duration and draws no pace
+//! mark. Because two pools can share a period, keys carry the pool as well as the length —
+//! `images/w86400` and `input-tokens/w86400` are two windows, not one. A period this build
+//! has never seen is skipped; a pool whose numbers cannot be read fails the whole fetch. A
+//! stated limit becomes the absolutes under the bar, and a pool with no stated limit keeps
+//! its percentage and prints nothing it would have to invent.
 //!
 //! A prepaid balance has no denominator. USD is therefore the first row of
 //! [`DetailSection::BALANCE`], which lets the card show the amount without inventing a bar;
-//! NANO and the deposit address remain detail rows. The successful fixtures below are the
-//! examples published in NanoGPT's API reference, not synthesized account data.
+//! NANO and the deposit address remain detail rows. The fixtures below are recorded
+//! responses, not synthesized account data.
 
 use super::{HandSpec, Options, ProviderError, redact_query};
 use crate::providers::{BoxFuture, Credential, Provider, http};
@@ -116,29 +130,7 @@ impl Provider for NanoGpt {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct Subscription {
-    active: bool,
-    state: SubscriptionState,
-    limits: Limits,
-    daily: Option<Quota>,
-    monthly: Option<Quota>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum SubscriptionState {
-    Active,
-    Grace,
-    Inactive,
-}
-
-#[derive(Debug, Deserialize)]
-struct Limits {
-    daily: f64,
-    monthly: f64,
-}
-
+/// One metric object: what a period has consumed, as every NanoGPT usage field reports it.
 #[derive(Debug, Deserialize)]
 struct Quota {
     used: f64,
@@ -174,29 +166,122 @@ fn reset(raw: i64, field: &str) -> Result<Timestamp, ProviderError> {
         .map_err(|_| ProviderError::malformed(format!("{field} is not a plausible timestamp")))
 }
 
+/// The period a metric name's leading word states, that word, and the pool the rest of the
+/// name identifies.
+///
+/// The live API does not report the `daily`/`monthly` pair its reference documents. It
+/// reports one object per metered thing — `dailyImages`, `weeklyInputTokens`,
+/// `dailyInputTokens` — and the leading word is the only place the period ever appears.
+/// Reading the length out of that word is what keeps [`WindowKey`] derived from length and
+/// pool: `dailyImages` and `dailyInputTokens` become two day-long windows drawing on
+/// different pools instead of one silently replacing the other. A leading word this build
+/// has never seen states a period of unknown length and is skipped rather than guessed at.
+fn period(name: &str) -> Option<(&'static str, Option<WindowLength>, &str)> {
+    let length = |seconds| Some(WindowLength::from_secs(seconds).expect("a period is nonzero"));
+    for (word, length) in [
+        ("daily", length(86_400)),
+        ("weekly", length(604_800)),
+        // A billing month is not a fixed number of seconds, so there is no length to key
+        // on and no pace mark to draw. See the `WindowKey::named` call below.
+        ("monthly", None),
+    ] {
+        if let Some(rest) = name.strip_prefix(word)
+            && (rest.is_empty() || rest.starts_with(|first: char| first.is_ascii_uppercase()))
+        {
+            return Some((word, length, rest));
+        }
+    }
+    None
+}
+
+/// `InputTokens` → `input tokens`: the provider's own metric name, in prose.
+fn spaced(rest: &str) -> String {
+    let mut text = String::with_capacity(rest.len() + 2);
+    for character in rest.chars() {
+        if character.is_ascii_uppercase() && !text.is_empty() {
+            text.push(' ');
+        }
+        text.extend(character.to_lowercase());
+    }
+    text
+}
+
+/// What the numbers under the bar are counted in. NanoGPT meters tokens, images and — in
+/// the documented subscription shape — nothing more specific than usage units.
+fn unit(pool: &str) -> &str {
+    pool.rsplit(' ')
+        .next()
+        .filter(|word| !word.is_empty())
+        .unwrap_or("units")
+}
+
+/// The period word capitalised, and the pool after it: `Weekly input tokens`.
+fn title(word: &str, pool: &str) -> String {
+    let mut title = String::with_capacity(word.len() + pool.len() + 1);
+    let mut characters = word.chars();
+    if let Some(first) = characters.next() {
+        title.extend(first.to_uppercase());
+        title.push_str(characters.as_str());
+    }
+    if !pool.is_empty() {
+        title.push(' ');
+        title.push_str(pool);
+    }
+    title
+}
+
+/// Whole counts with thousands separators, keeping one fraction digit only where there is
+/// one: `93,176`, `60,000,000`, `1.5`.
+fn compact(value: f64) -> String {
+    let sign = if value < 0.0 { "-" } else { "" };
+    let tenths = (value.abs() * 10.0).round() as i128;
+    let mut text = format!("{sign}{}", grouped(tenths / 10));
+    if tenths % 10 > 0 {
+        text.push('.');
+        text.push_str(&(tenths % 10).to_string());
+    }
+    text
+}
+
+fn grouped(whole: i128) -> String {
+    let digits = whole.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
 fn window(
     key: WindowKey,
-    title: &str,
+    title: String,
+    unit: &str,
     length: Option<WindowLength>,
     quota: &Quota,
-    limit: f64,
+    limit: Option<f64>,
 ) -> Result<Window, ProviderError> {
     if !quota.used.is_finite()
         || !quota.remaining.is_finite()
         || !quota.percent_used.is_finite()
-        || !limit.is_finite()
+        || limit.is_some_and(|limit| !limit.is_finite())
     {
         return Err(ProviderError::malformed(format!(
             "{title} quota contains a non-finite number"
         )));
     }
+    let resets_at = reset(quota.reset_at, &title)?;
     Ok(Window {
         key,
-        title: title.to_owned(),
-        subtitle: Some(format!("{} / {} units", quota.used, limit)),
+        // Without a limit there is no denominator to print, and inventing one would be a
+        // lie the card draws in small type. The percentage still draws the bar.
+        subtitle: limit.map(|limit| format!("{} / {} {unit}", compact(quota.used), compact(limit))),
         used_percent: (quota.percent_used * 100.0).clamp(0.0, 100.0),
-        resets_at: Some(reset(quota.reset_at, title)?),
+        resets_at: Some(resets_at),
         length,
+        title,
     })
 }
 
@@ -205,39 +290,59 @@ fn parse(
     balance_body: &str,
     captured_at: Timestamp,
 ) -> Result<Snapshot, ProviderError> {
-    let subscription: Subscription = serde_json::from_str(subscription_body)
+    let usage: serde_json::Map<String, serde_json::Value> = serde_json::from_str(subscription_body)
         .map_err(|e| ProviderError::malformed(format!("unreadable subscription usage: {e}")))?;
     let balance: Balance = serde_json::from_str(balance_body)
         .map_err(|e| ProviderError::malformed(format!("unreadable balance: {e}")))?;
     let usd = amount(&balance.usd_balance, "usd_balance")?;
     amount(&balance.nano_balance, "nano_balance")?;
 
-    let mut windows = Vec::with_capacity(2);
-    if subscription.active || subscription.state == SubscriptionState::Grace {
-        let daily = subscription
-            .daily
-            .as_ref()
-            .ok_or_else(|| ProviderError::malformed("active subscription has no daily usage"))?;
-        let monthly = subscription
-            .monthly
-            .as_ref()
-            .ok_or_else(|| ProviderError::malformed("active subscription has no monthly usage"))?;
-        let day = WindowLength::from_secs(86_400).expect("one day is nonzero");
+    let limits = usage.get("limits").and_then(serde_json::Value::as_object);
+    let mut windows = Vec::new();
+    for (name, reported) in &usage {
+        // A metric the account has no allowance for arrives as `null`. That is an absent
+        // window, not a broken one: nothing is reported, so nothing is published.
+        if name == "limits" || reported.is_null() {
+            continue;
+        }
+        let Some((word, length, rest)) = period(name) else {
+            continue;
+        };
+        let quota = Quota::deserialize(reported)
+            .map_err(|e| ProviderError::malformed(format!("unreadable {name} usage: {e}")))?;
+        let limit = match limits.and_then(|limits| limits.get(name)) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(limit) => Some(limit.as_f64().ok_or_else(|| {
+                ProviderError::malformed(format!("{name} limit is not a number"))
+            })?),
+        };
+        let pool = spaced(rest);
+        let key = match length {
+            Some(length) if pool.is_empty() => WindowKey::for_length(length),
+            Some(length) => WindowKey::for_pool(&pool.replace(' ', "-"), length),
+            // Named, not keyed by length, because a billing month does not have one. The
+            // name is still built from the period and the pool rather than from the field
+            // the provider happened to send them in.
+            None if pool.is_empty() => WindowKey::named(word),
+            None => WindowKey::named(&format!("{word}-{}", pool.replace(' ', "-"))),
+        };
         windows.push(window(
-            WindowKey::for_length(day),
-            "Daily",
-            Some(day),
-            daily,
-            subscription.limits.daily,
-        )?);
-        windows.push(window(
-            WindowKey::named("monthly"),
-            "Monthly",
-            None,
-            monthly,
-            subscription.limits.monthly,
+            key,
+            title(word, &pool),
+            unit(&pool),
+            length,
+            &quota,
+            limit,
         )?);
     }
+    // Shortest window first, the order the card reads best in. `serde_json` hands back a
+    // sorted map, so this is a presentation order rather than a tie-break for randomness.
+    windows.sort_by(|left, right| {
+        let length = |window: &Window| window.length.map_or(u64::MAX, WindowLength::as_secs);
+        length(left)
+            .cmp(&length(right))
+            .then_with(|| left.title.cmp(&right.title))
+    });
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
@@ -270,7 +375,15 @@ mod tests {
     use crate::providers::Credential;
     use tidemark_types::{CredentialKind, DetailSection, Timestamp};
 
-    const SUBSCRIPTION: &str = r#"{
+    /// A recorded `GET /api/subscription/v1/usage` response. This is the shape the live API
+    /// actually returns: one object per metered pool, named for its period, with the pools
+    /// the account has no allowance for reported as `null`. The `daily`/`monthly` pair in
+    /// NanoGPT's reference does not appear.
+    const LIVE: &str = r#"{"active":true,"provider":"balance","providerStatus":null,"providerStatusRaw":null,"stripeSubscriptionId":null,"cancellationReason":null,"canceledAt":null,"endedAt":null,"cancelAt":null,"cancelAtPeriodEnd":false,"limits":{"weeklyInputTokens":60000000,"dailyInputTokens":null,"dailyImages":100},"allowOverage":false,"period":{"currentPeriodEnd":"2026-09-19T22:57:50.820Z"},"dailyImages":{"used":0,"remaining":100,"percentUsed":0,"resetAt":1787616000000},"dailyInputTokens":null,"weeklyInputTokens":{"used":93176,"remaining":59906824,"percentUsed":0.0015529333333333334,"resetAt":1788134400000},"state":"active","graceUntil":null}"#;
+
+    /// The example published in NanoGPT's API reference. No account has been observed
+    /// returning it, but the periods it names are read the same way as the live ones.
+    const DOCUMENTED: &str = r#"{
       "active": true,
       "limits": { "daily": 5000, "monthly": 60000 },
       "enforceDailyLimit": true,
@@ -304,30 +417,31 @@ mod tests {
     }
 
     #[test]
-    fn the_documented_responses_show_subscription_quotas_and_balance() {
-        let snapshot = parse(SUBSCRIPTION, BALANCE, at(1_738_000_000)).expect("parses");
+    fn the_live_response_publishes_a_window_for_every_pool_it_meters() {
+        let snapshot = parse(LIVE, BALANCE, at(1_787_600_000)).expect("parses");
 
         assert_eq!(snapshot.provider.as_str(), "nanogpt");
+        // Three pools are named; `dailyInputTokens` is null, so two are reported.
         assert_eq!(snapshot.windows.len(), 2);
 
-        let daily = &snapshot.windows[0];
-        assert_eq!(daily.key.as_str(), "w86400");
-        assert_eq!(daily.title, "Daily");
-        assert_eq!(daily.used_percent, 0.1);
-        assert_eq!(daily.subtitle.as_deref(), Some("5 / 5000 units"));
-        assert_eq!(daily.length.expect("known").as_secs(), 86_400);
-        assert_eq!(daily.resets_at.expect("reported").as_unix(), 1_738_540_800);
+        let images = &snapshot.windows[0];
+        assert_eq!(images.key.as_str(), "images/w86400");
+        assert_eq!(images.title, "Daily images");
+        assert_eq!(images.used_percent, 0.0);
+        assert_eq!(images.subtitle.as_deref(), Some("0 / 100 images"));
+        assert_eq!(images.length.expect("known").as_secs(), 86_400);
+        assert_eq!(images.resets_at.expect("reported").as_unix(), 1_787_616_000);
 
-        let monthly = &snapshot.windows[1];
-        assert_eq!(monthly.key.as_str(), "monthly");
-        assert_eq!(monthly.title, "Monthly");
-        assert_eq!(monthly.used_percent, 0.075);
-        assert_eq!(monthly.subtitle.as_deref(), Some("45 / 60000 units"));
-        assert!(monthly.length.is_none());
+        let tokens = &snapshot.windows[1];
+        assert_eq!(tokens.key.as_str(), "input-tokens/w604800");
+        assert_eq!(tokens.title, "Weekly input tokens");
+        assert!((tokens.used_percent - 0.155_293_333_333_333_34).abs() < 1e-12);
         assert_eq!(
-            monthly.resets_at.expect("reported").as_unix(),
-            1_739_404_800
+            tokens.subtitle.as_deref(),
+            Some("93,176 / 60,000,000 tokens")
         );
+        assert_eq!(tokens.length.expect("known").as_secs(), 604_800);
+        assert_eq!(tokens.resets_at.expect("reported").as_unix(), 1_788_134_400);
 
         let balance = snapshot
             .details
@@ -346,50 +460,114 @@ mod tests {
     }
 
     #[test]
-    fn a_recognized_quota_with_a_malformed_remaining_value_fails_the_snapshot() {
-        let malformed = SUBSCRIPTION.replacen("\"remaining\": 4995", "\"remaining\": \"many\"", 1);
+    fn two_pools_of_the_same_length_do_not_share_one_key() {
+        // The recorded body with the null `dailyInputTokens` metric filled in: its limit
+        // stays null, so this is also the case where no denominator is stated.
+        let both_daily = LIVE.replacen(
+            r#""dailyInputTokens":null,"weeklyInputTokens""#,
+            r#""dailyInputTokens":{"used":10,"remaining":0,"percentUsed":1,"resetAt":1787616000000},"weeklyInputTokens""#,
+            1,
+        );
 
-        assert!(matches!(
-            parse(&malformed, BALANCE, at(1_738_000_000)),
-            Err(super::ProviderError::Malformed { .. })
-        ));
+        let snapshot = parse(&both_daily, BALANCE, at(1_787_600_000)).expect("parses");
+        let keys: Vec<&str> = snapshot.windows.iter().map(|w| w.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "images/w86400",
+                "input-tokens/w86400",
+                "input-tokens/w604800"
+            ]
+        );
+
+        let tokens = &snapshot.windows[1];
+        assert_eq!(tokens.title, "Daily input tokens");
+        assert_eq!(tokens.used_percent, 100.0);
+        assert_eq!(tokens.subtitle, None, "no limit is stated for this pool");
     }
 
     #[test]
-    fn a_subscription_in_grace_keeps_its_reported_windows() {
-        let grace = SUBSCRIPTION
-            .replacen("\"active\": true", "\"active\": false", 1)
-            .replacen("\"state\": \"active\"", "\"state\": \"grace\"", 1);
+    fn a_response_that_meters_nothing_still_reports_the_balance() {
+        let nothing = LIVE
+            .replacen(
+                r#""dailyImages":{"used":0,"remaining":100,"percentUsed":0,"resetAt":1787616000000}"#,
+                r#""dailyImages":null"#,
+                1,
+            )
+            .replacen(
+                r#""weeklyInputTokens":{"used":93176,"remaining":59906824,"percentUsed":0.0015529333333333334,"resetAt":1788134400000}"#,
+                r#""weeklyInputTokens":null"#,
+                1,
+            );
 
-        let snapshot = parse(&grace, BALANCE, at(1_738_000_000)).expect("parses");
-        assert_eq!(snapshot.windows.len(), 2);
-    }
-
-    #[test]
-    fn an_inactive_subscription_may_omit_usage_windows() {
-        let inactive = r#"{
-          "active": false,
-          "limits": { "daily": 0, "monthly": 0 },
-          "state": "inactive"
-        }"#;
-
-        let snapshot = parse(inactive, BALANCE, at(1_738_000_000)).expect("parses");
+        let snapshot = parse(&nothing, BALANCE, at(1_787_600_000)).expect("parses");
         assert!(snapshot.windows.is_empty());
         assert_eq!(snapshot.details[0].rows[0].value, "$129.47");
     }
 
     #[test]
-    fn an_active_subscription_must_report_both_usage_windows() {
-        let missing = r#"{
-          "active": true,
-          "limits": { "daily": 5000, "monthly": 60000 },
-          "state": "active"
-        }"#;
+    fn a_recognized_pool_with_a_malformed_number_fails_the_snapshot() {
+        let malformed = LIVE.replacen(r#""used":93176"#, r#""used":"many""#, 1);
 
         assert!(matches!(
-            parse(missing, BALANCE, at(1_738_000_000)),
+            parse(&malformed, BALANCE, at(1_787_600_000)),
             Err(super::ProviderError::Malformed { .. })
         ));
+    }
+
+    #[test]
+    fn a_limit_that_is_not_a_number_fails_rather_than_being_dropped() {
+        let malformed = LIVE.replacen(
+            r#""weeklyInputTokens":60000000"#,
+            r#""weeklyInputTokens":"lots""#,
+            1,
+        );
+
+        assert!(matches!(
+            parse(&malformed, BALANCE, at(1_787_600_000)),
+            Err(super::ProviderError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_period_this_build_does_not_know_is_skipped_rather_than_guessed_at() {
+        let unknown = LIVE.replacen(
+            r#""dailyImages":{"used":0"#,
+            r#""fortnightlyImages":{"used":0"#,
+            1,
+        );
+
+        let snapshot = parse(&unknown, BALANCE, at(1_787_600_000)).expect("parses");
+        let keys: Vec<&str> = snapshot.windows.iter().map(|w| w.key.as_str()).collect();
+        assert_eq!(keys, ["input-tokens/w604800"]);
+    }
+
+    #[test]
+    fn the_documented_shape_reads_as_a_day_and_a_billing_month() {
+        let snapshot = parse(DOCUMENTED, BALANCE, at(1_738_000_000)).expect("parses");
+
+        assert_eq!(snapshot.windows.len(), 2);
+
+        let daily = &snapshot.windows[0];
+        assert_eq!(daily.key.as_str(), "w86400");
+        assert_eq!(daily.title, "Daily");
+        assert_eq!(daily.used_percent, 0.1);
+        assert_eq!(daily.subtitle.as_deref(), Some("5 / 5,000 units"));
+        assert_eq!(daily.length.expect("known").as_secs(), 86_400);
+        assert_eq!(daily.resets_at.expect("reported").as_unix(), 1_738_540_800);
+
+        // A billing month has no fixed length, so it is named rather than keyed by one and
+        // it carries no pace mark.
+        let monthly = &snapshot.windows[1];
+        assert_eq!(monthly.key.as_str(), "monthly");
+        assert_eq!(monthly.title, "Monthly");
+        assert_eq!(monthly.used_percent, 0.075);
+        assert_eq!(monthly.subtitle.as_deref(), Some("45 / 60,000 units"));
+        assert!(monthly.length.is_none());
+        assert_eq!(
+            monthly.resets_at.expect("reported").as_unix(),
+            1_739_404_800
+        );
     }
 
     #[test]
