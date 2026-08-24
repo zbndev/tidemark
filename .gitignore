@@ -15,3 +15,12 @@
 # local planning, not for history
 /PLAN.md
 /plan/
+
+# ai slop
+.serena
+.codegraph
+.omp
+.omo
+.claude
+.codex
+.opencode
