@@ -11,14 +11,13 @@
 //! acquired a different way, and out of this plan's scope. What a key can read is the
 //! balance, and that is all this reads.
 //!
-//! # This card is empty on purpose
+//! # The card reading
 //!
-//! A balance has no limit behind it: there is nothing to divide by, so there is no share to
-//! draw a bar against. The design's rule for that shape is a detail section and no window —
-//! see `docs/superpowers/specs/2026-08-21-keyed-provider-port-design.md`. The source draws
-//! a bar anyway, at nought per cent while funded and a hundred once empty, and its
-//! depletion is real information; if that is wanted here it is a change to how a balance is
-//! drawn, not to this parser.
+//! A balance has no limit behind it: DeepSeek reports what is *left* — total, granted,
+//! topped up — and never what was spent, so there is no denominator and no share to
+//! compute. Inventing one would be inventing a quota. The snapshot therefore carries no
+//! window. It files the selected amount under [`DetailSection::BALANCE`], which lets the
+//! card print the money without a percentage or bar.
 //!
 //! # What the payload does not tell you
 //!
@@ -118,17 +117,26 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
     let rows = match chosen {
         // No row at all is an account with nothing in it, not an unreadable response: the
         // source reports exactly that, in dollars, with the sentence that says what to do.
-        None => vec![DetailRow {
-            label: "Balance".to_owned(),
-            value: "$0.00 — add credits at platform.deepseek.com".to_owned(),
-        }],
-        Some(balance) if balance.total <= 0.0 => vec![DetailRow {
-            label: "Balance".to_owned(),
-            value: format!(
-                "{} — add credits at platform.deepseek.com",
-                balance.amount(0.0)
-            ),
-        }],
+        None => vec![
+            DetailRow {
+                label: "Balance".to_owned(),
+                value: "$0.00".to_owned(),
+            },
+            DetailRow {
+                label: "Status".to_owned(),
+                value: "Add credits at platform.deepseek.com".to_owned(),
+            },
+        ],
+        Some(balance) if balance.total <= 0.0 => vec![
+            DetailRow {
+                label: "Balance".to_owned(),
+                value: balance.amount(0.0),
+            },
+            DetailRow {
+                label: "Status".to_owned(),
+                value: "Add credits at platform.deepseek.com".to_owned(),
+            },
+        ],
         Some(balance) if !envelope.is_available => vec![
             DetailRow {
                 label: "Balance".to_owned(),
@@ -159,10 +167,9 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
         provider: ProviderId::new(PROVIDER_ID),
         account: AccountId::default(),
         captured_at,
-        // No limit was reported, so there is no share to draw. See the module doc.
         windows: Vec::new(),
         details: vec![DetailSection {
-            title: DetailSection::PLAN.to_owned(),
+            title: DetailSection::BALANCE.to_owned(),
             rows,
         }],
     })
@@ -232,14 +239,14 @@ mod tests {
     }
 
     #[test]
-    fn a_balance_with_no_limit_draws_no_bar_and_says_what_it_is() {
+    fn a_funded_balance_is_an_amount_only_reading() {
         let snapshot = parse(USD, at(1_800_000_000)).expect("parses");
         assert!(
             snapshot.windows.is_empty(),
-            "nothing said what the balance is out of; a bar would be invented"
+            "a remaining balance says nothing about a percentage"
         );
         assert_eq!(snapshot.details.len(), 1);
-        assert_eq!(snapshot.details[0].title, DetailSection::PLAN);
+        assert_eq!(snapshot.details[0].title, "Balance");
         assert_eq!(
             rows(&snapshot),
             [
@@ -283,18 +290,23 @@ mod tests {
         let snapshot = parse(zeroed, at(1_800_000_000)).expect("parses");
         assert_eq!(
             rows(&snapshot),
-            [(
-                "Balance".to_owned(),
-                "$0.00 — add credits at platform.deepseek.com".to_owned()
-            )]
+            [
+                ("Balance".to_owned(), "$0.00".to_owned()),
+                (
+                    "Status".to_owned(),
+                    "Add credits at platform.deepseek.com".to_owned()
+                ),
+            ]
         );
+        assert!(snapshot.windows.is_empty());
 
         // "empty balance_infos returns unavailable snapshot": no row at all is an account
         // with nothing in it, not an unreadable response.
         let none = r#"{"is_available":true,"balance_infos":[]}"#;
         let snapshot = parse(none, at(1_800_000_000)).expect("parses");
-        assert_eq!(rows(&snapshot).len(), 1);
-        assert!(rows(&snapshot)[0].1.starts_with("$0.00 —"));
+        assert_eq!(rows(&snapshot)[0].1, "$0.00");
+        assert_eq!(rows(&snapshot)[1].0, "Status");
+        assert!(snapshot.windows.is_empty());
     }
 
     #[test]
@@ -310,6 +322,7 @@ mod tests {
                 ("Status".to_owned(), "Unavailable for API calls".to_owned()),
             ]
         );
+        assert!(snapshot.windows.is_empty());
     }
 
     #[test]

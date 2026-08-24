@@ -21,12 +21,19 @@
 //!
 //! # The reading
 //!
-//! A key with a limit is a fixed balance — spend against a stated budget — drawn as one
-//! lengthless window keyed `balance`, because a budget has no length to key on and
-//! never resets. Spend is the server-reported `limit_remaining` first, clamped to the
-//! limit, so a negative remaining reads as an exhausted quota; then the usage matching
-//! the declared reset window; then cumulative `usage`. A key without a limit is a row
-//! saying so and no window.
+//! The account's credits are the reading every OpenRouter key can produce: money added
+//! against money spent, which is a share, so they are drawn — one lengthless window keyed
+//! `credits`, `total_usage` over `total_credits`, because a topped-up balance has no length
+//! to key on and never resets. An account that has spent against no credits at all is drawn
+//! full rather than empty, the same way the other prepaid ports draw a configuration that
+//! reports spend with no allowance behind it.
+//!
+//! A key with a limit adds a second window — spend against a stated budget, keyed `balance`,
+//! lengthless for the same reason. Spend there is the server-reported `limit_remaining`
+//! first, clamped to the limit, so a negative remaining reads as an exhausted quota; then
+//! the usage matching the declared reset window; then cumulative `usage`. A key without a
+//! limit — the common case, and what a plain key reports — is a row saying so and no second
+//! window; the credits window is what the card leads with either way.
 //!
 //! # The base URL
 //!
@@ -229,6 +236,36 @@ impl Credits {
     fn balance(self) -> f64 {
         (self.total_credits - self.total_usage).max(0.0)
     }
+
+    /// The credits as a window: spent over added. Lengthless and resetless — money added
+    /// does not roll over into anything — so `named("credits")`, keyed apart from the key's
+    /// own `balance` budget because the two measure different money.
+    ///
+    /// Credits of nought are the degenerate case: nothing spent is an untouched account at
+    /// nought per cent, and spend recorded against no credits at all is drawn full, so a
+    /// configuration that cannot be measured is visible rather than reassuring.
+    fn window(self) -> Window {
+        let used_percent = if self.total_credits > 0.0 {
+            (self.total_usage / self.total_credits * 100.0).clamp(0.0, 100.0)
+        } else if self.total_usage > 0.0 {
+            100.0
+        } else {
+            0.0
+        };
+        Window {
+            key: WindowKey::named("credits"),
+            title: "Credits".to_owned(),
+            subtitle: Some(format!(
+                "{} of {} used · {} left",
+                usd(self.total_usage),
+                usd(self.total_credits),
+                usd(self.balance())
+            )),
+            used_percent,
+            resets_at: None,
+            length: None,
+        }
+    }
 }
 
 /// Reads the credits body. Pure, and strict: this request is the point of the fetch, so
@@ -359,7 +396,9 @@ fn snapshot(credits: &Credits, key: &KeyState, captured_at: Timestamp) -> Snapsh
         KeyState::Data(data) => Budget::of(data),
         KeyState::Degraded(_) => None,
     };
-    let mut windows = Vec::new();
+    // Credits lead: they are the reading the account always has, and the card draws the
+    // first lengthless window it is given.
+    let mut windows = vec![credits.window()];
     if let Some(budget) = &budget {
         windows.push(budget.window());
     }
@@ -579,10 +618,22 @@ mod tests {
     }
 
     #[test]
-    fn a_key_with_a_limit_is_one_balance_window() {
+    fn the_credits_are_the_first_window_and_a_key_limit_the_second() {
         let snapshot = snapshot_with(&KeyState::Data(key_data(KEY_LIMIT_USAGE)));
-        assert_eq!(snapshot.windows.len(), 1);
-        let window = &snapshot.windows[0];
+        assert_eq!(snapshot.windows.len(), 2);
+
+        let credits = &snapshot.windows[0];
+        assert_eq!(credits.key.as_str(), "credits");
+        assert_eq!(credits.title, "Credits");
+        assert_eq!(credits.used_percent, 40.0, "$40 spent of the $100 added");
+        assert_eq!(credits.length, None);
+        assert_eq!(credits.resets_at, None);
+        assert_eq!(
+            credits.subtitle.as_deref(),
+            Some("$40.00 of $100.00 used · $60.00 left")
+        );
+
+        let window = &snapshot.windows[1];
         assert_eq!(window.key.as_str(), "balance");
         assert_eq!(window.title, "API key budget");
         assert_eq!(window.used_percent, 25.0);
@@ -591,6 +642,24 @@ mod tests {
         assert_eq!(
             window.subtitle.as_deref(),
             Some("$5.00 of $20.00 used · $15.00 left")
+        );
+    }
+
+    #[test]
+    fn credits_with_nothing_behind_them_are_drawn_by_whether_anything_was_spent() {
+        let untouched = Credits {
+            total_credits: 0.0,
+            total_usage: 0.0,
+        };
+        assert_eq!(untouched.window().used_percent, 0.0);
+        let spent = Credits {
+            total_credits: 0.0,
+            total_usage: 4.0,
+        };
+        assert_eq!(
+            spent.window().used_percent,
+            100.0,
+            "spend against no credits is a broken configuration, drawn full"
         );
     }
 
@@ -606,9 +675,11 @@ mod tests {
     }
 
     #[test]
-    fn a_key_without_a_limit_has_no_window_and_says_so() {
+    fn a_key_without_a_limit_still_draws_the_credits_and_says_so() {
         let snapshot = snapshot_with(&KeyState::Data(key_data(KEY_EMPTY)));
-        assert!(snapshot.windows.is_empty());
+        assert_eq!(snapshot.windows.len(), 1);
+        assert_eq!(snapshot.windows[0].key.as_str(), "credits");
+        assert_eq!(snapshot.windows[0].used_percent, 40.0);
         assert_eq!(
             row_of(&snapshot, "API key budget").value,
             "No limit configured"
@@ -618,7 +689,7 @@ mod tests {
     #[test]
     fn the_server_reported_remaining_drives_the_window() {
         let snapshot = snapshot_with(&KeyState::Data(key_data(KEY_REMAINING)));
-        let window = &snapshot.windows[0];
+        let window = &snapshot.windows[1];
         assert!(
             (window.used_percent - 9.0914810042).abs() < 1e-9,
             "{}",
@@ -632,11 +703,11 @@ mod tests {
     fn a_missing_remaining_falls_back_to_the_reset_window_usage() {
         for body in [KEY_MONTHLY_NO_REMAINING, KEY_MONTHLY_ONLY] {
             let snapshot = snapshot_with(&KeyState::Data(key_data(body)));
-            assert_eq!(snapshot.windows.len(), 1, "{body}");
+            assert_eq!(snapshot.windows.len(), 2, "{body}");
             assert!(
-                (snapshot.windows[0].used_percent - 9.0914810042).abs() < 1e-9,
+                (snapshot.windows[1].used_percent - 9.0914810042).abs() < 1e-9,
                 "{body}: {}",
-                snapshot.windows[0].used_percent
+                snapshot.windows[1].used_percent
             );
             assert_eq!(row_of(&snapshot, "API key remaining").value, "$454.54");
         }
@@ -645,7 +716,7 @@ mod tests {
     #[test]
     fn a_negative_remaining_is_an_exhausted_quota() {
         let snapshot = snapshot_with(&KeyState::Data(key_data(KEY_NEGATIVE_REMAINING)));
-        assert_eq!(snapshot.windows[0].used_percent, 100.0);
+        assert_eq!(snapshot.windows[1].used_percent, 100.0);
         assert_eq!(row_of(&snapshot, "API key remaining").value, "$0.00");
     }
 
@@ -662,7 +733,8 @@ mod tests {
     #[test]
     fn a_degraded_key_request_leaves_the_credits_and_says_why() {
         let snapshot = snapshot_with(&KeyState::Degraded("HTTP 500".to_owned()));
-        assert!(snapshot.windows.is_empty());
+        assert_eq!(snapshot.windows.len(), 1, "the credits still measure");
+        assert_eq!(snapshot.windows[0].key.as_str(), "credits");
         assert_eq!(row_of(&snapshot, "Remaining").value, "$60.00");
         assert_eq!(
             row_of(&snapshot, "API key budget").value,

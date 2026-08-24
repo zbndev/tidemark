@@ -526,6 +526,18 @@ impl ProviderStatus {
             .map(|row| row.value.as_str())
     }
 
+    /// An amount-only balance to show instead of an invented percentage.
+    ///
+    /// By convention this is the first row of [`DetailSection::BALANCE`]. It remains detail
+    /// data on the wire, so older clients simply keep it in the detail dialog.
+    pub fn balance(&self) -> Option<&str> {
+        self.details
+            .iter()
+            .find(|section| section.title == DetailSection::BALANCE)
+            .and_then(|section| section.rows.first())
+            .map(|row| row.value.as_str())
+    }
+
     /// The state, or `None` if this build does not know the string a newer daemon sent.
     pub fn state(&self) -> Option<ProviderState> {
         ProviderState::from_wire(&self.state)

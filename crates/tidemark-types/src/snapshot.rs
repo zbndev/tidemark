@@ -81,10 +81,17 @@ impl DetailSection {
     /// The heading a provider files its subscription level under.
     ///
     /// A convention rather than a field, because "plan" means something different at every
-    /// provider — a level, a tier, a seat, a credit balance — and the adapters already
-    /// phrase it in the provider's own words. What a client needs is only *which section*
-    /// to lift onto the card, so that is all this pins down. See [`crate::ProviderStatus::plan`].
+    /// provider — a level, a tier, or a seat — and the adapters already phrase it in the
+    /// provider's own words. What a client needs is only *which section* to lift onto the
+    /// card, so that is all this pins down. See [`crate::ProviderStatus::plan`].
     pub const PLAN: &'static str = "Plan";
+
+    /// The heading for an amount-only balance reading.
+    ///
+    /// The first row is the provider-formatted amount a card may show when there is no rate
+    /// window and therefore no honest percentage or bar. Status prose belongs in later rows:
+    /// the card never parses a formatted amount to separate money from an explanation.
+    pub const BALANCE: &'static str = "Balance";
 }
 
 /// What to call a provider in front of a person.
