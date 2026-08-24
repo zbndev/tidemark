@@ -31,6 +31,7 @@ whose services the cards are about:
 | `tidemark-llmproxy-symbolic.svg` | The LLM Proxy project |
 | `tidemark-minimax-symbolic.svg` | MiniMax |
 | `tidemark-moonshot-symbolic.svg` | Moonshot AI |
+| `tidemark-nanogpt-symbolic.svg` | NanoGPT (nano-gpt.com) |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
 | `tidemark-openai-api-symbolic.svg` | OpenAI |
 | `tidemark-opencodego-symbolic.svg` | The OpenCode project (OpenCode Go) |
@@ -67,7 +68,9 @@ approximation until 2026-08-22. The Moonshot mark is the Kimi one: they are the 
 Moonshot with its Kimi icon for that reason. The
 ClinePass one, its file notes, is
 Cline's own bot icon from [cline.bot/brand](https://cline.bot/brand), and the OpenAI one
-is the blossom CodexBar files under its codex name. Each was reduced to a
+is the blossom CodexBar files under its codex name. The NanoGPT mark is a single-colour
+trace of NanoGPT's official
+[`Nano-gptFilled.png`](https://nano-gpt.com/logo/Nano-gptFilled.png) asset. Each was reduced to a
 single-colour path set and stripped of the fills, gradients, masks and filters the
 originals carry — a symbolic icon is recoloured by the theme and cannot keep
 them; the ai&, ClawRouter, Fireworks, LiteLLM, OpenRouter, Synthetic and Wayfinder marks were first
