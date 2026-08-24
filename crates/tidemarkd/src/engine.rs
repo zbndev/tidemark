@@ -2348,7 +2348,9 @@ mod tests {
         let mut harness = harness_with_config(
             vec![
                 Account::with_client(Fake::new(vec![Ok(reading(0, 42.0, 3600))])).with_rebuild(
-                    Box::new(|_| Ok(Fake::new(vec![Ok(reading(0, 42.0, 3600))]) as Arc<dyn Provider>)),
+                    Box::new(|_| {
+                        Ok(Fake::new(vec![Ok(reading(0, 42.0, 3600))]) as Arc<dyn Provider>)
+                    }),
                 ),
             ],
             std::env::temp_dir().join(format!("tidemark-engine-proxy-{}.toml", std::process::id())),
@@ -2377,7 +2379,8 @@ mod tests {
             "a client built against the old proxy must not survive the change"
         );
         assert_eq!(
-            harness.engine.accounts()[0].status, published,
+            harness.engine.accounts()[0].status,
+            published,
             "the reading on the card is not news about a proxy"
         );
 

@@ -280,11 +280,7 @@ impl Config {
     /// Refused rather than clamped when it is out of range: a `70000` in the file was
     /// meant to be a port, and silently reading it as some other port is worse than
     /// saying it is not one.
-    fn preference_port(
-        &self,
-        table: &'static str,
-        key: &'static str,
-    ) -> Result<u16, ConfigError> {
+    fn preference_port(&self, table: &'static str, key: &'static str) -> Result<u16, ConfigError> {
         let Some(item) = self.preference(table, key)? else {
             return Ok(0);
         };
@@ -1228,7 +1224,13 @@ mod tests {
             "forever"
         );
         assert_eq!(config.preferences().expect("readable").proxy_mode, "off");
-        assert!(config.preferences().expect("readable").proxy_host.is_empty());
+        assert!(
+            config
+                .preferences()
+                .expect("readable")
+                .proxy_host
+                .is_empty()
+        );
         assert_eq!(config.preferences().expect("readable").proxy_port, 0);
     }
 
