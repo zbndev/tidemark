@@ -26,7 +26,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use tidemark_types::{ProviderStatus, Timestamp, Window};
+use tidemark_types::{DetailSection, ProviderState, ProviderStatus, Timestamp, Window};
 
 use crate::bar::QuotaBar;
 use crate::format;
@@ -375,14 +375,26 @@ impl Card {
 
         self.set_absolutes(absolutes_for(status).as_deref());
 
-        let secondary = match windows.split_first() {
-            Some((dominant, rest)) => {
+        let balance = balance_for(status);
+        let secondary = match (windows.split_first(), balance) {
+            (Some((dominant, rest)), _) => {
                 self.reading.set_visible(true);
                 self.blank.set_visible(false);
+                self.bar.widget().set_visible(true);
                 self.dominant_title.set_label(&dominant.title);
                 self.rebuild_rows(rest)
             }
-            None => {
+            (None, Some(balance)) => {
+                self.reading.set_visible(true);
+                self.blank.set_visible(false);
+                self.headline.set_label(balance);
+                self.dominant_title.set_label(DetailSection::BALANCE);
+                self.bar.widget().set_visible(false);
+                self.reset.set_visible(false);
+                self.set_absolutes(None);
+                self.rebuild_rows(&[])
+            }
+            (None, None) => {
                 self.reading.set_visible(false);
                 self.blank.set_visible(true);
                 let message = blank_message(status);
@@ -538,15 +550,23 @@ fn align_to_baseline(name: &gtk::Label, mark: &gtk::Image, plan: &gtk::Label) {
     });
 }
 
-/// What to say on a card that has no numbers to show.
+/// An amount-only balance from a successful reading.
 ///
-/// The daemon's own explanation when it gave one — it knows why, and it is more specific
-/// than anything this side could infer from the state alone.
+/// Failed polls leave the last good details in place. Those details must not hide the
+/// daemon's current explanation, so only an `Ok` state may promote its balance to the card.
+fn balance_for(status: &ProviderStatus) -> Option<&str> {
+    (status.state() == Some(ProviderState::Ok))
+        .then(|| status.balance())
+        .flatten()
+}
+
+/// What to say on a card that has no quota window or amount-only balance.
 fn blank_message(status: &ProviderStatus) -> String {
-    match status.message.as_deref() {
-        Some(message) => message.to_owned(),
-        None => "No reading yet.".to_owned(),
-    }
+    status
+        .message
+        .as_deref()
+        .unwrap_or("No reading yet.")
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -555,7 +575,9 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use tidemark_types::{AccountId, ProviderId, ProviderState, WindowStatus};
+    use tidemark_types::{
+        AccountId, DetailRow, DetailSection, ProviderId, ProviderState, WindowStatus,
+    };
 
     /// When the readings below were taken. Fixed so that nothing here depends on the wall
     /// clock.
@@ -600,6 +622,21 @@ mod tests {
             Some("No key is stored for zai.".into()),
         );
         assert_eq!(blank_message(&status), "No key is stored for zai.");
+    }
+
+    #[test]
+    fn a_balance_only_reading_shows_its_amount_instead_of_a_placeholder() {
+        let mut status = status_with(Vec::new());
+        status.details = vec![DetailSection {
+            title: DetailSection::BALANCE.to_owned(),
+            rows: vec![DetailRow {
+                label: "Balance".to_owned(),
+                value: "$1.93".to_owned(),
+            }],
+        }];
+        status.set_state(ProviderState::Ok, None);
+
+        assert_eq!(balance_for(&status), Some("$1.93"));
     }
 
     #[test]
