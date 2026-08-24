@@ -11,6 +11,12 @@
 //! nearly exhausted one, a failure with a last good reading underneath it, and an account
 //! that has never answered at all.
 //!
+//! Three of them are here because a card's size must not depend on them: an error message
+//! longer than a card and unbreakable by word wrapping, a window whose title and absolutes
+//! are longer than the room they have, and a state string this build does not know and shows
+//! verbatim. All three arrive from another process, and each one of them widened every card
+//! on screen once.
+//!
 //! ```sh
 //! systemctl --user stop tidemarkd        # it owns the name; only one process can
 //! cargo run -p tidemark --example mock-daemon
@@ -236,6 +242,10 @@ fn statuses() -> Vec<ProviderStatus> {
     codex.auth_source = Some("oauth".to_owned());
     codex.external_present = Some(true);
     codex.has_credential = Some(true);
+    // A state this build has never heard of, which the card shows verbatim because the
+    // daemon is the one that can name it. Long on purpose: the title row has a mark, a name
+    // and a plan on it already, and the chip is the part that gives way.
+    codex.state = "waiting-for-billing-cycle".to_owned();
 
     let mut kimi = account(
         "kimi",
@@ -251,11 +261,17 @@ fn statuses() -> Vec<ProviderStatus> {
         Some("Asked to wait 20 minutes.".into()),
     );
 
+    // The case that used to widen every card on screen, in the words the keyring actually
+    // used: a message longer than a card, with a D-Bus error name in it that word wrapping
+    // cannot break. The card is meant to wrap it at any character and keep its size.
     let mut antigravity =
         ProviderStatus::pending(&ProviderId::new("antigravity"), &AccountId::default());
     antigravity.set_state(
-        ProviderState::NoCredential,
-        Some("Sign in to Antigravity to see its quota.".into()),
+        ProviderState::KeyringUnavailable,
+        Some(
+            "the keyring is unavailable: service error org.freedesktop.zbus.Error: i/o error"
+                .into(),
+        ),
     );
     // The empty half of the CLI screen: nothing signed in either way, so the pane has a
     // command to run and nothing found.
@@ -266,8 +282,12 @@ fn statuses() -> Vec<ProviderStatus> {
     // The account that reports a fixed balance rather than only a percentage: the absolutes
     // behind the 41% are drawn under the bar, in the provider's own words. No live provider
     // fills this in yet, so the mock is the only place the case can be looked at.
-    let mut zai_five_hour = window("5 hours", 18_000, 41.0, Some(9_000));
-    zai_five_hour.subtitle = Some("410 / 1,000 prompts".to_owned());
+    //
+    // Both strings are longer than the card is wide, deliberately: the provider chooses how
+    // it phrases a window and its absolutes, and neither may choose how wide a card is.
+    let mut zai_five_hour = window("5 hours (Coding Plan)", 18_000, 41.0, Some(9_000));
+    zai_five_hour.subtitle =
+        Some("410 of 1,000 prompts and 2,450,000 of 5,000,000 tokens".to_owned());
 
     let zai = account(
         "zai",
