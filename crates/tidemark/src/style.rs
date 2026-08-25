@@ -47,19 +47,41 @@ pub(crate) const STYLE: &str = "
     box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.18), 0 8px 20px 0 rgba(0, 0, 0, 0.34);
 }
 
-/* Held by the pointer: opaque, further off the surface, and not offset, because the grid is
-   already carrying it.
+/* While any card is off its slot: every card opaque, in the colour it already was.
 
-   The background is the point. `.card` takes `@card_bg_color`, which in the dark style is
-   8% white *over whatever is behind it* — correct for a card lying on the window, and wrong
-   for one being carried over its neighbours, which then show through it. A lifted card is
-   opaque, and `@popover_bg_color` is the platform's own name for a surface floating above
-   the content rather than a colour of our invention. The foreground is deliberately left
-   alone: the bar's track and its pace mark take the inherited text colour, and changing it
-   would make them shift tone for the length of a drag. */
+   `.card` takes `@card_bg_color`, which in the dark style is 8% white *over whatever is
+   behind it* — right for a card lying on the window, wrong the moment cards overlap, and a
+   reorder makes them overlap: a displaced card whose new slot is on another row travels
+   there diagonally, across both rows. It is not enough to make the travelling card opaque.
+   Painting order is child order, so a card the drag left standing still is *above* every
+   card with a lower index, and a traveller sliding under one showed through it however
+   opaque the traveller was. While anything is moving, nothing is translucent.
+
+   The colour is the composite the card already is — `@window_bg_color` for the window it
+   lies on, with `@card_bg_color` over it as an image, because a background image paints
+   over the background colour. So the rule is invisible: it goes on when a drag starts and
+   comes off when the last card lands, and no card changes tone either time. Which rules out
+   `@popover_bg_color`, the carried card's colour: eight cards stepping a shade lighter for
+   the length of a drag is worse than the overlap it would fix. */
+.quota-grid.reordering > .quota-slot > .quota-card {
+    background-color: @window_bg_color;
+    background-image: linear-gradient(@card_bg_color, @card_bg_color);
+}
+
+/* Held by the pointer: further off the surface, and not offset, because the grid is already
+   carrying it. `@popover_bg_color` is the platform's own name for a surface floating above
+   the content rather than a colour of our invention, and it is opaque, so the card above
+   the rest of them is the one card that may say so. Written after the rule above because
+   the two have the same specificity, and `background-image` back to `none` because that
+   rule sets one.
+
+   The foreground is deliberately left alone: the bar's track and its pace mark take the
+   inherited text colour, and changing it would make them shift tone for the length of a
+   drag. */
 .quota-grid > .quota-slot.dragging > .quota-card,
 .quota-grid > .quota-slot:hover.dragging > .quota-card {
     background-color: @popover_bg_color;
+    background-image: none;
     transform: none;
     box-shadow: 0 4px 8px 0 rgba(0, 0, 0, 0.24), 0 16px 36px 0 rgba(0, 0, 0, 0.44);
 }
