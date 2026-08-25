@@ -61,6 +61,19 @@ pub const SLOT_CLASS: &str = "quota-slot";
 /// inside it. On the slot rather than the card because the grid holds slots and knows
 /// nothing about what is in them; `style.rs` matches `.quota-slot.dragging > .quota-card`.
 const DRAGGING_CLASS: &str = "dragging";
+/// The class the grid itself carries, which every rule in `style.rs` is scoped to. Added
+/// here rather than by whoever builds the grid, so a rule cannot quietly stop matching
+/// because a caller forgot it.
+pub const GRID_CLASS: &str = "quota-grid";
+/// Added to the *grid* for as long as any card is off its slot.
+///
+/// Every card, and not only the ones in motion. `.card` is 8% white over whatever is behind
+/// it in the dark style, and when two cards overlap the one on top may be either of them: a
+/// card the drag left standing still is painted above every card with a lower index, so a
+/// traveller sliding under one showed through it however opaque the traveller itself was
+/// made. The cheapest thing that is right is for no card to be translucent while any card
+/// is moving. `style.rs` matches `.quota-grid.reordering > .quota-slot > .quota-card`.
+const REORDERING_CLASS: &str = "reordering";
 
 /// How many columns fit, between one and `max`.
 ///
@@ -160,6 +173,26 @@ fn shift(index: usize, from: usize, to: usize) -> f64 {
         return 1.0;
     }
     0.0
+}
+
+/// The order the cards are painted in: the ones standing still, then the ones in motion,
+/// then the carried one, each group keeping its slot order.
+///
+/// Painting order is child order, and slot order is the wrong child order the moment a card
+/// leaves its slot. A card travelling to a slot on another row crosses the rows between,
+/// and every card the drag left alone with a higher index is painted after it — so the
+/// travelling card slid *under* its neighbours instead of over them. Nothing that is
+/// standing still should be over something that is moving.
+fn paint_order(motion: &[bool], carried: Option<usize>) -> Vec<usize> {
+    let carried = carried.filter(|index| *index < motion.len());
+    let mut order = Vec::with_capacity(motion.len());
+    for group in [false, true] {
+        order.extend(
+            (0..motion.len()).filter(|index| Some(*index) != carried && motion[*index] == group),
+        );
+    }
+    order.extend(carried);
+    order
 }
 
 /// How fast the scrolled view should follow a pointer this far into its edge, in pixels per
@@ -268,6 +301,7 @@ mod imp {
     impl ObjectImpl for CardGrid {
         fn constructed(&self) {
             self.parent_constructed();
+            self.obj().add_css_class(GRID_CLASS);
             self.obj().install_gesture();
         }
 
@@ -587,6 +621,9 @@ impl CardGrid {
             // the detail dialog. The card also moves to the end of the child list, which is
             // what puts it above its siblings for both painting and picking.
             gesture.set_state(gtk::EventSequenceState::Claimed);
+            // Cards are about to overlap, in both directions of z-order. Nothing on this
+            // grid is translucent until the last of them is back on a slot.
+            self.add_css_class(REORDERING_CLASS);
             let index = self.imp().drag.borrow().as_ref().map(|drag| drag.index);
             if let Some(index) = index {
                 let slots = self.imp().slots.borrow();
@@ -632,6 +669,7 @@ impl CardGrid {
         for (index, wanted) in shifts {
             self.animate_offset(index, wanted);
         }
+        self.raise_moving();
         self.queue_allocate();
     }
 
@@ -789,6 +827,7 @@ impl CardGrid {
                 autoscroll.remove();
             }
         }
+        self.remove_css_class(REORDERING_CLASS);
         for held in self.imp().slots.borrow().iter() {
             held.child.remove_css_class(DRAGGING_CLASS);
             held.target.set(0.0);
@@ -807,6 +846,30 @@ impl CardGrid {
         for held in self.imp().slots.borrow().iter() {
             held.child.insert_after(self, previous.as_ref());
             previous = Some(held.child.clone());
+        }
+    }
+
+    /// Rebuilds the child list in [`paint_order`], so a card in motion is painted over the
+    /// cards standing still. Once per change of destination, not once per frame: which
+    /// cards are moving only changes when the pointer crosses a slot boundary.
+    fn raise_moving(&self) {
+        let carried = self
+            .imp()
+            .drag
+            .borrow()
+            .as_ref()
+            .filter(|drag| drag.carrying || drag.settle.is_some())
+            .map(|drag| drag.index);
+        let slots = self.imp().slots.borrow();
+        let motion: Vec<bool> = slots
+            .iter()
+            .map(|held| held.offset.get() != 0.0 || held.target.get() != 0.0)
+            .collect();
+        let mut previous: Option<gtk::Widget> = None;
+        for index in paint_order(&motion, carried) {
+            let child = slots[index].child.clone();
+            child.insert_after(self, previous.as_ref());
+            previous = Some(child);
         }
     }
 
@@ -1012,12 +1075,45 @@ mod tests {
     }
 
     #[test]
+    fn a_card_in_motion_is_painted_over_the_cards_standing_still() {
+        // Card 1 is the one being carried, and card 3 is travelling to a slot on another
+        // row. Cards 4 and 5 are standing still with higher indices, which is what used to
+        // put them over the top of card 3.
+        let motion = [false, false, true, true, false, false];
+        assert_eq!(paint_order(&motion, Some(1)), [0, 4, 5, 2, 3, 1]);
+    }
+
+    #[test]
+    fn nothing_moving_leaves_the_cards_in_slot_order() {
+        assert_eq!(paint_order(&[false; 4], None), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_carried_card_that_the_daemon_removed_underneath_the_drag_is_not_painted_twice() {
+        // `slots` can be replaced while a drag is in flight, and an index that is no longer
+        // in it would otherwise be appended to an order it is not a member of.
+        assert_eq!(paint_order(&[false, true], Some(7)), [0, 1]);
+    }
+
+    #[test]
     fn the_stylesheet_lifts_the_widget_the_drag_actually_marks() {
         // The class goes on the slot, and the rule that makes a carried card opaque has to
         // be written against the slot too. It was written against the card once, matched
         // nothing, and the only symptom was a translucent card mid-drag — which no test
         // reaches and no warning reports.
         let selector = format!(".{SLOT_CLASS}.{DRAGGING_CLASS} >");
+        assert!(
+            crate::style::STYLE.contains(&selector),
+            "the stylesheet has to select {selector}"
+        );
+    }
+
+    #[test]
+    fn the_stylesheet_makes_every_card_opaque_while_one_is_moving() {
+        // Same trap, one level up: this class goes on the grid, and a rule scoped to the
+        // slot instead would leave the cards a drag displaces translucent, which is a bug
+        // report and not a test failure.
+        let selector = format!(".{GRID_CLASS}.{REORDERING_CLASS} > .{SLOT_CLASS} >");
         assert!(
             crate::style::STYLE.contains(&selector),
             "the stylesheet has to select {selector}"

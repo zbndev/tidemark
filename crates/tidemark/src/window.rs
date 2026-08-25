@@ -127,7 +127,6 @@ impl MainWindow {
         grid.set_margin_start(12);
         grid.set_margin_end(12);
         grid.set_valign(gtk::Align::Start);
-        grid.add_css_class("quota-grid");
 
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
