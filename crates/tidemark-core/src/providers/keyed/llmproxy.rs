@@ -414,7 +414,7 @@ impl LLMProxy {
         if self.credential.is_blank() {
             return Err(ProviderError::Credential { status: 401 });
         }
-        let body = super::request(&self.client, self.quota_stats_request()?).await?;
+        let body = super::request(PROVIDER_ID, &self.client, self.quota_stats_request()?).await?;
         parse(&body, Timestamp::now())
     }
 }

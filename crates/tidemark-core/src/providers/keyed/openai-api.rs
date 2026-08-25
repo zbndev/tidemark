@@ -236,7 +236,7 @@ impl OpenAiApi {
     /// The legacy balance path, whose failure is a balance error for the precedence
     /// above to weigh — never a silent return to the usage error.
     async fn balance(&self, now: Timestamp) -> Result<Snapshot, ProviderError> {
-        let body = super::request(&self.client, self.credit_request()?).await?;
+        let body = super::request(PROVIDER_ID, &self.client, self.credit_request()?).await?;
         let grants = parse_credit_grants(&body, now)?;
         Ok(balance_snapshot(&grants, now))
     }
@@ -272,6 +272,7 @@ impl OpenAiApi {
             let mut walk = Walk::default();
             loop {
                 let body = super::request(
+                    PROVIDER_ID,
                     &self.client,
                     self.page_request(url, group_by, *range, walk.cursor())?,
                 )

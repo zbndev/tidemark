@@ -1084,7 +1084,9 @@ impl Kilo {
     /// card: the quota is the point of the poll.
     async fn profile(&self) -> Option<Profile> {
         let request = self.profile_request().ok()?;
-        let body = super::request(&self.client, request).await.ok()?;
+        let body = super::request(PROVIDER_ID, &self.client, request)
+            .await
+            .ok()?;
         parse_profile(&body).ok()
     }
 
@@ -1092,7 +1094,8 @@ impl Kilo {
         if self.credential.is_blank() {
             return Err(ProviderError::Credential { status: 401 });
         }
-        let reading = parse_batch(&super::request(&self.client, self.batch_request()?).await?)?;
+        let reading =
+            parse_batch(&super::request(PROVIDER_ID, &self.client, self.batch_request()?).await?)?;
         let profile = self.profile().await;
         Ok(snapshot(
             &reading,

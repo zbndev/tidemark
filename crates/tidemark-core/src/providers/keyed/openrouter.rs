@@ -145,7 +145,9 @@ impl OpenRouter {
             return Err(ProviderError::Credential { status: 401 });
         }
         let now = Timestamp::now();
-        let credits = parse_credits(&super::request(&self.client, self.credits_request()?).await?)?;
+        let credits = parse_credits(
+            &super::request(PROVIDER_ID, &self.client, self.credits_request()?).await?,
+        )?;
         let key = self.key_state().await;
         Ok(snapshot(&credits, &key, now))
     }
@@ -158,7 +160,7 @@ impl OpenRouter {
         let Ok(request) = self.key_request() else {
             return KeyState::Degraded("request failed".to_owned());
         };
-        match super::request(&self.client, request).await {
+        match super::request(PROVIDER_ID, &self.client, request).await {
             Ok(body) => match parse_key(&body) {
                 Ok(Some(data)) => KeyState::Data(data),
                 Ok(None) => KeyState::Degraded("no key data in the response".to_owned()),

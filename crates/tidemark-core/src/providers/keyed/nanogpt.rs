@@ -101,8 +101,8 @@ impl NanoGpt {
         let subscription_request = self.subscription_request()?;
         let balance_request = self.balance_request()?;
         let (subscription, balance) = tokio::join!(
-            super::request(&self.client, subscription_request),
-            super::request(&self.client, balance_request),
+            super::request(PROVIDER_ID, &self.client, subscription_request),
+            super::request(PROVIDER_ID, &self.client, balance_request),
         );
         parse(&subscription?, &balance?, Timestamp::now())
     }

@@ -135,6 +135,7 @@ impl AiAnd {
         let mut after_id: Option<String> = None;
         for _ in 0..MAX_PAGES {
             let body = super::request(
+                PROVIDER_ID,
                 &self.client,
                 self.logs_request(after.as_deref(), after_id.as_deref())?,
             )

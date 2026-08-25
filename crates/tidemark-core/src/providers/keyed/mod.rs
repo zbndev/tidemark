@@ -72,6 +72,7 @@ pub mod zai;
 pub mod zenmux;
 
 use super::{BoxFuture, Credential, Provider, ProviderError, http};
+use crate::debug;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -269,7 +270,7 @@ impl Keyed {
         if self.credential.is_blank() {
             return Err(ProviderError::Credential { status: 401 });
         }
-        let body = request(&self.client, self.build_request()?).await?;
+        let body = request(self.spec.id, &self.client, self.build_request()?).await?;
         (self.spec.parse)(&body, Timestamp::now())
     }
 }
@@ -281,25 +282,67 @@ impl Keyed {
 /// OpenRouter makes two calls — keeps its own `impl Provider` and sends each of its
 /// requests through here, so the parts that are easy to forget travel with the function
 /// rather than with each provider: `Retry-After` is read before the body consumes the
-/// headers, a non-success status goes through `http::check`, and the query string is
-/// stripped off any `reqwest` error before it can be rendered.
+/// headers, a non-success status goes through `http::check`, the query string is
+/// stripped off any `reqwest` error before it can be rendered, and the exchange reaches
+/// [`crate::debug`] when the user has asked for a raw-response log.
+///
+/// The slug is the provider the request belongs to. It is a parameter rather than
+/// something inferred from the URL because a provider whose fetch is several requests to
+/// several hosts is exactly the one whose log is hard to read without it.
 pub async fn request(
+    provider: &str,
     client: &reqwest::Client,
     request: reqwest::Request,
 ) -> Result<String, ProviderError> {
-    let response = client
-        .execute(request)
-        .await
-        .map_err(|error| ProviderError::Transport(redact_query(error)))?;
+    let sent = debug::Recorded::of(&request);
+    let note = |answer| {
+        if let Some(sent) = &sent {
+            debug::record(debug::Exchange {
+                provider,
+                sent: sent.sent(),
+                answer,
+            });
+        }
+    };
+
+    let response = match client.execute(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            let error = ProviderError::Transport(redact_query(error));
+            note(debug::Answer::Failed {
+                error: &error.to_string(),
+            });
+            return Err(error);
+        }
+    };
 
     let status = response.status();
     let retry_after = http::retry_after_header(&response).map(str::to_owned);
-    http::check(status, retry_after.as_deref())?;
+    if let Err(error) = http::check(status, retry_after.as_deref()) {
+        // Refused on its status: `reqwest` has not read the body and neither have we, so
+        // the line says what came back without pretending to a body it never held.
+        note(debug::Answer::Refused {
+            status: status.as_u16(),
+        });
+        return Err(error);
+    }
 
-    let body = response
-        .text()
-        .await
-        .map_err(|error| ProviderError::Transport(redact_query(error)))?;
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            let error = ProviderError::Transport(redact_query(error));
+            note(debug::Answer::Failed {
+                error: &error.to_string(),
+            });
+            return Err(error);
+        }
+    };
+    // Before the emptiness check, deliberately: "the provider answered nothing" is one of
+    // the things a person reads this log to confirm.
+    note(debug::Answer::Body {
+        status: status.as_u16(),
+        body: &body,
+    });
     if body.trim().is_empty() {
         // An empty body is its own error rather than serde's "EOF while parsing a value":
         // the one says the provider answered nothing, the other says we read it wrong.
