@@ -299,12 +299,12 @@ impl Cursor {
 
     async fn fetch_with_cookie(&self, cookie: &str) -> Result<Snapshot, ProviderError> {
         let summary_request = self.get(&self.url(USAGE_SUMMARY_URL), cookie)?;
-        let summary = super::request(&self.client, summary_request).await?;
+        let summary = super::request(PROVIDER_ID, &self.client, summary_request).await?;
         let identity_request = self.get(&self.url(AUTH_ME_URL), cookie)?;
         let sand_request = self.sand_usage_request(cookie)?;
         let (identity, sand) = tokio::join!(
-            super::request(&self.client, identity_request),
-            super::request(&self.client, sand_request),
+            super::request(PROVIDER_ID, &self.client, identity_request),
+            super::request(PROVIDER_ID, &self.client, sand_request),
         );
         // Both are supplementary: a failure here is an account with nothing to say, not a
         // poll that went wrong. See the module note.
@@ -322,7 +322,9 @@ impl Cursor {
         let legacy = match subject {
             Some(subject) => {
                 let request = self.request_usage_request(&subject, cookie)?;
-                super::request(&self.client, request).await.ok()
+                super::request(PROVIDER_ID, &self.client, request)
+                    .await
+                    .ok()
             }
             None => None,
         };
