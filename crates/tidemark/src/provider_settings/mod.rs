@@ -10,7 +10,7 @@ use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use gtk::glib;
-use tidemark_types::{AccountId, ProviderDefinition, ProviderId, ProviderStatus};
+use tidemark_types::{AccountId, CredentialKind, ProviderDefinition, ProviderId, ProviderStatus};
 
 use self::detail::ProviderDetail;
 use self::list::{ConfiguredList, Picker};
@@ -332,7 +332,9 @@ impl ProviderSettings {
             }
             settings.refresh_views();
             settings.dialog.pop_subpage();
-            settings.open_detail(provider, AccountId::default().to_string());
+            if opens_detail_after_add(&definition.credential, !definition.options.is_empty()) {
+                settings.open_detail(provider, AccountId::default().to_string());
+            }
         });
     }
 
@@ -464,6 +466,15 @@ fn pending_status(definition: &ProviderDefinition) -> ProviderStatus {
     status
 }
 
+/// Whether a provider has a configuration detail worth navigating to after it is added.
+///
+/// A browser-session provider with no options starts polling immediately. Pushing an empty
+/// detail page in that case looks like the click did nothing; the configured list and card
+/// are the useful confirmation instead.
+pub(super) fn opens_detail_after_add(credential: &str, has_options: bool) -> bool {
+    credential != CredentialKind::None.as_wire() || has_options
+}
+
 /// A D-Bus error as one sentence for a toast.
 pub(super) fn reason(error: &zbus::Error) -> String {
     match error {
@@ -477,7 +488,24 @@ mod tests {
     use std::collections::HashSet;
 
     use super::detail::{AfterBeginAction, after_begin_action};
-    use super::{ActiveDetail, DetailCache, PendingLogins, remove_local_provider};
+    use super::{
+        ActiveDetail, DetailCache, PendingLogins, opens_detail_after_add, remove_local_provider,
+    };
+    use tidemark_types::CredentialKind;
+
+    #[test]
+    fn a_keyless_provider_without_options_returns_to_the_configured_list_after_adding() {
+        assert!(!opens_detail_after_add(
+            CredentialKind::None.as_wire(),
+            false
+        ));
+    }
+
+    #[test]
+    fn a_provider_with_a_credential_or_options_opens_its_detail_after_adding() {
+        assert!(opens_detail_after_add(CredentialKind::Key.as_wire(), false));
+        assert!(opens_detail_after_add(CredentialKind::None.as_wire(), true));
+    }
 
     #[test]
     fn pending_logins_are_taken_once_for_cancellation() {

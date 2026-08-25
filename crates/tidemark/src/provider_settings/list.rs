@@ -4,7 +4,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use tidemark_types::{ProviderDefinition, ProviderStatus, provider_label};
 
-use super::model;
+use super::{model, opens_detail_after_add};
 use crate::mark;
 
 type IdentityCallback = Rc<dyn Fn(String, String)>;
@@ -173,7 +173,11 @@ fn update_row(
             .unwrap_or_else(|| status.state.clone())
     };
     row.row.set_subtitle(&subtitle);
-    row.edit.set_sensitive(definition.is_some());
+    let editable = definition.is_some_and(|definition| {
+        opens_detail_after_add(&definition.credential, !definition.options.is_empty())
+    });
+    row.edit.set_visible(editable);
+    row.edit.set_sensitive(editable);
     mark::set(&row.image, &status.provider);
 }
 

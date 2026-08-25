@@ -39,6 +39,7 @@ pub mod clawrouter;
 pub mod clinepass;
 pub mod codebuff;
 pub mod crof;
+pub mod cursor;
 pub mod deepgram;
 pub mod deepinfra;
 pub mod deepseek;
@@ -182,8 +183,10 @@ pub struct HandSpec {
     /// What to call it in front of a person.
     pub title: &'static str,
     /// How the account is authenticated, and therefore what the credentials dialog offers.
-    /// [`CredentialKind::Key`] for all but the local gateways, which answer without a
-    /// credential and declare [`CredentialKind::None`]; the registry publishes this rather
+    /// [`CredentialKind::Key`] for the providers the user pastes a key for;
+    /// [`CredentialKind::None`] for the ones that need nothing — the local gateways, which
+    /// answer without a credential, and the browser-session providers, which read the
+    /// session a browser on this machine already holds. The registry publishes this rather
     /// than assuming a key, and builds the account to match.
     pub credential: CredentialKind,
     /// One sentence saying which page the key is on. Empty for a provider that needs no

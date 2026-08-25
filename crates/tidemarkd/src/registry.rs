@@ -25,8 +25,8 @@ use std::sync::Arc;
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
-    self, aiand, codebuff, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo, litellm,
-    llmproxy, nanogpt, openai_api, openrouter, poe, sub2api, wayfinder, xai,
+    self, aiand, codebuff, cursor, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo,
+    litellm, llmproxy, nanogpt, openai_api, openrouter, poe, sub2api, wayfinder, xai,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -109,6 +109,9 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 /// The hand-written key-authenticated providers: those whose fetch is more than one
 /// request, so a `keyed::Spec` cannot describe them — ai& pages a request log,
 /// Codebuff posts for credits and then reads a subscription it can do without,
+/// Cursor reads a usage summary and then the identity, legacy request quota and weekly Bot
+/// allowance an account may or may not have, signing every request with the session cookie
+/// a browser on this machine already holds rather than with anything the user is asked for,
 /// Deepgram lists projects and then reads a usage breakdown for each (and puts its key in
 /// a scheme of its own, `Authorization: Token`, which `keyed::Auth` cannot express),
 /// DeepInfra reads a checklist and a month's usage, Factory walks an
@@ -133,6 +136,7 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &aiand::SPEC,
     &codebuff::SPEC,
+    &cursor::SPEC,
     &deepgram::SPEC,
     &deepinfra::SPEC,
     &factory::SPEC,
@@ -916,7 +920,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 38);
+        assert_eq!(definitions.len(), 39);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(

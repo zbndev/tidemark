@@ -77,7 +77,10 @@ Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 **No credential needed**
 
-Wayfinder
+Cursor · Wayfinder
+
+Cursor reads the session a browser on this machine already has on cursor.com — it has no
+API key to paste.
 
 Some providers need one extra setting alongside the key — a region, an account id, or the
 base URL of your own deployment. The provider's page asks for it.
