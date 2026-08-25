@@ -8,6 +8,8 @@ pub mod config;
 
 pub mod browser;
 
+pub mod debug;
+
 pub mod paths;
 
 pub mod oauth;

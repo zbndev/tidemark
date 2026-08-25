@@ -138,7 +138,7 @@ impl Groq {
 
     /// Sends one query and reads its scalar answer.
     async fn scalar(&self, query: &str) -> Result<f64, ProviderError> {
-        let body = super::request(&self.client, self.query_request(query)?).await?;
+        let body = super::request(PROVIDER_ID, &self.client, self.query_request(query)?).await?;
         parse_scalar(&body)
     }
 }

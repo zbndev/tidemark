@@ -145,7 +145,7 @@ impl Wayfinder {
     }
 
     async fn get(&self, url: &str) -> Result<String, ProviderError> {
-        super::request(&self.client, self.request(url)?).await
+        super::request(PROVIDER_ID, &self.client, self.request(url)?).await
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {

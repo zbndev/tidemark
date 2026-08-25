@@ -196,7 +196,7 @@ impl Factory {
     /// The soft second rung: any failure — the request, the status, the body — is no
     /// answer, and the ladder falls through to usage.
     async fn limits(&self) -> Option<BillingReading> {
-        let body = super::request(&self.client, self.limits_request().ok()?)
+        let body = super::request(PROVIDER_ID, &self.client, self.limits_request().ok()?)
             .await
             .ok()?;
         parse_limits(&body)
@@ -207,7 +207,7 @@ impl Factory {
             return Err(ProviderError::Credential { status: 401 });
         }
         let now = Timestamp::now();
-        let body = super::request(&self.client, self.auth_request()?).await?;
+        let body = super::request(PROVIDER_ID, &self.client, self.auth_request()?).await?;
         let auth = parse_auth(&body)?;
         // The source's own precedence: the profile's id, else the JWT inside the key.
         // The sniff is the last thing the key is used for besides the wire.
@@ -218,7 +218,12 @@ impl Factory {
         if let Some(reading) = self.limits().await {
             return Ok(rate_limits_snapshot(&auth, &reading, now));
         }
-        let body = super::request(&self.client, self.usage_request(user_id.as_deref())?).await?;
+        let body = super::request(
+            PROVIDER_ID,
+            &self.client,
+            self.usage_request(user_id.as_deref())?,
+        )
+        .await?;
         let usage = parse_usage(&body)?;
         Ok(classic_snapshot(&auth, &usage, now))
     }

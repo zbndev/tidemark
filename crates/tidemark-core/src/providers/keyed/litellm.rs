@@ -163,15 +163,17 @@ impl LiteLLM {
             return Err(ProviderError::Credential { status: 401 });
         }
         let now = Timestamp::now();
-        let body = super::request(&self.client, self.key_info_request()?).await?;
+        let body = super::request(PROVIDER_ID, &self.client, self.key_info_request()?).await?;
         let key = parse_key_info(&body)?;
         let reading = if key.user_id.is_some() {
             let id = key.user_id.as_deref().expect("checked above");
-            let body = super::request(&self.client, self.user_info_request(id)?).await?;
+            let body =
+                super::request(PROVIDER_ID, &self.client, self.user_info_request(id)?).await?;
             parse_user_info(&body, &key)?
         } else if key.team_id.is_some() {
             let id = key.team_id.as_deref().expect("checked above");
-            let body = super::request(&self.client, self.team_info_request(id)?).await?;
+            let body =
+                super::request(PROVIDER_ID, &self.client, self.team_info_request(id)?).await?;
             Reading::Team(parse_team_info(&body, &key)?)
         } else {
             // Unreachable — `parse_key_info` refuses a body naming neither — but the

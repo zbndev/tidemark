@@ -111,6 +111,55 @@ pub const OAUTH_SOURCE: &str = "oauth";
 /// The stored spelling of [`Source::Cli`].
 pub const CLI_SOURCE: &str = "cli";
 
+/// Checks a response's status and reads its body, writing the whole exchange to the
+/// raw-response log on the way through.
+///
+/// The providers that keep their own client — Claude, Codex, Antigravity — do these three
+/// steps identically, and each of them is a place the debug log would otherwise be
+/// forgotten. `keyed::request` is deliberately not this function: it redacts a query
+/// string out of its own errors, which these four have none of.
+pub(crate) async fn read_body(
+    provider: &str,
+    sent: crate::debug::Sent<'_>,
+    response: reqwest::Response,
+) -> Result<String, ProviderError> {
+    use crate::debug::{Answer, Exchange, record};
+
+    let status = response.status();
+    let retry_after = http::retry_after_header(&response).map(str::to_owned);
+    let note = |answer| {
+        record(Exchange {
+            provider,
+            sent,
+            answer,
+        });
+    };
+
+    if let Err(error) = http::check(status, retry_after.as_deref()) {
+        // Refused on its status: nothing has read the body, so the line says what came
+        // back rather than pretending to a body it never held.
+        note(Answer::Refused {
+            status: status.as_u16(),
+        });
+        return Err(error);
+    }
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            let error = ProviderError::Transport(error);
+            note(Answer::Failed {
+                error: &error.to_string(),
+            });
+            return Err(error);
+        }
+    };
+    note(Answer::Body {
+        status: status.as_u16(),
+        body: &body,
+    });
+    Ok(body)
+}
+
 /// What to call a window of this length, in the plainest terms that divide evenly.
 ///
 /// Shared because a window's span is the provider-neutral half of its title: every

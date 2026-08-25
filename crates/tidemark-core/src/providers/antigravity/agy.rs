@@ -146,19 +146,26 @@ impl Agy {
 
     /// Posts one RPC to a server already proven ready.
     pub async fn rpc(&self, port: u16, path: &str) -> Result<String, ProviderError> {
+        let url = endpoint(port, path);
         let response = self
             .client
-            .post(endpoint(port, path))
+            .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
             .body("{}")
             .send()
             .await
             .map_err(ProviderError::Transport)?;
-        let status = response.status();
-        let retry_after = http::retry_after_header(&response).map(str::to_owned);
-        http::check(status, retry_after.as_deref())?;
-        response.text().await.map_err(ProviderError::Transport)
+        crate::providers::read_body(
+            super::PROVIDER_ID,
+            crate::debug::Sent {
+                method: "POST",
+                url: &url,
+                body: Some("{}"),
+            },
+            response,
+        )
+        .await
     }
 
     /// Returns the port of a live server, starting one if there is none.

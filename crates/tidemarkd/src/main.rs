@@ -24,6 +24,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use tidemark_core::config::Config;
+use tidemark_core::debug;
 use tidemark_core::paths;
 use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::secrets::Secrets;
@@ -129,6 +130,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // key. Once running, a later bad edit is reported and the previous settings stand.
     let config = Config::at(config_path.clone())?;
     let preferences = config.preferences()?;
+    // Read here and only here: a switch that took effect mid-poll would leave a log whose
+    // gaps mean nothing, so turning it on is a restart. Before the first client is built,
+    // for the same reason the proxy is — the very first poll is often the interesting one.
+    if config.debug_raw_responses()? {
+        let log = debug::enable(&paths::data_dir()?)?;
+        tracing::warn!(
+            log = %log.display(),
+            "[debug] raw_responses is on: every provider response is being written to disk verbatim"
+        );
+    }
     // Before the first client is built, because `registry::accounts` builds several of
     // them: a `reqwest::Client` holds its proxy for life, and one built a line too early
     // would keep talking around the proxy until the daemon was restarted.

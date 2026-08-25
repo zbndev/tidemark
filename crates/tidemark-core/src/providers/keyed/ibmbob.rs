@@ -162,7 +162,7 @@ impl IBMBob {
             return Err(ProviderError::Credential { status: 401 });
         }
         let now = Timestamp::now();
-        let body = super::request(&self.client, self.profile_request()?).await?;
+        let body = super::request(PROVIDER_ID, &self.client, self.profile_request()?).await?;
         let profile = parse_profile(&body)?;
         let mut teams = Vec::new();
         for instance in &profile.instances {
@@ -180,7 +180,7 @@ impl IBMBob {
                     continue;
                 }
                 let request = self.team_request(&host, &instance.instance_id, &team.id, user_id)?;
-                let body = super::request(&self.client, request).await?;
+                let body = super::request(PROVIDER_ID, &self.client, request).await?;
                 let budget = parse_team_budget(&body)?;
                 teams.push(TeamUsage::of(instance, team, &budget));
             }

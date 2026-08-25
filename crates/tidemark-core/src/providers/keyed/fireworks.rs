@@ -132,7 +132,7 @@ impl Fireworks {
             return Err(ProviderError::Credential { status: 401 });
         }
         let now = Timestamp::now();
-        let body = super::request(&self.client, self.summary_request(now)?).await?;
+        let body = super::request(PROVIDER_ID, &self.client, self.summary_request(now)?).await?;
         Ok(snapshot(parse_summary(&body)?.as_ref(), now))
     }
 }

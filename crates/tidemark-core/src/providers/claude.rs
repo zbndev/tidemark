@@ -201,10 +201,12 @@ impl Claude {
             .send()
             .await
             .map_err(ProviderError::Transport)?;
-        let status = response.status();
-        let retry_after = http::retry_after_header(&response).map(str::to_owned);
-        http::check(status, retry_after.as_deref())?;
-        let body = response.text().await.map_err(ProviderError::Transport)?;
+        let body = super::read_body(
+            PROVIDER_ID,
+            crate::debug::Sent::get(&self.usage_url),
+            response,
+        )
+        .await?;
         let mut snapshot = parse(&body, Timestamp::now())?;
         // Asked after the reading, never before it: the plan is one line on the card and
         // the windows are the point of the poll, so nothing about the plan may delay or
@@ -253,10 +255,20 @@ impl Claude {
             .send()
             .await
             .ok()?;
-        if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.ok()?;
+        crate::debug::record(crate::debug::Exchange {
+            provider: PROVIDER_ID,
+            sent: crate::debug::Sent::get(&self.profile_url),
+            answer: crate::debug::Answer::Body {
+                status: status.as_u16(),
+                body: &body,
+            },
+        });
+        if !status.is_success() {
             return None;
         }
-        let plan = plan_from_profile(&response.text().await.ok()?)?;
+        let plan = plan_from_profile(&body)?;
         let _ = self.plan.set(plan.clone());
         Some(plan)
     }

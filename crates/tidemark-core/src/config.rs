@@ -45,6 +45,14 @@ const UPDATES_TABLE: &str = "updates";
 const RELEASE_CHECK_KEY: &str = "check";
 const HISTORY_TABLE: &str = "history";
 const HISTORY_RETENTION_KEY: &str = "retention";
+/// Table the raw-response log lives under: `[debug] raw_responses = true`.
+///
+/// Deliberately not part of [`Preferences`]. That type is the D-Bus wire shape the
+/// interface and every other client read, and this is not a preference anyone is meant to
+/// find in a settings dialog: it is a switch a person flips in the file, on purpose, to
+/// collect evidence for a bug report.
+const DEBUG_TABLE: &str = "debug";
+const RAW_RESPONSES_KEY: &str = "raw_responses";
 const PROXY_TABLE: &str = "proxy";
 const PROXY_MODE_KEY: &str = "mode";
 const PROXY_HOST_KEY: &str = "host";
@@ -196,6 +204,17 @@ impl Config {
                 .to_owned(),
             proxy_port: self.preference_port(PROXY_TABLE, PROXY_PORT_KEY)?,
         })
+    }
+
+    /// Whether the daemon should write every provider response to the raw-response log.
+    ///
+    /// Read once, at startup: a switch that took effect mid-poll would leave a file whose
+    /// gaps mean nothing. There is no setter, because there is deliberately no control —
+    /// see [`DEBUG_TABLE`].
+    pub fn debug_raw_responses(&self) -> Result<bool, ConfigError> {
+        Ok(self
+            .preference_bool(DEBUG_TABLE, RAW_RESPONSES_KEY)?
+            .unwrap_or(false))
     }
 
     pub fn set_release_check(&mut self, enabled: bool) -> Result<(), ConfigError> {
@@ -752,6 +771,37 @@ mod tests {
         let config = Config::at(scratch("absent").with_file_name("nothing.toml"))
             .expect("a missing file is an empty document");
         assert_eq!(config.option("zai", "region"), None);
+    }
+
+    #[test]
+    fn the_raw_response_log_is_off_until_the_file_asks_for_it() {
+        let path = scratch("debug-absent");
+        let _ = std::fs::remove_file(&path);
+        let config = Config::at(path.clone()).expect("missing is valid");
+        assert!(!config.debug_raw_responses().expect("readable"));
+
+        std::fs::write(&path, "[debug]\nraw_responses = true\n").expect("seed");
+        let config = Config::at(path.clone()).expect("parses");
+        assert!(config.debug_raw_responses().expect("readable"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_raw_response_switch_that_is_not_a_boolean_is_refused_rather_than_ignored() {
+        // Silently defaulting would leave someone collecting evidence for a bug report
+        // from a log that was never opened.
+        let path = scratch("debug-not-a-bool");
+        std::fs::write(&path, "[debug]\nraw_responses = \"yes\"\n").expect("seed");
+        let config = Config::at(path.clone()).expect("parses");
+        assert!(matches!(
+            config.debug_raw_responses(),
+            Err(ConfigError::InvalidPreference {
+                table: DEBUG_TABLE,
+                key: RAW_RESPONSES_KEY,
+                ..
+            })
+        ));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
