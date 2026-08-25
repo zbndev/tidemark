@@ -482,7 +482,9 @@ impl Codebuff {
     /// because the credits already in hand are the point of the poll.
     async fn subscription(&self) -> Option<Subscription> {
         let request = self.subscription_request().ok()?;
-        let body = super::request(&self.client, request).await.ok()?;
+        let body = super::request(PROVIDER_ID, &self.client, request)
+            .await
+            .ok()?;
         parse_subscription(&body).ok()
     }
 
@@ -490,7 +492,8 @@ impl Codebuff {
         if self.credential.is_blank() {
             return Err(ProviderError::Credential { status: 401 });
         }
-        let usage = parse_usage(&super::request(&self.client, self.usage_request()?).await?)?;
+        let usage =
+            parse_usage(&super::request(PROVIDER_ID, &self.client, self.usage_request()?).await?)?;
         let subscription = self.subscription().await;
         Ok(snapshot(&usage, subscription.as_ref(), Timestamp::now()))
     }

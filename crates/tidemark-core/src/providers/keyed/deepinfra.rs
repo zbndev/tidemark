@@ -112,8 +112,9 @@ impl DeepInfra {
             return Err(ProviderError::Credential { status: 401 });
         }
         let now = Timestamp::now();
-        let checklist_body = super::request(&self.client, self.checklist_request()?).await?;
-        let usage_body = super::request(&self.client, self.usage_request()?).await?;
+        let checklist_body =
+            super::request(PROVIDER_ID, &self.client, self.checklist_request()?).await?;
+        let usage_body = super::request(PROVIDER_ID, &self.client, self.usage_request()?).await?;
         combine(
             &parse_checklist(&checklist_body)?,
             &parse_usage(&usage_body)?,

@@ -215,13 +215,23 @@ impl Codex {
                 )
                 && credentials.refresh_token.is_some()
             {
+                crate::debug::record(crate::debug::Exchange {
+                    provider: PROVIDER_ID,
+                    sent: crate::debug::Sent::get(&self.usage_url),
+                    answer: crate::debug::Answer::Refused {
+                        status: status.as_u16(),
+                    },
+                });
                 refreshed = true;
                 credentials = self.force_refresh().await?;
                 continue;
             }
-            let retry_after = http::retry_after_header(&response).map(str::to_owned);
-            http::check(status, retry_after.as_deref())?;
-            let body = response.text().await.map_err(ProviderError::Transport)?;
+            let body = super::read_body(
+                PROVIDER_ID,
+                crate::debug::Sent::get(&self.usage_url),
+                response,
+            )
+            .await?;
             return parse(&body, Timestamp::now());
         }
     }

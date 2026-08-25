@@ -117,7 +117,7 @@ impl Poe {
             return Err(ProviderError::Credential { status: 401 });
         }
         let now = Timestamp::now();
-        let body = super::request(&self.client, self.balance_request()?).await?;
+        let body = super::request(PROVIDER_ID, &self.client, self.balance_request()?).await?;
         let balance = parse_balance(&body)?;
         let history = self.history(now).await;
         Ok(snapshot(balance, &history, now))
@@ -154,7 +154,7 @@ impl Poe {
         entries: &mut Vec<HistoryEntry>,
     ) -> Result<Option<String>, ()> {
         let request = self.history_request(cursor).map_err(|_| ())?;
-        let body = super::request(&self.client, request)
+        let body = super::request(PROVIDER_ID, &self.client, request)
             .await
             .map_err(|_| ())?;
         let page = parse_history_page(&body).map_err(|_| ())?;

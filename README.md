@@ -62,6 +62,29 @@ Antigravity can sign in through Tidemark, or reuse the login their own CLI alrea
 
 Removing a provider deletes its credentials and its card but keeps the quota history.
 
+## Reporting a wrong reading
+
+If a card shows a number the provider's own dashboard disagrees with, the useful evidence
+is the response Tidemark actually received. Put this in `~/.config/tidemark/config.toml`:
+
+```toml
+[debug]
+raw_responses = true
+```
+
+then `systemctl --user restart tidemarkd`. Every provider response is written verbatim,
+one JSON object per line, to `~/.local/share/tidemark/debug/responses.ndjson`:
+
+```bash
+jq 'select(.provider == "opencodego")' ~/.local/share/tidemark/debug/responses.ndjson
+```
+
+API keys are never written: request headers are left out entirely, URL query strings are
+redacted, and the sign-in endpoints are not logged at all. The file still describes your
+account's usage, so read it before attaching it to an issue. It rolls over at 16 MB and
+keeps one previous file. There is no switch in the interface — turning it off is the same
+edit, and a restart.
+
 ## Supported providers
 
 **Sign in with your account**

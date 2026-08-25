@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tidemark_types::{AccountId, ProviderId, Snapshot, Timestamp, Window, WindowKey, WindowLength};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use crate::providers::{ProviderError, http, title_case};
+use crate::providers::{ProviderError, title_case};
 
 use super::PROVIDER_ID;
 
@@ -29,22 +29,30 @@ pub async fn fetch(
         "{}/v1internal:fetchAvailableModels",
         endpoint.trim_end_matches('/')
     );
+    let payload = match project_id {
+        Some(project_id) => serde_json::json!({ "project": project_id }),
+        // Not `{"project": ""}`: an account Google gave no Cloud AI Companion project
+        // asks about itself, and a blank one is a value the server would validate.
+        None => serde_json::json!({}),
+    };
     let response = client
-        .post(url)
+        .post(&url)
         .bearer_auth(access_token)
-        .json(&match project_id {
-            Some(project_id) => serde_json::json!({ "project": project_id }),
-            // Not `{"project": ""}`: an account Google gave no Cloud AI Companion project
-            // asks about itself, and a blank one is a value the server would validate.
-            None => serde_json::json!({}),
-        })
+        .json(&payload)
         .send()
         .await
         .map_err(ProviderError::Transport)?;
-    let status = response.status();
-    let retry_after = http::retry_after_header(&response).map(str::to_owned);
-    http::check(status, retry_after.as_deref())?;
-    let body = response.text().await.map_err(ProviderError::Transport)?;
+    let sent_body = payload.to_string();
+    let body = crate::providers::read_body(
+        PROVIDER_ID,
+        crate::debug::Sent {
+            method: "POST",
+            url: &url,
+            body: Some(&sent_body),
+        },
+        response,
+    )
+    .await?;
     parse(&body, Timestamp::now())
 }
 

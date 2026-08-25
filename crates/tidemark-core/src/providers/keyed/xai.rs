@@ -147,7 +147,9 @@ impl Xai {
             return Err(ProviderError::Credential { status: 401 });
         }
         let now = Timestamp::now();
-        let balance = parse_balance(&super::request(&self.client, self.balance_request()?).await?)?;
+        let balance = parse_balance(
+            &super::request(PROVIDER_ID, &self.client, self.balance_request()?).await?,
+        )?;
         // The history is optional, as in the source: every failure but an
         // authentication one is swallowed into the unavailable row. A rejected
         // credential on this request is the same rejection as on the balance, and the
@@ -163,7 +165,7 @@ impl Xai {
     }
 
     async fn history(&self, now: Timestamp) -> Result<History, ProviderError> {
-        let body = super::request(&self.client, self.usage_request(now)?).await?;
+        let body = super::request(PROVIDER_ID, &self.client, self.usage_request(now)?).await?;
         parse_usage(&body).map(History::Present)
     }
 }

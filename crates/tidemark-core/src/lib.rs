@@ -6,6 +6,8 @@
 
 pub mod config;
 
+pub mod debug;
+
 pub mod paths;
 
 pub mod oauth;
