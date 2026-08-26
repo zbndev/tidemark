@@ -13,6 +13,16 @@ pub struct Selection {
     pub profile: Option<String>,
 }
 
+impl Selection {
+    /// The opaque stable path a client sends back to select this browser or profile.
+    pub fn candidate_id(&self) -> String {
+        match &self.profile {
+            Some(profile) => format!("{}/{}", self.browser, profile),
+            None => self.browser.clone(),
+        }
+    }
+}
+
 /// The outcome of a provider's proof request for a candidate cookie header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Validation {
@@ -102,7 +112,11 @@ where
             Err(_) => AuthCandidateState::Unreachable,
         };
         let child = AuthCandidate {
-            id: store.profile.clone(),
+            id: Selection {
+                browser: store.browser.slug.to_owned(),
+                profile: Some(store.profile.clone()),
+            }
+            .candidate_id(),
             title: store.profile,
             subtitle: None,
             state: state.as_wire().to_owned(),
@@ -249,8 +263,11 @@ mod tests {
                 .map(|candidate| (candidate.id.as_str(), candidate.state.as_str()))
                 .collect::<Vec<_>>(),
             [
-                ("aa.Working", AuthCandidateState::Ready.as_wire()),
-                ("zz.Rejected", AuthCandidateState::Rejected.as_wire()),
+                ("firefox/aa.Working", AuthCandidateState::Ready.as_wire()),
+                (
+                    "firefox/zz.Rejected",
+                    AuthCandidateState::Rejected.as_wire()
+                ),
             ]
         );
         assert_eq!(
@@ -264,8 +281,8 @@ mod tests {
                 .map(|candidate| (candidate.id.as_str(), candidate.state.as_str()))
                 .collect::<Vec<_>>(),
             [
-                ("aa.Expired", AuthCandidateState::Missing.as_wire()),
-                ("zz.AlsoWorking", AuthCandidateState::Ready.as_wire()),
+                ("zen/aa.Expired", AuthCandidateState::Missing.as_wire()),
+                ("zen/zz.AlsoWorking", AuthCandidateState::Ready.as_wire()),
             ]
         );
     }

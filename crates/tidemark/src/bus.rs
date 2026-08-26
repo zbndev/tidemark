@@ -25,7 +25,9 @@ use std::future::poll_fn;
 use std::pin::pin;
 use std::task::Poll;
 
-use tidemark_types::{DataInfo, Preferences, ProviderDefinition, ProviderStatus, ids};
+use tidemark_types::{
+    AuthCandidate, AuthSelection, DataInfo, Preferences, ProviderDefinition, ProviderStatus, ids,
+};
 use zbus::export::futures_core::Stream;
 
 /// How long to wait before trying the session bus again after a failure. Only reached when
@@ -92,6 +94,17 @@ pub trait Daemon {
         account: &str,
         name: &str,
         value: &str,
+    ) -> zbus::Result<()>;
+
+    /// Inspects secret-free local authentication candidates for one account.
+    fn get_auth_sources(&self, provider: &str, account: &str) -> zbus::Result<Vec<AuthCandidate>>;
+
+    /// Revalidates and stores one local authentication selection.
+    fn select_auth_source(
+        &self,
+        provider: &str,
+        account: &str,
+        selection: AuthSelection,
     ) -> zbus::Result<()>;
 
     /// Switches notifications for one of an account's windows on or off.
@@ -393,7 +406,9 @@ mod tests {
     use std::cell::RefCell;
     use std::process;
 
-    use tidemark_types::{Preferences, ProviderDefinition, ProviderStatus, ids};
+    use tidemark_types::{
+        AuthCandidate, AuthSelection, Preferences, ProviderDefinition, ProviderStatus, ids,
+    };
 
     use super::{DaemonProxy, Update, load};
     use zbus::fdo;
@@ -420,6 +435,26 @@ mod tests {
 
         fn get_status(&self) -> Vec<ProviderStatus> {
             Vec::new()
+        }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct BrowserAuthService(std::sync::Arc<std::sync::Mutex<Option<AuthSelection>>>);
+
+    #[zbus::interface(name = "io.github.zbndev.Tidemark.Daemon1")]
+    impl BrowserAuthService {
+        fn get_auth_sources(&self, _provider: &str, _account: &str) -> Vec<AuthCandidate> {
+            vec![AuthCandidate {
+                id: "cursor-app".into(),
+                title: "Cursor App".into(),
+                subtitle: None,
+                state: "ready".into(),
+                children: Vec::new(),
+            }]
+        }
+
+        fn select_auth_source(&self, _provider: &str, _account: &str, selection: AuthSelection) {
+            *self.0.lock().expect("no test panics holding this") = Some(selection);
         }
     }
     /// A daemon that implements `GetPreferences` but cannot read its own storage.
@@ -449,6 +484,58 @@ mod tests {
         assert_eq!(ids::DAEMON_INTERFACE, "io.github.zbndev.Tidemark.Daemon1");
         assert_eq!(ids::DAEMON_BUS_NAME, "io.github.zbndev.Tidemark.Daemon");
         assert_eq!(ids::OBJECT_PATH, "/io/github/zbndev/Tidemark");
+    }
+
+    #[test]
+    fn the_proxy_round_trips_secret_free_browser_auth_calls() {
+        zbus::block_on(async {
+            let Ok(client_connection) = zbus::Connection::session().await else {
+                eprintln!("skipped: no session bus reachable");
+                return;
+            };
+            let name = format!(
+                "io.github.zbndev.Tidemark.BrowserAuthTest.p{}",
+                process::id()
+            );
+            let service = BrowserAuthService::default();
+            let selected = std::sync::Arc::clone(&service.0);
+            let _server = zbus::connection::Builder::session()
+                .expect("session bus address")
+                .name(name.as_str())
+                .expect("valid test bus name")
+                .serve_at(ids::OBJECT_PATH, service)
+                .expect("valid test object")
+                .build()
+                .await
+                .expect("test service starts");
+            let proxy = DaemonProxy::builder(&client_connection)
+                .destination(name.as_str())
+                .expect("valid destination")
+                .path(ids::OBJECT_PATH)
+                .expect("valid path")
+                .build()
+                .await
+                .expect("proxy builds");
+
+            let sources = proxy
+                .get_auth_sources("cursor", "default")
+                .await
+                .expect("sources arrive");
+            assert_eq!(sources[0].id, "cursor-app");
+            assert!(!format!("{sources:?}").contains("session="));
+            let selection = AuthSelection {
+                mode: "cursor-app".into(),
+                candidate: None,
+            };
+            proxy
+                .select_auth_source("cursor", "default", selection.clone())
+                .await
+                .expect("selection arrives");
+            assert_eq!(
+                *selected.lock().expect("no test panics holding this"),
+                Some(selection)
+            );
+        });
     }
 
     #[test]

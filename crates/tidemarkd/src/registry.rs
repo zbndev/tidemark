@@ -34,8 +34,8 @@ use tidemark_core::providers::{
 };
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
-    AccountId, CredentialKind, ExternalLogin, OptionChoice, ProviderDefinition, ProviderId,
-    ProviderOption, ProviderStatus,
+    AccountId, AuthMode, AuthSelection, AuthSelector, CredentialKind, ExternalLogin, OptionChoice,
+    ProviderDefinition, ProviderId, ProviderOption, ProviderStatus,
 };
 
 use crate::engine::Account;
@@ -234,7 +234,7 @@ fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderD
         credential: spec.credential.as_wire().to_owned(),
         credential_hint: spec.credential_hint.to_owned(),
         external: None,
-        browser_auth: None,
+        browser_auth: browser_auth(spec.id),
         options: options(spec.id, config),
     }
 }
@@ -263,8 +263,55 @@ pub fn account(
     Ok(account.map(|account| {
         account
             .with_options(options(provider, config))
+            .with_auth_selection(browser_auth_selection(provider, config))
             .with_notify(notify(provider, config))
     }))
+}
+
+/// The local browser-auth capability one hand-written provider declares.
+///
+/// This is daemon metadata rather than a GUI branch: a later browser-cookie provider adds
+/// its selector here and gets the same wire contract, engine lifecycle and GTK rendering.
+fn browser_auth(provider: &str) -> Option<AuthSelector> {
+    (provider == cursor::PROVIDER_ID).then(|| AuthSelector {
+        option: cursor::AUTH_SOURCE.into(),
+        modes: vec![
+            AuthMode {
+                value: cursor::CURSOR_APP_SOURCE.into(),
+                title: "Cursor App".into(),
+            },
+            AuthMode {
+                value: cursor::BROWSER_SOURCE.into(),
+                title: "Browser".into(),
+            },
+        ],
+    })
+}
+
+/// The durable config source an account is already constrained to, if it is complete.
+///
+/// An incomplete or hand-edited value deliberately remains absent: treating it as another
+/// source would restore the old silent fallback this selector is designed to remove.
+pub(crate) fn browser_auth_selection(provider: &str, config: &Config) -> Option<AuthSelection> {
+    browser_auth(provider)?;
+    match config.option(provider, cursor::AUTH_SOURCE) {
+        Some(cursor::CURSOR_APP_SOURCE) => Some(AuthSelection {
+            mode: cursor::CURSOR_APP_SOURCE.into(),
+            candidate: None,
+        }),
+        Some(cursor::BROWSER_SOURCE) => {
+            let browser = config.option(provider, cursor::AUTH_BROWSER)?;
+            let candidate = match config.option(provider, cursor::AUTH_PROFILE) {
+                Some(profile) => format!("{browser}/{profile}"),
+                None => browser.to_owned(),
+            };
+            Some(AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some(candidate),
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Every configured account the daemon polls, in the order of `config.toml`.
@@ -705,6 +752,46 @@ mod tests {
                 definition.provider
             );
         }
+    }
+
+    #[test]
+    fn cursor_publishes_its_browser_auth_capability_and_stored_selection() {
+        let definition = catalog(&empty_config())
+            .into_iter()
+            .find(|definition| definition.provider == cursor::PROVIDER_ID)
+            .expect("Cursor is in the catalog");
+        let selector = definition
+            .browser_auth
+            .expect("Cursor has local source selection");
+        assert_eq!(selector.option, cursor::AUTH_SOURCE);
+        assert_eq!(
+            selector
+                .modes
+                .iter()
+                .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (cursor::CURSOR_APP_SOURCE, "Cursor App"),
+                (cursor::BROWSER_SOURCE, "Browser"),
+            ]
+        );
+
+        let path = scratch_config(
+            "cursor-browser-selection",
+            "providers = [\"cursor\"]\n\n[provider.cursor]\nauth-source = \"browser\"\nauth-browser = \"zen\"\nauth-profile = \"work\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let account = account(cursor::PROVIDER_ID, &secrets(), &config)
+            .expect("builds")
+            .expect("Cursor account builds");
+        assert_eq!(
+            account.status().auth_selection,
+            Some(tidemark_types::AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some("zen/work".into()),
+            })
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

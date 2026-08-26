@@ -613,6 +613,10 @@ impl Provider for Cursor {
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
         Box::pin(self.fetch_inner())
     }
+
+    fn inspect_auth_sources(&self) -> BoxFuture<'_, Result<Vec<AuthCandidate>, ProviderError>> {
+        Box::pin(self.inspect_sources())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1025,7 +1029,7 @@ fn parse(
 #[cfg(test)]
 mod tests {
     use super::{Cursor, Options, SPEC, parse};
-    use crate::providers::{Credential, ProviderError};
+    use crate::providers::{Credential, Provider, ProviderError};
     use tidemark_types::{AuthCandidateState, CredentialKind, DetailSection, Timestamp};
 
     /// A live Pro account's `GET /api/usage-summary`, as CodexBar's own regression test
@@ -1803,7 +1807,7 @@ mod tests {
         assert_eq!(sources[1].children[0].id, "zen");
         assert_eq!(
             sources[1].children[0].children[0].id,
-            "k26qcf29.Default (release)"
+            "zen/k26qcf29.Default (release)"
         );
         assert!(!format!("{sources:?}").contains("browser-session"));
         assert!(
@@ -1811,6 +1815,35 @@ mod tests {
                 .iter()
                 .any(|request| request.contains("browser-session"))
         );
+    }
+
+    #[test]
+    fn the_provider_trait_exposes_cursor_auth_sources_without_credentials() {
+        let home = gecko_home(&[(
+            ".cursor.com",
+            "WorkosCursorSessionToken",
+            "browser-session",
+            0,
+        )]);
+        let (base, requests, server) = session_server(1);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_test_base(&base);
+
+        let provider: &dyn Provider = &provider;
+        let sources = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.inspect_auth_sources())
+            .expect("inspects");
+        let _ = requests.recv().expect("the browser validation request");
+        server.join().expect("server stopped");
+
+        assert_eq!(sources[1].children[0].id, "zen");
+        assert_eq!(
+            sources[1].children[0].children[0].id,
+            "zen/k26qcf29.Default (release)"
+        );
+        assert!(!format!("{sources:?}").contains("browser-session"));
     }
 
     #[test]

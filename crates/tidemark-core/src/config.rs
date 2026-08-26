@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tidemark_types::Preferences;
+use tidemark_types::{AuthSelection, Preferences};
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 use crate::paths;
@@ -28,6 +28,10 @@ use crate::paths;
 /// Table every provider's own settings live under: `[provider.zai]`.
 const PROVIDER_TABLE: &str = "provider";
 const PROVIDERS_KEY: &str = "providers";
+/// The shared storage keys used by browser-cookie authentication providers.
+const AUTH_SOURCE_KEY: &str = "auth-source";
+const AUTH_BROWSER_KEY: &str = "auth-browser";
+const AUTH_PROFILE_KEY: &str = "auth-profile";
 
 /// Table the notification opt-in lives under: `[notify.claude]`.
 ///
@@ -106,6 +110,18 @@ pub enum ConfigError {
         path: PathBuf,
         /// Whose list it is.
         provider: String,
+    },
+    /// A browser-auth selection cannot be represented by the shared local-source keys.
+    #[error(
+        "{path}: [{PROVIDER_TABLE}.{provider}] has an invalid authentication selection: {reason}"
+    )]
+    InvalidAuthSelection {
+        /// The file.
+        path: PathBuf,
+        /// The provider carrying the selection.
+        provider: String,
+        /// Why the selected opaque candidate cannot be stored.
+        reason: String,
     },
     /// An application preference has a wrong type or an unknown named value.
     #[error("{path}: [{table}] {key} {reason}")]
@@ -543,6 +559,90 @@ impl Config {
         self.write()
     }
 
+    /// Stores one daemon-validated browser-cookie source in one staged config write.
+    ///
+    /// Browser candidates travel over D-Bus as opaque `browser` or `browser/profile` paths.
+    /// The daemon resolves and validates that path before it reaches this method; config only
+    /// turns it into the stable fields a provider rebuild consumes. Keeping all three fields
+    /// in this transaction prevents an old profile from surviving a newly selected browser.
+    pub fn set_auth_selection(
+        &mut self,
+        provider: &str,
+        selection: &AuthSelection,
+    ) -> Result<(), ConfigError> {
+        let browser_profile = match (selection.mode.as_str(), selection.candidate.as_deref()) {
+            ("cursor-app", None) => None,
+            ("browser", Some(candidate)) => {
+                Some(parse_browser_candidate(candidate).ok_or_else(|| {
+                    ConfigError::InvalidAuthSelection {
+                        path: self.path.clone(),
+                        provider: provider.to_owned(),
+                        reason: "browser candidates must name a browser and optional profile"
+                            .into(),
+                    }
+                })?)
+            }
+            ("cursor-app", Some(_)) => {
+                return Err(ConfigError::InvalidAuthSelection {
+                    path: self.path.clone(),
+                    provider: provider.to_owned(),
+                    reason: "Cursor App does not take a browser candidate".into(),
+                });
+            }
+            ("browser", None) => {
+                return Err(ConfigError::InvalidAuthSelection {
+                    path: self.path.clone(),
+                    provider: provider.to_owned(),
+                    reason: "Browser needs a selected candidate".into(),
+                });
+            }
+            _ => {
+                return Err(ConfigError::InvalidAuthSelection {
+                    path: self.path.clone(),
+                    provider: provider.to_owned(),
+                    reason: "unknown authentication mode".into(),
+                });
+            }
+        };
+
+        self.normalize_providers(None)?;
+        let providers = self
+            .document
+            .entry(PROVIDER_TABLE)
+            .or_insert_with(|| Item::Table(implicit_table()));
+        let providers = providers
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: PROVIDER_TABLE.to_owned(),
+            })?;
+        let table = providers
+            .entry(provider)
+            .or_insert_with(|| Item::Table(Table::new()));
+        let table = table
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: format!("{PROVIDER_TABLE}.{provider}"),
+            })?;
+        table.insert(AUTH_SOURCE_KEY, value(selection.mode.as_str()));
+        match browser_profile {
+            Some((browser, profile)) => {
+                table.insert(AUTH_BROWSER_KEY, value(browser));
+                if let Some(profile) = profile {
+                    table.insert(AUTH_PROFILE_KEY, value(profile));
+                } else {
+                    table.remove(AUTH_PROFILE_KEY);
+                }
+            }
+            None => {
+                table.remove(AUTH_BROWSER_KEY);
+                table.remove(AUTH_PROFILE_KEY);
+            }
+        }
+        self.write()
+    }
+
     /// Window keys of this provider whose notifications the user has switched on.
     ///
     /// Absent table, absent key and empty array all mean the same thing: this provider
@@ -713,6 +813,19 @@ fn remove_carrying_prefix(array: &mut Array, index: usize) {
     }
 }
 
+/// Splits the opaque browser candidate path used by browser-cookie source selection.
+///
+/// Browser slugs and profile directory names cannot contain `/`, so one separator retains
+/// both durable components while a bare browser path represents the common parent choice.
+fn parse_browser_candidate(candidate: &str) -> Option<(&str, Option<&str>)> {
+    let (browser, profile) = match candidate.split_once('/') {
+        Some((browser, profile)) => (browser, Some(profile)),
+        None => (candidate, None),
+    };
+    (!browser.is_empty() && profile.is_none_or(|profile| !profile.is_empty()))
+        .then_some((browser, profile))
+}
+
 /// Appends without moving the previous last element's inline comment onto the new value.
 fn push_provider(array: &mut Array, provider: &str) {
     let trailing = array.trailing().as_str().map(str::to_owned);
@@ -758,6 +871,7 @@ fn implicit_table() -> Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidemark_types::AuthSelection;
 
     fn scratch(name: &str) -> PathBuf {
         let dir =
@@ -771,6 +885,60 @@ mod tests {
         let config = Config::at(scratch("absent").with_file_name("nothing.toml"))
             .expect("a missing file is an empty document");
         assert_eq!(config.option("zai", "region"), None);
+    }
+
+    #[test]
+    fn an_auth_selection_replaces_only_its_stale_browser_fields() {
+        // Replacing this with individual option writes could leave an old profile paired
+        // with a newly chosen browser if the daemon stopped between them.
+        let path = scratch("auth-selection");
+        std::fs::write(
+            &path,
+            "[provider.cursor]\n\
+             auth-source = \"browser\"\n\
+             auth-browser = \"firefox\"\n\
+             auth-profile = \"Default\"\n",
+        )
+        .expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        config
+            .set_auth_selection(
+                "cursor",
+                &AuthSelection {
+                    mode: "cursor-app".into(),
+                    candidate: None,
+                },
+            )
+            .expect("stores Cursor App");
+        assert_eq!(config.option("cursor", "auth-source"), Some("cursor-app"));
+        assert_eq!(config.option("cursor", "auth-browser"), None);
+        assert_eq!(config.option("cursor", "auth-profile"), None);
+
+        config
+            .set_auth_selection(
+                "cursor",
+                &AuthSelection {
+                    mode: "browser".into(),
+                    candidate: Some("zen".into()),
+                },
+            )
+            .expect("stores a browser parent");
+        assert_eq!(config.option("cursor", "auth-browser"), Some("zen"));
+        assert_eq!(config.option("cursor", "auth-profile"), None);
+
+        config
+            .set_auth_selection(
+                "cursor",
+                &AuthSelection {
+                    mode: "browser".into(),
+                    candidate: Some("firefox/work".into()),
+                },
+            )
+            .expect("stores a browser profile");
+        assert_eq!(config.option("cursor", "auth-browser"), Some("firefox"));
+        assert_eq!(config.option("cursor", "auth-profile"), Some("work"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

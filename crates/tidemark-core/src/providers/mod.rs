@@ -35,7 +35,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
-use tidemark_types::{AccountId, ProviderId, Snapshot, Timestamp, WindowLength};
+use tidemark_types::{AccountId, AuthCandidate, ProviderId, Snapshot, Timestamp, WindowLength};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// A future returned from a trait method.
@@ -57,6 +57,14 @@ pub trait Provider: fmt::Debug + Send + Sync {
 
     /// Fetch current quota.
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>>;
+
+    /// Inspects selectable local authentication sources without exposing their credentials.
+    ///
+    /// Most providers have no such choice. Browser-cookie providers override this so the
+    /// daemon can discover and validate candidates through the same trait object it polls.
+    fn inspect_auth_sources(&self) -> BoxFuture<'_, Result<Vec<AuthCandidate>, ProviderError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }
 
 /// Which of two credentials an account uses.
