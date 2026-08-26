@@ -304,6 +304,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         secrets,
         updates,
         config_path,
+        scheduler::RefreshMode::configured(&preferences),
         notifier as Arc<dyn notify::Notifier>,
     );
     // Before the first announcement, so a client connecting immediately is told whether

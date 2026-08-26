@@ -32,10 +32,6 @@ use crate::scheduler::{self, Situation};
 /// so there is nothing to gain from doing it more often than once a day.
 pub const THIN_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 
-/// Consumption must move by more than this to count as movement. Percentages that arrive
-/// as ratios multiplied out wobble in the last decimal place; a wobble is not a session.
-const CHANGE_EPSILON: f64 = 0.01;
-
 /// A change the publisher task must apply to its shared view of the accounts.
 #[derive(Debug)]
 #[expect(
@@ -66,6 +62,8 @@ pub enum Preference {
     MinimizeOnClose(bool),
     StartupMode(String),
     HistoryRetention(String),
+    RefreshMode(String),
+    RefreshMinutes(u32),
     /// The one preference that changes how this process reaches the network, rather than
     /// what it does with what it reaches.
     Proxy {
@@ -213,7 +211,6 @@ pub struct Account {
     status: ProviderStatus,
     failures: u32,
     retry_after: Option<Duration>,
-    last_change_at: Option<Timestamp>,
     due: Instant,
 }
 
@@ -251,7 +248,6 @@ impl Account {
             client: None,
             failures: 0,
             retry_after: None,
-            last_change_at: None,
             due: Instant::now(),
         }
     }
@@ -273,7 +269,6 @@ impl Account {
             client: Some(client),
             failures: 0,
             retry_after: None,
-            last_change_at: None,
             due: Instant::now(),
         }
     }
@@ -298,7 +293,6 @@ impl Account {
             client: None,
             failures: 0,
             retry_after: None,
-            last_change_at: None,
             due: Instant::now(),
         }
     }
@@ -391,6 +385,10 @@ pub struct Engine {
     /// Where the settings are read from on a reload. Held rather than resolved from the
     /// environment each time, so the loop can be run over a settings file of a test's own.
     config_path: std::path::PathBuf,
+    /// How healthy accounts are paced. Held rather than re-read per reschedule, because
+    /// every change to it arrives through this loop's own command queue — there is no
+    /// window in which the file and the field can disagree.
+    refresh: scheduler::RefreshMode,
     last_thin: Option<Instant>,
     notifier: Arc<dyn Notifier>,
 }
@@ -403,6 +401,7 @@ impl Engine {
         secrets: Arc<dyn Secrets>,
         updates: mpsc::Sender<Publication>,
         config_path: std::path::PathBuf,
+        refresh: scheduler::RefreshMode,
         notifier: Arc<dyn Notifier>,
     ) -> Self {
         Self {
@@ -411,6 +410,7 @@ impl Engine {
             secrets,
             updates,
             config_path,
+            refresh,
             last_thin: None,
             notifier,
         }
@@ -625,6 +625,12 @@ impl Engine {
     /// (release watch, startup integration) must follow the durable config.
     pub async fn set_preference(&mut self, preference: Preference) -> Result<Preferences, String> {
         let retention_changed = matches!(&preference, Preference::HistoryRetention(_));
+        let refresh_changed = matches!(
+            &preference,
+            Preference::RefreshMode(_) | Preference::RefreshMinutes(_)
+        );
+        // Captured before the match below, which takes the preference by value.
+        let mode_switch = matches!(&preference, Preference::RefreshMode(_));
         // Built before anything is written. A mode with nowhere to reach is a mistake the
         // user can still see on screen and correct; persisted first, it would instead
         // become a stored setting that fails every poll from here on.
@@ -638,6 +644,8 @@ impl Engine {
             Preference::MinimizeOnClose(enabled) => config.set_minimize_on_close(enabled),
             Preference::StartupMode(mode) => config.set_startup_mode(&mode),
             Preference::HistoryRetention(retention) => config.set_history_retention(&retention),
+            Preference::RefreshMode(mode) => config.set_refresh_mode(&mode),
+            Preference::RefreshMinutes(minutes) => config.set_refresh_minutes(minutes),
             Preference::Proxy { mode, host, port } => config.set_proxy(&mode, &host, port),
         }
         .map_err(|error| error.to_string())?;
@@ -649,6 +657,19 @@ impl Engine {
         }
         if let Some(proxy) = proxy {
             self.adopt_proxy(proxy);
+        }
+        if refresh_changed {
+            self.refresh = scheduler::RefreshMode::configured(&preferences);
+            if mode_switch {
+                // A mode switch is owed an immediate reading under the new rules — the
+                // `adopt_proxy` precedent. Minutes deliberately do not: a spin control
+                // must not be able to cause a poll storm, so the new pace applies from
+                // each account's next natural poll.
+                let now = Instant::now();
+                for account in &mut self.accounts {
+                    account.due = now;
+                }
+            }
         }
         Ok(preferences)
     }
@@ -959,8 +980,6 @@ impl Engine {
     /// is built from, but a daemon that stopped publishing numbers because it could not
     /// write them down would turn a recoverable disk problem into a blank interface.
     async fn record(&mut self, index: usize, snapshot: &Snapshot) {
-        let moved = consumption_moved(&self.accounts[index].status.windows, snapshot);
-
         match self.history.ingest(snapshot) {
             Ok(report) => {
                 for outcome in report.segments_opened() {
@@ -987,11 +1006,6 @@ impl Engine {
                 %error,
                 "could not write to the history database"
             ),
-        }
-
-        let account = &mut self.accounts[index];
-        if moved || account.last_change_at.is_none() {
-            account.last_change_at = Some(snapshot.captured_at);
         }
     }
 
@@ -1120,8 +1134,8 @@ impl Engine {
             failures: account.failures,
             retry_after: account.retry_after,
             seconds_to_next_reset: soonest_reset(&account.status.windows, now),
-            mode: scheduler::RefreshMode::Auto,
-            worst_used_percent: None,
+            mode: self.refresh,
+            worst_used_percent: worst_used(&account.status.windows),
         };
         let interval = scheduler::next_interval(&situation);
 
@@ -1375,22 +1389,15 @@ fn soonest_reset(windows: &[WindowStatus], now: Timestamp) -> Option<i64> {
         .min()
 }
 
-/// Whether any window's consumption differs from what was last published.
+/// The most-used window the account last reported, if it reported any.
 ///
-/// A window that only appears in one of the two is movement: a quota pool that turned up
-/// or went away is exactly the kind of change that should wake the polling back up.
-fn consumption_moved(published: &[WindowStatus], snapshot: &Snapshot) -> bool {
-    if published.len() != snapshot.windows.len() {
-        return true;
-    }
-    snapshot.windows.iter().any(|window| {
-        published
-            .iter()
-            .find(|previous| previous.key == window.key.as_str())
-            .is_none_or(|previous| {
-                (previous.used_percent - window.used_percent).abs() > CHANGE_EPSILON
-            })
-    })
+/// Auto paces by the worst window: a red five-hour window is news every minute even
+/// beside a blue weekly one.
+fn worst_used(windows: &[WindowStatus]) -> Option<f64> {
+    windows
+        .iter()
+        .map(|window| window.used_percent)
+        .reduce(f64::max)
 }
 
 #[cfg(test)]
@@ -1546,6 +1553,59 @@ mod tests {
         }
     }
 
+    /// Two windows, so a test can put them in different zones.
+    fn two_windows(five_hour: f64, weekly: f64, resets_in: i64) -> Snapshot {
+        let now = Timestamp::now();
+        Snapshot {
+            provider: ProviderId::new("fake"),
+            account: AccountId::default(),
+            captured_at: now,
+            windows: vec![
+                Window {
+                    key: WindowKey::for_length(WindowLength::from_secs(18_000).expect("nonzero")),
+                    title: "5 hours".into(),
+                    subtitle: None,
+                    used_percent: five_hour,
+                    resets_at: Some(now.saturating_add_seconds(resets_in)),
+                    length: WindowLength::from_secs(18_000),
+                },
+                Window {
+                    key: WindowKey::for_length(WindowLength::from_secs(604_800).expect("nonzero")),
+                    title: "7 days".into(),
+                    subtitle: None,
+                    used_percent: weekly,
+                    resets_at: Some(now.saturating_add_seconds(7 * 24 * 3600)),
+                    length: WindowLength::from_secs(604_800),
+                },
+            ],
+            details: Vec::new(),
+        }
+    }
+
+    /// A harness whose engine runs one chosen refresh mode rather than the file's.
+    fn with_provider_paced(
+        provider: Arc<dyn Provider>,
+        refresh: scheduler::RefreshMode,
+    ) -> Harness {
+        let (tx, rx) = mpsc::channel(64);
+        let config_path = std::env::temp_dir().join("tidemark-engine-tests-absent.toml");
+        let notices = Arc::new(Recorder::default());
+        Harness {
+            engine: Engine::new(
+                vec![Account::with_client(provider)],
+                History::in_memory().expect("an in-memory database opens"),
+                unlocked(),
+                tx,
+                config_path.clone(),
+                refresh,
+                Arc::clone(&notices) as Arc<dyn Notifier>,
+            ),
+            updates: rx,
+            config_path,
+            notices,
+        }
+    }
+
     struct Harness {
         engine: Engine,
         updates: mpsc::Receiver<Publication>,
@@ -1605,6 +1665,7 @@ mod tests {
                     secrets,
                     tx,
                     config_path.clone(),
+                    scheduler::RefreshMode::Auto,
                     Arc::clone(&notices) as Arc<dyn Notifier>,
                 ),
                 updates: rx,
@@ -1638,6 +1699,7 @@ mod tests {
                     secrets,
                     tx,
                     config_path.clone(),
+                    scheduler::RefreshMode::Auto,
                     Arc::clone(&notices) as Arc<dyn Notifier>,
                 ),
                 updates: rx,
@@ -1682,6 +1744,11 @@ mod tests {
     fn harness_with_config(accounts: Vec<Account>, config: std::path::PathBuf) -> Harness {
         let (tx, rx) = mpsc::channel(64);
         let notices = Arc::new(Recorder::default());
+        // From the file, so a test can seed `[refresh]` and have the loop run it.
+        let refresh = Config::at(config.clone())
+            .and_then(|config| config.preferences())
+            .map(|preferences| scheduler::RefreshMode::configured(&preferences))
+            .unwrap_or(scheduler::RefreshMode::Auto);
         Harness {
             engine: Engine::new(
                 accounts,
@@ -1689,6 +1756,7 @@ mod tests {
                 unlocked(),
                 tx,
                 config.clone(),
+                refresh,
                 Arc::clone(&notices) as Arc<dyn Notifier>,
             ),
             updates: rx,
@@ -1776,6 +1844,7 @@ mod tests {
             secrets,
             updates,
             config_path.clone(),
+            scheduler::RefreshMode::Auto,
             Arc::new(Recorder::default()) as Arc<dyn Notifier>,
         );
         assert!(
@@ -1964,6 +2033,7 @@ mod tests {
             secrets,
             updates,
             config_path.clone(),
+            scheduler::RefreshMode::Auto,
             Arc::new(Recorder::default()) as Arc<dyn Notifier>,
         );
         let (commands, mut command_queue) = mpsc::channel(4);
@@ -2149,6 +2219,7 @@ mod tests {
             unlocked(),
             updates,
             std::env::temp_dir().join("tidemark-engine-current-segment.toml"),
+            scheduler::RefreshMode::Auto,
             Arc::new(Recorder::default()) as Arc<dyn Notifier>,
         );
         engine.poll_due(Instant::now()).await;
@@ -2377,28 +2448,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_worst_window_sets_the_auto_pace() {
+        let mut harness = with_provider(Fake::new(vec![Ok(two_windows(55.0, 95.0, 4 * 3600))]));
+        harness.engine.poll_due(Instant::now()).await;
+        assert_eq!(
+            harness.wait_secs(),
+            scheduler::AUTO_RED.as_secs(),
+            "a red weekly window is news every minute beside a blue five-hour one"
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_polls_at_the_chosen_interval_whatever_the_zone() {
+        let mut harness = with_provider_paced(
+            Fake::new(vec![Ok(snapshot(95.0, 4 * 3600))]),
+            scheduler::RefreshMode::Manual(Duration::from_secs(15 * 60)),
+        );
+        harness.engine.poll_due(Instant::now()).await;
+        assert_eq!(
+            harness.wait_secs(),
+            15 * 60,
+            "the user picked a pace; neither the zone nor the reset changes it"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_the_refresh_mode_polls_every_account_now() {
+        let mut harness = with_provider(Fake::new(vec![Ok(snapshot(50.0, 4 * 3600))]));
+        harness.engine.poll_due(Instant::now()).await;
+        assert_eq!(harness.wait_secs(), scheduler::AUTO_BLUE.as_secs());
+
+        harness
+            .engine
+            .set_preference(Preference::RefreshMode("manual".into()))
+            .await
+            .expect("mode stored");
+        assert_eq!(
+            harness.wait_secs(),
+            0,
+            "the new pace is owed an immediate reading, not one old interval later"
+        );
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(
+            config.preferences().expect("readable").refresh_mode,
+            "manual"
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_the_manual_minutes_applies_from_the_next_poll() {
+        let path = std::env::temp_dir().join(format!(
+            "tidemark-engine-refresh-minutes-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "[refresh]\nmode = \"manual\"\nminutes = 10\n").expect("seed");
+        let mut harness = harness_with_config(
+            vec![Account::with_client(Fake::new(vec![
+                Ok(snapshot(50.0, 4 * 3600)),
+                Ok(snapshot(50.0, 4 * 3600)),
+            ]))],
+            path.clone(),
+        );
+        harness.engine.poll_due(Instant::now()).await;
+        assert_eq!(harness.wait_secs(), 10 * 60);
+
+        harness
+            .engine
+            .set_preference(Preference::RefreshMinutes(2))
+            .await
+            .expect("minutes stored");
+        assert!(
+            harness.wait_secs() > 0,
+            "a spin control must not be able to cause a poll storm"
+        );
+
+        harness.poll_again().await;
+        assert_eq!(harness.wait_secs(), 2 * 60);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
     async fn every_account_is_announced_before_anything_is_polled() {
         let mut harness = with_provider(Fake::new(vec![]));
         harness.engine.announce().await;
         let published = harness.published();
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].state(), Some(ProviderState::Pending));
-    }
-
-    #[test]
-    fn movement_is_measured_against_what_was_published_not_what_was_stored() {
-        let published = vec![WindowStatus::from_window(&snapshot(10.0, 3600).windows[0])];
-        assert!(!consumption_moved(&published, &snapshot(10.0, 3600)));
-        assert!(consumption_moved(&published, &snapshot(10.5, 3600)));
-    }
-
-    #[test]
-    fn a_window_appearing_or_disappearing_counts_as_movement() {
-        let published = vec![WindowStatus::from_window(&snapshot(10.0, 3600).windows[0])];
-        let mut gone = snapshot(10.0, 3600);
-        gone.windows.clear();
-        assert!(consumption_moved(&published, &gone));
-        assert!(consumption_moved(&[], &snapshot(10.0, 3600)));
     }
 
     /// The opt-in is the whole point of the switch: fifteen windows announcing themselves
@@ -2465,6 +2600,7 @@ mod tests {
                 unlocked(),
                 tx,
                 std::env::temp_dir().join("tidemark-engine-retry-absent.toml"),
+                scheduler::RefreshMode::Auto,
                 Arc::clone(&notices) as Arc<dyn Notifier>,
             ),
             updates: rx,
@@ -2522,6 +2658,7 @@ mod tests {
                 unlocked(),
                 tx,
                 config.clone(),
+                scheduler::RefreshMode::Auto,
                 Arc::clone(&notices) as Arc<dyn Notifier>,
             );
             engine.poll_due(Instant::now()).await;
@@ -2755,6 +2892,7 @@ mod tests {
             unlocked(),
             updates,
             config_path.clone(),
+            scheduler::RefreshMode::Auto,
             Arc::clone(&notices) as Arc<dyn Notifier>,
         );
 
