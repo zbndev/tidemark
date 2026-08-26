@@ -173,9 +173,9 @@ fn update_row(
             .unwrap_or_else(|| status.state.clone())
     };
     row.row.set_subtitle(&subtitle);
-    let editable = definition.is_some_and(|definition| {
-        opens_detail_after_add(&definition.credential, !definition.options.is_empty())
-    });
+    // A provider with a source selector to pick at counts as editable however it logs in:
+    // which local login to read is configuration, not something polling works out.
+    let editable = definition.is_some_and(opens_detail_after_add);
     row.edit.set_visible(editable);
     row.edit.set_sensitive(editable);
     mark::set(&row.image, &status.provider);

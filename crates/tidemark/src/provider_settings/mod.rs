@@ -1,5 +1,6 @@
 //! Navigable provider configuration: configured list, add picker, and stable details.
 
+mod browser_auth;
 mod detail;
 mod list;
 pub mod model;
@@ -332,7 +333,7 @@ impl ProviderSettings {
             }
             settings.refresh_views();
             settings.dialog.pop_subpage();
-            if opens_detail_after_add(&definition.credential, !definition.options.is_empty()) {
+            if opens_detail_after_add(&definition) {
                 settings.open_detail(provider, AccountId::default().to_string());
             }
         });
@@ -470,9 +471,13 @@ fn pending_status(definition: &ProviderDefinition) -> ProviderStatus {
 ///
 /// A browser-session provider with no options starts polling immediately. Pushing an empty
 /// detail page in that case looks like the click did nothing; the configured list and card
-/// are the useful confirmation instead.
-pub(super) fn opens_detail_after_add(credential: &str, has_options: bool) -> bool {
-    credential != CredentialKind::None.as_wire() || has_options
+/// are the useful confirmation instead. Choosing among local authentication sources counts
+/// as something to configure even when there is neither a credential nor an ordinary
+/// setting: which login on this machine to read is the whole decision.
+pub(super) fn opens_detail_after_add(definition: &ProviderDefinition) -> bool {
+    definition.browser_auth.is_some()
+        || definition.credential != CredentialKind::None.as_wire()
+        || !definition.options.is_empty()
 }
 
 /// A D-Bus error as one sentence for a toast.
@@ -487,24 +492,70 @@ pub(super) fn reason(error: &zbus::Error) -> String {
 mod tests {
     use std::collections::HashSet;
 
+    use tidemark_types::{AuthMode, AuthSelector, CredentialKind, ProviderDefinition};
+
     use super::detail::{AfterBeginAction, after_begin_action};
     use super::{
         ActiveDetail, DetailCache, PendingLogins, opens_detail_after_add, remove_local_provider,
     };
-    use tidemark_types::CredentialKind;
+
+    fn definition(credential: CredentialKind) -> ProviderDefinition {
+        ProviderDefinition {
+            provider: "zai".into(),
+            title: "Z.ai".into(),
+            credential: credential.as_wire().into(),
+            credential_hint: String::new(),
+            external: None,
+            browser_auth: None,
+            options: Vec::new(),
+        }
+    }
+
+    /// A Cursor-shaped catalog entry: no credential to paste or sign in to, but an explicit
+    /// local source to pick on its own authentication page.
+    fn keyless_with_browser_auth() -> ProviderDefinition {
+        let mut definition = definition(CredentialKind::None);
+        definition.provider = "cursor".into();
+        definition.browser_auth = Some(AuthSelector {
+            option: "auth-source".into(),
+            modes: vec![
+                AuthMode {
+                    value: "cursor-app".into(),
+                    title: "Cursor App".into(),
+                },
+                AuthMode {
+                    value: "browser".into(),
+                    title: "Browser".into(),
+                },
+            ],
+        });
+        definition
+    }
 
     #[test]
-    fn a_keyless_provider_without_options_returns_to_the_configured_list_after_adding() {
-        assert!(!opens_detail_after_add(
-            CredentialKind::None.as_wire(),
-            false
-        ));
+    fn a_keyless_provider_without_sources_or_options_returns_to_the_list_after_adding() {
+        assert!(!opens_detail_after_add(&definition(CredentialKind::None)));
+    }
+
+    #[test]
+    fn a_keyless_provider_that_picks_a_local_source_opens_its_detail_after_adding() {
+        // Nothing was typed or signed in to, yet there is something to configure: choosing
+        // which login on this machine to read is the whole point of adding it.
+        assert!(opens_detail_after_add(&keyless_with_browser_auth()));
     }
 
     #[test]
     fn a_provider_with_a_credential_or_options_opens_its_detail_after_adding() {
-        assert!(opens_detail_after_add(CredentialKind::Key.as_wire(), false));
-        assert!(opens_detail_after_add(CredentialKind::None.as_wire(), true));
+        assert!(opens_detail_after_add(&definition(CredentialKind::Key)));
+        let mut with_options = definition(CredentialKind::None);
+        with_options.options.push(tidemark_types::ProviderOption {
+            name: "model".into(),
+            title: "Model".into(),
+            description: None,
+            value: String::new(),
+            choices: Vec::new(),
+        });
+        assert!(opens_detail_after_add(&with_options));
     }
 
     #[test]
