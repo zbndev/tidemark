@@ -34,6 +34,7 @@
 //! - **Chromium** — Chrome, Chromium, Brave, Edge, Vivaldi, Opera. `Cookies`, table
 //!   `cookies`, values sealed with `os_crypt`. See [`chromium`] for that scheme.
 
+pub mod auth;
 pub mod chromium;
 pub mod gecko;
 mod safe_storage;
