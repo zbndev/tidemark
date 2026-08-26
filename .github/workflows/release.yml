@@ -120,6 +120,14 @@ jobs:
           path: artifacts
           merge-multiple: true
       - run: ls -l artifacts
+      # The package tools name their outputs the way package managers expect — the -1 is
+      # the Debian revision, the suffix the architecture. The file a person downloads gets
+      # the project's own name instead, shaped by the tag the checks job has already
+      # agreed with Cargo.toml.
+      - name: Give the assets their release names
+        run: |
+          mv artifacts/*.deb "artifacts/Tidemark-${GITHUB_REF_NAME}.deb"
+          mv artifacts/*.rpm "artifacts/Tidemark-${GITHUB_REF_NAME}.rpm"
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
