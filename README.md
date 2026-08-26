@@ -102,8 +102,11 @@ Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 Cursor · Wayfinder
 
-Cursor reads the session a browser on this machine already has on cursor.com — it has no
-API key to paste.
+Cursor uses the cursor.com session already signed in on this machine — it has no API key
+to paste. Its settings page asks you to choose one local source: the Cursor App, or one of
+your browsers (and one of its profiles, if it keeps more than one). That choice is kept and
+used alone; if the chosen source later signs out, Tidemark tells you instead of silently
+switching to another browser or the App.
 
 Some providers need one extra setting alongside the key — a region, an account id, or the
 base URL of your own deployment. The provider's page asks for it.
