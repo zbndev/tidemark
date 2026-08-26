@@ -77,12 +77,14 @@ Cursor has provider-local stable settings:
 
 - auth-source = cursor-app or browser
 - auth-browser = browser slug, present only for browser mode
-- auth-profile = profile identifier, present only for an explicit nested-profile choice
+- auth-profile = profile identifier, present only for browser mode
 
-Choosing Cursor App removes auth-browser and auth-profile. Choosing a browser parent records its
-browser slug and removes auth-profile, then uses that browser's first validated profile in stable
-scan order. Choosing a nested profile records all three fields. Invalid/missing hand-edited values
-do not choose a different source; they lead to the ordinary no-credential state.
+Choosing Cursor App removes auth-browser and auth-profile. Choosing a browser resolves it to that
+browser's first validated profile in stable scan order at selection time and records the resolved
+profile alongside the slug, so every later poll reads exactly the proven store instead of
+rescanning and quietly choosing a different account. A nested choice works the same way, naming
+its explicit profile. Invalid/missing hand-edited values do not choose a different source; they
+lead to the ordinary no-credential state.
 
 Cursor receives this resolved selection through its options and reads only the selected store.
 The historical implicit scan of every browser plus Cursor App is removed.
@@ -152,4 +154,3 @@ moving the user's cursor.
 CONTEXT.md replaces its deferred blanket exclusion of browser-cookie scraping with this bounded
 mechanism and its privacy/ownership rules. README.md explains that Cursor offers an explicit local
 source selector instead of silently using the first session it finds.
-

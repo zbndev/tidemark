@@ -136,10 +136,10 @@ fn session_query() -> browser::Query {
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "Cursor",
-    // Nothing is asked of the user: the credential is the session a browser on this
-    // machine already holds, so the settings dialog draws no credential row at all.
-    credential: CredentialKind::None,
-    credential_hint: "",
+    // Cursor owns this session outside Tidemark. The daemon selects it without ever storing
+    // its token, unlike a local gateway that genuinely needs no credential.
+    credential: CredentialKind::External,
+    credential_hint: "Choose a local Cursor session.",
     options: &[
         OptionSchema {
             name: AUTH_SOURCE,
@@ -357,7 +357,10 @@ impl Cursor {
                 .iter()
                 .any(|cookie| SESSION_COOKIE_NAMES.contains(&cookie.name.as_str()))
             {
-                return Ok(Some(browser::header(&live)));
+                let header = browser::header_for(&live, USAGE_SUMMARY_URL);
+                if !header.is_empty() {
+                    return Ok(Some(header));
+                }
             }
         }
         if keyring_locked {
@@ -379,8 +382,8 @@ impl Cursor {
         let Ok(request) = self.get(&self.url(USAGE_SUMMARY_URL), cookie) else {
             return crate::browser::auth::Validation::Unreachable;
         };
-        match super::request(PROVIDER_ID, &self.client, request).await {
-            Ok(_) => crate::browser::auth::Validation::Ready,
+        match super::validate(&self.client, request).await {
+            Ok(()) => crate::browser::auth::Validation::Ready,
             Err(ProviderError::Credential { status: 401 | 403 }) => {
                 crate::browser::auth::Validation::Rejected
             }
@@ -401,6 +404,7 @@ impl Cursor {
                 .map(browser::stores_in)
                 .unwrap_or_default(),
             &session_query(),
+            USAGE_SUMMARY_URL,
             self.storage.as_ref(),
             |credential| async move { self.validate_header(credential.header()).await },
         )
@@ -1386,10 +1390,10 @@ mod tests {
     }
 
     #[test]
-    fn the_spec_builds_a_cursor_provider_that_needs_no_credential() {
+    fn the_spec_describes_cursor_as_an_external_local_credential() {
         assert_eq!(SPEC.id, "cursor");
         assert_eq!(SPEC.title, "Cursor");
-        assert_eq!(SPEC.credential, CredentialKind::None);
+        assert_eq!(SPEC.credential, CredentialKind::External);
         assert_eq!(
             SPEC.options
                 .iter()
@@ -1814,6 +1818,43 @@ mod tests {
             requests
                 .iter()
                 .any(|request| request.contains("browser-session"))
+        );
+    }
+
+    #[test]
+    fn source_validation_does_not_retain_a_response_body_in_the_raw_response_log() {
+        let home = gecko_home(&[(
+            ".cursor.com",
+            "WorkosCursorSessionToken",
+            "browser-session",
+            0,
+        )]);
+        let log = crate::debug::enable(home.path()).expect("enables raw response logging");
+        let (base, requests, server) = session_server(1);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_test_base(&base);
+
+        let sources = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.inspect_sources())
+            .expect("inspects");
+        let _ = requests.recv().expect("the validation request");
+        server.join().expect("server stopped");
+        crate::debug::disable();
+
+        assert_eq!(sources[1].children[0].children[0].state, "ready");
+        // The raw log is process-global and parallel tests legitimately record their own
+        // exchanges into whatever sink is open, so emptiness cannot be asserted. What this
+        // inspection alone contributed would name this server's unique port — and none may.
+        let recorded = std::fs::read_to_string(log).expect("debug log reads");
+        let leaked: Vec<&str> = recorded
+            .lines()
+            .filter(|line| line.contains(&base))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "proof responses are credential-adjacent and must never join ordinary polling logs, got {leaked:?}"
         );
     }
 

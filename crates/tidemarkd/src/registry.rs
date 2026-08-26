@@ -602,15 +602,24 @@ fn keyed_account(spec: &'static keyed::Spec) -> Account {
 /// builder says what to do with them. It, too, resolves its URLs at build time and refuses
 /// a required option that is unset, naming it.
 fn hand_written_account(spec: &'static keyed::HandSpec) -> Account {
-    if spec.credential == CredentialKind::None {
-        // Nothing is stored and nothing is asked for, so there is no key to hand the
-        // builder — it is given a blank one and ignores it. The settings are the whole of
-        // what this account is, which is why it is built from them alone.
-        return Account::keyless(
+    if matches!(
+        spec.credential,
+        CredentialKind::None | CredentialKind::External
+    ) {
+        // Neither local gateways nor external local sessions have a Tidemark-owned secret.
+        // Both rebuild from settings alone; their published kinds still distinguish the two
+        // contracts for clients. A credential-free service also keeps its hint absent —
+        // there is genuinely nothing to say about where a nonexistent secret comes from.
+        let account = Account::keyless(
             ProviderId::new(spec.id),
             AccountId::default(),
             Box::new(move |options| (spec.build)(Credential::new(String::new()), options)),
-        );
+        )
+        .with_credential(spec.credential);
+        if spec.credential_hint.is_empty() {
+            return account;
+        }
+        return account.with_hint(spec.credential_hint);
     }
     Account::new(
         ProviderId::new(spec.id),
@@ -760,6 +769,9 @@ mod tests {
             .into_iter()
             .find(|definition| definition.provider == cursor::PROVIDER_ID)
             .expect("Cursor is in the catalog");
+        // The session belongs to another application: D-Bus clients must see external,
+        // not none, so their authentication semantics stay honest.
+        assert_eq!(definition.credential_kind(), Some(CredentialKind::External));
         let selector = definition
             .browser_auth
             .expect("Cursor has local source selection");

@@ -98,15 +98,19 @@ DeepSeek · ElevenLabs · Factory · Fireworks · Groq · IBM Bob · Kilo · Kim
 LLM Proxy · MiniMax · Moonshot · NanoGPT · Neuralwatt · OpenAI · OpenCode Go · OpenRouter ·
 Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
-**No credential needed**
+**Local session**
 
-Cursor · Wayfinder
+Cursor
 
-Cursor uses the cursor.com session already signed in on this machine — it has no API key
-to paste. Its settings page asks you to choose one local source: the Cursor App, or one of
+Cursor uses a cursor.com session already signed in on this machine — Tidemark does not store
+an API key or session token. Its settings page asks you to choose one local source: the Cursor App, or one of
 your browsers (and one of its profiles, if it keeps more than one). That choice is kept and
 used alone; if the chosen source later signs out, Tidemark tells you instead of silently
 switching to another browser or the App.
+
+**No credential needed**
+
+Wayfinder
 
 Some providers need one extra setting alongside the key — a region, an account id, or the
 base URL of your own deployment. The provider's page asks for it.

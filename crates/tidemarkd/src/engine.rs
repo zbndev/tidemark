@@ -591,9 +591,9 @@ impl Engine {
             return Err(format!("account {provider}/{account} is not configured"));
         };
         let sources = self.inspect_auth_sources(provider, account).await?;
-        if !is_ready_auth_selection(&sources, &selection) {
+        let Some(selection) = ready_auth_selection(&sources, &selection) else {
             return Err("the selected authentication source is not ready".into());
-        }
+        };
 
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
         config
@@ -1294,26 +1294,53 @@ pub fn stored_kind(credential: CredentialKind) -> Option<Kind> {
     }
 }
 
-/// Whether an inspected, ready candidate exactly names the requested local source.
-fn is_ready_auth_selection(sources: &[AuthCandidate], selection: &AuthSelection) -> bool {
-    let Some(mode) = sources
+/// The exact ready source an inspected choice names.
+///
+/// A browser parent is a one-click shorthand only. The persisted choice is its first ready
+/// profile in inspection order, so a later poll cannot re-scan and choose a different account.
+fn ready_auth_selection(
+    sources: &[AuthCandidate],
+    selection: &AuthSelection,
+) -> Option<AuthSelection> {
+    let mode = sources
         .iter()
-        .find(|candidate| candidate.id == selection.mode)
-    else {
-        return false;
-    };
+        .find(|candidate| candidate.id == selection.mode)?;
     match selection.candidate.as_deref() {
-        None => mode.state() == Some(AuthCandidateState::Ready),
-        Some(candidate) => ready_descendant(&mode.children, candidate),
+        None if mode.state() == Some(AuthCandidateState::Ready) => Some(selection.clone()),
+        None => None,
+        Some(candidate) => {
+            ready_descendant(&mode.children, candidate).map(|candidate| AuthSelection {
+                mode: selection.mode.clone(),
+                candidate: Some(candidate.id.clone()),
+            })
+        }
     }
 }
 
-/// Searches only below the selected top-level mode, preserving a mode's candidate scope.
-fn ready_descendant(candidates: &[AuthCandidate], selected: &str) -> bool {
-    candidates.iter().any(|candidate| {
-        (candidate.id == selected && candidate.state() == Some(AuthCandidateState::Ready))
-            || ready_descendant(&candidate.children, selected)
+/// Finds a selected ready candidate and resolves parent shortcuts to their first ready leaf.
+fn ready_descendant<'a>(
+    candidates: &'a [AuthCandidate],
+    selected: &str,
+) -> Option<&'a AuthCandidate> {
+    candidates.iter().find_map(|candidate| {
+        if candidate.id == selected && candidate.state() == Some(AuthCandidateState::Ready) {
+            first_ready_leaf(candidate)
+        } else {
+            ready_descendant(&candidate.children, selected)
+        }
     })
+}
+
+/// The first proven leaf in the daemon's stable discovery order.
+fn first_ready_leaf(candidate: &AuthCandidate) -> Option<&AuthCandidate> {
+    if candidate.state() != Some(AuthCandidateState::Ready) {
+        return None;
+    }
+    candidate
+        .children
+        .iter()
+        .find_map(first_ready_leaf)
+        .or(Some(candidate))
 }
 
 /// What asking the keyring for a credential produced.
@@ -1776,7 +1803,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_ready_browser_auth_source_is_validated_then_persisted_and_rebuilt() {
+    async fn a_browser_parent_persists_its_first_validated_profile_then_rebuilds() {
         // If the validation moved after the write, an unknown candidate could replace the
         // working Cursor App source with a browser the daemon has never proved usable.
         let path = std::env::temp_dir().join(format!(
@@ -1813,13 +1840,22 @@ mod tests {
                     title: "Firefox".into(),
                     subtitle: None,
                     state: "ready".into(),
-                    children: vec![AuthCandidate {
-                        id: "firefox/work".into(),
-                        title: "Work".into(),
-                        subtitle: None,
-                        state: "ready".into(),
-                        children: Vec::new(),
-                    }],
+                    children: vec![
+                        AuthCandidate {
+                            id: "firefox/work".into(),
+                            title: "Work".into(),
+                            subtitle: None,
+                            state: "ready".into(),
+                            children: Vec::new(),
+                        },
+                        AuthCandidate {
+                            id: "firefox/personal".into(),
+                            title: "Personal".into(),
+                            subtitle: None,
+                            state: "ready".into(),
+                            children: Vec::new(),
+                        },
+                    ],
                 }],
             },
         ];
@@ -1873,14 +1909,18 @@ mod tests {
                 "default",
                 AuthSelection {
                     mode: "browser".into(),
-                    candidate: Some("firefox/work".into()),
+                    candidate: Some("firefox".into()),
                 },
             )
             .await
             .expect("ready source is committed");
         let written = Config::at(path.clone()).expect("config parses");
         assert_eq!(written.option("cursor", "auth-browser"), Some("firefox"));
-        assert_eq!(written.option("cursor", "auth-profile"), Some("work"));
+        assert_eq!(
+            written.option("cursor", "auth-profile"),
+            Some("work"),
+            "a one-click browser choice is pinned to the exact ready profile it proved"
+        );
         assert_eq!(
             harness.engine.accounts[0].status.auth_selection,
             Some(AuthSelection {

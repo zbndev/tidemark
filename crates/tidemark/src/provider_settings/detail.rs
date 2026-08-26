@@ -558,6 +558,10 @@ impl ProviderDetail {
     }
 
     fn build_authentication(self: &Rc<Self>) {
+        if self.definition.browser_auth.is_some() {
+            self.build_browser_auth();
+            return;
+        }
         match self.definition.credential_kind() {
             Some(CredentialKind::Key) => self.build_key_rows(),
             // A provider whose credential can also come from a CLI on this machine gets
@@ -576,15 +580,9 @@ impl ProviderDetail {
                     self.build_local_rows(external);
                 }
             }
-            // Nothing to paste and nobody to sign in to. What remains is the login this
-            // machine already holds: a provider with an explicit local source gets its
-            // tabs instead of an empty box under a heading that promised a control.
+            // A real credential-free service exposes no authentication controls.
             Some(CredentialKind::None) => {
-                if self.definition.browser_auth.is_some() {
-                    self.build_browser_auth();
-                } else {
-                    self.authentication.set_visible(false);
-                }
+                self.authentication.set_visible(false);
             }
             Some(CredentialKind::External) | None => {
                 let status = self.status.borrow();

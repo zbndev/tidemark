@@ -356,6 +356,22 @@ pub async fn request(
     Ok(body)
 }
 
+/// Sends a credential proof request without reading or recording its response body.
+///
+/// Source inspection proves only that a local session is accepted. Its body is not a quota
+/// reading and can contain account data, so it must not enter the optional raw-response log.
+pub async fn validate(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+) -> Result<(), ProviderError> {
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|error| ProviderError::Transport(redact_query(error)))?;
+    let retry_after = http::retry_after_header(&response).map(str::to_owned);
+    http::check(response.status(), retry_after.as_deref())
+}
+
 /// Reads a required option, refusing the build with the setting's name when it is unset
 /// or blank — the check [`Keyed::new`] makes generically, factored out for the
 /// hand-written providers whose builds are their own.

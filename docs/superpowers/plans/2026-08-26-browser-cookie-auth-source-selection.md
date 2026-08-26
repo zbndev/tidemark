@@ -219,7 +219,7 @@ git commit -m "feat(cursor): select an explicit local auth source"
 
 - [x] **Step 1: Write failing config, engine, registry, and service tests**
 
-Test that Cursor App selection removes auth-browser/auth-profile, a browser-parent selection removes only auth-profile, and nested selection retains all fields. Test that unknown/unready candidate selection leaves config unchanged, drops/rebuilds the client only after validation, and publishes an immediate due status. Under dbus-run-session, exercise the two new D-Bus methods and ensure the returned report contains no cookie value.
+Test that Cursor App selection removes auth-browser/auth-profile, a browser-parent selection pins its first ready profile into auth-profile, and nested selection retains all fields. Test that unknown/unready candidate selection leaves config unchanged, drops/rebuilds the client only after validation, and publishes an immediate due status. Under dbus-run-session, exercise the two new D-Bus methods and ensure the returned report contains no cookie value.
 
 ~~~rust
 config.set_auth_selection("cursor", &AuthSelection {
@@ -391,4 +391,3 @@ Use the tidemark-installed-verification skill. Rebuild/install the scoped packag
 
 Run: git status --short && git log --oneline -7
 Expected: only the scoped commits and any explicitly pre-existing user changes. Report the exact command results, installed D-Bus evidence, and commit list before proposing integration.
-

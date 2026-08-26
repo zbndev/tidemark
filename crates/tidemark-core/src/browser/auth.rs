@@ -1,6 +1,6 @@
 //! Generic inspection of browser-cookie authentication sources.
 
-use super::{CookieError, Query, SafeStorage, Store, header};
+use super::{CookieError, Query, SafeStorage, Store, header_for};
 use std::future::Future;
 use tidemark_types::{AuthCandidate, AuthCandidateState};
 
@@ -73,6 +73,7 @@ impl CandidateCredential {
 pub async fn inspect<F, Fut>(
     stores: Vec<Store>,
     query: &Query,
+    request_url: &str,
     storage: &dyn SafeStorage,
     validate: F,
 ) -> Vec<AuthCandidate>
@@ -90,7 +91,8 @@ where
                     .into_iter()
                     .filter(|cookie| cookie.is_live(now))
                     .collect();
-                if live.is_empty() {
+                let header = header_for(&live, request_url);
+                if header.is_empty() {
                     AuthCandidateState::Missing
                 } else {
                     match validate(CandidateCredential {
@@ -98,7 +100,7 @@ where
                             browser: store.browser.slug.to_owned(),
                             profile: Some(store.profile.clone()),
                         },
-                        header: header(&live),
+                        header,
                     })
                     .await
                     {
@@ -241,6 +243,7 @@ mod tests {
         let report = runtime.block_on(inspect(
             stores_in(home.path()),
             &query,
+            "https://cursor.com/api/usage-summary",
             &NoKeyring,
             |credential| async move {
                 if credential.header().contains("rejected") {

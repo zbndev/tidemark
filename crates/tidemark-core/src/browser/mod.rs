@@ -249,6 +249,56 @@ impl Cookie {
     }
 }
 
+#[cfg(test)]
+mod scope_tests {
+    use super::{Cookie, header_for};
+
+    #[test]
+    fn a_cookie_header_keeps_only_the_one_cursor_session_the_request_url_can_receive() {
+        // Sending either a www-only token or a path-scoped duplicate to cursor.com lets the
+        // server choose an account Tidemark did not validate.
+        let cookies = vec![
+            Cookie {
+                host: ".cursor.com".into(),
+                name: "WorkosCursorSessionToken".into(),
+                value: "selected".into(),
+                path: "/".into(),
+                secure: true,
+                expires_at: None,
+            },
+            Cookie {
+                host: "www.cursor.com".into(),
+                name: "WorkosCursorSessionToken".into(),
+                value: "wrong-host".into(),
+                path: "/".into(),
+                secure: true,
+                expires_at: None,
+            },
+            Cookie {
+                host: ".cursor.com".into(),
+                name: "WorkosCursorSessionToken".into(),
+                value: "wrong-path".into(),
+                path: "/settings".into(),
+                secure: true,
+                expires_at: None,
+            },
+            Cookie {
+                host: ".cursor.com".into(),
+                name: "analytics".into(),
+                value: "allowed".into(),
+                path: "/".into(),
+                secure: false,
+                expires_at: None,
+            },
+        ];
+
+        assert_eq!(
+            header_for(&cookies, "https://cursor.com/api/usage-summary"),
+            "WorkosCursorSessionToken=selected; analytics=allowed"
+        );
+    }
+}
+
 impl fmt::Debug for Cookie {
     /// Written by hand: a derived impl would print a live session the first time anything
     /// traced a cookie.
@@ -265,13 +315,56 @@ impl fmt::Debug for Cookie {
     }
 }
 
-/// The value of a `Cookie:` header carrying these cookies, in the order given.
-pub fn header(cookies: &[Cookie]) -> String {
+/// The `Cookie:` header a browser would send to one HTTPS request URL.
+///
+/// Browser stores can contain same-named cookies for several hosts and paths.  Sending all
+/// of them makes the remote server choose a session rather than the browser's own matching
+/// rules, so this keeps request host/path/secure scope and the first matching name only.
+pub fn header_for(cookies: &[Cookie], request_url: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(request_url) else {
+        return String::new();
+    };
+    let Some(host) = url.host_str() else {
+        return String::new();
+    };
+    let path = url.path();
+    let secure = url.scheme() == "https";
+    let mut names = std::collections::BTreeSet::new();
+
     cookies
         .iter()
+        .filter(|cookie| {
+            (!cookie.secure || secure)
+                && cookie_host_matches(&cookie.host, host)
+                && cookie_path_matches(&cookie.path, path)
+                && names.insert(&cookie.name)
+        })
         .map(|cookie| format!("{}={}", cookie.name, cookie.value))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+fn cookie_host_matches(cookie_host: &str, request_host: &str) -> bool {
+    let request_host = request_host.to_ascii_lowercase();
+    match cookie_host.strip_prefix('.') {
+        Some(domain) => {
+            let domain = domain.to_ascii_lowercase();
+            request_host == domain || request_host.ends_with(&format!(".{domain}"))
+        }
+        None => request_host == cookie_host.to_ascii_lowercase(),
+    }
+}
+
+fn cookie_path_matches(cookie_path: &str, request_path: &str) -> bool {
+    let cookie_path = if cookie_path.is_empty() {
+        "/"
+    } else {
+        cookie_path
+    };
+    request_path.starts_with(cookie_path)
+        && (cookie_path.ends_with('/')
+            || request_path.len() == cookie_path.len()
+            || request_path.as_bytes().get(cookie_path.len()) == Some(&b'/'))
 }
 
 /// Why cookies could not be read.
@@ -496,16 +589,6 @@ pub(crate) mod tests {
         assert!(rendered.contains("session"));
         assert!(!rendered.contains("do-not-print-this"));
         assert!(rendered.contains("redacted"));
-    }
-
-    #[test]
-    fn a_header_is_the_cookies_in_the_order_they_were_given() {
-        let header = header(&[
-            cookie(".cursor.com", "WorkosCursorSessionToken", "abc"),
-            cookie(".cursor.com", "other", "1"),
-        ]);
-
-        assert_eq!(header, "WorkosCursorSessionToken=abc; other=1");
     }
 
     #[test]
