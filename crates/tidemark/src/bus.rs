@@ -121,6 +121,12 @@ pub trait Daemon {
     fn set_startup_mode(&self, mode: &str) -> zbus::Result<()>;
     fn set_history_retention(&self, retention: &str) -> zbus::Result<()>;
 
+    /// Chooses zone-based or fixed-interval polling for healthy accounts.
+    fn set_refresh_mode(&self, mode: &str) -> zbus::Result<()>;
+
+    /// Sets the fixed interval Manual mode polls at, in minutes.
+    fn set_refresh_minutes(&self, minutes: u32) -> zbus::Result<()>;
+
     /// All three proxy settings at once: they are one setting, and half of it applied is a
     /// proxy nothing can be reached through.
     fn set_proxy(&self, mode: &str, host: &str, port: u16) -> zbus::Result<()>;

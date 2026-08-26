@@ -41,6 +41,7 @@ const PROXY_LABELS: [&str; 4] = ["Off", "HTTP", "HTTPS", "SOCKS5"];
 enum SwitchKind {
     ReleaseCheck,
     MinimizeOnClose,
+    RefreshAuto,
 }
 
 /// Whether an incomplete proxy is the user's mistake or just the middle of typing one in.
@@ -59,6 +60,8 @@ pub struct PreferencesDialog {
     proxy: DaemonProxy<'static>,
     release_check: adw::SwitchRow,
     minimize_on_close: adw::SwitchRow,
+    refresh_auto: adw::SwitchRow,
+    refresh_minutes: adw::SpinRow,
     startup: adw::ComboRow,
     retention: adw::ComboRow,
     proxy_mode: adw::ComboRow,
@@ -108,12 +111,32 @@ impl PreferencesDialog {
         behavior.add(&minimize_on_close);
         let startup = adw::PreferencesGroup::builder().title("Startup").build();
         startup.add(&startup_mode);
+        // The subtitle stays vague on purpose: which zone buys which pace is the daemon's
+        // business, and a number here would be a second truth to keep in step with
+        // `CONTEXT.md`.
+        let refresh_auto = adw::SwitchRow::builder()
+            .title("Auto")
+            .subtitle("Refresh frequency adapts to how much quota is left.")
+            .build();
+        let refresh_minutes = adw::SpinRow::new(
+            Some(&gtk::Adjustment::new(5.0, 1.0, 120.0, 1.0, 10.0, 0.0)),
+            1.0,
+            0,
+        );
+        refresh_minutes.set_title("Manual refresh frequency");
+        refresh_minutes.set_subtitle("Minutes between polls when Auto is off.");
+        let refresh_group = adw::PreferencesGroup::builder()
+            .title("Providers refresh")
+            .build();
+        refresh_group.add(&refresh_auto);
+        refresh_group.add(&refresh_minutes);
         let general = adw::PreferencesPage::builder()
             .title("General")
             .icon_name("preferences-system-symbolic")
             .build();
         general.add(&behavior);
         general.add(&startup);
+        general.add(&refresh_group);
         dialog.add(&general);
 
         let proxy_mode = adw::ComboRow::builder()
@@ -227,6 +250,8 @@ impl PreferencesDialog {
             proxy,
             release_check,
             minimize_on_close,
+            refresh_auto,
+            refresh_minutes,
             startup: startup_mode,
             retention,
             proxy_mode,
@@ -244,9 +269,11 @@ impl PreferencesDialog {
 
         settings.connect_switch(&settings.release_check, SwitchKind::ReleaseCheck);
         settings.connect_switch(&settings.minimize_on_close, SwitchKind::MinimizeOnClose);
+        settings.connect_switch(&settings.refresh_auto, SwitchKind::RefreshAuto);
         settings.connect_startup();
         settings.connect_retention();
         settings.connect_proxy();
+        settings.connect_refresh_minutes();
         settings.connect_clear(&clear);
         settings.apply(&preferences, &data);
 
@@ -270,6 +297,10 @@ impl PreferencesDialog {
             .set_active(preferences.release_check && data.release_check_available);
         self.minimize_on_close
             .set_active(preferences.minimize_on_close);
+        self.refresh_auto
+            .set_active(preferences.refresh_mode == Preferences::REFRESH_AUTO);
+        self.refresh_minutes
+            .set_value(f64::from(preferences.refresh_minutes));
         apply_named_choice(
             &self.startup,
             &STARTUP_LABELS,
@@ -317,6 +348,15 @@ impl PreferencesDialog {
             row.remove_css_class("error");
         }
         self.sync_proxy_editable();
+        self.sync_refresh_editable();
+    }
+
+    /// Whether the manual interval row can be typed into, from what the Auto switch
+    /// shows — the row's own state, not the stored preference, for the reason the proxy
+    /// rows read theirs: the switch flips before the daemon answers.
+    fn sync_refresh_editable(&self) {
+        self.refresh_minutes
+            .set_sensitive(manual_refresh_editable(self.refresh_auto.is_active()));
     }
 
     fn connect_switch(self: &Rc<Self>, row: &adw::SwitchRow, kind: SwitchKind) {
@@ -328,6 +368,11 @@ impl PreferencesDialog {
                 };
                 if settings.suppress.get() {
                     return;
+                }
+                if matches!(kind, SwitchKind::RefreshAuto) {
+                    // Before the round trip, so the row the mode just made irrelevant
+                    // locks the moment the switch flips and not a reply later.
+                    settings.sync_refresh_editable();
                 }
                 settings.change_switch(kind, row.is_active());
             }
@@ -341,6 +386,10 @@ impl PreferencesDialog {
             let result = match kind {
                 SwitchKind::ReleaseCheck => self.proxy.set_release_check(enabled).await,
                 SwitchKind::MinimizeOnClose => self.proxy.set_minimize_on_close(enabled).await,
+                SwitchKind::RefreshAuto => {
+                    let mode = refresh_mode_for(enabled);
+                    self.proxy.set_refresh_mode(mode).await
+                }
             };
             if let Err(error) = result {
                 let preferences = self.preferences.borrow().clone();
@@ -352,6 +401,9 @@ impl PreferencesDialog {
                 match kind {
                     SwitchKind::ReleaseCheck => preferences.release_check = enabled,
                     SwitchKind::MinimizeOnClose => preferences.minimize_on_close = enabled,
+                    SwitchKind::RefreshAuto => {
+                        preferences.refresh_mode = refresh_mode_for(enabled).to_owned();
+                    }
                 }
             }
             if !matches!(kind, SwitchKind::ReleaseCheck)
@@ -366,7 +418,42 @@ impl PreferencesDialog {
         match kind {
             SwitchKind::ReleaseCheck => &self.release_check,
             SwitchKind::MinimizeOnClose => &self.minimize_on_close,
+            SwitchKind::RefreshAuto => &self.refresh_auto,
         }
+    }
+
+    /// Commits the manual interval each time the stepper settles on a value.
+    ///
+    /// The row is made insensitive for the round trip, which is what bounds the commit
+    /// rate: a held stepper button cannot queue a poll per click.
+    fn connect_refresh_minutes(self: &Rc<Self>) {
+        self.refresh_minutes.connect_value_notify({
+            let weak = Rc::downgrade(self);
+            move |row| {
+                let Some(settings) = weak.upgrade() else {
+                    return;
+                };
+                if settings.suppress.get() {
+                    return;
+                }
+                let minutes = row.value() as u32;
+                row.set_sensitive(false);
+                let row = row.clone();
+                glib::spawn_future_local(async move {
+                    if let Err(error) = settings.proxy.set_refresh_minutes(minutes).await {
+                        let preferences = settings.preferences.borrow().clone();
+                        let data = settings.data.borrow().clone();
+                        settings.apply(&preferences, &data);
+                        settings.toast(&error.to_string());
+                    } else {
+                        settings.preferences.borrow_mut().refresh_minutes = minutes;
+                    }
+                    // Either way the row is redrawn from the switch, which is what
+                    // restores its sensitivity under the mode that allows typing.
+                    settings.sync_refresh_editable();
+                });
+            }
+        });
     }
 
     fn connect_startup(self: &Rc<Self>) {
@@ -677,6 +764,21 @@ fn proxy_rows_editable(selected: u32) -> bool {
         .is_some_and(|mode| *mode != Preferences::PROXY_OFF)
 }
 
+/// Whether the manual interval row belongs to the mode the Auto switch shows right now —
+/// including the moment between a toggle and the daemon's answer.
+fn manual_refresh_editable(auto_active: bool) -> bool {
+    !auto_active
+}
+
+/// The named mode a switch state commits.
+fn refresh_mode_for(auto_active: bool) -> &'static str {
+    if auto_active {
+        Preferences::REFRESH_AUTO
+    } else {
+        Preferences::REFRESH_MANUAL
+    }
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
@@ -717,6 +819,24 @@ mod tests {
         assert_eq!(proxy_index(Preferences::PROXY_SOCKS5), Some(3));
         assert_eq!(proxy_index("socks4"), None);
         assert_eq!(PROXY_VALUES.len(), PROXY_LABELS.len());
+    }
+
+    #[test]
+    fn the_manual_interval_row_follows_the_auto_switch() {
+        // Reads the row and not the stored preference, for the same reason the proxy
+        // rows do: the switch flips before the daemon has answered, and locking the
+        // row against the stored value would leave the setting unreachable mid-change.
+        assert!(!manual_refresh_editable(true), "auto decides the pace");
+        assert!(
+            manual_refresh_editable(false),
+            "manual needs a pace to read"
+        );
+    }
+
+    #[test]
+    fn a_switch_state_maps_back_to_one_of_the_named_refresh_modes() {
+        assert_eq!(refresh_mode_for(true), Preferences::REFRESH_AUTO);
+        assert_eq!(refresh_mode_for(false), Preferences::REFRESH_MANUAL);
     }
 
     /// The regression this exists for: the host and the port were derived from the
