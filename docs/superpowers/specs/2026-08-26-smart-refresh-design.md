@@ -93,11 +93,13 @@ with the complete dict afterwards, exactly as `SetStartupMode` does.
 ## Applying a change
 
 The engine holds the parsed mode in a field, set at construction from `Config::preferences()`
-and replaced on `SetPreference`. Changing either value persists it, updates the field, and
+and replaced on `SetPreference`. Changing the mode persists it, updates the field, and
 marks every account due immediately — the `adopt_proxy` precedent: one extra request per
-account on a rare user action, in exchange for the new pace being observable at once rather
-than one old interval later. `reschedule` then computes the worst `used_percent` across the
-account's published windows and passes it, with the mode, into the `Situation`.
+account on a rare user action. Changing the minutes only persists it and updates the
+field: the new pace applies from each account's next natural poll, because a spin control
+must not be able to cause a poll storm. `reschedule` then computes the worst
+`used_percent` across the account's published windows and passes it, with the mode, into
+the `Situation`.
 
 `scheduler::Situation` gains `mode: RefreshMode` (`Auto | Manual(Duration)`, daemon-side
 enum) and `worst_used_percent: Option<f64>`, and loses `seconds_since_change`.
