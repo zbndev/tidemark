@@ -1171,6 +1171,7 @@ mod tests {
             credential: kind.as_wire().into(),
             credential_hint: "Z.ai dashboard → API keys.".into(),
             external: None,
+            browser_auth: None,
             options: Vec::new(),
         }
     }

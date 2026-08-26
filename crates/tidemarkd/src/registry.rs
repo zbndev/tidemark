@@ -201,6 +201,7 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
                 command: entry.external_command.to_owned(),
                 writes_back: entry.writes_back,
             }),
+            browser_auth: None,
             options: options(entry.slug, config),
         })
         .collect();
@@ -210,6 +211,7 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
         credential: CredentialKind::Key.as_wire().to_owned(),
         credential_hint: spec.credential_hint.to_owned(),
         external: None,
+        browser_auth: None,
         options: options(spec.id, config),
     }));
     definitions.extend(
@@ -232,6 +234,7 @@ fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderD
         credential: spec.credential.as_wire().to_owned(),
         credential_hint: spec.credential_hint.to_owned(),
         external: None,
+        browser_auth: None,
         options: options(spec.id, config),
     }
 }

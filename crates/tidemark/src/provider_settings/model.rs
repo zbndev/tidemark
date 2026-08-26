@@ -199,6 +199,7 @@ mod tests {
             credential: CredentialKind::Key.as_wire().into(),
             credential_hint: "Create a key in the provider dashboard.".into(),
             external: None,
+            browser_auth: None,
             options: Vec::new(),
         }
     }
@@ -236,6 +237,7 @@ mod tests {
             credential: CredentialKind::OAuth.as_wire().into(),
             credential_hint: "Sign in through a browser.".into(),
             external,
+            browser_auth: None,
             options,
         }
     }

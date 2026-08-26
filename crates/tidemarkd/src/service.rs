@@ -1310,6 +1310,7 @@ mod tests {
             credential: "key".into(),
             credential_hint: "Z.ai dashboard → API keys.".into(),
             external: None,
+            browser_auth: None,
             options: Vec::new(),
         }]
     }
@@ -1406,6 +1407,7 @@ mod tests {
             credential: "key".into(),
             credential_hint: "Z.ai dashboard → API keys.".into(),
             external: None,
+            browser_auth: None,
             options: Vec::new(),
         };
         let (daemon, _secrets, _commands) =
