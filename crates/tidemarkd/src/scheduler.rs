@@ -2,17 +2,43 @@
 //!
 //! Kept as one pure function over a described [`Situation`], with no clock and no I/O in
 //! it, because every interesting case here is one nobody wants to reproduce live: a
-//! provider asking for an hour, a window five minutes from rolling over, a keyring that is
-//! still locked, a machine that has been idle since lunch.
+//! provider asking for an hour, a window five minutes from rolling over, a keyring that
+//! is still locked.
 //!
 //! The intervals themselves come from `CONTEXT.md` § Polling and are not this module's to
-//! reinvent: five minutes baseline, sixty seconds in the last quarter hour before a reset,
-//! half an hour when nothing is being spent, exponential backoff capped at an hour.
+//! reinvent: in Auto the pace follows the quota zones — ten minutes in the blue, five in
+//! the yellow, one in the red, ten again once the quota is exhausted — with the last
+//! quarter hour before a reset watched at sixty seconds so the rollover is seen the
+//! moment it happens; in Manual the user's chosen interval is the whole rule. Failures
+//! back off exponentially from the baseline regardless of mode.
 
 use std::time::Duration;
-use tidemark_types::ProviderState;
+use tidemark_types::{DANGER_AT, Preferences, ProviderState, WARNING_AT};
 
-/// Interval when nothing special is happening.
+/// How the daemon chooses a healthy account's next interval.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RefreshMode {
+    /// Interval from the worst window's quota zone; the near-reset speedup applies.
+    Auto,
+    /// One fixed interval, and nothing else — the pace the user picked.
+    Manual(Duration),
+}
+
+impl RefreshMode {
+    /// The mode the settings file describes, for the daemon's construction. The file has
+    /// been validated by the time this runs, so an unknown name cannot reach here.
+    pub fn configured(preferences: &Preferences) -> Self {
+        match preferences.refresh_mode.as_str() {
+            Preferences::REFRESH_MANUAL => Self::Manual(Duration::from_secs(
+                u64::from(preferences.refresh_minutes) * 60,
+            )),
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// Interval when nothing special is happening: the seed exponential backoff doubles from,
+/// and the pace a manual interval defaults to.
 pub const BASELINE: Duration = Duration::from_secs(5 * 60);
 
 /// Interval while a window is about to roll over. The rollover is the one event history
@@ -23,17 +49,16 @@ pub const NEAR_RESET: Duration = Duration::from_secs(60);
 /// How close to a reset counts as near it.
 pub const NEAR_RESET_HORIZON_SECS: i64 = 15 * 60;
 
-/// Interval when no quota is being spent.
-pub const IDLE: Duration = Duration::from_secs(30 * 60);
+/// Auto interval while the worst window is in the blue zone — under [`WARNING_AT`] used,
+/// or exhausted entirely: nothing more can be spent, and the reset is watched for
+/// separately by [`NEAR_RESET`].
+pub const AUTO_BLUE: Duration = Duration::from_secs(10 * 60);
 
-/// How long consumption must sit still before the account is treated as idle.
-///
-/// **What "no session activity" means here.** The daemon cannot see the user's terminal,
-/// and `CONTEXT.md` deliberately does not say it can. The only activity signal it actually
-/// has is the number the provider reports: quota that stops moving means nobody is
-/// spending it. The cost of that definition is bounded and known — after a quiet spell,
-/// the first poll of a new session can be up to [`IDLE`] late.
-pub const IDLE_AFTER_SECS: i64 = 30 * 60;
+/// Auto interval while the worst window is between [`WARNING_AT`] and [`DANGER_AT`].
+pub const AUTO_YELLOW: Duration = Duration::from_secs(5 * 60);
+
+/// Auto interval while the worst window has passed [`DANGER_AT`] but is not exhausted.
+pub const AUTO_RED: Duration = Duration::from_secs(60);
 
 /// Ceiling on backoff we invent ourselves. A provider that explicitly asks for longer is
 /// still obeyed: this caps our guessing, not their instruction.
@@ -61,8 +86,11 @@ pub struct Situation {
     /// Seconds until the soonest reset among the windows we last saw. Negative when a
     /// reset is overdue, which is still near it. `None` when no window said.
     pub seconds_to_next_reset: Option<i64>,
-    /// Seconds since consumption last moved. `None` before there is anything to compare.
-    pub seconds_since_change: Option<i64>,
+    /// The refresh mode the daemon is running: zones, or the user's fixed interval.
+    pub mode: RefreshMode,
+    /// How much the account's most-used window had consumed, as of the last good
+    /// reading. `None` before there is anything to pace by — which paces as blue.
+    pub worst_used_percent: Option<f64>,
 }
 
 impl Situation {
@@ -74,7 +102,8 @@ impl Situation {
             failures: 0,
             retry_after: None,
             seconds_to_next_reset: None,
-            seconds_since_change: None,
+            mode: RefreshMode::Auto,
+            worst_used_percent: None,
         }
     }
 }
@@ -94,22 +123,39 @@ pub fn next_interval(situation: &Situation) -> Duration {
 }
 
 fn healthy(situation: &Situation) -> Duration {
-    // Near a reset beats idle deliberately: a window that rolls over while we are asleep
-    // costs a segment boundary, and an idle account is exactly the one whose rollover
-    // would otherwise be missed entirely.
-    if situation
-        .seconds_to_next_reset
-        .is_some_and(|secs| secs <= NEAR_RESET_HORIZON_SECS)
-    {
-        return NEAR_RESET;
+    match situation.mode {
+        RefreshMode::Auto => {
+            // Near a reset beats the zone deliberately: a window that rolls over while we
+            // are asleep costs a segment boundary — the one event history cannot
+            // reconstruct afterwards — and the reset notification is owed the moment the
+            // boundary passes, not one zone-interval later.
+            if situation
+                .seconds_to_next_reset
+                .is_some_and(|secs| secs <= NEAR_RESET_HORIZON_SECS)
+            {
+                return NEAR_RESET;
+            }
+            zone_interval(situation.worst_used_percent)
+        }
+        RefreshMode::Manual(interval) => interval,
     }
-    if situation
-        .seconds_since_change
-        .is_some_and(|secs| secs >= IDLE_AFTER_SECS)
-    {
-        return IDLE;
+}
+
+/// The Auto interval for an account whose worst window reads this much used.
+///
+/// The boundaries are the same constants the bar colours and the notifications use, so
+/// all three agree about when a window is worth watching.
+fn zone_interval(worst_used_percent: Option<f64>) -> Duration {
+    let used = worst_used_percent.unwrap_or(0.0);
+    if used >= 100.0 {
+        AUTO_BLUE
+    } else if used >= DANGER_AT {
+        AUTO_RED
+    } else if used >= WARNING_AT {
+        AUTO_YELLOW
+    } else {
+        AUTO_BLUE
     }
-    BASELINE
 }
 
 /// Exponential from the baseline, doubling per consecutive failure.
@@ -130,11 +176,21 @@ fn backoff(failures: u32, retry_after: Option<Duration>) -> Duration {
 mod tests {
     use super::*;
 
-    fn healthy_with(reset: Option<i64>, since_change: Option<i64>) -> Situation {
+    fn auto_with(worst: Option<f64>, reset: Option<i64>) -> Situation {
+        Situation {
+            state: ProviderState::Ok,
+            worst_used_percent: worst,
+            seconds_to_next_reset: reset,
+            mode: RefreshMode::Auto,
+            ..Situation::fresh()
+        }
+    }
+
+    fn manual(minutes: u64, reset: Option<i64>) -> Situation {
         Situation {
             state: ProviderState::Ok,
             seconds_to_next_reset: reset,
-            seconds_since_change: since_change,
+            mode: RefreshMode::Manual(Duration::from_secs(minutes * 60)),
             ..Situation::fresh()
         }
     }
@@ -149,56 +205,96 @@ mod tests {
     }
 
     #[test]
-    fn nothing_special_is_the_baseline() {
+    fn the_zones_pace_by_how_much_of_the_quota_is_left() {
         assert_eq!(
-            next_interval(&healthy_with(Some(4 * 3600), Some(60))),
-            BASELINE
+            next_interval(&auto_with(Some(0.0), Some(4 * 3600))),
+            AUTO_BLUE
         );
-        assert_eq!(next_interval(&Situation::fresh()), BASELINE);
+        assert_eq!(
+            next_interval(&auto_with(Some(69.9), Some(4 * 3600))),
+            AUTO_BLUE
+        );
+        assert_eq!(
+            next_interval(&auto_with(Some(70.0), Some(4 * 3600))),
+            AUTO_YELLOW
+        );
+        assert_eq!(
+            next_interval(&auto_with(Some(89.9), Some(4 * 3600))),
+            AUTO_YELLOW
+        );
+        assert_eq!(
+            next_interval(&auto_with(Some(90.0), Some(4 * 3600))),
+            AUTO_RED
+        );
+        assert_eq!(
+            next_interval(&auto_with(Some(99.9), Some(4 * 3600))),
+            AUTO_RED
+        );
     }
 
     #[test]
-    fn the_quarter_hour_before_a_reset_is_watched_closely() {
+    fn an_exhausted_account_waits_like_a_blue_one() {
+        // Nothing can be spent until the reset, and the reset is watched for separately.
         assert_eq!(
-            next_interval(&healthy_with(Some(14 * 60), None)),
+            next_interval(&auto_with(Some(100.0), Some(4 * 3600))),
+            AUTO_BLUE
+        );
+        assert_eq!(
+            next_interval(&auto_with(Some(105.0), Some(4 * 3600))),
+            AUTO_BLUE
+        );
+    }
+
+    #[test]
+    fn an_account_with_no_windows_yet_is_paced_as_blue() {
+        assert_eq!(next_interval(&auto_with(None, None)), AUTO_BLUE);
+        assert_eq!(next_interval(&Situation::fresh()), AUTO_BLUE);
+    }
+
+    #[test]
+    fn the_quarter_hour_before_a_reset_beats_every_zone() {
+        assert_eq!(
+            next_interval(&auto_with(Some(95.0), Some(14 * 60))),
             NEAR_RESET
         );
-        assert_eq!(next_interval(&healthy_with(Some(16 * 60), None)), BASELINE);
+        assert_eq!(
+            next_interval(&auto_with(Some(50.0), Some(16 * 60))),
+            AUTO_BLUE
+        );
     }
 
     #[test]
     fn an_overdue_reset_is_still_near_one() {
         // The provider said it would roll over a minute ago and we have not seen it happen
-        // yet. Backing off to five minutes here is how a segment boundary gets lost.
+        // yet. Backing off here is how a segment boundary gets lost.
+        assert_eq!(next_interval(&auto_with(Some(95.0), Some(-60))), NEAR_RESET);
+    }
+
+    #[test]
+    fn manual_polls_at_exactly_the_chosen_interval() {
         assert_eq!(
-            next_interval(&healthy_with(Some(-60), Some(10 * 3600))),
-            NEAR_RESET
+            next_interval(&manual(5, Some(14 * 60))),
+            Duration::from_secs(5 * 60),
+            "near a reset is Auto's acceleration; Manual is the pace the user picked"
+        );
+        assert_eq!(next_interval(&manual(1, None)), Duration::from_secs(60));
+        assert_eq!(
+            next_interval(&manual(120, None)),
+            Duration::from_secs(120 * 60)
         );
     }
 
     #[test]
-    fn quota_that_stops_moving_slows_the_polling_down() {
-        assert_eq!(
-            next_interval(&healthy_with(None, Some(IDLE_AFTER_SECS))),
-            IDLE
-        );
-        assert_eq!(
-            next_interval(&healthy_with(None, Some(IDLE_AFTER_SECS - 1))),
-            BASELINE
-        );
-    }
+    fn the_mode_the_settings_describe_is_the_mode_the_daemon_runs() {
+        let mut preferences = Preferences::default();
+        assert_eq!(RefreshMode::configured(&preferences), RefreshMode::Auto);
 
-    #[test]
-    fn an_idle_account_still_wakes_up_for_its_rollover() {
+        preferences.refresh_mode = Preferences::REFRESH_MANUAL.into();
+        preferences.refresh_minutes = 30;
         assert_eq!(
-            next_interval(&healthy_with(Some(5 * 60), Some(12 * 3600))),
-            NEAR_RESET
+            RefreshMode::configured(&preferences),
+            RefreshMode::Manual(Duration::from_secs(1800))
         );
-    }
-
-    #[test]
-    fn a_fresh_account_is_not_idle_merely_because_nothing_is_known_about_it() {
-        assert_eq!(next_interval(&healthy_with(None, None)), BASELINE);
     }
 
     #[test]

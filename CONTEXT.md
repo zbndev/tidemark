@@ -376,21 +376,33 @@ address would defeat the point.
 
 ## Polling
 
-Adaptive: 5 minutes baseline, 60 seconds in the last 15 minutes before a reset, 30 minutes
-when no session activity is detected. Exponential backoff on 429, capped at one hour.
+Adaptive, in two modes kept in `[refresh]` in `config.toml` and switched from the
+preferences dialog.
 
-**"No session activity" means consumption that has stopped moving.** The daemon cannot see
-the user's terminal and does not try to; the only activity signal it has is the number the
-provider reports, so an account whose `used_percent` has not moved for 30 minutes is the
-idle one. The cost is bounded and stated: after a quiet spell, the first poll of a new
-session can be up to 30 minutes late. Near a reset always wins over idle — an idle account
-is precisely the one whose rollover would otherwise be slept through, and a rollover is the
-one event history cannot reconstruct afterwards.
+**Auto** (the default) paces each account by its worst window: ten minutes under 70% used,
+five minutes from 70%, one minute from 90%, and ten again once the quota is exhausted —
+nothing more can be spent, and the reset itself is watched for separately. The zone
+boundaries are the same 70/90 constants the bar colours and the notifications use, so all
+three agree about when a window is worth watching. Within fifteen minutes of a reset —
+including an overdue one — the interval drops to sixty seconds, because a rollover is the
+one event history cannot reconstruct afterwards, and the reset notification is owed the
+moment the boundary passes rather than one zone-interval later.
 
+**Manual** polls healthy accounts at exactly the chosen interval, one to a hundred and
+twenty minutes. No near-reset acceleration: the user picked a pace and gets it, at the
+stated cost that a reset notification can arrive one interval late.
+
+Changing the mode polls every account immediately; changing the manual interval applies
+from each account's next poll. There is deliberately no idle slowdown in either mode:
+half an hour of quiet is enough to spend most of a cheap subscription's quota with no
+notification at all.
+
+Failures back off exponentially in both modes — five minutes, doubling, capped at an hour.
 A provider's own `Retry-After` is obeyed when it is *longer* than our backoff and never
 when it is shorter: a service failing every request while asking for one second would
 otherwise turn a backoff into a hot loop. The hour cap applies to our own guess, not to an
-explicit instruction from the provider.
+explicit instruction from the provider. A locked keyring is re-asked every minute; states
+only the user can clear wait half an hour.
 Antigravity likely needs a longer interval of its own because reaching it means bringing
 up the `agy` local HTTPS server rather than making one request — to be measured.
 

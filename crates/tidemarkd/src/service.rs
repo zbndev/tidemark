@@ -943,6 +943,42 @@ impl Daemon {
         self.publish_preferences(&emitter, preferences).await
     }
 
+    /// Chooses how the daemon paces healthy accounts: by quota zone, or one fixed interval.
+    async fn set_refresh_mode(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        mode: &str,
+    ) -> fdo::Result<()> {
+        if !Preferences::valid_refresh_mode(mode) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "unknown refresh mode {mode:?}"
+            )));
+        }
+        let _guard = self.preference_mutation.lock().await;
+        let preferences = self
+            .preference_request(Preference::RefreshMode(mode.into()))
+            .await?;
+        self.publish_preferences(&emitter, preferences).await
+    }
+
+    /// Sets the fixed interval Manual mode polls at, in minutes.
+    async fn set_refresh_minutes(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        minutes: u32,
+    ) -> fdo::Result<()> {
+        if !Preferences::valid_refresh_minutes(minutes) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "refresh minutes must be 1 to 120, not {minutes}"
+            )));
+        }
+        let _guard = self.preference_mutation.lock().await;
+        let preferences = self
+            .preference_request(Preference::RefreshMinutes(minutes))
+            .await?;
+        self.publish_preferences(&emitter, preferences).await
+    }
+
     /// Points every outbound request and every child process at a proxy, or at none.
     ///
     /// Takes all three values together because they are one setting: applying a mode
@@ -2848,5 +2884,55 @@ mod tests {
             );
             let _ = std::fs::remove_file(config_path);
         }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_refresh_mode_is_refused_before_the_engine_hears_it() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let Ok(connection) = zbus::Connection::session().await else {
+            eprintln!("skipped: no session bus reachable");
+            return;
+        };
+        let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH).expect("a valid path");
+
+        assert!(matches!(
+            daemon.set_refresh_mode(emitter, "sometimes").await,
+            Err(fdo::Error::InvalidArgs(_))
+        ));
+        assert!(
+            commands.try_recv().is_err(),
+            "a refused value must not reach the engine"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_change_reaches_the_engine_and_publishes_the_dict() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let daemon = Arc::new(daemon);
+        let Ok(connection) = zbus::Connection::session().await else {
+            eprintln!("skipped: no session bus reachable");
+            return;
+        };
+        let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH).expect("a valid path");
+
+        let changing = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { daemon.set_refresh_minutes(emitter, 30).await })
+        };
+        let Command::SetPreference { preference, reply } = commands
+            .recv()
+            .await
+            .expect("the change reaches the engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert!(matches!(preference, Preference::RefreshMinutes(30)));
+        reply
+            .send(Ok(Preferences::default()))
+            .expect("caller waits for reply");
+        changing
+            .await
+            .expect("task did not panic")
+            .expect("accepted");
     }
 }

@@ -471,6 +471,11 @@ pub struct Preferences {
     /// Port the proxy listens on. Zero until one is set; a mode other than `off` needs a
     /// real one.
     pub proxy_port: u16,
+    /// `auto` or `manual`: whether healthy polling follows the quota zones or one fixed
+    /// pace. See `CONTEXT.md` § Polling.
+    pub refresh_mode: String,
+    /// Minutes between polls in manual mode, 1 to 120. Ignored while the mode is `auto`.
+    pub refresh_minutes: u32,
 }
 
 impl Preferences {
@@ -486,6 +491,9 @@ impl Preferences {
     pub const PROXY_HTTP: &'static str = "http";
     pub const PROXY_HTTPS: &'static str = "https";
     pub const PROXY_SOCKS5: &'static str = "socks5";
+
+    pub const REFRESH_AUTO: &'static str = "auto";
+    pub const REFRESH_MANUAL: &'static str = "manual";
 
     /// Whether this build knows the named startup mode.
     pub fn valid_startup(value: &str) -> bool {
@@ -510,6 +518,18 @@ impl Preferences {
             Self::PROXY_OFF | Self::PROXY_HTTP | Self::PROXY_HTTPS | Self::PROXY_SOCKS5
         )
     }
+
+    /// Whether this build knows the named refresh mode.
+    pub fn valid_refresh_mode(value: &str) -> bool {
+        matches!(value, Self::REFRESH_AUTO | Self::REFRESH_MANUAL)
+    }
+
+    /// Whether a manual interval is one the daemon will run. Refused rather than clamped:
+    /// the bounds are part of the setting's meaning, and a silently different pace is the
+    /// one thing a user who set it deliberately must never get.
+    pub fn valid_refresh_minutes(value: u32) -> bool {
+        (1..=120).contains(&value)
+    }
 }
 
 impl Default for Preferences {
@@ -522,6 +542,8 @@ impl Default for Preferences {
             proxy_mode: Self::PROXY_OFF.into(),
             proxy_host: String::new(),
             proxy_port: 0,
+            refresh_mode: Self::REFRESH_AUTO.into(),
+            refresh_minutes: 5,
         }
     }
 }
@@ -1037,11 +1059,26 @@ mod tests {
             proxy_mode: "socks5".into(),
             proxy_host: "127.0.0.1".into(),
             proxy_port: 1080,
+            refresh_mode: "manual".into(),
+            refresh_minutes: 30,
         };
 
         let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
         let (decoded, _): (Preferences, _) = encoded.deserialize().expect("decodes again");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn only_the_two_named_refresh_modes_and_a_bounded_interval_are_known() {
+        assert!(Preferences::valid_refresh_mode(Preferences::REFRESH_AUTO));
+        assert!(Preferences::valid_refresh_mode(Preferences::REFRESH_MANUAL));
+        assert!(!Preferences::valid_refresh_mode("sometimes"));
+        assert!(!Preferences::valid_refresh_mode(""));
+
+        assert!(Preferences::valid_refresh_minutes(1));
+        assert!(Preferences::valid_refresh_minutes(120));
+        assert!(!Preferences::valid_refresh_minutes(0));
+        assert!(!Preferences::valid_refresh_minutes(121));
     }
 
     #[test]
