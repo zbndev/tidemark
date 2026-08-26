@@ -42,6 +42,7 @@ pub(super) struct ProviderDetail {
     definition: ProviderDefinition,
     status: RefCell<ProviderStatus>,
     page: adw::NavigationPage,
+    header: adw::HeaderBar,
     authentication: adw::PreferencesGroup,
     key: RefCell<Option<KeyRows>>,
     sign_in: RefCell<Option<SignInRow>>,
@@ -346,6 +347,7 @@ impl ProviderDetail {
             definition,
             status: RefCell::new(status),
             page,
+            header,
             authentication,
             key: RefCell::new(None),
             sign_in: RefCell::new(None),
@@ -893,43 +895,51 @@ impl ProviderDetail {
         let Some(selector) = self.definition.browser_auth.clone() else {
             return;
         };
-        let weak = Rc::downgrade(self);
-        let on_refresh: Rc<dyn Fn()> = Rc::new(move || {
-            if let Some(detail) = weak.upgrade() {
-                detail.open_browser_auth();
+        let refresh = gtk::Button::builder()
+            .icon_name("view-refresh-symbolic")
+            .tooltip_text("Check again")
+            .valign(gtk::Align::Center)
+            .css_classes(["circular"])
+            .build();
+        refresh.connect_clicked({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(detail) = weak.upgrade() {
+                    detail.open_browser_auth();
+                }
             }
         });
+        self.header.pack_end(&refresh);
+
         let weak = Rc::downgrade(self);
         let on_choose: Rc<dyn Fn(AuthSelection)> = Rc::new(move |selection| {
-            let Some(detail) = weak.upgrade() else {
-                return;
-            };
-            let proxy = detail.proxy.clone();
-            let (provider, account) = {
-                let status = detail.status.borrow();
-                (status.provider.clone(), status.account.clone())
-            };
-            glib::spawn_future_local(async move {
-                // The daemon validates inside the write, so a refused source leaves the
-                // previous one in force; there is nothing local to roll back, only the
-                // reason to say out loud.
-                if let Err(error) = proxy
-                    .select_auth_source(&provider, &account, selection)
-                    .await
-                {
-                    detail.toast(&reason(&error));
-                    return;
-                }
-                // Asking the daemon to publish now makes the accepted selection's In-use
-                // mark arrive with its status rather than at the next scheduled poll.
-                if let Err(error) = proxy.refresh(&provider).await {
-                    detail.toast(&reason(&error));
-                }
-            });
+            if let Some(detail) = weak.upgrade() {
+                let proxy = detail.proxy.clone();
+                let (provider, account) = {
+                    let status = detail.status.borrow();
+                    (status.provider.clone(), status.account.clone())
+                };
+                glib::spawn_future_local(async move {
+                    // The daemon validates inside the write, so a refused source leaves the
+                    // previous one in force; there is nothing local to roll back, only the
+                    // reason to say out loud.
+                    if let Err(error) = proxy
+                        .select_auth_source(&provider, &account, selection)
+                        .await
+                    {
+                        detail.toast(&reason(&error));
+                        return;
+                    }
+                    // Asking the daemon to publish now makes the accepted selection's In-use
+                    // mark arrive with its status rather than at the next scheduled poll.
+                    if let Err(error) = proxy.refresh(&provider).await {
+                        detail.toast(&reason(&error));
+                    }
+                });
+            }
         });
-
         let published = self.status.borrow().auth_selection.clone();
-        let rows = BrowserAuth::new(&selector, published.as_ref(), on_refresh, on_choose);
+        let rows = BrowserAuth::new(&selector, published.as_ref(), on_choose);
         rows.attach(&self.authentication);
         *self.browser_auth.borrow_mut() = Some(rows);
 

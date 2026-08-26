@@ -90,6 +90,7 @@ impl CandidateRow {
             .title(title)
             .use_markup(false)
             .sensitive(selectable)
+            .activatable(selectable)
             .build();
         if let Some(subtitle) = subtitle {
             row.set_subtitle(subtitle);
@@ -147,14 +148,11 @@ struct Half {
 }
 
 impl Half {
-    fn new(mode: &AuthMode, on_refresh: Rc<dyn Fn()>) -> Self {
-        let group = adw::PreferencesGroup::builder().visible(false).build();
-        let check_again = gtk::Button::builder()
-            .label("Check again")
-            .valign(gtk::Align::Center)
+    fn new(mode: &AuthMode) -> Self {
+        let group = adw::PreferencesGroup::builder()
+            .visible(false)
+            .margin_top(12)
             .build();
-        check_again.connect_clicked(move |_| on_refresh());
-        group.set_header_suffix(Some(&check_again));
 
         Self {
             mode_value: mode.value.clone(),
@@ -295,7 +293,6 @@ impl BrowserAuth {
     pub(super) fn new(
         selector: &AuthSelector,
         status_selection: Option<&AuthSelection>,
-        on_refresh: Rc<dyn Fn()>,
         on_choose: Rc<dyn Fn(AuthSelection)>,
     ) -> Self {
         // Full width, in a row of its own at the top of the group, rather than tucked
@@ -319,11 +316,7 @@ impl BrowserAuth {
             .build();
         pill_row.add_css_class("credential-choice");
 
-        let halves: Vec<Half> = selector
-            .modes
-            .iter()
-            .map(|mode| Half::new(mode, Rc::clone(&on_refresh)))
-            .collect();
+        let halves: Vec<Half> = selector.modes.iter().map(Half::new).collect();
 
         let suppress_toggle = Rc::new(Cell::new(false));
         let navigated = Rc::new(Cell::new(false));
@@ -470,9 +463,14 @@ fn position_halves(halves: &[Half], visible_mode: &str) {
 
 #[cfg(test)]
 mod tests {
-    use tidemark_types::{AuthCandidate, AuthCandidateState};
+    use std::rc::Rc;
 
-    use super::{candidate_selectable, shows_profile_children, state_classes, state_word};
+    use adw::prelude::*;
+    use tidemark_types::{AuthCandidate, AuthCandidateState, AuthMode};
+
+    use super::{
+        CandidateRow, Half, candidate_selectable, shows_profile_children, state_classes, state_word,
+    };
 
     fn candidate(id: &str, state: AuthCandidateState) -> AuthCandidate {
         AuthCandidate {
@@ -487,6 +485,43 @@ mod tests {
     #[test]
     fn only_a_proven_working_candidate_is_selectable() {
         assert!(candidate_selectable(AuthCandidateState::Ready));
+    }
+
+    /// GTK widget state needs a display, while the rest of this module's tests intentionally
+    /// stay headless. Keep all such assertions together: GTK binds initialization to the
+    /// harness thread.
+    fn widgets() -> bool {
+        static READY: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| adw::init().is_ok());
+        *READY
+    }
+
+    #[test]
+    fn browser_auth_widgets_keep_source_rows_separate_from_the_tabs() {
+        if !widgets() {
+            eprintln!("skipped: no display is available");
+            return;
+        }
+
+        let row = CandidateRow::new(
+            "firefox".into(),
+            "Firefox",
+            None,
+            Some(AuthCandidateState::Ready),
+            true,
+            "browser",
+            Rc::new(|_| {}),
+        );
+
+        assert!(row.row.is_activatable());
+
+        let half = Half::new(&AuthMode {
+            value: "browser".into(),
+            title: "Browser".into(),
+        });
+
+        assert!(half.group.title().is_empty());
+        assert!(half.group.header_suffix().is_none());
+        assert_eq!(half.group.margin_top(), 12);
     }
 
     #[test]
