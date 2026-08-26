@@ -160,12 +160,9 @@ impl DetailDialog {
             .hscrollbar_policy(gtk::PolicyType::Never)
             .child(&content)
             .build();
-        let close = gtk::Button::builder()
-            .icon_name("window-close-symbolic")
-            .tooltip_text("Close")
-            .build();
+        // AdwDialog forces AdwHeaderBar's decoration layout to include a close button;
+        // packing our own would render two of them.
         let header = adw::HeaderBar::new();
-        header.pack_end(&close);
         let view = adw::ToolbarView::builder().content(&scroller).build();
         view.add_top_bar(&header);
         let dialog = adw::Dialog::builder()
@@ -211,12 +208,6 @@ impl DetailDialog {
                     detail.selection.borrow_mut().0 = Some(key);
                     detail.load_current_segment();
                 }
-            }
-        });
-        close.connect_clicked({
-            let dialog = dialog.clone();
-            move |_| {
-                dialog.close();
             }
         });
         dialog.connect_closed(move |_| on_closed());
