@@ -63,10 +63,14 @@
 use super::{HandSpec, Options, ProviderError, redact_query};
 use crate::browser::{self, Keyring, SafeStorage};
 use crate::providers::{BoxFuture, Credential, Provider, http, parse_rfc3339, title_case};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tidemark_types::{
     AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window,
     WindowKey, WindowLength,
@@ -78,6 +82,12 @@ const USAGE_SUMMARY_URL: &str = "https://cursor.com/api/usage-summary";
 const AUTH_ME_URL: &str = "https://cursor.com/api/auth/me";
 const REQUEST_USAGE_URL: &str = "https://cursor.com/api/usage";
 const SAND_USAGE_URL: &str = "https://cursor.com/api/dashboard/get-sand-usage-status";
+
+/// Cursor's standalone desktop app keeps its sign-in token in this VS Code-style state store.
+const STATE_DATABASE: &str = ".config/Cursor/User/globalStorage/state.vscdb";
+
+/// The key Cursor uses for the raw JWT in [`STATE_DATABASE`].
+const ACCESS_TOKEN_KEY: &str = "cursorAuth/accessToken";
 
 /// What the dashboard POST must be sent from. Cursor refuses the Bot endpoint without it.
 const ORIGIN: &str = "https://cursor.com";
@@ -231,6 +241,7 @@ impl Cursor {
             Some(home) => browser::stores_in(home),
             None => Vec::new(),
         };
+        let standalone = self.home.as_deref().and_then(standalone_session_header);
         let now = Timestamp::now();
         let mut keyring_locked = false;
         let mut headers = Vec::new();
@@ -264,6 +275,11 @@ impl Cursor {
                     headers.push(header);
                 }
             }
+        }
+        if let Some(header) = standalone
+            && !headers.contains(&header)
+        {
+            headers.push(header);
         }
         if headers.is_empty() && keyring_locked {
             return Err(ProviderError::KeyringLocked);
@@ -337,6 +353,95 @@ impl Cursor {
             Timestamp::now(),
         )
     }
+}
+
+/// Reads Cursor standalone's session JWT and reconstructs the cookie its dashboard accepts.
+///
+/// The desktop app owns the database and may be writing it in WAL mode, so its files are
+/// copied into an owner-only temporary directory before SQLite opens them. A missing or changed
+/// store is just an unavailable credential source; browser sessions remain candidates.
+fn standalone_session_header(home: &Path) -> Option<String> {
+    let state = StateSnapshot::of(&home.join(STATE_DATABASE)).ok()?;
+    let connection = rusqlite::Connection::open_with_flags(
+        state.database(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    let token: String = connection
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = ?1",
+            [ACCESS_TOKEN_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()??;
+    standalone_cookie(&token)
+}
+
+/// Rebuilds the WorkOS session value Cursor's web dashboard derives from its access token.
+fn standalone_cookie(token: &str) -> Option<String> {
+    let claims = token.split('.').nth(1)?;
+    let claims = BASE64_URL.decode(claims).ok()?;
+    let subject = serde_json::from_slice::<StandaloneClaims>(&claims)
+        .ok()?
+        .sub;
+    let user = subject.split_once('|')?.1;
+    if user.trim().is_empty() {
+        return None;
+    }
+    Some(format!("WorkosCursorSessionToken={user}%3A%3A{token}"))
+}
+
+/// The only JWT claim needed to reconstruct the dashboard cookie.
+#[derive(Deserialize)]
+struct StandaloneClaims {
+    sub: String,
+}
+
+/// An owner-only temporary copy of Cursor standalone's SQLite database.
+#[derive(Debug)]
+struct StateSnapshot {
+    directory: PathBuf,
+}
+
+impl StateSnapshot {
+    fn of(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "tidemark-cursor-state-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        let snapshot = Self { directory };
+        std::fs::copy(path, snapshot.database())?;
+        for sidecar in ["-wal", "-shm"] {
+            let source = with_suffix(path, sidecar);
+            if source.is_file() {
+                std::fs::copy(source, with_suffix(&snapshot.database(), sidecar))?;
+            }
+        }
+        Ok(snapshot)
+    }
+
+    fn database(&self) -> PathBuf {
+        self.directory.join("state.vscdb")
+    }
+}
+
+impl Drop for StateSnapshot {
+    fn drop(&mut self) {
+        // Best effort: the private copy has mode 0700, and a failed cleanup cannot be fixed.
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 impl fmt::Debug for Cursor {
@@ -1205,6 +1310,59 @@ mod tests {
         home
     }
 
+    /// A throwaway Cursor standalone state store holding its access token.
+    fn cursor_home(access_token: &str) -> crate::browser::tests::TestHome {
+        let home = crate::browser::tests::TestHome::new();
+        cursor_state(&home, access_token);
+        home
+    }
+
+    fn cursor_state(home: &crate::browser::tests::TestHome, access_token: &str) {
+        use rusqlite::Connection;
+
+        let path = home
+            .path()
+            .join(".config/Cursor/User/globalStorage/state.vscdb");
+        std::fs::create_dir_all(path.parent().expect("has parent")).expect("creates");
+        let connection = Connection::open(path).expect("opens");
+        connection
+            .execute_batch(
+                "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);",
+            )
+            .expect("creates the table");
+        connection
+            .execute(
+                "INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/accessToken', ?1)",
+                [access_token],
+            )
+            .expect("inserts the access token");
+    }
+
+    fn cursor_state_in_wal(
+        home: &crate::browser::tests::TestHome,
+        access_token: &str,
+    ) -> rusqlite::Connection {
+        let path = home
+            .path()
+            .join(".config/Cursor/User/globalStorage/state.vscdb");
+        std::fs::create_dir_all(path.parent().expect("has parent")).expect("creates");
+        let connection = rusqlite::Connection::open(path).expect("opens");
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA wal_autocheckpoint = 0;
+                 CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);",
+            )
+            .expect("sets WAL mode and creates the table");
+        connection
+            .execute(
+                "INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/accessToken', ?1)",
+                [access_token],
+            )
+            .expect("inserts the access token");
+        connection
+    }
+
     fn header_of(provider: &Cursor) -> Option<String> {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1342,6 +1500,71 @@ mod tests {
             !header.contains("NID"),
             "other sites' cookies are never read"
         );
+    }
+
+    #[test]
+    fn a_signed_in_cursor_desktop_app_supplies_the_session_header() {
+        let home =
+            cursor_home("eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature");
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring)).expect("builds");
+
+        assert_eq!(
+            header_of(&provider).as_deref(),
+            Some(
+                "WorkosCursorSessionToken=user_cursor%3A%3AeyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature"
+            )
+        );
+    }
+
+    #[test]
+    fn a_cursor_desktop_session_is_tried_after_browser_sessions_are_rejected() {
+        let home = gecko_home(&[(
+            ".cursor.com",
+            "WorkosCursorSessionToken",
+            "expired-session",
+            0,
+        )]);
+        cursor_state(
+            &home,
+            "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature",
+        );
+        let (base, requests, server) = session_server();
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_test_base(&base);
+
+        let snapshot = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect("the standalone session wins after browser rejection");
+        assert_eq!(snapshot.provider.as_str(), "cursor");
+
+        let requests: Vec<_> = (0..4)
+            .map(|_| requests.recv().expect("request captured"))
+            .collect();
+        server.join().expect("server stopped");
+        let summaries: Vec<_> = requests
+            .iter()
+            .filter(|request| request.starts_with("GET /api/usage-summary "))
+            .collect();
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries[0].contains("WorkosCursorSessionToken=expired-session"));
+        assert!(summaries[1].contains(
+            "WorkosCursorSessionToken=user_cursor%3A%3AeyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature"
+        ));
+    }
+
+    #[test]
+    fn a_cursor_desktop_session_committed_only_to_wal_is_found() {
+        let home = crate::browser::tests::TestHome::new();
+        let writer = cursor_state_in_wal(
+            &home,
+            "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature",
+        );
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring)).expect("builds");
+
+        assert!(header_of(&provider).is_some());
+        drop(writer);
     }
 
     #[test]
