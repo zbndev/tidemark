@@ -1120,9 +1120,8 @@ impl Engine {
             failures: account.failures,
             retry_after: account.retry_after,
             seconds_to_next_reset: soonest_reset(&account.status.windows, now),
-            seconds_since_change: account
-                .last_change_at
-                .map(|changed| changed.seconds_until(now)),
+            mode: scheduler::RefreshMode::Auto,
+            worst_used_percent: None,
         };
         let interval = scheduler::next_interval(&situation);
 
@@ -2635,6 +2634,8 @@ mod tests {
                 proxy_mode: Preferences::PROXY_OFF.into(),
                 proxy_host: String::new(),
                 proxy_port: 0,
+                refresh_mode: Preferences::REFRESH_AUTO.into(),
+                refresh_minutes: 5,
             }
         );
         assert_eq!(
