@@ -438,7 +438,6 @@ impl PreferencesDialog {
                 }
                 let minutes = row.value() as u32;
                 row.set_sensitive(false);
-                let row = row.clone();
                 glib::spawn_future_local(async move {
                     if let Err(error) = settings.proxy.set_refresh_minutes(minutes).await {
                         let preferences = settings.preferences.borrow().clone();
