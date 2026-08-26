@@ -219,6 +219,8 @@ impl Config {
                 .unwrap_or(defaults.proxy_host.as_str())
                 .to_owned(),
             proxy_port: self.preference_port(PROXY_TABLE, PROXY_PORT_KEY)?,
+            refresh_mode: defaults.refresh_mode.clone(),
+            refresh_minutes: defaults.refresh_minutes,
         })
     }
 
@@ -1465,6 +1467,8 @@ mod tests {
             proxy_mode: "socks5".into(),
             proxy_host: "127.0.0.1".into(),
             proxy_port: 1080,
+            refresh_mode: "auto".into(),
+            refresh_minutes: 5,
         };
 
         config.set_release_check(false).expect("release setting");
