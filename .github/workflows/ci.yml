@@ -12,6 +12,11 @@ on:
       - '**/*.md'
       - 'docs/**'
 
+# Read-only is all this workflow ever does; declaring it keeps the repository's default
+# permissions from silently applying.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

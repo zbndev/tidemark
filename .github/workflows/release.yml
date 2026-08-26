@@ -4,9 +4,6 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
-
 env:
   CARGO_TERM_COLOR: always
 
@@ -15,6 +12,8 @@ jobs:
   # the tag agrees with the manifest.
   checks:
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
 
@@ -53,6 +52,8 @@ jobs:
     # which is the whole reason each format is built on its own target rather than on one
     # shared build host.
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
       - name: Install the toolkit
@@ -86,6 +87,8 @@ jobs:
     # numbers differently, and the package will not install.
     runs-on: ubuntu-26.04
     container: fedora:44
+    permissions:
+      contents: read
     steps:
       - name: Bootstrap the container
         run: |
@@ -114,6 +117,10 @@ jobs:
   release:
     needs: [checks, deb, rpm]
     runs-on: ubuntu-26.04
+    # The one job that writes: creating the draft release is the only mutation anywhere
+    # in this workflow, so the build jobs above stay read-only.
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v5
         with:
