@@ -2,18 +2,11 @@
 //!
 //! # Why the credential is a browser session
 //!
-//! Cursor publishes no usage API and issues no API key for one. Every reader of this data —
-//! the dashboard, and CodexBar, which this port follows — authenticates with the
-//! `WorkosCursorSessionToken` cookie a browser session holds. CodexBar on Linux makes the
-//! user copy that header out of the browser's network panel by hand; Tidemark instead reads
-//! the cookie itself, out of every browser on the machine, on every poll — which is also
-//! what keeps the reading alive when the session rolls over. The reading machinery is
-//! [`crate::browser`]; this module only names the domains and the cookie names.
-//!
-//! Which cookies count, and in what order they are tried, is CodexBar's ladder: a strict
-//! pass that requires one of the known session-cookie names to be present, then a fallback
-//! pass that takes any cookies on Cursor's domains at all, because the session name has
-//! changed before and the API is the arbiter of what still works.
+//! Cursor publishes no usage API and issues no API key for one. The dashboard authenticates
+//! with a local Cursor session, either the Cursor App's state database or a browser cookie.
+//! Tidemark reads exactly the source the person selected; it never substitutes another
+//! browser, profile, or Cursor App session after a failure. The browser reading machinery is
+//! [`crate::browser`]; this module names Cursor's domains and session-cookie names.
 //!
 //! # The four requests
 //!
@@ -60,7 +53,7 @@
 //! percentages come from the token-based pricing that plan is not on, so showing them
 //! beside a request quota would be showing a person two unrelated readings of one account.
 
-use super::{HandSpec, Options, ProviderError, redact_query};
+use super::{HandSpec, OptionSchema, Options, ProviderError, redact_query};
 use crate::browser::{self, Keyring, SafeStorage};
 use crate::providers::{BoxFuture, Credential, Provider, http, parse_rfc3339, title_case};
 use base64::Engine;
@@ -72,11 +65,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tidemark_types::{
-    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window,
-    WindowKey, WindowLength,
+    AccountId, AuthCandidate, AuthCandidateState, CredentialKind, DetailRow, DetailSection,
+    ProviderId, Snapshot, Timestamp, Window, WindowKey, WindowLength,
 };
 
 pub const PROVIDER_ID: &str = "cursor";
+
+/// The local source mode selected for Cursor under `[provider.cursor]`.
+pub const AUTH_SOURCE: &str = "auth-source";
+/// The selected browser's stable slug, present for [`BROWSER_SOURCE`].
+pub const AUTH_BROWSER: &str = "auth-browser";
+/// The selected browser profile directory name, when a browser has multiple usable profiles.
+pub const AUTH_PROFILE: &str = "auth-profile";
+/// Cursor's standalone state database source.
+pub const CURSOR_APP_SOURCE: &str = "cursor-app";
+/// A browser-cookie source.
+pub const BROWSER_SOURCE: &str = "browser";
 
 const USAGE_SUMMARY_URL: &str = "https://cursor.com/api/usage-summary";
 const AUTH_ME_URL: &str = "https://cursor.com/api/auth/me";
@@ -121,6 +125,14 @@ fn cookie_query() -> browser::Query {
     browser::Query::new(COOKIE_DOMAINS.iter().copied(), Vec::<String>::new())
 }
 
+/// The narrower query used only to discover whether a profile has a Cursor session.
+fn session_query() -> browser::Query {
+    browser::Query::new(
+        COOKIE_DOMAINS.iter().copied(),
+        SESSION_COOKIE_NAMES.iter().copied(),
+    )
+}
+
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "Cursor",
@@ -128,28 +140,94 @@ pub static SPEC: HandSpec = HandSpec {
     // machine already holds, so the settings dialog draws no credential row at all.
     credential: CredentialKind::None,
     credential_hint: "",
-    options: &[],
+    options: &[
+        OptionSchema {
+            name: AUTH_SOURCE,
+            title: "Authentication source",
+            description: None,
+            default: "",
+            choices: &[
+                (CURSOR_APP_SOURCE, "Cursor App"),
+                (BROWSER_SOURCE, "Browser"),
+            ],
+            required: false,
+        },
+        OptionSchema {
+            name: AUTH_BROWSER,
+            title: "Browser",
+            description: None,
+            default: "",
+            choices: &[],
+            required: false,
+        },
+        OptionSchema {
+            name: AUTH_PROFILE,
+            title: "Browser profile",
+            description: None,
+            default: "",
+            choices: &[],
+            required: false,
+        },
+    ],
     build,
 };
 
-fn build(_credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Cursor::new()?))
+fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Cursor::new(options)?))
+}
+
+/// The one local Cursor session a provider instance may read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    CursorApp,
+    Browser {
+        browser: String,
+        profile: Option<String>,
+    },
+}
+
+impl Source {
+    fn from_options(options: &Options) -> Option<Self> {
+        match options.get(AUTH_SOURCE).map(String::as_str) {
+            Some(CURSOR_APP_SOURCE) => Some(Self::CursorApp),
+            Some(BROWSER_SOURCE) => {
+                let browser = options
+                    .get(AUTH_BROWSER)
+                    .map(String::as_str)
+                    .map(str::trim)
+                    .filter(|browser| !browser.is_empty())?;
+                let profile = options
+                    .get(AUTH_PROFILE)
+                    .map(String::as_str)
+                    .map(str::trim)
+                    .filter(|profile| !profile.is_empty())
+                    .map(str::to_owned);
+                Some(Self::Browser {
+                    browser: browser.to_owned(),
+                    profile,
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 pub struct Cursor {
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
+    source: Option<Source>,
     #[cfg(test)]
     base_url: Option<String>,
 }
 
 impl Cursor {
-    pub fn new() -> Result<Self, ProviderError> {
+    pub fn new(options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
+            source: Source::from_options(options),
             #[cfg(test)]
             base_url: None,
         })
@@ -166,6 +244,7 @@ impl Cursor {
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
+            source: None,
             base_url: None,
         })
     }
@@ -173,6 +252,12 @@ impl Cursor {
     #[cfg(test)]
     fn with_test_base(mut self, base_url: &str) -> Self {
         self.base_url = Some(base_url.trim_end_matches('/').to_owned());
+        self
+    }
+
+    #[cfg(test)]
+    fn with_options(mut self, options: Options) -> Self {
+        self.source = Source::from_options(&options);
         self
     }
 
@@ -224,93 +309,120 @@ impl Cursor {
             .map_err(|error| ProviderError::Client(redact_query(error)))
     }
 
-    /// Every `Cookie:` header a browser on this machine could send to cursor.com.
-    ///
-    /// Two passes over every profile of every browser, CodexBar's order: first the stores
-    /// holding one of the known session-cookie names, then — because the name has changed
-    /// before — any store holding cookies on Cursor's domains at all. The headers remain in
-    /// that order, but are not trusted on the name alone: [`Self::fetch_inner`] gives each
-    /// one the required summary request, then only moves to the next after an HTTP
-    /// credential rejection.
-    ///
-    /// A locked keyring is not an empty answer: a Chromium store's cookies are sealed with
-    /// a Secret Service password, so nothing can be said about them until it unlocks, and
-    /// the caller gets [`ProviderError::KeyringLocked`] — the waiting state, not a failure.
-    async fn session_headers(&self) -> Result<Vec<String>, ProviderError> {
+    /// The header from exactly the selected source, if it still contains a session.
+    async fn session_header(&self) -> Result<Option<String>, ProviderError> {
+        let Some(source) = &self.source else {
+            return Ok(None);
+        };
+        match source {
+            Source::CursorApp => Ok(self.home.as_deref().and_then(standalone_session_header)),
+            Source::Browser { browser, profile } => {
+                self.browser_session_header(browser, profile).await
+            }
+        }
+    }
+
+    /// The header from one selected browser, and optionally one selected profile.
+    async fn browser_session_header(
+        &self,
+        browser: &str,
+        profile: &Option<String>,
+    ) -> Result<Option<String>, ProviderError> {
         let stores = match &self.home {
             Some(home) => browser::stores_in(home),
             None => Vec::new(),
         };
-        let standalone = self.home.as_deref().and_then(standalone_session_header);
         let now = Timestamp::now();
         let mut keyring_locked = false;
-        let mut headers = Vec::new();
-        for strict in [true, false] {
-            for store in &stores {
-                let cookies = match store.cookies(&cookie_query(), self.storage.as_ref()).await {
-                    Ok(cookies) => cookies,
-                    Err(browser::CookieError::KeyringLocked) => {
-                        keyring_locked = true;
-                        continue;
-                    }
-                    // A database that does not open is a browser we cannot ask, not a
-                    // session that is not there; the next store may still hold one.
-                    Err(_) => continue,
-                };
-                let live: Vec<_> = cookies
-                    .into_iter()
-                    .filter(|cookie| cookie.is_live(now))
-                    .collect();
-                if live.is_empty() {
+
+        for store in stores.into_iter().filter(|store| {
+            store.browser.slug == browser
+                && profile
+                    .as_ref()
+                    .is_none_or(|profile| profile == &store.profile)
+        }) {
+            let cookies = match store.cookies(&cookie_query(), self.storage.as_ref()).await {
+                Ok(cookies) => cookies,
+                Err(browser::CookieError::KeyringLocked) => {
+                    keyring_locked = true;
                     continue;
                 }
-                let has_session = live
-                    .iter()
-                    .any(|cookie| SESSION_COOKIE_NAMES.contains(&cookie.name.as_str()));
-                if strict && !has_session {
-                    continue;
-                }
-                let header = browser::header(&live);
-                if !headers.contains(&header) {
-                    headers.push(header);
-                }
+                Err(_) => continue,
+            };
+            let live: Vec<_> = cookies
+                .into_iter()
+                .filter(|cookie| cookie.is_live(now))
+                .collect();
+            if live
+                .iter()
+                .any(|cookie| SESSION_COOKIE_NAMES.contains(&cookie.name.as_str()))
+            {
+                return Ok(Some(browser::header(&live)));
             }
         }
-        if let Some(header) = standalone
-            && !headers.contains(&header)
-        {
-            headers.push(header);
-        }
-        if headers.is_empty() && keyring_locked {
+        if keyring_locked {
             return Err(ProviderError::KeyringLocked);
         }
-        Ok(headers)
-    }
-
-    #[cfg(test)]
-    async fn session_header(&self) -> Result<Option<String>, ProviderError> {
-        Ok(self.session_headers().await?.into_iter().next())
+        Ok(None)
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
-        let headers = self.session_headers().await?;
-        if headers.is_empty() {
-            return Err(ProviderError::NoCredential);
-        }
-        let mut rejected = None;
-        for cookie in headers {
-            match self.fetch_with_cookie(&cookie).await {
-                Err(error @ ProviderError::Credential { .. }) => rejected = Some(error),
-                outcome => return outcome,
+        let cookie = self
+            .session_header()
+            .await?
+            .ok_or(ProviderError::NoCredential)?;
+        self.fetch_with_cookie(&cookie).await
+    }
+
+    /// Validates one header without reading or publishing its body.
+    async fn validate_header(&self, cookie: &str) -> crate::browser::auth::Validation {
+        let Ok(request) = self.get(&self.url(USAGE_SUMMARY_URL), cookie) else {
+            return crate::browser::auth::Validation::Unreachable;
+        };
+        match super::request(PROVIDER_ID, &self.client, request).await {
+            Ok(_) => crate::browser::auth::Validation::Ready,
+            Err(ProviderError::Credential { status: 401 | 403 }) => {
+                crate::browser::auth::Validation::Rejected
             }
+            Err(_) => crate::browser::auth::Validation::Unreachable,
         }
-        // `headers` was non-empty; reaching here means each candidate was explicitly
-        // rejected by Cursor, not that no browser had a session. The `None` branch is
-        // defensive against a future non-rejection retry rule changing above.
-        match rejected {
-            Some(error) => Err(error),
-            None => Err(ProviderError::NoCredential),
-        }
+    }
+
+    /// Inspects the standalone Cursor App and browser sources without returning cookies.
+    pub async fn inspect_sources(&self) -> Result<Vec<AuthCandidate>, ProviderError> {
+        let standalone = self.home.as_deref().and_then(standalone_session_header);
+        let standalone_state = match standalone.as_deref() {
+            Some(header) => validation_state(self.validate_header(header).await),
+            None => AuthCandidateState::Missing,
+        };
+        let browsers = crate::browser::auth::inspect(
+            self.home
+                .as_deref()
+                .map(browser::stores_in)
+                .unwrap_or_default(),
+            &session_query(),
+            self.storage.as_ref(),
+            |credential| async move { self.validate_header(credential.header()).await },
+        )
+        .await;
+        let browser_state = candidate_state(&browsers);
+
+        Ok(vec![
+            AuthCandidate {
+                id: CURSOR_APP_SOURCE.into(),
+                title: "Cursor App".into(),
+                subtitle: Some("Cursor's local session database".into()),
+                state: standalone_state.as_wire().into(),
+                children: Vec::new(),
+            },
+            AuthCandidate {
+                id: BROWSER_SOURCE.into(),
+                title: "Browser".into(),
+                subtitle: None,
+                state: browser_state.as_wire().into(),
+                children: browsers,
+            },
+        ])
     }
 
     async fn fetch_with_cookie(&self, cookie: &str) -> Result<Snapshot, ProviderError> {
@@ -353,6 +465,43 @@ impl Cursor {
             Timestamp::now(),
         )
     }
+}
+
+fn validation_state(validation: crate::browser::auth::Validation) -> AuthCandidateState {
+    match validation {
+        crate::browser::auth::Validation::Ready => AuthCandidateState::Ready,
+        crate::browser::auth::Validation::Rejected => AuthCandidateState::Rejected,
+        crate::browser::auth::Validation::Unreachable => AuthCandidateState::Unreachable,
+    }
+}
+
+fn candidate_state(candidates: &[AuthCandidate]) -> AuthCandidateState {
+    let states = candidates.iter().filter_map(AuthCandidate::state);
+    if states
+        .clone()
+        .any(|state| state == AuthCandidateState::Ready)
+    {
+        return AuthCandidateState::Ready;
+    }
+    if states
+        .clone()
+        .any(|state| state == AuthCandidateState::WaitingForKeyring)
+    {
+        return AuthCandidateState::WaitingForKeyring;
+    }
+    if states
+        .clone()
+        .any(|state| state == AuthCandidateState::Unreachable)
+    {
+        return AuthCandidateState::Unreachable;
+    }
+    if states
+        .clone()
+        .any(|state| state == AuthCandidateState::Rejected)
+    {
+        return AuthCandidateState::Rejected;
+    }
+    AuthCandidateState::Missing
 }
 
 /// Reads Cursor standalone's session JWT and reconstructs the cookie its dashboard accepts.
@@ -877,7 +1026,7 @@ fn parse(
 mod tests {
     use super::{Cursor, Options, SPEC, parse};
     use crate::providers::{Credential, ProviderError};
-    use tidemark_types::{CredentialKind, DetailSection, Timestamp};
+    use tidemark_types::{AuthCandidateState, CredentialKind, DetailSection, Timestamp};
 
     /// A live Pro account's `GET /api/usage-summary`, as CodexBar's own regression test
     /// records it: fractional lane percentages that are percentages, not fractions.
@@ -1191,7 +1340,7 @@ mod tests {
 
     #[test]
     fn every_request_carries_the_session_and_the_dashboard_post_carries_its_origin() {
-        let provider = Cursor::new().expect("builds");
+        let provider = Cursor::new(&Options::new()).expect("builds");
         let cookie = "WorkosCursorSessionToken=abc";
 
         let summary = provider
@@ -1237,7 +1386,13 @@ mod tests {
         assert_eq!(SPEC.id, "cursor");
         assert_eq!(SPEC.title, "Cursor");
         assert_eq!(SPEC.credential, CredentialKind::None);
-        assert!(SPEC.options.is_empty());
+        assert_eq!(
+            SPEC.options
+                .iter()
+                .map(|option| option.name)
+                .collect::<Vec<_>>(),
+            ["auth-source", "auth-browser", "auth-profile"]
+        );
 
         let provider =
             (SPEC.build)(Credential::new(String::new()), &Options::new()).expect("builds");
@@ -1372,7 +1527,21 @@ mod tests {
             .expect("no keyring state")
     }
 
-    fn session_server() -> (
+    fn cursor_options(source: &str, browser: Option<&str>, profile: Option<&str>) -> Options {
+        let mut options = Options::new();
+        options.insert("auth-source".into(), source.into());
+        if let Some(browser) = browser {
+            options.insert("auth-browser".into(), browser.into());
+        }
+        if let Some(profile) = profile {
+            options.insert("auth-profile".into(), profile.into());
+        }
+        options
+    }
+
+    fn session_server(
+        request_count: usize,
+    ) -> (
         String,
         std::sync::mpsc::Receiver<String>,
         std::thread::JoinHandle<()>,
@@ -1384,7 +1553,7 @@ mod tests {
         let address = listener.local_addr().expect("listener address");
         let (request_tx, request_rx) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
-            for _ in 0..4 {
+            for _ in 0..request_count {
                 let (mut stream, _) = listener.accept().expect("request accepted");
                 let mut reader = BufReader::new(&mut stream);
                 let mut request = String::new();
@@ -1407,7 +1576,11 @@ mod tests {
                 drop(reader);
 
                 let (status, response) =
-                    if request.contains("WorkosCursorSessionToken=expired-session") {
+                    if request.contains("WorkosCursorSessionToken=payment-required-session") {
+                        ("402 Payment Required", "{}")
+                    } else if request.contains("WorkosCursorSessionToken=forbidden-session") {
+                        ("403 Forbidden", "{}")
+                    } else if request.contains("WorkosCursorSessionToken=expired-session") {
                         ("401 Unauthorized", "{}")
                     } else if request.starts_with("GET /api/usage-summary ") {
                         ("200 OK", PRO)
@@ -1427,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    fn a_later_browser_session_is_used_after_an_earlier_one_is_rejected() {
+    fn a_selected_browser_rejection_does_not_try_another_profile() {
         let home = gecko_home(&[(
             ".cursor.com",
             "WorkosCursorSessionToken",
@@ -1459,28 +1632,21 @@ mod tests {
                 )
                 .expect("creates the working session");
         }
-        let (base, requests, server) = session_server();
+        let (base, requests, server) = session_server(1);
         let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
             .expect("builds")
+            .with_options(cursor_options("browser", Some("zen"), None))
             .with_test_base(&base);
 
-        let snapshot = tokio::runtime::Runtime::new()
+        let error = tokio::runtime::Runtime::new()
             .expect("runtime")
             .block_on(provider.fetch_inner())
-            .expect("the working session wins");
-        assert_eq!(snapshot.provider.as_str(), "cursor");
+            .expect_err("the selected session was rejected");
+        assert!(matches!(error, ProviderError::Credential { status: 401 }));
 
-        let requests: Vec<_> = (0..4)
-            .map(|_| requests.recv().expect("request captured"))
-            .collect();
+        let request = requests.recv().expect("the selected summary request");
+        assert!(request.contains("WorkosCursorSessionToken=expired-session"));
         server.join().expect("server stopped");
-        let summaries: Vec<_> = requests
-            .iter()
-            .filter(|request| request.starts_with("GET /api/usage-summary "))
-            .collect();
-        assert_eq!(summaries.len(), 2);
-        assert!(summaries[0].contains("WorkosCursorSessionToken=expired-session"));
-        assert!(summaries[1].contains("WorkosCursorSessionToken=working-session"));
     }
 
     #[test]
@@ -1490,7 +1656,9 @@ mod tests {
             (".cursor.com", "_ga", "analytics", 0),
             (".google.com", "NID", "not-ours", 0),
         ]);
-        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring)).expect("builds");
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("browser", Some("zen"), None));
 
         let header = header_of(&provider).expect("a session");
         // The whole domain's cookies go on the wire, not just the session one.
@@ -1503,21 +1671,7 @@ mod tests {
     }
 
     #[test]
-    fn a_signed_in_cursor_desktop_app_supplies_the_session_header() {
-        let home =
-            cursor_home("eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature");
-        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring)).expect("builds");
-
-        assert_eq!(
-            header_of(&provider).as_deref(),
-            Some(
-                "WorkosCursorSessionToken=user_cursor%3A%3AeyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature"
-            )
-        );
-    }
-
-    #[test]
-    fn a_cursor_desktop_session_is_tried_after_browser_sessions_are_rejected() {
+    fn the_cursor_app_source_never_reads_a_browser_session() {
         let home = gecko_home(&[(
             ".cursor.com",
             "WorkosCursorSessionToken",
@@ -1528,30 +1682,211 @@ mod tests {
             &home,
             "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature",
         );
-        let (base, requests, server) = session_server();
+        let (base, requests, server) = session_server(3);
         let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
             .expect("builds")
+            .with_options(cursor_options("cursor-app", None, None))
             .with_test_base(&base);
 
         let snapshot = tokio::runtime::Runtime::new()
             .expect("runtime")
             .block_on(provider.fetch_inner())
-            .expect("the standalone session wins after browser rejection");
+            .expect("the Cursor App session works");
         assert_eq!(snapshot.provider.as_str(), "cursor");
 
-        let requests: Vec<_> = (0..4)
+        let requests: Vec<_> = (0..3)
             .map(|_| requests.recv().expect("request captured"))
             .collect();
         server.join().expect("server stopped");
-        let summaries: Vec<_> = requests
-            .iter()
-            .filter(|request| request.starts_with("GET /api/usage-summary "))
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.contains("expired-session"))
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("user_cursor%3A%3A"))
+        );
+    }
+
+    #[test]
+    fn a_selected_browser_profile_does_not_read_another_profile() {
+        let home = gecko_home(&[(
+            ".cursor.com",
+            "WorkosCursorSessionToken",
+            "expired-session",
+            0,
+        )]);
+        let other = home.gecko(".zen/zz99.Working");
+        {
+            use rusqlite::Connection;
+
+            let connection = Connection::open(other).expect("opens");
+            connection
+                .execute_batch(
+                    "CREATE TABLE moz_cookies (
+                        id INTEGER PRIMARY KEY,
+                        baseDomain TEXT,
+                        originAttributes TEXT NOT NULL DEFAULT '',
+                        name TEXT, value TEXT, host TEXT, path TEXT,
+                        expiry INTEGER, lastAccessed INTEGER, creationTime INTEGER,
+                        isSecure INTEGER, isHttpOnly INTEGER
+                    );
+                    INSERT INTO moz_cookies (
+                        host, name, value, path, expiry, isSecure, lastAccessed,
+                        creationTime, isHttpOnly
+                    ) VALUES (
+                        '.cursor.com', 'WorkosCursorSessionToken', 'working-session', '/', 0,
+                        1, 0, 0, 0
+                    );",
+                )
+                .expect("creates the working session");
+        }
+        let (base, requests, server) = session_server(3);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("browser", Some("zen"), Some("zz99.Working")))
+            .with_test_base(&base);
+
+        let snapshot = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect("the selected profile works");
+        assert_eq!(snapshot.provider.as_str(), "cursor");
+
+        let requests: Vec<_> = (0..3)
+            .map(|_| requests.recv().expect("request captured"))
             .collect();
-        assert_eq!(summaries.len(), 2);
-        assert!(summaries[0].contains("WorkosCursorSessionToken=expired-session"));
-        assert!(summaries[1].contains(
-            "WorkosCursorSessionToken=user_cursor%3A%3AeyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature"
-        ));
+        server.join().expect("server stopped");
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.contains("expired-session"))
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("working-session"))
+        );
+    }
+
+    #[test]
+    fn the_source_inspection_reports_only_source_metadata() {
+        let home = gecko_home(&[(
+            ".cursor.com",
+            "WorkosCursorSessionToken",
+            "browser-session",
+            0,
+        )]);
+        cursor_state(
+            &home,
+            "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature",
+        );
+        let (base, requests, server) = session_server(2);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_test_base(&base);
+
+        let sources = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.inspect_sources())
+            .expect("inspects");
+        let requests: Vec<_> = (0..2)
+            .map(|_| requests.recv().expect("request captured"))
+            .collect();
+        server.join().expect("server stopped");
+
+        assert_eq!(sources[0].id, "cursor-app");
+        assert_eq!(sources[0].state, "ready");
+        assert_eq!(sources[1].id, "browser");
+        assert_eq!(sources[1].children[0].id, "zen");
+        assert_eq!(
+            sources[1].children[0].children[0].id,
+            "k26qcf29.Default (release)"
+        );
+        assert!(!format!("{sources:?}").contains("browser-session"));
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("browser-session"))
+        );
+    }
+
+    #[test]
+    fn a_payment_required_source_is_unreachable_during_inspection() {
+        let home = gecko_home(&[(
+            ".cursor.com",
+            "WorkosCursorSessionToken",
+            "payment-required-session",
+            0,
+        )]);
+        let (base, requests, server) = session_server(1);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_test_base(&base);
+
+        let sources = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.inspect_sources())
+            .expect("inspects");
+        let _ = requests.recv().expect("the browser validation request");
+        server.join().expect("server stopped");
+
+        assert_eq!(
+            sources[1].children[0].children[0].state,
+            AuthCandidateState::Unreachable.as_wire()
+        );
+    }
+
+    #[test]
+    fn a_forbidden_source_is_rejected_during_inspection() {
+        let home = gecko_home(&[(
+            ".cursor.com",
+            "WorkosCursorSessionToken",
+            "forbidden-session",
+            0,
+        )]);
+        let (base, requests, server) = session_server(1);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_test_base(&base);
+
+        let sources = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.inspect_sources())
+            .expect("inspects");
+        let _ = requests.recv().expect("the browser validation request");
+        server.join().expect("server stopped");
+
+        assert_eq!(
+            sources[1].children[0].children[0].state,
+            AuthCandidateState::Rejected.as_wire()
+        );
+    }
+
+    #[test]
+    fn a_signed_in_cursor_desktop_app_supplies_the_session_header() {
+        let home =
+            cursor_home("eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature");
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("cursor-app", None, None));
+
+        assert_eq!(
+            header_of(&provider).as_deref(),
+            Some(
+                "WorkosCursorSessionToken=user_cursor%3A%3AeyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature"
+            )
+        );
+    }
+
+    #[test]
+    fn an_unselected_provider_does_not_read_a_browser_session() {
+        let home = gecko_home(&[(".cursor.com", "WorkosCursorSessionToken", "the-session", 0)]);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring)).expect("builds");
+
+        assert_eq!(header_of(&provider), None);
     }
 
     #[test]
@@ -1561,14 +1896,16 @@ mod tests {
             &home,
             "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature",
         );
-        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring)).expect("builds");
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("cursor-app", None, None));
 
         assert!(header_of(&provider).is_some());
         drop(writer);
     }
 
     #[test]
-    fn a_known_session_name_wins_over_a_store_that_only_has_domain_cookies() {
+    fn a_selected_browser_skips_profiles_without_a_cursor_session() {
         let home = gecko_home(&[(".cursor.com", "_ga", "analytics", 0)]);
         // A second profile, later in the scan order, that holds the named session.
         let other = home.gecko(".zen/zz99.Other");
@@ -1597,22 +1934,26 @@ mod tests {
                 )
                 .expect("inserts");
         }
-        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring)).expect("builds");
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("browser", Some("zen"), None));
 
         let header = header_of(&provider).expect("a session");
         assert!(header.contains("WorkosCursorSessionToken=the-session"));
         assert!(
             !header.contains("analytics"),
-            "the strict pass runs over every store before the fallback pass"
+            "analytics cookies do not become a Cursor session"
         );
     }
 
     #[test]
-    fn a_store_without_a_known_name_is_still_tried_in_the_fallback_pass() {
+    fn a_browser_cookie_without_a_known_session_name_is_not_a_credential() {
         let home = gecko_home(&[(".cursor.com", "_ga", "analytics", 0)]);
-        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring)).expect("builds");
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("browser", Some("zen"), None));
 
-        assert_eq!(header_of(&provider).as_deref(), Some("_ga=analytics"));
+        assert_eq!(header_of(&provider), None);
     }
 
     #[test]
@@ -1623,7 +1964,9 @@ mod tests {
             "expired-session",
             1_600_000_000, // 2020
         )]);
-        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring)).expect("builds");
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("browser", Some("zen"), None));
 
         assert_eq!(header_of(&provider), None);
     }
@@ -1631,7 +1974,9 @@ mod tests {
     #[test]
     fn a_machine_with_no_cursor_session_is_a_missing_credential_not_an_error() {
         let home = crate::browser::tests::TestHome::new();
-        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring)).expect("builds");
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("cursor-app", None, None));
 
         assert_eq!(header_of(&provider), None);
     }
@@ -1641,7 +1986,9 @@ mod tests {
         let home = crate::browser::tests::TestHome::new();
         // A Chromium profile's cookies are sealed with the password this keyring holds.
         home.profile("chromium/Default", "Cookies");
-        let provider = Cursor::for_test(home.path(), Arc::new(LockedKeyring)).expect("builds");
+        let provider = Cursor::for_test(home.path(), Arc::new(LockedKeyring))
+            .expect("builds")
+            .with_options(cursor_options("browser", Some("chromium"), None));
 
         let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
