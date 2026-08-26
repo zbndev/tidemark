@@ -61,6 +61,9 @@ const PROXY_TABLE: &str = "proxy";
 const PROXY_MODE_KEY: &str = "mode";
 const PROXY_HOST_KEY: &str = "host";
 const PROXY_PORT_KEY: &str = "port";
+const REFRESH_TABLE: &str = "refresh";
+const REFRESH_MODE_KEY: &str = "mode";
+const REFRESH_MINUTES_KEY: &str = "minutes";
 
 /// Why the settings could not be read or written.
 #[derive(Debug, thiserror::Error)]
@@ -204,6 +207,34 @@ impl Config {
                 format!("has unknown value {proxy_mode:?}"),
             ));
         }
+        let refresh_mode = self
+            .preference_string(REFRESH_TABLE, REFRESH_MODE_KEY)?
+            .unwrap_or(defaults.refresh_mode.as_str())
+            .to_owned();
+        if !Preferences::valid_refresh_mode(&refresh_mode) {
+            return Err(self.invalid_preference(
+                REFRESH_TABLE,
+                REFRESH_MODE_KEY,
+                format!("has unknown value {refresh_mode:?}"),
+            ));
+        }
+        // Present-but-wrong is refused rather than clamped: a `minutes` that silently
+        // becomes some other pace is the one thing a user who set it deliberately must
+        // never get. Absent means the documented default, which is different.
+        let refresh_minutes = match self.preference(REFRESH_TABLE, REFRESH_MINUTES_KEY)? {
+            None => defaults.refresh_minutes,
+            Some(item) => item
+                .as_integer()
+                .and_then(|minutes| u32::try_from(minutes).ok())
+                .filter(|minutes| Preferences::valid_refresh_minutes(*minutes))
+                .ok_or_else(|| {
+                    self.invalid_preference(
+                        REFRESH_TABLE,
+                        REFRESH_MINUTES_KEY,
+                        "must be a whole number from 1 to 120".into(),
+                    )
+                })?,
+        };
         Ok(Preferences {
             release_check: self
                 .preference_bool(UPDATES_TABLE, RELEASE_CHECK_KEY)?
@@ -219,8 +250,8 @@ impl Config {
                 .unwrap_or(defaults.proxy_host.as_str())
                 .to_owned(),
             proxy_port: self.preference_port(PROXY_TABLE, PROXY_PORT_KEY)?,
-            refresh_mode: defaults.refresh_mode.clone(),
-            refresh_minutes: defaults.refresh_minutes,
+            refresh_mode,
+            refresh_minutes,
         })
     }
 
@@ -284,6 +315,34 @@ impl Config {
         table.insert(PROXY_HOST_KEY, value(host));
         table.insert(PROXY_PORT_KEY, value(i64::from(port)));
         self.write()
+    }
+
+    /// Chooses how healthy accounts are paced: by quota zone, or one fixed interval.
+    pub fn set_refresh_mode(&mut self, mode: &str) -> Result<(), ConfigError> {
+        if !Preferences::valid_refresh_mode(mode) {
+            return Err(self.invalid_preference(
+                REFRESH_TABLE,
+                REFRESH_MODE_KEY,
+                format!("has unknown value {mode:?}"),
+            ));
+        }
+        self.set_preference(REFRESH_TABLE, REFRESH_MODE_KEY, value(mode))
+    }
+
+    /// Sets the fixed interval Manual mode polls at, in minutes.
+    pub fn set_refresh_minutes(&mut self, minutes: u32) -> Result<(), ConfigError> {
+        if !Preferences::valid_refresh_minutes(minutes) {
+            return Err(self.invalid_preference(
+                REFRESH_TABLE,
+                REFRESH_MINUTES_KEY,
+                format!("must be 1 to 120, not {minutes}"),
+            ));
+        }
+        self.set_preference(
+            REFRESH_TABLE,
+            REFRESH_MINUTES_KEY,
+            value(i64::from(minutes)),
+        )
     }
 
     fn preference_bool(
@@ -1452,6 +1511,8 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(config.preferences().expect("readable").proxy_port, 0);
+        assert_eq!(config.preferences().expect("readable").refresh_mode, "auto");
+        assert_eq!(config.preferences().expect("readable").refresh_minutes, 5);
     }
 
     #[test]
@@ -1467,8 +1528,8 @@ mod tests {
             proxy_mode: "socks5".into(),
             proxy_host: "127.0.0.1".into(),
             proxy_port: 1080,
-            refresh_mode: "auto".into(),
-            refresh_minutes: 5,
+            refresh_mode: "manual".into(),
+            refresh_minutes: 30,
         };
 
         config.set_release_check(false).expect("release setting");
@@ -1480,6 +1541,8 @@ mod tests {
         config
             .set_proxy("socks5", "127.0.0.1", 1080)
             .expect("proxy setting");
+        config.set_refresh_mode("manual").expect("refresh mode");
+        config.set_refresh_minutes(30).expect("refresh minutes");
 
         let reread = Config::at(path.clone()).expect("reloaded");
         assert_eq!(reread.preferences().expect("readable"), preferences);
@@ -1519,8 +1582,41 @@ mod tests {
     fn a_proxy_port_outside_the_range_is_refused_rather_than_clamped() {
         let path = scratch("preferences-proxy-port");
         std::fs::write(&path, "[proxy]\nmode = \"http\"\nport = 70000\n").expect("seeded");
-        let config = Config::at(path).expect("valid TOML");
+        let config = Config::at(path.clone()).expect("valid TOML");
 
         assert!(config.preferences().is_err());
+    }
+
+    #[test]
+    fn an_unknown_refresh_mode_is_refused() {
+        let path = scratch("preferences-refresh-mode");
+        std::fs::write(&path, "[refresh]\nmode = \"sometimes\"\n").expect("seeded");
+        let config = Config::at(path.clone()).expect("valid TOML");
+
+        assert!(config.preferences().is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn refresh_minutes_outside_the_range_are_refused_rather_than_clamped() {
+        for (index, wrong) in [
+            "minutes = 0",
+            "minutes = 121",
+            "minutes = -5",
+            "minutes = \"five\"",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = scratch(&format!("preferences-refresh-minutes-{index}"));
+            std::fs::write(&path, format!("[refresh]\n{wrong}\n")).expect("seeded");
+            let config = Config::at(path.clone()).expect("valid TOML");
+
+            assert!(
+                config.preferences().is_err(),
+                "{wrong} must not silently become a pace"
+            );
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
