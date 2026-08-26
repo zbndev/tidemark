@@ -502,6 +502,7 @@ mod tests {
             credential: "key".to_owned(),
             credential_hint: "ClinePass console.".to_owned(),
             external: None,
+            browser_auth: None,
             options: Vec::new(),
         }]);
         assert_eq!(

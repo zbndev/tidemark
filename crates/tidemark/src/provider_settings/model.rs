@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use tidemark_types::{ExternalLogin, ProviderDefinition, ProviderState, ProviderStatus};
+use tidemark_types::{
+    AuthSelection, ExternalLogin, ProviderDefinition, ProviderOption, ProviderState, ProviderStatus,
+};
 
 /// Catalog entries which have not already been configured and match the query.
 pub fn addable<'a>(
@@ -71,6 +73,42 @@ pub fn auth_source(definition: &ProviderDefinition, status: &ProviderStatus) -> 
             .and_then(AuthSource::from_value)
             .unwrap_or(AuthSource::Tidemark),
     )
+}
+
+/// The candidate row an account's published selection points at within one mode.
+///
+/// Modes that carry no separate candidate — Cursor App is chosen by choosing the mode —
+/// claim their own availability row, so highlighting a source needs no special case.
+pub fn selected_candidate<'a>(
+    selection: &'a AuthSelection,
+    mode_value: &'a str,
+) -> Option<&'a str> {
+    if selection.mode != mode_value {
+        return None;
+    }
+    Some(selection.candidate.as_deref().unwrap_or(mode_value))
+}
+
+/// A provider's own settings that remain after its authentication capability took what is
+/// the daemon's to write.
+///
+/// The selector option draws nothing here — the authentication tabs above choose it — and
+/// an option carrying no choices has no menu to draw at all: those are identifiers, like
+/// which browser was picked, that only daemon source selection may set. Sent as they
+/// arrived when this build speaks with no such capability.
+pub fn settings_options<'a>(
+    declared: impl IntoIterator<Item = &'a ProviderOption>,
+    definition: &ProviderDefinition,
+) -> Vec<&'a ProviderOption> {
+    declared
+        .into_iter()
+        .filter(|option| {
+            !definition
+                .browser_auth
+                .as_ref()
+                .is_some_and(|selector| selector.option == option.name || option.choices.is_empty())
+        })
+        .collect()
 }
 
 /// Concise copy for the configured-provider list, and for the heading of the half in force.
@@ -183,13 +221,15 @@ mod tests {
     use std::collections::HashSet;
 
     use tidemark_types::{
-        AccountId, CredentialKind, ExternalLogin, OptionChoice, ProviderDefinition, ProviderId,
-        ProviderOption, ProviderState, ProviderStatus,
+        AccountId, AuthMode, AuthSelection, AuthSelector, CredentialKind, ExternalLogin,
+        OptionChoice, ProviderDefinition, ProviderId, ProviderOption, ProviderState,
+        ProviderStatus,
     };
 
     use super::{
         AuthSource, NotificationRow, addable, auth_source, connection_text, external_presence_text,
-        merge_local_additions, notification_rows, write_back_text,
+        merge_local_additions, notification_rows, selected_candidate, settings_options,
+        write_back_text,
     };
 
     fn definition(provider: &str, title: &str) -> ProviderDefinition {
@@ -199,6 +239,7 @@ mod tests {
             credential: CredentialKind::Key.as_wire().into(),
             credential_hint: "Create a key in the provider dashboard.".into(),
             external: None,
+            browser_auth: None,
             options: Vec::new(),
         }
     }
@@ -236,6 +277,7 @@ mod tests {
             credential: CredentialKind::OAuth.as_wire().into(),
             credential_hint: "Sign in through a browser.".into(),
             external,
+            browser_auth: None,
             options,
         }
     }
@@ -441,5 +483,108 @@ mod tests {
     fn an_account_that_has_never_been_polled_offers_nothing_to_switch() {
         let status = ProviderStatus::pending(&ProviderId::new("claude"), &AccountId::default());
         assert!(notification_rows(&status).is_empty());
+    }
+
+    /// One published choice, as every menu-bearing option carries it.
+    fn choice(value: &str, title: &str) -> OptionChoice {
+        OptionChoice {
+            value: value.into(),
+            title: title.into(),
+        }
+    }
+
+    /// What the daemon publishes for a provider whose login is one explicit local source:
+    /// the selector's own option plus the identifier settings only the daemon may write.
+    fn cursor_like_definition() -> ProviderDefinition {
+        ProviderDefinition {
+            provider: "cursor".into(),
+            title: "Cursor".into(),
+            credential: CredentialKind::None.as_wire().into(),
+            credential_hint: String::new(),
+            external: None,
+            browser_auth: Some(AuthSelector {
+                option: "auth-source".into(),
+                modes: vec![
+                    AuthMode {
+                        value: "cursor-app".into(),
+                        title: "Cursor App".into(),
+                    },
+                    AuthMode {
+                        value: "browser".into(),
+                        title: "Browser".into(),
+                    },
+                ],
+            }),
+            options: vec![
+                ProviderOption {
+                    name: "auth-source".into(),
+                    title: "Authentication source".into(),
+                    description: None,
+                    value: String::new(),
+                    choices: vec![
+                        choice("cursor-app", "Cursor App"),
+                        choice("browser", "Browser"),
+                    ],
+                },
+                ProviderOption {
+                    name: "auth-browser".into(),
+                    title: "Browser".into(),
+                    description: None,
+                    value: String::new(),
+                    choices: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn the_source_selector_owns_its_settings_instead_of_the_menu_below() {
+        // The selector option itself, and every choiceless identifier the daemon writes
+        // through source selection, would each draw a menu of nothing — the tabs above are
+        // where those are chosen.
+        let definition = cursor_like_definition();
+        assert!(settings_options(definition.options.iter(), &definition).is_empty());
+    }
+
+    #[test]
+    fn ordinary_provider_choices_keep_their_place_under_the_tabs() {
+        let mut definition = definition("zai", "Z.ai");
+        definition.options = vec![ProviderOption {
+            name: "model".into(),
+            title: "Model".into(),
+            description: None,
+            value: "auto".into(),
+            choices: vec![choice("auto", "Automatic")],
+        }];
+        let names: Vec<&str> = settings_options(definition.options.iter(), &definition)
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect();
+        assert_eq!(names, ["model"]);
+    }
+
+    #[test]
+    fn a_published_selection_names_the_row_it_claims_inside_its_mode() {
+        let nested = AuthSelection {
+            mode: "browser".into(),
+            candidate: Some("zen/profile-a".into()),
+        };
+        assert_eq!(
+            selected_candidate(&nested, "browser"),
+            Some("zen/profile-a")
+        );
+        assert_eq!(selected_candidate(&nested, "cursor-app"), None);
+    }
+
+    #[test]
+    fn a_mode_without_a_separate_candidate_claims_its_own_row() {
+        let direct = AuthSelection {
+            mode: "cursor-app".into(),
+            candidate: None,
+        };
+        assert_eq!(
+            selected_candidate(&direct, "cursor-app"),
+            Some("cursor-app")
+        );
     }
 }

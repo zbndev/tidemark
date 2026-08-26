@@ -5,9 +5,11 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 use tidemark_types::{
-    CredentialKind, ExternalLogin, ProviderDefinition, ProviderOption, ProviderStatus, Remedy,
+    AuthSelection, CredentialKind, ExternalLogin, ProviderDefinition, ProviderOption,
+    ProviderStatus, Remedy,
 };
 
+use super::browser_auth::BrowserAuth;
 use super::model::AuthSource;
 use super::{model, reason};
 use crate::bus::DaemonProxy;
@@ -40,6 +42,7 @@ pub(super) struct ProviderDetail {
     definition: ProviderDefinition,
     status: RefCell<ProviderStatus>,
     page: adw::NavigationPage,
+    header: adw::HeaderBar,
     authentication: adw::PreferencesGroup,
     key: RefCell<Option<KeyRows>>,
     sign_in: RefCell<Option<SignInRow>>,
@@ -47,6 +50,9 @@ pub(super) struct ProviderDetail {
     local: RefCell<Option<LocalRows>>,
     /// The pill that picks between the two halves. Absent for a provider with one.
     choice: RefCell<Option<SourceChoice>>,
+    /// The tabs and source rows of an explicitly chosen local login. Absent when the
+    /// daemon published no such selector for this provider.
+    browser_auth: RefCell<Option<BrowserAuth>>,
     external: RefCell<Option<adw::ActionRow>>,
     options: RefCell<BTreeMap<String, Rc<OptionRow>>>,
     notifications: adw::PreferencesGroup,
@@ -341,11 +347,13 @@ impl ProviderDetail {
             definition,
             status: RefCell::new(status),
             page,
+            header,
             authentication,
             key: RefCell::new(None),
             sign_in: RefCell::new(None),
             local: RefCell::new(None),
             choice: RefCell::new(None),
+            browser_auth: RefCell::new(None),
             external: RefCell::new(None),
             options: RefCell::new(BTreeMap::new()),
             notifications,
@@ -414,6 +422,9 @@ impl ProviderDetail {
         drop(rows);
         self.apply_local(status);
         self.apply_notifications(status);
+        if let Some(browser) = self.browser_auth.borrow().as_ref() {
+            browser.apply_selection(status.auth_selection.as_ref());
+        }
     }
 
     /// Puts the pill and the two halves where the daemon says the account is.
@@ -547,6 +558,10 @@ impl ProviderDetail {
     }
 
     fn build_authentication(self: &Rc<Self>) {
+        if self.definition.browser_auth.is_some() {
+            self.build_browser_auth();
+            return;
+        }
         match self.definition.credential_kind() {
             Some(CredentialKind::Key) => self.build_key_rows(),
             // A provider whose credential can also come from a CLI on this machine gets
@@ -565,10 +580,10 @@ impl ProviderDetail {
                     self.build_local_rows(external);
                 }
             }
-            // Nothing to paste and nobody to sign in to: the whole group would be an empty
-            // box under a heading that promised a control. Configuring the account is its
-            // settings alone, which are a group of their own.
-            Some(CredentialKind::None) => self.authentication.set_visible(false),
+            // A real credential-free service exposes no authentication controls.
+            Some(CredentialKind::None) => {
+                self.authentication.set_visible(false);
+            }
             Some(CredentialKind::External) | None => {
                 let status = self.status.borrow();
                 // The row's stay-off-markup rule: the title is the daemon's connection
@@ -867,6 +882,111 @@ impl ProviderDetail {
         });
     }
 
+    /// The tabs and source rows for picking which login on this machine this account
+    /// reads.
+    ///
+    /// The tabs come from the daemon's selector and the rows from its latest inspection;
+    /// a click anywhere lands as one Select that the daemon validates before storing any
+    /// of it. First inspection starts here, so the page never opens as if nothing were
+    /// being checked.
+    fn build_browser_auth(self: &Rc<Self>) {
+        let Some(selector) = self.definition.browser_auth.clone() else {
+            return;
+        };
+        let refresh = gtk::Button::builder()
+            .icon_name("view-refresh-symbolic")
+            .tooltip_text("Check again")
+            .valign(gtk::Align::Center)
+            .css_classes(["circular"])
+            .build();
+        refresh.connect_clicked({
+            let weak = Rc::downgrade(self);
+            move |_| {
+                if let Some(detail) = weak.upgrade() {
+                    detail.open_browser_auth();
+                }
+            }
+        });
+        self.header.pack_end(&refresh);
+
+        let weak = Rc::downgrade(self);
+        let on_choose: Rc<dyn Fn(AuthSelection)> = Rc::new(move |selection| {
+            if let Some(detail) = weak.upgrade() {
+                let proxy = detail.proxy.clone();
+                let (provider, account) = {
+                    let status = detail.status.borrow();
+                    (status.provider.clone(), status.account.clone())
+                };
+                glib::spawn_future_local(async move {
+                    // The daemon validates inside the write, so a refused source leaves the
+                    // previous one in force; there is nothing local to roll back, only the
+                    // reason to say out loud.
+                    if let Err(error) = proxy
+                        .select_auth_source(&provider, &account, selection)
+                        .await
+                    {
+                        detail.toast(&reason(&error));
+                        return;
+                    }
+                    // Asking the daemon to publish now makes the accepted selection's In-use
+                    // mark arrive with its status rather than at the next scheduled poll.
+                    if let Err(error) = proxy.refresh(&provider).await {
+                        detail.toast(&reason(&error));
+                    }
+                });
+            }
+        });
+        let published = self.status.borrow().auth_selection.clone();
+        let rows = BrowserAuth::new(&selector, published.as_ref(), on_choose);
+        rows.attach(&self.authentication);
+        *self.browser_auth.borrow_mut() = Some(rows);
+
+        // Construction counts as opening: the report is what turns Checking… into rows.
+        self.open_browser_auth();
+    }
+
+    /// Inspects this account's local sources again.
+    ///
+    /// The halves go to their checking note first, so a slow daemon reads as busy rather
+    /// than broken; a failure then restores whatever was on screen instead of an empty
+    /// page, because refusing to answer is not evidence about any source.
+    fn open_browser_auth(self: &Rc<Self>) {
+        {
+            let guard = self.browser_auth.borrow();
+            let Some(rows) = guard.as_ref() else {
+                return;
+            };
+            rows.begin_loading();
+        }
+        let (provider, account) = {
+            let status = self.status.borrow();
+            (status.provider.clone(), status.account.clone())
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let report = match weak.upgrade() {
+                Some(detail) => detail.proxy.get_auth_sources(&provider, &account).await,
+                None => return,
+            };
+            let Some(detail) = weak.upgrade() else {
+                return;
+            };
+            match report {
+                Ok(report) => {
+                    if let Some(rows) = detail.browser_auth.borrow().as_ref() {
+                        rows.apply_report(report);
+                    }
+                }
+                Err(error) => {
+                    if let Some(rows) = detail.browser_auth.borrow().as_ref() {
+                        rows.recover();
+                    }
+                    detail.toast(&reason(&error));
+                }
+            }
+        });
+    }
+
     /// The half that reads a login another program on this machine holds.
     ///
     /// Three things, in the order somebody with a problem needs them: whether the login is
@@ -963,11 +1083,15 @@ impl ProviderDetail {
         } else {
             &status.options
         };
+        // Two exclusions, one per control that owns its setting: the credential pill
+        // draws the OAuth source choice, and the authentication tabs own every local
+        // source identifier. What survives is genuinely a menu.
         let auth_option = self.definition.auth_option();
-        let options: Vec<&ProviderOption> = declared
+        let pill_excluded: Vec<&ProviderOption> = declared
             .iter()
             .filter(|option| Some(option.name.as_str()) != auth_option)
             .collect();
+        let options = model::settings_options(pill_excluded, &self.definition);
         group.set_visible(!options.is_empty());
         for option in options {
             let row = self.build_option_row(option);
@@ -1171,6 +1295,7 @@ mod tests {
             credential: kind.as_wire().into(),
             credential_hint: "Z.ai dashboard → API keys.".into(),
             external: None,
+            browser_auth: None,
             options: Vec::new(),
         }
     }

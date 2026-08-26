@@ -235,6 +235,117 @@ pub struct ExternalLogin {
     pub writes_back: bool,
 }
 
+/// One top-level local authentication method a provider can offer.
+///
+/// Values are stable configuration values. A client draws `title`, but sends `value` back
+/// to the daemon unchanged so that it never needs to know provider-specific source names.
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct AuthMode {
+    /// Stable value stored in the provider configuration.
+    pub value: String,
+    /// What to call this method on screen.
+    pub title: String,
+}
+
+/// Metadata for a provider's local authentication source selector.
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct AuthSelector {
+    /// The provider option that records the selected top-level mode.
+    pub option: String,
+    /// Top-level methods the client presents as authentication tabs.
+    pub modes: Vec<AuthMode>,
+}
+
+/// The daemon's most recent verdict on a local authentication candidate.
+///
+/// The state travels as a string on [`AuthCandidate`] so a newer daemon can add a verdict
+/// without changing its D-Bus signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AuthCandidateState {
+    /// The daemon proved that this source authenticates successfully.
+    Ready,
+    /// The source does not contain a usable matching credential.
+    Missing,
+    /// The provider rejected the source's credential.
+    Rejected,
+    /// A locked keyring prevented the daemon from reading the source.
+    WaitingForKeyring,
+    /// The daemon could not reach the provider to determine whether the source works.
+    Unreachable,
+}
+
+impl AuthCandidateState {
+    /// The stable string this state travels as.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Missing => "missing",
+            Self::Rejected => "rejected",
+            Self::WaitingForKeyring => "waiting-for-keyring",
+            Self::Unreachable => "unreachable",
+        }
+    }
+
+    /// Parses a daemon verdict. Unknown values remain unknown rather than being shown as a
+    /// usable source by an older client.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        [
+            Self::Ready,
+            Self::Missing,
+            Self::Rejected,
+            Self::WaitingForKeyring,
+            Self::Unreachable,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.as_wire() == value)
+    }
+}
+
+impl std::fmt::Display for AuthCandidateState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire())
+    }
+}
+
+/// One local source the daemon inspected, without its credential.
+///
+/// `id` is opaque to clients and stable enough to record a selected browser or profile.
+/// Children represent the rare case where a source needs a second explicit choice, such as
+/// multiple usable profiles inside a browser.
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct AuthCandidate {
+    /// Stable opaque source identifier.
+    pub id: String,
+    /// Human-readable source name.
+    pub title: String,
+    /// Optional human-readable context, never a filesystem path or credential.
+    pub subtitle: Option<String>,
+    /// An [`AuthCandidateState`] string.
+    pub state: String,
+    /// Nested choices within this source.
+    pub children: Vec<AuthCandidate>,
+}
+
+impl AuthCandidate {
+    /// The verdict this build recognizes, if any.
+    pub fn state(&self) -> Option<AuthCandidateState> {
+        AuthCandidateState::from_wire(&self.state)
+    }
+}
+
+/// The explicit local authentication source an account uses.
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct AuthSelection {
+    /// The selected [`AuthMode::value`].
+    pub mode: String,
+    /// The selected candidate, or none for a mode that has no candidate choice.
+    pub candidate: Option<String>,
+}
+
 /// Presentation metadata for one provider in the daemon's catalog.
 #[derive(Debug, Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
 #[zvariant(signature = "a{sv}")]
@@ -245,6 +356,9 @@ pub struct ProviderDefinition {
     pub credential_hint: String,
     /// The other credential this provider can read, for the providers that have one.
     pub external: Option<ExternalLogin>,
+    /// An explicit local browser or application authentication selector, when the provider
+    /// supports one. Its dynamic candidates are fetched separately from the daemon.
+    pub browser_auth: Option<AuthSelector>,
     pub options: Vec<ProviderOption>,
 }
 
@@ -475,6 +589,9 @@ pub struct ProviderStatus {
     /// login wins over the file their CLI owns. A client that guessed would have to be
     /// taught each of those rules, and would go stale the first time one changed.
     pub auth_source: Option<String>,
+    /// The daemon-resolved local source selected for browser-cookie authentication.
+    /// Absent on providers without this capability and when speaking to an older daemon.
+    pub auth_selection: Option<AuthSelection>,
     /// The provider's own settings, with their current values and alternatives.
     pub options: Vec<ProviderOption>,
     /// Keys of the windows whose notifications the user has switched on.
@@ -502,6 +619,7 @@ impl ProviderStatus {
             credential_hint: None,
             external_present: None,
             auth_source: None,
+            auth_selection: None,
             options: Vec::new(),
             notify: Vec::new(),
         }
@@ -630,6 +748,7 @@ mod tests {
                 command: "agy".into(),
                 writes_back: false,
             }),
+            browser_auth: None,
             options: Vec::new(),
         };
         let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
@@ -637,6 +756,74 @@ mod tests {
         assert_eq!(decoded, original);
         assert_eq!(decoded.credential_kind(), Some(CredentialKind::OAuth));
         assert_eq!(decoded.auth_option(), Some("source"));
+    }
+
+    #[test]
+    fn a_browser_auth_definition_and_nested_candidate_survive_the_bus() {
+        // Removing the selector or flattening a browser's two profiles would leave the GTK
+        // client unable to offer the explicit source the daemon validated.
+        let selector = AuthSelector {
+            option: "auth-source".into(),
+            modes: vec![
+                AuthMode {
+                    value: "cursor-app".into(),
+                    title: "Cursor App".into(),
+                },
+                AuthMode {
+                    value: "browser".into(),
+                    title: "Browser".into(),
+                },
+            ],
+        };
+        let definition = ProviderDefinition {
+            provider: "cursor".into(),
+            title: "Cursor".into(),
+            credential: CredentialKind::None.as_wire().into(),
+            credential_hint: "Choose a local Cursor session.".into(),
+            external: None,
+            browser_auth: Some(selector.clone()),
+            options: Vec::new(),
+        };
+        let candidate = AuthCandidate {
+            id: "firefox".into(),
+            title: "Firefox".into(),
+            subtitle: None,
+            state: AuthCandidateState::Ready.as_wire().into(),
+            children: vec![AuthCandidate {
+                id: "default-release".into(),
+                title: "Default Release".into(),
+                subtitle: Some("Cursor session".into()),
+                state: AuthCandidateState::Ready.as_wire().into(),
+                children: Vec::new(),
+            }],
+        };
+
+        let encoded = to_bytes(Context::new_dbus(LE, 0), &definition).expect("encodes");
+        let (decoded, _): (ProviderDefinition, _) = encoded.deserialize().expect("decodes");
+        let encoded = to_bytes(Context::new_dbus(LE, 0), &candidate).expect("encodes");
+        let (decoded_candidate, _): (AuthCandidate, _) = encoded.deserialize().expect("decodes");
+        let mut status = ProviderStatus::pending(&ProviderId::new("cursor"), &AccountId::default());
+        status.auth_selection = Some(AuthSelection {
+            mode: "browser".into(),
+            candidate: Some("firefox/default-release".into()),
+        });
+        let (decoded_status, _): (ProviderStatus, _) =
+            encode(&status).deserialize().expect("decodes");
+
+        assert_eq!(decoded.browser_auth.as_ref(), Some(&selector));
+        assert_eq!(decoded_candidate, candidate);
+        assert_eq!(decoded_status.auth_selection, status.auth_selection);
+    }
+
+    #[test]
+    fn an_older_status_dictionary_without_browser_auth_fields_still_decodes() {
+        // A daemon that predates source selection omits this key entirely; the GUI must not
+        // mistake that absence for a selected source.
+        let original = ProviderStatus::pending(&ProviderId::new("cursor"), &AccountId::default());
+        let encoded = encode(&original);
+        let (decoded, _): (ProviderStatus, _) = encoded.deserialize().expect("decodes");
+
+        assert_eq!(decoded.auth_selection, None);
     }
 
     #[test]
@@ -649,6 +836,7 @@ mod tests {
             credential: CredentialKind::Key.as_wire().into(),
             credential_hint: "Z.ai dashboard → API keys.".into(),
             external: None,
+            browser_auth: None,
             options: Vec::new(),
         };
         assert_eq!(definition.auth_option(), None);

@@ -69,6 +69,7 @@ impl MockDaemon {
                     credential_hint: "Paste a key.".to_owned(),
                     options: external.iter().map(source_option).collect(),
                     external,
+                    browser_auth: None,
                 }
             })
             .collect()

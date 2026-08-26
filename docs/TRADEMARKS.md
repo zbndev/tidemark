@@ -17,6 +17,7 @@ whose services the cards are about:
 | `tidemark-codex-symbolic.svg` | OpenAI (Codex) |
 | `tidemark-codebuff-symbolic.svg` | Codebuff, Inc. |
 | `tidemark-crof-symbolic.svg` | Crof |
+| `tidemark-cursor-symbolic.svg` | Anysphere, Inc. (Cursor) |
 | `tidemark-deepinfra-symbolic.svg` | DeepInfra |
 | `tidemark-deepgram-symbolic.svg` | Deepgram, Inc. |
 | `tidemark-deepseek-symbolic.svg` | Hangzhou DeepSeek Artificial Intelligence Co., Ltd. |

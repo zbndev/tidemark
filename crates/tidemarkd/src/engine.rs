@@ -18,8 +18,9 @@ use tidemark_core::providers::{Credential, Provider, ProviderError};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
 use tidemark_types::{
-    AccountId, CredentialKind, HistoryPoint, Preferences, ProviderId, ProviderOption,
-    ProviderState, ProviderStatus, Snapshot, Timestamp, WindowKey, WindowStatus,
+    AccountId, AuthCandidate, AuthCandidateState, AuthSelection, CredentialKind, HistoryPoint,
+    Preferences, ProviderId, ProviderOption, ProviderState, ProviderStatus, Snapshot, Timestamp,
+    WindowKey, WindowStatus,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -116,6 +117,26 @@ pub enum Command {
         /// One of the option's declared values.
         value: String,
         /// Completion sent after persistence and in-memory state agree.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Discovers dynamic local authentication sources for one configured account.
+    InspectAuthSources {
+        /// Stable provider slug.
+        provider: String,
+        /// Stable account name.
+        account: String,
+        /// Secret-free candidate report.
+        reply: oneshot::Sender<Result<Vec<AuthCandidate>, String>>,
+    },
+    /// Revalidates and stores one explicit dynamic local authentication source.
+    SelectAuthSource {
+        /// Stable provider slug.
+        provider: String,
+        /// Stable account name.
+        account: String,
+        /// The mode and opaque candidate identity selected by the client.
+        selection: AuthSelection,
+        /// Completion sent after validation, persistence and publication finish.
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Switch one window's notifications on or off, in the same queue as topology writes.
@@ -312,6 +333,12 @@ impl Account {
     /// Replaces the published settings of this provider.
     pub fn with_options(mut self, options: Vec<ProviderOption>) -> Self {
         self.status.options = options;
+        self
+    }
+
+    /// Publishes the explicit local browser-cookie source selected in config.
+    pub fn with_auth_selection(mut self, selection: Option<AuthSelection>) -> Self {
+        self.status.auth_selection = selection;
         self
     }
 
@@ -529,6 +556,66 @@ impl Engine {
         Ok(())
     }
 
+    /// Discovers and validates the dynamic local sources one configured account offers.
+    pub async fn inspect_auth_sources(
+        &mut self,
+        provider: &str,
+        account: &str,
+    ) -> Result<Vec<AuthCandidate>, String> {
+        let Some(index) = self.accounts.iter().position(|configured| {
+            configured.provider.as_str() == provider && configured.account.as_str() == account
+        }) else {
+            return Err(format!("account {provider}/{account} is not configured"));
+        };
+        self.ensure_client(index).await;
+        let client = self.accounts[index]
+            .client
+            .as_ref()
+            .ok_or_else(|| format!("{provider} has no client for authentication inspection"))?;
+        client
+            .inspect_auth_sources()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Revalidates, then atomically persists one selected dynamic local source.
+    pub async fn select_auth_source(
+        &mut self,
+        provider: &str,
+        account: &str,
+        selection: AuthSelection,
+    ) -> Result<(), String> {
+        let Some(index) = self.accounts.iter().position(|configured| {
+            configured.provider.as_str() == provider && configured.account.as_str() == account
+        }) else {
+            return Err(format!("account {provider}/{account} is not configured"));
+        };
+        let sources = self.inspect_auth_sources(provider, account).await?;
+        let Some(selection) = ready_auth_selection(&sources, &selection) else {
+            return Err("the selected authentication source is not ready".into());
+        };
+
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        config
+            .set_auth_selection(provider, &selection)
+            .map_err(|error| error.to_string())?;
+        let target = &mut self.accounts[index];
+        target.status.options = crate::registry::options(provider, &config);
+        target.status.auth_selection = crate::registry::browser_auth_selection(provider, &config);
+        if target.rebuildable() {
+            target.client = None;
+        }
+        target.failures = 0;
+        target.retry_after = None;
+        target.due = Instant::now();
+        target.status.next_poll_at = Some(Timestamp::now().as_unix());
+        let _ = self
+            .updates
+            .send(Publication::Changed(target.status.clone()))
+            .await;
+        Ok(())
+    }
+
     /// Persists one application preference in the same serial queue as every other config
     /// mutation. Returning the complete set lets the service publish one coherent view.
     ///
@@ -676,6 +763,14 @@ impl Engine {
                     }
                     Some(Command::SetOption { provider, account, name, value, reply }) => {
                         let result = self.set_option(&provider, &account, &name, &value).await;
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::InspectAuthSources { provider, account, reply }) => {
+                        let result = self.inspect_auth_sources(&provider, &account).await;
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::SelectAuthSource { provider, account, selection, reply }) => {
+                        let result = self.select_auth_source(&provider, &account, selection).await;
                         let _ = reply.send(result);
                     }
                     Some(Command::SetWindowNotify { provider, account, window, enabled, reply }) => {
@@ -1199,6 +1294,55 @@ pub fn stored_kind(credential: CredentialKind) -> Option<Kind> {
     }
 }
 
+/// The exact ready source an inspected choice names.
+///
+/// A browser parent is a one-click shorthand only. The persisted choice is its first ready
+/// profile in inspection order, so a later poll cannot re-scan and choose a different account.
+fn ready_auth_selection(
+    sources: &[AuthCandidate],
+    selection: &AuthSelection,
+) -> Option<AuthSelection> {
+    let mode = sources
+        .iter()
+        .find(|candidate| candidate.id == selection.mode)?;
+    match selection.candidate.as_deref() {
+        None if mode.state() == Some(AuthCandidateState::Ready) => Some(selection.clone()),
+        None => None,
+        Some(candidate) => {
+            ready_descendant(&mode.children, candidate).map(|candidate| AuthSelection {
+                mode: selection.mode.clone(),
+                candidate: Some(candidate.id.clone()),
+            })
+        }
+    }
+}
+
+/// Finds a selected ready candidate and resolves parent shortcuts to their first ready leaf.
+fn ready_descendant<'a>(
+    candidates: &'a [AuthCandidate],
+    selected: &str,
+) -> Option<&'a AuthCandidate> {
+    candidates.iter().find_map(|candidate| {
+        if candidate.id == selected && candidate.state() == Some(AuthCandidateState::Ready) {
+            first_ready_leaf(candidate)
+        } else {
+            ready_descendant(&candidate.children, selected)
+        }
+    })
+}
+
+/// The first proven leaf in the daemon's stable discovery order.
+fn first_ready_leaf(candidate: &AuthCandidate) -> Option<&AuthCandidate> {
+    if candidate.state() != Some(AuthCandidateState::Ready) {
+        return None;
+    }
+    candidate
+        .children
+        .iter()
+        .find_map(first_ready_leaf)
+        .or(Some(candidate))
+}
+
 /// What asking the keyring for a credential produced.
 enum Loaded {
     /// A client, ready to poll.
@@ -1256,7 +1400,7 @@ mod tests {
     use crate::notify::{Notice, Notifier, NotifyError};
     use std::sync::Mutex;
     use tidemark_core::providers::BoxFuture;
-    use tidemark_types::{Window, WindowKey, WindowLength};
+    use tidemark_types::{AuthCandidate, AuthSelection, Window, WindowKey, WindowLength};
 
     #[test]
     fn a_missing_cli_credential_has_its_own_published_state() {
@@ -1295,6 +1439,26 @@ mod tests {
                 .pop()
                 .unwrap_or(Err(ProviderError::Http { status: 503 }));
             Box::pin(async move { answer })
+        }
+    }
+
+    /// A rebuildable provider whose authentication candidates are fixed test metadata.
+    #[derive(Debug)]
+    struct AuthFake {
+        sources: Vec<AuthCandidate>,
+    }
+
+    impl Provider for AuthFake {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("cursor")
+        }
+
+        fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+            Box::pin(async { Err(ProviderError::NoCredential) })
+        }
+
+        fn inspect_auth_sources(&self) -> BoxFuture<'_, Result<Vec<AuthCandidate>, ProviderError>> {
+            Box::pin(async { Ok(self.sources.clone()) })
         }
     }
 
@@ -1636,6 +1800,148 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&config_path);
+    }
+
+    #[tokio::test]
+    async fn a_browser_parent_persists_its_first_validated_profile_then_rebuilds() {
+        // If the validation moved after the write, an unknown candidate could replace the
+        // working Cursor App source with a browser the daemon has never proved usable.
+        let path = std::env::temp_dir().join(format!(
+            "tidemark-engine-auth-source-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut config = Config::at(path.clone()).expect("empty config parses");
+        config.add_provider("cursor").expect("Cursor configured");
+        config
+            .set_auth_selection(
+                "cursor",
+                &AuthSelection {
+                    mode: "cursor-app".into(),
+                    candidate: None,
+                },
+            )
+            .expect("Cursor App stored");
+        let sources = vec![
+            AuthCandidate {
+                id: "cursor-app".into(),
+                title: "Cursor App".into(),
+                subtitle: None,
+                state: "ready".into(),
+                children: Vec::new(),
+            },
+            AuthCandidate {
+                id: "browser".into(),
+                title: "Browser".into(),
+                subtitle: None,
+                state: "ready".into(),
+                children: vec![AuthCandidate {
+                    id: "firefox".into(),
+                    title: "Firefox".into(),
+                    subtitle: None,
+                    state: "ready".into(),
+                    children: vec![
+                        AuthCandidate {
+                            id: "firefox/work".into(),
+                            title: "Work".into(),
+                            subtitle: None,
+                            state: "ready".into(),
+                            children: Vec::new(),
+                        },
+                        AuthCandidate {
+                            id: "firefox/personal".into(),
+                            title: "Personal".into(),
+                            subtitle: None,
+                            state: "ready".into(),
+                            children: Vec::new(),
+                        },
+                    ],
+                }],
+            },
+        ];
+        let source_copy = sources.clone();
+        let account = Account::keyless(
+            ProviderId::new("cursor"),
+            AccountId::default(),
+            Box::new(move |_| {
+                Ok(Arc::new(AuthFake {
+                    sources: source_copy.clone(),
+                }) as Arc<dyn Provider>)
+            }),
+        )
+        .with_options(crate::registry::options("cursor", &config))
+        .with_auth_selection(crate::registry::browser_auth_selection("cursor", &config));
+        let mut harness = harness_with_config(vec![account], path.clone());
+        harness.engine.ensure_client(0).await;
+        assert!(
+            harness.engine.accounts[0].client.is_some(),
+            "old client is live"
+        );
+
+        assert!(
+            harness
+                .engine
+                .select_auth_source(
+                    "cursor",
+                    "default",
+                    AuthSelection {
+                        mode: "browser".into(),
+                        candidate: Some("firefox/unknown".into()),
+                    },
+                )
+                .await
+                .is_err()
+        );
+        let untouched = Config::at(path.clone()).expect("config still parses");
+        assert_eq!(
+            untouched.option("cursor", "auth-source"),
+            Some("cursor-app")
+        );
+        assert!(
+            harness.engine.accounts[0].client.is_some(),
+            "rejection keeps the client"
+        );
+
+        harness
+            .engine
+            .select_auth_source(
+                "cursor",
+                "default",
+                AuthSelection {
+                    mode: "browser".into(),
+                    candidate: Some("firefox".into()),
+                },
+            )
+            .await
+            .expect("ready source is committed");
+        let written = Config::at(path.clone()).expect("config parses");
+        assert_eq!(written.option("cursor", "auth-browser"), Some("firefox"));
+        assert_eq!(
+            written.option("cursor", "auth-profile"),
+            Some("work"),
+            "a one-click browser choice is pinned to the exact ready profile it proved"
+        );
+        assert_eq!(
+            harness.engine.accounts[0].status.auth_selection,
+            Some(AuthSelection {
+                mode: "browser".into(),
+                candidate: Some("firefox/work".into()),
+            })
+        );
+        assert!(
+            harness.engine.accounts[0].client.is_none(),
+            "client is rebuilt on poll"
+        );
+        assert_eq!(
+            harness.wait_secs(),
+            0,
+            "the selected source is due immediately"
+        );
+        assert!(matches!(
+            harness.updates.recv().await,
+            Some(Publication::Changed(status)) if status.auth_selection.is_some()
+        ));
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

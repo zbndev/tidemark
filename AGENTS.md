@@ -90,7 +90,7 @@ CI (`ubuntu-26.04`, `.github/workflows/ci.yml`) runs exactly:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-dbus-run-session -- cargo test --workspace
+cargo test --workspace
 scripts/check-layering.sh
 scripts/check-desktop-integration.sh
 scripts/test-restart-user-daemon.sh
@@ -198,7 +198,7 @@ human work. Tag push starts the release workflow, so the script runs no tests.
   them for process-global behaviour (proxy selection) and cross-seam flows.
 
 ```bash
-dbus-run-session -- cargo test --workspace          # exactly as CI runs it
+cargo test --workspace          # exactly as CI runs it
 cargo test -p tidemark-core
 cargo test -p tidemark-core providers::antigravity::direct::tests -- --nocapture
 cargo test -p tidemark chart::tests -- --nocapture  # passes without a display server
@@ -221,6 +221,3 @@ cargo test -p tidemark chart::tests -- --nocapture  # passes without a display s
   `matches!(..., Err(ProviderError::Malformed { .. }))` for malformed-provider contracts.
 - No coverage tooling or threshold is configured; "coverage" in the design docs means scenario
   coverage.
-- Gotchas: without a session bus the Secret Service tests silently skip, so prefer the
-  `dbus-run-session` form. `corpus_replay.rs` skips unless `TIDEMARK_CORPUS_DIR` or
-  `~/.config/codexbar/history` exists — never commit corpus data.

@@ -25,8 +25,8 @@ use std::sync::Arc;
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
-    self, aiand, codebuff, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo, litellm,
-    llmproxy, nanogpt, openai_api, openrouter, poe, sub2api, wayfinder, xai,
+    self, aiand, codebuff, cursor, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo,
+    litellm, llmproxy, nanogpt, openai_api, openrouter, poe, sub2api, wayfinder, xai,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -34,8 +34,8 @@ use tidemark_core::providers::{
 };
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
-    AccountId, CredentialKind, ExternalLogin, OptionChoice, ProviderDefinition, ProviderId,
-    ProviderOption, ProviderStatus,
+    AccountId, AuthMode, AuthSelection, AuthSelector, CredentialKind, ExternalLogin, OptionChoice,
+    ProviderDefinition, ProviderId, ProviderOption, ProviderStatus,
 };
 
 use crate::engine::Account;
@@ -109,6 +109,9 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 /// The hand-written key-authenticated providers: those whose fetch is more than one
 /// request, so a `keyed::Spec` cannot describe them — ai& pages a request log,
 /// Codebuff posts for credits and then reads a subscription it can do without,
+/// Cursor reads a usage summary and then the identity, legacy request quota and weekly Bot
+/// allowance an account may or may not have, signing every request with the session cookie
+/// a browser on this machine already holds rather than with anything the user is asked for,
 /// Deepgram lists projects and then reads a usage breakdown for each (and puts its key in
 /// a scheme of its own, `Authorization: Token`, which `keyed::Auth` cannot express),
 /// DeepInfra reads a checklist and a month's usage, Factory walks an
@@ -133,6 +136,7 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &aiand::SPEC,
     &codebuff::SPEC,
+    &cursor::SPEC,
     &deepgram::SPEC,
     &deepinfra::SPEC,
     &factory::SPEC,
@@ -197,6 +201,7 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
                 command: entry.external_command.to_owned(),
                 writes_back: entry.writes_back,
             }),
+            browser_auth: None,
             options: options(entry.slug, config),
         })
         .collect();
@@ -206,6 +211,7 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
         credential: CredentialKind::Key.as_wire().to_owned(),
         credential_hint: spec.credential_hint.to_owned(),
         external: None,
+        browser_auth: None,
         options: options(spec.id, config),
     }));
     definitions.extend(
@@ -228,6 +234,7 @@ fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderD
         credential: spec.credential.as_wire().to_owned(),
         credential_hint: spec.credential_hint.to_owned(),
         external: None,
+        browser_auth: browser_auth(spec.id),
         options: options(spec.id, config),
     }
 }
@@ -256,8 +263,55 @@ pub fn account(
     Ok(account.map(|account| {
         account
             .with_options(options(provider, config))
+            .with_auth_selection(browser_auth_selection(provider, config))
             .with_notify(notify(provider, config))
     }))
+}
+
+/// The local browser-auth capability one hand-written provider declares.
+///
+/// This is daemon metadata rather than a GUI branch: a later browser-cookie provider adds
+/// its selector here and gets the same wire contract, engine lifecycle and GTK rendering.
+fn browser_auth(provider: &str) -> Option<AuthSelector> {
+    (provider == cursor::PROVIDER_ID).then(|| AuthSelector {
+        option: cursor::AUTH_SOURCE.into(),
+        modes: vec![
+            AuthMode {
+                value: cursor::CURSOR_APP_SOURCE.into(),
+                title: "Cursor App".into(),
+            },
+            AuthMode {
+                value: cursor::BROWSER_SOURCE.into(),
+                title: "Browser".into(),
+            },
+        ],
+    })
+}
+
+/// The durable config source an account is already constrained to, if it is complete.
+///
+/// An incomplete or hand-edited value deliberately remains absent: treating it as another
+/// source would restore the old silent fallback this selector is designed to remove.
+pub(crate) fn browser_auth_selection(provider: &str, config: &Config) -> Option<AuthSelection> {
+    browser_auth(provider)?;
+    match config.option(provider, cursor::AUTH_SOURCE) {
+        Some(cursor::CURSOR_APP_SOURCE) => Some(AuthSelection {
+            mode: cursor::CURSOR_APP_SOURCE.into(),
+            candidate: None,
+        }),
+        Some(cursor::BROWSER_SOURCE) => {
+            let browser = config.option(provider, cursor::AUTH_BROWSER)?;
+            let candidate = match config.option(provider, cursor::AUTH_PROFILE) {
+                Some(profile) => format!("{browser}/{profile}"),
+                None => browser.to_owned(),
+            };
+            Some(AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some(candidate),
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Every configured account the daemon polls, in the order of `config.toml`.
@@ -548,15 +602,24 @@ fn keyed_account(spec: &'static keyed::Spec) -> Account {
 /// builder says what to do with them. It, too, resolves its URLs at build time and refuses
 /// a required option that is unset, naming it.
 fn hand_written_account(spec: &'static keyed::HandSpec) -> Account {
-    if spec.credential == CredentialKind::None {
-        // Nothing is stored and nothing is asked for, so there is no key to hand the
-        // builder — it is given a blank one and ignores it. The settings are the whole of
-        // what this account is, which is why it is built from them alone.
-        return Account::keyless(
+    if matches!(
+        spec.credential,
+        CredentialKind::None | CredentialKind::External
+    ) {
+        // Neither local gateways nor external local sessions have a Tidemark-owned secret.
+        // Both rebuild from settings alone; their published kinds still distinguish the two
+        // contracts for clients. A credential-free service also keeps its hint absent —
+        // there is genuinely nothing to say about where a nonexistent secret comes from.
+        let account = Account::keyless(
             ProviderId::new(spec.id),
             AccountId::default(),
             Box::new(move |options| (spec.build)(Credential::new(String::new()), options)),
-        );
+        )
+        .with_credential(spec.credential);
+        if spec.credential_hint.is_empty() {
+            return account;
+        }
+        return account.with_hint(spec.credential_hint);
     }
     Account::new(
         ProviderId::new(spec.id),
@@ -698,6 +761,49 @@ mod tests {
                 definition.provider
             );
         }
+    }
+
+    #[test]
+    fn cursor_publishes_its_browser_auth_capability_and_stored_selection() {
+        let definition = catalog(&empty_config())
+            .into_iter()
+            .find(|definition| definition.provider == cursor::PROVIDER_ID)
+            .expect("Cursor is in the catalog");
+        // The session belongs to another application: D-Bus clients must see external,
+        // not none, so their authentication semantics stay honest.
+        assert_eq!(definition.credential_kind(), Some(CredentialKind::External));
+        let selector = definition
+            .browser_auth
+            .expect("Cursor has local source selection");
+        assert_eq!(selector.option, cursor::AUTH_SOURCE);
+        assert_eq!(
+            selector
+                .modes
+                .iter()
+                .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (cursor::CURSOR_APP_SOURCE, "Cursor App"),
+                (cursor::BROWSER_SOURCE, "Browser"),
+            ]
+        );
+
+        let path = scratch_config(
+            "cursor-browser-selection",
+            "providers = [\"cursor\"]\n\n[provider.cursor]\nauth-source = \"browser\"\nauth-browser = \"zen\"\nauth-profile = \"work\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let account = account(cursor::PROVIDER_ID, &secrets(), &config)
+            .expect("builds")
+            .expect("Cursor account builds");
+        assert_eq!(
+            account.status().auth_selection,
+            Some(tidemark_types::AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some("zen/work".into()),
+            })
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -916,7 +1022,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 38);
+        assert_eq!(definitions.len(), 39);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(

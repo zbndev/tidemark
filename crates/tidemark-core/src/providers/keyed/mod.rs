@@ -39,6 +39,7 @@ pub mod clawrouter;
 pub mod clinepass;
 pub mod codebuff;
 pub mod crof;
+pub mod cursor;
 pub mod deepgram;
 pub mod deepinfra;
 pub mod deepseek;
@@ -183,8 +184,10 @@ pub struct HandSpec {
     /// What to call it in front of a person.
     pub title: &'static str,
     /// How the account is authenticated, and therefore what the credentials dialog offers.
-    /// [`CredentialKind::Key`] for all but the local gateways, which answer without a
-    /// credential and declare [`CredentialKind::None`]; the registry publishes this rather
+    /// [`CredentialKind::Key`] for the providers the user pastes a key for;
+    /// [`CredentialKind::None`] for the ones that need nothing — the local gateways, which
+    /// answer without a credential, and the browser-session providers, which read the
+    /// session a browser on this machine already holds. The registry publishes this rather
     /// than assuming a key, and builds the account to match.
     pub credential: CredentialKind,
     /// One sentence saying which page the key is on. Empty for a provider that needs no
@@ -351,6 +354,22 @@ pub async fn request(
         ));
     }
     Ok(body)
+}
+
+/// Sends a credential proof request without reading or recording its response body.
+///
+/// Source inspection proves only that a local session is accepted. Its body is not a quota
+/// reading and can contain account data, so it must not enter the optional raw-response log.
+pub async fn validate(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+) -> Result<(), ProviderError> {
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|error| ProviderError::Transport(redact_query(error)))?;
+    let retry_after = http::retry_after_header(&response).map(str::to_owned);
+    http::check(response.status(), retry_after.as_deref())
 }
 
 /// Reads a required option, refusing the build with the setting's name when it is unset
