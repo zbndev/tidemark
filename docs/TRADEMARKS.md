@@ -40,6 +40,7 @@ whose services the cards are about:
 | `tidemark-mimo-symbolic.svg` | Xiaomi Corporation |
 | `tidemark-mistral-symbolic.svg` | Mistral AI |
 | `tidemark-notion-symbolic.svg` | Notion Labs, Inc. |
+| `tidemark-ollama-symbolic.svg` | Ollama, Inc. |
 | `tidemark-nanogpt-symbolic.svg` | NanoGPT (nano-gpt.com) |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
 | `tidemark-openai-api-symbolic.svg` | OpenAI |
@@ -66,10 +67,10 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the thirty marks that CodexBar records as the provider icons of
+asset, and except the thirty-one marks that CodexBar records as the provider icons of
 ai&, Amp, Chutes, ClawRouter, ClinePass, Codebuff, Crof, Deepgram, DeepInfra, DeepSeek,
 ElevenLabs, Factory,
-Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, OpenAI, OpenCode Go,
+Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, Ollama, OpenAI, OpenCode Go,
 OpenRouter, Poe, Qoder, sub2api, Synthetic, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
 xAI's own, taken from
 [File:XAI Logo.svg](https://commons.wikimedia.org/wiki/File:XAI_Logo.svg) on Wikimedia

@@ -64,6 +64,7 @@ pub mod moonshot;
 pub mod nanogpt;
 pub mod neuralwatt;
 pub mod notion;
+pub mod ollama;
 // The slug carries a hyphen, which a module name cannot; the file keeps the slug so the
 // provider is greppable by its storage key.
 #[path = "openai-api.rs"]
@@ -308,6 +309,20 @@ pub async fn request(
     client: &reqwest::Client,
     request: reqwest::Request,
 ) -> Result<String, ProviderError> {
+    request_with_url(provider, client, request)
+        .await
+        .map(|(body, _)| body)
+}
+
+/// [`request`], also reporting the URL the exchange finally landed on, redirect following
+/// included — which is how a provider whose expired session shows up as a bounce to a
+/// sign-in page recognises the bounce. A provider that does not care where the answer
+/// came from stays on [`request`].
+pub async fn request_with_url(
+    provider: &str,
+    client: &reqwest::Client,
+    request: reqwest::Request,
+) -> Result<(String, reqwest::Url), ProviderError> {
     let sent = debug::Recorded::of(&request);
     let note = |answer| {
         if let Some(sent) = &sent {
@@ -331,6 +346,7 @@ pub async fn request(
     };
 
     let status = response.status();
+    let url = response.url().clone();
     let retry_after = http::retry_after_header(&response).map(str::to_owned);
     if let Err(error) = http::check(status, retry_after.as_deref()) {
         // Refused on its status: `reqwest` has not read the body and neither have we, so
@@ -364,7 +380,7 @@ pub async fn request(
             "the provider answered an empty body",
         ));
     }
-    Ok(body)
+    Ok((body, url))
 }
 
 /// Sends a credential proof request without reading or recording its response body.

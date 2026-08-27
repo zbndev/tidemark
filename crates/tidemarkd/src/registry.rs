@@ -27,7 +27,7 @@ use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
     self, abacus, aiand, augment, codebuff, commandcode, cursor, deepgram, deepinfra, factory,
     fireworks, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo, mistral, nanogpt,
-    notion, openai_api, openrouter, perplexity, poe, qoder, sub2api, wayfinder, xai,
+    notion, ollama, openai_api, openrouter, perplexity, poe, qoder, sub2api, wayfinder, xai,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -155,6 +155,7 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &mistral::SPEC,
     &nanogpt::SPEC,
     &notion::SPEC,
+    &ollama::SPEC,
     &openai_api::SPEC,
     &openrouter::SPEC,
     &perplexity::SPEC,
@@ -1079,7 +1080,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 49);
+        assert_eq!(definitions.len(), 50);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(
