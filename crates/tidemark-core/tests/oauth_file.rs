@@ -5,7 +5,7 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fs4::fs_std::FileExt;
+use fs4::{FileExt, TryLockError};
 use serde_json::json;
 use tidemark_core::oauth_file::{CredentialFile, CredentialFileError, Field, UpdateOutcome};
 
@@ -132,17 +132,19 @@ fn the_update_guard_holds_an_exclusive_advisory_lock() {
         .write(true)
         .open(dir.join(".credentials.json.tidemark.lock"))
         .expect("lock file exists");
-    assert!(!contender.try_lock_exclusive().expect("contention checked"));
+    assert!(matches!(
+        FileExt::try_lock(&contender),
+        Err(TryLockError::WouldBlock)
+    ));
     let target_contender = OpenOptions::new()
         .read(true)
         .write(true)
         .open(dir.join(".credentials.json"))
         .expect("credential file exists");
-    assert!(
-        !target_contender
-            .try_lock_exclusive()
-            .expect("target contention checked")
-    );
+    assert!(matches!(
+        FileExt::try_lock(&target_contender),
+        Err(TryLockError::WouldBlock)
+    ));
 }
 
 #[test]

@@ -24,7 +24,7 @@
 
 use aes::Aes128;
 use cbc::Decryptor;
-use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+use cbc::cipher::{BlockModeDecrypt, KeyIvInit};
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -133,7 +133,7 @@ fn value(
     }?;
     let mut body = encrypted[3..].to_vec();
     let padded = Decryptor::<Aes128>::new(key.into(), &IV.into())
-        .decrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut body)
+        .decrypt_padded::<cbc::cipher::block_padding::Pkcs7>(&mut body)
         .ok()?;
     // M130 and newer seal `SHA-256(host) || value`; the prefix is part of the plaintext,
     // not of the value.
@@ -168,7 +168,7 @@ fn derive_key(password: &[u8]) -> [u8; 16] {
 mod tests {
     use super::*;
     use crate::browser::tests::TestHome;
-    use cbc::cipher::BlockEncryptMut;
+    use cbc::cipher::BlockModeEncrypt;
     use std::path::PathBuf;
 
     /// The sealed form of a value, as Chromium would write it.
@@ -180,7 +180,7 @@ mod tests {
         let mut buffer = vec![0u8; length];
         buffer[..plaintext.len()].copy_from_slice(plaintext);
         let sealed = cbc::Encryptor::<Aes128>::new((&key).into(), &IV.into())
-            .encrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer, plaintext.len())
+            .encrypt_padded::<cbc::cipher::block_padding::Pkcs7>(&mut buffer, plaintext.len())
             .expect("seals")
             .to_vec();
         body.extend_from_slice(&sealed);
