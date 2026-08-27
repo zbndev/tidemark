@@ -53,7 +53,7 @@
 //! percentages come from the token-based pricing that plan is not on, so showing them
 //! beside a request quota would be showing a person two unrelated readings of one account.
 
-use super::{HandSpec, OptionSchema, Options, ProviderError, redact_query};
+use super::{HandSpec, OptionSchema, Options, ProviderError, redact_query, session};
 use crate::browser::{self, Keyring, SafeStorage};
 use crate::providers::{BoxFuture, Credential, Provider, http, parse_rfc3339, title_case};
 use base64::Engine;
@@ -328,45 +328,20 @@ impl Cursor {
         browser: &str,
         profile: &Option<String>,
     ) -> Result<Option<String>, ProviderError> {
-        let stores = match &self.home {
-            Some(home) => browser::stores_in(home),
-            None => Vec::new(),
+        let selection = crate::browser::auth::Selection {
+            browser: browser.to_owned(),
+            profile: profile.clone(),
         };
-        let now = Timestamp::now();
-        let mut keyring_locked = false;
-
-        for store in stores.into_iter().filter(|store| {
-            store.browser.slug == browser
-                && profile
-                    .as_ref()
-                    .is_none_or(|profile| profile == &store.profile)
-        }) {
-            let cookies = match store.cookies(&cookie_query(), self.storage.as_ref()).await {
-                Ok(cookies) => cookies,
-                Err(browser::CookieError::KeyringLocked) => {
-                    keyring_locked = true;
-                    continue;
-                }
-                Err(_) => continue,
-            };
-            let live: Vec<_> = cookies
-                .into_iter()
-                .filter(|cookie| cookie.is_live(now))
-                .collect();
-            if live
-                .iter()
-                .any(|cookie| SESSION_COOKIE_NAMES.contains(&cookie.name.as_str()))
-            {
-                let header = browser::header_for(&live, USAGE_SUMMARY_URL);
-                if !header.is_empty() {
-                    return Ok(Some(header));
-                }
-            }
-        }
-        if keyring_locked {
-            return Err(ProviderError::KeyringLocked);
-        }
-        Ok(None)
+        session::session(
+            self.home.as_deref(),
+            self.storage.as_ref(),
+            &selection,
+            SESSION_COOKIE_NAMES,
+            &cookie_query(),
+            USAGE_SUMMARY_URL,
+        )
+        .await
+        .map(|session| session.map(|session| session.header))
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
@@ -398,14 +373,11 @@ impl Cursor {
             Some(header) => validation_state(self.validate_header(header).await),
             None => AuthCandidateState::Missing,
         };
-        let browsers = crate::browser::auth::inspect(
-            self.home
-                .as_deref()
-                .map(browser::stores_in)
-                .unwrap_or_default(),
+        let browsers = session::inspect_sources(
+            self.home.as_deref(),
+            self.storage.as_ref(),
             &session_query(),
             USAGE_SUMMARY_URL,
-            self.storage.as_ref(),
             |credential| async move { self.validate_header(credential.header()).await },
         )
         .await;
