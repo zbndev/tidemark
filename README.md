@@ -100,7 +100,7 @@ Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 **Local session**
 
-Cursor · Manus · Perplexity
+Cursor · Manus · Perplexity · Qoder
 
 Cursor uses a cursor.com session already signed in on this machine — Tidemark does not store
 an API key or session token. Its settings page asks you to choose one local source: the Cursor App, or one of
@@ -113,6 +113,9 @@ the account; Tidemark keeps that choice and does not store the session token.
 
 Manus uses a signed-in manus.im browser session. Choose the browser profile that owns the
 account; Tidemark keeps that choice and does not store the session token.
+
+Qoder uses a signed-in qoder.com or qoder.com.cn browser session. Choose the browser profile
+that owns the account; Tidemark keeps that choice and does not store the session token.
 
 **No credential needed**
 

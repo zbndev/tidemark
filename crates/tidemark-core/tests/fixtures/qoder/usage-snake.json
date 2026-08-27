@@ -1,0 +1,15 @@
+{
+  "user_id": "redacted",
+  "quota_key": "big_model_credits",
+  "next_reset_at": 1725148800000,
+  "status": "active",
+  "total_quota": {
+    "quota_summary": {
+      "used_value": 125,
+      "limit_value": 500,
+      "remaining_value": 375,
+      "usage_percentage": 25,
+      "unit": "credit"
+    }
+  }
+}

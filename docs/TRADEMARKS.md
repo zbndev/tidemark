@@ -40,6 +40,7 @@ whose services the cards are about:
 | `tidemark-openrouter-symbolic.svg` | OpenRouter |
 | `tidemark-perplexity-symbolic.svg` | Perplexity AI, Inc. |
 | `tidemark-poe-symbolic.svg` | Quora, Inc. (Poe) |
+| `tidemark-qoder-symbolic.svg` | Qoder |
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
 | `tidemark-venice-symbolic.svg` | Venice AI |
@@ -62,7 +63,7 @@ asset, and except the thirty marks that CodexBar records as the provider icons o
 ai&, Amp, Chutes, ClawRouter, ClinePass, Codebuff, Crof, Deepgram, DeepInfra, DeepSeek,
 ElevenLabs, Factory,
 Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, OpenAI, OpenCode Go,
-OpenRouter, Poe, sub2api, Synthetic, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
+OpenRouter, Poe, Qoder, sub2api, Synthetic, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
 xAI's own, taken from
 [File:XAI Logo.svg](https://commons.wikimedia.org/wiki/File:XAI_Logo.svg) on Wikimedia
 Commons: the icon CodexBar files under `xai` is three strokes in the shape of an X and a
