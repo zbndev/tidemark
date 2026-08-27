@@ -40,6 +40,7 @@ pub mod chutes;
 pub mod clawrouter;
 pub mod clinepass;
 pub mod codebuff;
+pub mod commandcode;
 pub mod crof;
 pub mod cursor;
 pub mod deepgram;

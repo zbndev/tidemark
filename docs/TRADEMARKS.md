@@ -18,6 +18,7 @@ whose services the cards are about:
 | `tidemark-clinepass-symbolic.svg` | Cline (ClinePass) |
 | `tidemark-codex-symbolic.svg` | OpenAI (Codex) |
 | `tidemark-codebuff-symbolic.svg` | Codebuff, Inc. |
+| `tidemark-commandcode-symbolic.svg` | CommandCode (commandcode.ai) |
 | `tidemark-crof-symbolic.svg` | Crof |
 | `tidemark-cursor-symbolic.svg` | Anysphere, Inc. (Cursor) |
 | `tidemark-deepinfra-symbolic.svg` | DeepInfra |
