@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-use fs4::fs_std::FileExt;
+use fs4::FileExt;
 
 static NEXT_STAGE: AtomicU64 = AtomicU64::new(0);
 
@@ -52,9 +52,7 @@ impl CredentialFile {
             return Err(CredentialFileError::NotRegularFile(self.path.clone()));
         }
         lock.set_permissions(fs::Permissions::from_mode(0o600))?;
-        if !lock.try_lock_exclusive()? {
-            return Err(CredentialFileError::Contended);
-        }
+        try_lock(&lock)?;
         let target_lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -63,9 +61,7 @@ impl CredentialFile {
         if !target_lock.metadata()?.file_type().is_file() {
             return Err(CredentialFileError::NotRegularFile(self.path.clone()));
         }
-        if !target_lock.try_lock_exclusive()? {
-            return Err(CredentialFileError::Contended);
-        }
+        try_lock(&target_lock)?;
         Ok(LockedCredentialFile {
             path: self.path.clone(),
             canonical: self.canonical.clone(),
@@ -313,6 +309,15 @@ fn lock_path(path: &Path) -> Result<PathBuf, CredentialFileError> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| CredentialFileError::InvalidPath(path.to_owned()))?;
     Ok(path.with_file_name(format!("{name}.tidemark.lock")))
+}
+
+/// Acquires an exclusive advisory lock without mistaking a real I/O failure for contention.
+fn try_lock(file: &File) -> Result<(), CredentialFileError> {
+    match FileExt::try_lock(file) {
+        Ok(()) => Ok(()),
+        Err(fs4::TryLockError::WouldBlock) => Err(CredentialFileError::Contended),
+        Err(fs4::TryLockError::Error(error)) => Err(error.into()),
+    }
 }
 
 fn top_level_value_span(bytes: &[u8], wanted: &str) -> Result<Range<usize>, CredentialFileError> {
