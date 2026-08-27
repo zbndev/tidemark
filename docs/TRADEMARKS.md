@@ -40,7 +40,7 @@ whose services the cards are about:
 | `tidemark-openrouter-symbolic.svg` | OpenRouter |
 | `tidemark-perplexity-symbolic.svg` | Perplexity AI, Inc. |
 | `tidemark-poe-symbolic.svg` | Quora, Inc. (Poe) |
-| `tidemark-qoder-symbolic.svg` | Qoder |
+| `tidemark-qoder-symbolic.svg` | Qoder (Alibaba Group) |
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
 | `tidemark-venice-symbolic.svg` | Venice AI |

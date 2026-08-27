@@ -276,19 +276,29 @@ pub fn account(
 /// This is daemon metadata rather than a GUI branch: a later browser-cookie provider adds
 /// its selector here and gets the same wire contract, engine lifecycle and GTK rendering.
 fn browser_auth(provider: &str) -> Option<AuthSelector> {
-    (provider == cursor::PROVIDER_ID).then(|| AuthSelector {
-        option: cursor::AUTH_SOURCE.into(),
-        modes: vec![
-            AuthMode {
-                value: cursor::CURSOR_APP_SOURCE.into(),
-                title: "Cursor App".into(),
-            },
-            AuthMode {
+    match provider {
+        cursor::PROVIDER_ID => Some(AuthSelector {
+            option: cursor::AUTH_SOURCE.into(),
+            modes: vec![
+                AuthMode {
+                    value: cursor::CURSOR_APP_SOURCE.into(),
+                    title: "Cursor App".into(),
+                },
+                AuthMode {
+                    value: cursor::BROWSER_SOURCE.into(),
+                    title: "Browser".into(),
+                },
+            ],
+        }),
+        qoder::PROVIDER_ID => Some(AuthSelector {
+            option: AUTH_SOURCE.into(),
+            modes: vec![AuthMode {
                 value: cursor::BROWSER_SOURCE.into(),
                 title: "Browser".into(),
-            },
-        ],
-    })
+            }],
+        }),
+        _ => None,
+    }
 }
 
 /// The durable config source an account is already constrained to, if it is complete.
@@ -804,6 +814,43 @@ mod tests {
             Some(tidemark_types::AuthSelection {
                 mode: cursor::BROWSER_SOURCE.into(),
                 candidate: Some("zen/work".into()),
+            })
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn qoder_publishes_browser_auth_and_restores_its_selected_profile() {
+        let definition = catalog(&empty_config())
+            .into_iter()
+            .find(|definition| definition.provider == qoder::PROVIDER_ID)
+            .expect("Qoder is in the catalog");
+        let selector = definition
+            .browser_auth
+            .expect("Qoder has local source selection");
+        assert_eq!(selector.option, AUTH_SOURCE);
+        assert_eq!(
+            selector
+                .modes
+                .iter()
+                .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                .collect::<Vec<_>>(),
+            [(cursor::BROWSER_SOURCE, "Browser")]
+        );
+
+        let path = scratch_config(
+            "qoder-browser-selection",
+            "providers = [\"qoder\"]\n\n[provider.qoder]\nauth-source = \"browser\"\nauth-browser = \"firefox\"\nauth-profile = \"Default\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let account = account(qoder::PROVIDER_ID, &secrets(), &config)
+            .expect("builds")
+            .expect("Qoder account builds");
+        assert_eq!(
+            account.status().auth_selection,
+            Some(tidemark_types::AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some("firefox/Default".into()),
             })
         );
         let _ = std::fs::remove_file(path);

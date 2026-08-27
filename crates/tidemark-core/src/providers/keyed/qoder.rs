@@ -8,7 +8,8 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tidemark_types::{
-    AccountId, AuthCandidate, CredentialKind, ProviderId, Snapshot, Timestamp, Window, WindowKey,
+    AccountId, AuthCandidate, AuthCandidateState, CredentialKind, ProviderId, Snapshot, Timestamp,
+    Window, WindowKey,
 };
 
 /// The stable slug this provider's history is filed under.
@@ -139,35 +140,44 @@ impl Qoder {
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
-        let international_cookie = self.session(INTERNATIONAL_URL).await?;
-        let international = super::request(
-            PROVIDER_ID,
-            &self.client,
-            self.request(
-                &self.url(false),
-                &international_cookie,
-                INTERNATIONAL_ORIGIN,
-            )?,
-        )
-        .await;
-        let body = match international {
-            Ok(body) => body,
-            Err(ProviderError::Credential { status: 401 | 403 }) => {
-                let china_cookie = self.session(CHINA_URL).await?;
-                super::request(
-                    PROVIDER_ID,
-                    &self.client,
-                    self.request(&self.url(true), &china_cookie, CHINA_ORIGIN)?,
-                )
-                .await?
-            }
+        let body = match self.session(INTERNATIONAL_URL).await {
+            Ok(cookie) => match self.fetch_site(false, &cookie).await {
+                Ok(body) => body,
+                Err(ProviderError::Credential { status: 401 | 403 }) => self.fetch_china().await?,
+                Err(error) => return Err(error),
+            },
+            Err(ProviderError::NoCredential) => self.fetch_china().await?,
             Err(error) => return Err(error),
         };
         parse(&body, Timestamp::now())
     }
 
-    async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
-        let Ok(request) = self.request(INTERNATIONAL_URL, header, INTERNATIONAL_ORIGIN) else {
+    async fn fetch_china(&self) -> Result<String, ProviderError> {
+        let cookie = self.session(CHINA_URL).await?;
+        self.fetch_site(true, &cookie).await
+    }
+
+    async fn fetch_site(&self, china: bool, cookie: &str) -> Result<String, ProviderError> {
+        let (origin, url) = if china {
+            (CHINA_ORIGIN, self.url(true))
+        } else {
+            (INTERNATIONAL_ORIGIN, self.url(false))
+        };
+        super::request(
+            PROVIDER_ID,
+            &self.client,
+            self.request(&url, cookie, origin)?,
+        )
+        .await
+    }
+
+    async fn validate_header(&self, header: &str, china: bool) -> crate::browser::auth::Validation {
+        let (origin, url) = if china {
+            (CHINA_ORIGIN, self.url(true))
+        } else {
+            (INTERNATIONAL_ORIGIN, self.url(false))
+        };
+        let Ok(request) = self.request(&url, header, origin) else {
             return crate::browser::auth::Validation::Unreachable;
         };
         match super::validate(&self.client, request).await {
@@ -180,15 +190,74 @@ impl Qoder {
     }
 
     async fn inspect_sources(&self) -> Vec<AuthCandidate> {
-        session::inspect_sources(
+        let international = session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
             &cookie_query(),
             INTERNATIONAL_URL,
-            |credential| async move { self.validate_header(credential.header()).await },
+            |credential| async move { self.validate_header(credential.header(), false).await },
         )
-        .await
+        .await;
+        let china = session::inspect_sources(
+            self.home.as_deref(),
+            self.storage.as_ref(),
+            &cookie_query(),
+            CHINA_URL,
+            |credential| async move { self.validate_header(credential.header(), true).await },
+        )
+        .await;
+        merge_sources(international, china)
     }
+}
+
+fn merge_sources(
+    mut primary: Vec<AuthCandidate>,
+    secondary: Vec<AuthCandidate>,
+) -> Vec<AuthCandidate> {
+    for browser in secondary {
+        let Some(existing) = primary
+            .iter_mut()
+            .find(|candidate| candidate.id == browser.id)
+        else {
+            primary.push(browser);
+            continue;
+        };
+        for child in browser.children {
+            match existing
+                .children
+                .iter_mut()
+                .find(|candidate| candidate.id == child.id)
+            {
+                Some(current) if source_rank(child.state()) > source_rank(current.state()) => {
+                    current.state = child.state;
+                }
+                Some(_) => {}
+                None => existing.children.push(child),
+            }
+        }
+        existing.state = aggregate_source_state(&existing.children)
+            .as_wire()
+            .to_owned();
+    }
+    primary
+}
+
+fn source_rank(state: Option<AuthCandidateState>) -> u8 {
+    match state {
+        Some(AuthCandidateState::Ready) => 5,
+        Some(AuthCandidateState::WaitingForKeyring) => 4,
+        Some(AuthCandidateState::Unreachable) => 3,
+        Some(AuthCandidateState::Rejected) => 2,
+        Some(AuthCandidateState::Missing) | None => 1,
+    }
+}
+
+fn aggregate_source_state(children: &[AuthCandidate]) -> AuthCandidateState {
+    children
+        .iter()
+        .filter_map(AuthCandidate::state)
+        .max_by_key(|state| source_rank(Some(*state)))
+        .unwrap_or(AuthCandidateState::Missing)
 }
 
 impl fmt::Debug for Qoder {
@@ -404,7 +473,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::sync::Arc;
-    use tidemark_types::{Timestamp, WindowKey};
+    use tidemark_types::{AuthCandidateState, Timestamp, WindowKey};
 
     #[test]
     fn a_recorded_usage_response_draws_total_and_shared_credit_pools() {
@@ -494,6 +563,33 @@ mod tests {
                 )
                 .expect("inserts a cookie");
         }
+        home
+    }
+
+    fn gecko_home_with_only_a_china_cookie() -> crate::browser::tests::TestHome {
+        let home = crate::browser::tests::TestHome::new();
+        let connection = Connection::open(home.gecko(".mozilla/firefox/Default")).expect("opens");
+        connection
+            .execute_batch(
+                "CREATE TABLE moz_cookies (
+                    id INTEGER PRIMARY KEY,
+                    baseDomain TEXT,
+                    originAttributes TEXT NOT NULL DEFAULT '',
+                    name TEXT, value TEXT, host TEXT, path TEXT,
+                    expiry INTEGER, lastAccessed INTEGER, creationTime INTEGER,
+                    isSecure INTEGER, isHttpOnly INTEGER
+                );",
+            )
+            .expect("creates");
+        connection
+            .execute(
+                "INSERT INTO moz_cookies (
+                    host, name, value, path, expiry, isSecure, lastAccessed,
+                    creationTime, isHttpOnly
+                ) VALUES ('.qoder.com.cn', 'cn-session', 'china-only-session', '/', 0, 1, 0, 0, 0)",
+                [],
+            )
+            .expect("inserts a cookie");
         home
     }
 
@@ -590,6 +686,51 @@ mod tests {
         second_server.join().expect("second server exits");
 
         assert!(second.contains("cookie: cn-session=fallback-session"));
+    }
+
+    #[test]
+    fn a_china_only_selected_jar_reaches_the_china_usage_endpoint() {
+        let home = gecko_home_with_only_a_china_cookie();
+        let (china, requests, server) = server(
+            200,
+            include_str!("../../../tests/fixtures/qoder/usage.json"),
+        );
+
+        let snapshot =
+            fetch(&provider(&home, "http://127.0.0.1:9", &china)).expect("uses the China session");
+        let request = requests
+            .recv()
+            .expect("request captured")
+            .to_ascii_lowercase();
+        server.join().expect("server exits");
+
+        assert_eq!(snapshot.provider.as_str(), "qoder");
+        assert!(request.contains("cookie: cn-session=china-only-session"));
+        assert!(request.contains("origin: https://qoder.com.cn"));
+    }
+
+    #[test]
+    fn a_china_only_browser_session_is_a_ready_auth_source() {
+        let home = gecko_home_with_only_a_china_cookie();
+        let (china, _requests, server) = server(
+            200,
+            include_str!("../../../tests/fixtures/qoder/usage.json"),
+        );
+        let provider = provider(&home, "http://127.0.0.1:9", &china);
+
+        let sources = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(provider.inspect_auth_sources())
+            .expect("inspects sources");
+        server.join().expect("server exits");
+
+        assert_eq!(sources[0].children[0].id, "firefox/Default");
+        assert_eq!(
+            sources[0].children[0].state,
+            AuthCandidateState::Ready.as_wire()
+        );
     }
 
     #[test]
