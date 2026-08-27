@@ -79,6 +79,7 @@ pub mod sakana;
 pub mod session;
 pub mod sub2api;
 pub mod synthetic;
+pub mod t3chat;
 pub mod venice;
 pub mod warp;
 pub mod wayfinder;
@@ -325,6 +326,23 @@ pub async fn request_with_url(
     client: &reqwest::Client,
     request: reqwest::Request,
 ) -> Result<(String, reqwest::Url), ProviderError> {
+    request_inspected(provider, client, request, |_| Ok(())).await
+}
+
+/// [`request_with_url`] with one hook: the response is shown to `inspect` before the
+/// status mapping runs, for the provider whose refusal is only recognisable from a
+/// response header — T3 Chat's Vercel challenge arrives stamped as a 429 and would
+/// otherwise be read as a rate limit. An `Err` from the hook is the exchange's error;
+/// everything else about the exchange is [`request`]'s.
+pub async fn request_inspected<F>(
+    provider: &str,
+    client: &reqwest::Client,
+    request: reqwest::Request,
+    inspect: F,
+) -> Result<(String, reqwest::Url), ProviderError>
+where
+    F: FnOnce(&reqwest::Response) -> Result<(), ProviderError>,
+{
     let sent = debug::Recorded::of(&request);
     let note = |answer| {
         if let Some(sent) = &sent {
@@ -350,6 +368,12 @@ pub async fn request_with_url(
     let status = response.status();
     let url = response.url().clone();
     let retry_after = http::retry_after_header(&response).map(str::to_owned);
+    if let Err(error) = inspect(&response) {
+        note(debug::Answer::Refused {
+            status: status.as_u16(),
+        });
+        return Err(error);
+    }
     if let Err(error) = http::check(status, retry_after.as_deref()) {
         // Refused on its status: `reqwest` has not read the body and neither have we, so
         // the line says what came back without pretending to a body it never held.

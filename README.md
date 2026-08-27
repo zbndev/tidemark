@@ -100,7 +100,7 @@ Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 **Local session**
 
-Abacus · Augment · CommandCode · Cursor · LongCat · Manus · MiMo · Mistral · Notion · Ollama · OpenCode · Perplexity · Qoder · Sakana
+Abacus · Augment · CommandCode · Cursor · LongCat · Manus · MiMo · Mistral · Notion · Ollama · OpenCode · Perplexity · Qoder · Sakana · T3 Chat
 
 Cursor uses a cursor.com session already signed in on this machine — Tidemark does not store
 an API key or session token. Its settings page asks you to choose one local source: the Cursor App, or one of
@@ -147,6 +147,9 @@ that owns the account; Tidemark keeps that choice and does not store the session
 
 Sakana uses a signed-in console.sakana.ai browser session. Choose the browser profile that
 owns the account; Tidemark keeps that choice and does not store the session token.
+
+T3 Chat uses a signed-in t3.chat browser session. Choose the browser profile that owns the
+account; Tidemark keeps that choice and does not store the session token.
 
 **No credential needed**
 

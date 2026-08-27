@@ -53,6 +53,7 @@ whose services the cards are about:
 | `tidemark-sakana-symbolic.svg` | Sakana AI |
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
+| `tidemark-t3chat-symbolic.svg` | T3 Chat (Theo Browne) |
 | `tidemark-venice-symbolic.svg` | Venice AI |
 | `tidemark-warp-symbolic.svg` | Warp (warp.dev) |
 | `tidemark-wayfinder-symbolic.svg` | The Wayfinder project (wayfinder-router) |
@@ -69,11 +70,11 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the thirty-three marks that CodexBar records as the provider icons of
+asset, and except the thirty-four marks that CodexBar records as the provider icons of
 ai&, Amp, Chutes, ClawRouter, ClinePass, Codebuff, Crof, Deepgram, DeepInfra, DeepSeek,
 ElevenLabs, Factory,
 Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, Ollama, OpenAI, OpenCode, OpenCode Go,
-OpenRouter, Poe, Qoder, Sakana, sub2api, Synthetic, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
+OpenRouter, Poe, Qoder, Sakana, sub2api, Synthetic, T3 Chat, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
 xAI's own, taken from
 [File:XAI Logo.svg](https://commons.wikimedia.org/wiki/File:XAI_Logo.svg) on Wikimedia
 Commons: the icon CodexBar files under `xai` is three strokes in the shape of an X and a
