@@ -62,6 +62,7 @@ pub mod neuralwatt;
 pub mod openai_api;
 pub mod opencodego;
 pub mod openrouter;
+pub mod perplexity;
 pub mod poe;
 pub mod session;
 pub mod sub2api;

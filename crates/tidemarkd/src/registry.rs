@@ -26,7 +26,7 @@ use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
     self, aiand, codebuff, cursor, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo,
-    litellm, llmproxy, nanogpt, openai_api, openrouter, poe, sub2api, wayfinder, xai,
+    litellm, llmproxy, nanogpt, openai_api, openrouter, perplexity, poe, sub2api, wayfinder, xai,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -149,6 +149,7 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &nanogpt::SPEC,
     &openai_api::SPEC,
     &openrouter::SPEC,
+    &perplexity::SPEC,
     &poe::SPEC,
     &sub2api::SPEC,
     &wayfinder::SPEC,
