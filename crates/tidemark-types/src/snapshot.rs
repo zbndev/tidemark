@@ -110,6 +110,7 @@ pub fn provider_label(slug: &str) -> String {
         "nanogpt" => "NanoGPT".to_owned(),
         "commandcode" => "CommandCode".to_owned(),
         "longcat" => "LongCat".to_owned(),
+        "opencode" => "OpenCode".to_owned(),
         "mimo" => "MiMo".to_owned(),
         other => {
             let mut chars = other.chars();

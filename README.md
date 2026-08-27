@@ -100,7 +100,7 @@ Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 **Local session**
 
-Abacus · Augment · CommandCode · Cursor · LongCat · Manus · MiMo · Mistral · Notion · Ollama · Perplexity · Qoder · Sakana
+Abacus · Augment · CommandCode · Cursor · LongCat · Manus · MiMo · Mistral · Notion · Ollama · OpenCode · Perplexity · Qoder · Sakana
 
 Cursor uses a cursor.com session already signed in on this machine — Tidemark does not store
 an API key or session token. Its settings page asks you to choose one local source: the Cursor App, or one of
@@ -129,6 +129,9 @@ first workspace is used otherwise.
 
 Ollama uses a signed-in ollama.com browser session. Choose the browser profile that owns the
 account; Tidemark keeps that choice and does not store the session token.
+
+OpenCode uses a signed-in opencode.ai browser session. Choose the browser profile that owns
+the account; Tidemark keeps that choice and does not store the session token.
 
 Perplexity uses a signed-in perplexity.ai browser session. Choose the browser profile that owns
 the account; Tidemark keeps that choice and does not store the session token.

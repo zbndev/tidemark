@@ -69,6 +69,7 @@ pub mod ollama;
 // provider is greppable by its storage key.
 #[path = "openai-api.rs"]
 pub mod openai_api;
+pub mod opencode;
 pub mod opencodego;
 pub mod openrouter;
 pub mod perplexity;

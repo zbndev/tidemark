@@ -44,6 +44,7 @@ whose services the cards are about:
 | `tidemark-nanogpt-symbolic.svg` | NanoGPT (nano-gpt.com) |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
 | `tidemark-openai-api-symbolic.svg` | OpenAI |
+| `tidemark-opencode-symbolic.svg` | The OpenCode project |
 | `tidemark-opencodego-symbolic.svg` | The OpenCode project (OpenCode Go) |
 | `tidemark-openrouter-symbolic.svg` | OpenRouter |
 | `tidemark-perplexity-symbolic.svg` | Perplexity AI, Inc. |
@@ -68,10 +69,10 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the thirty-two marks that CodexBar records as the provider icons of
+asset, and except the thirty-three marks that CodexBar records as the provider icons of
 ai&, Amp, Chutes, ClawRouter, ClinePass, Codebuff, Crof, Deepgram, DeepInfra, DeepSeek,
 ElevenLabs, Factory,
-Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, Ollama, OpenAI, OpenCode Go,
+Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, Ollama, OpenAI, OpenCode, OpenCode Go,
 OpenRouter, Poe, Qoder, Sakana, sub2api, Synthetic, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
 xAI's own, taken from
 [File:XAI Logo.svg](https://commons.wikimedia.org/wiki/File:XAI_Logo.svg) on Wikimedia
