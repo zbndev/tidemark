@@ -26,7 +26,8 @@ use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
     self, aiand, codebuff, cursor, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo,
-    litellm, llmproxy, nanogpt, openai_api, openrouter, perplexity, poe, sub2api, wayfinder, xai,
+    litellm, llmproxy, manus, nanogpt, openai_api, openrouter, perplexity, poe, sub2api, wayfinder,
+    xai,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -118,7 +119,7 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 /// auth/billing/usage ladder, Fireworks reads a rolling billing
 /// window, Groq reads four Prometheus rate queries, IBM Bob reads a profile then
 /// per-team regional budgets, Kilo reads a tRPC batch and then a profile, LiteLLM walks a
-/// two-request management ladder, NanoGPT reads subscription quotas and a prepaid balance,
+/// two-request management ladder, Manus reads its browser session's credit inventory, NanoGPT reads subscription quotas and a prepaid balance,
 /// OpenAI pages two Admin API endpoints, OpenRouter reads credits and key quota, Poe pages
 /// through a usage history, xAI reads a prepaid balance and a spend
 /// history — and those whose single request hangs from a required base URL with no
@@ -128,11 +129,10 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 /// health, routes and savings in three requests. Each
 /// entry is the provider's own [`keyed::HandSpec`], which carries everything a
 /// `Spec` carries except the single endpoint, and says how to build a client from
-/// the stored key and the account's settings. Each entry says how it is authenticated:
-/// the same pasted key as the catalog's, `CredentialKind::Key`, for all of them so far,
-/// so the credentials dialog is unchanged — but a provider that answers without a
-/// credential says `CredentialKind::None` here and is published, and built, with no key
-/// field at all.
+/// the stored key and the account's settings. An ordinary entry says it uses the same
+/// pasted key as the catalog's, `CredentialKind::Key`; a browser-session provider says
+/// `CredentialKind::External`; and a provider that answers without a credential says
+/// `CredentialKind::None` and is published, and built, with no key field at all.
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &aiand::SPEC,
     &codebuff::SPEC,
@@ -146,6 +146,7 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &kilo::SPEC,
     &litellm::SPEC,
     &llmproxy::SPEC,
+    &manus::SPEC,
     &nanogpt::SPEC,
     &openai_api::SPEC,
     &openrouter::SPEC,
@@ -1023,7 +1024,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 39);
+        assert_eq!(definitions.len(), 41);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(

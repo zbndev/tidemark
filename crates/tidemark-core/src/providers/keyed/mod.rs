@@ -52,6 +52,7 @@ pub mod kilo;
 pub mod kimi;
 pub mod litellm;
 pub mod llmproxy;
+pub mod manus;
 pub mod minimax;
 pub mod moonshot;
 pub mod nanogpt;

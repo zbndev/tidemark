@@ -30,6 +30,7 @@ whose services the cards are about:
 | `tidemark-kimi-symbolic.svg` | Moonshot AI (Kimi) |
 | `tidemark-litellm-symbolic.svg` | The LiteLLM project |
 | `tidemark-llmproxy-symbolic.svg` | The LLM Proxy project |
+| `tidemark-manus-symbolic.svg` | Manus AI |
 | `tidemark-minimax-symbolic.svg` | MiniMax |
 | `tidemark-moonshot-symbolic.svg` | Moonshot AI |
 | `tidemark-nanogpt-symbolic.svg` | NanoGPT (nano-gpt.com) |
