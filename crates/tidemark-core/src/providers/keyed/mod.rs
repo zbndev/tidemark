@@ -35,6 +35,7 @@
 pub mod abacus;
 pub mod aiand;
 pub mod amp;
+pub mod augment;
 pub mod chutes;
 pub mod clawrouter;
 pub mod clinepass;

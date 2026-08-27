@@ -11,6 +11,7 @@ whose services the cards are about:
 | `tidemark-aiand-symbolic.svg` | ai& (console.aiand.com) |
 | `tidemark-amp-symbolic.svg` | Amp (ampcode.com) |
 | `tidemark-antigravity-symbolic.svg` | Google LLC (Antigravity) |
+| `tidemark-augment-symbolic.svg` | Augment Code, Inc. |
 | `tidemark-chutes-symbolic.svg` | Chutes AI (Chutes) |
 | `tidemark-claude-symbolic.svg` | Anthropic PBC (Claude) |
 | `tidemark-clawrouter-symbolic.svg` | The OpenClaw project (ClawRouter) |
