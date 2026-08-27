@@ -38,6 +38,7 @@ whose services the cards are about:
 | `tidemark-minimax-symbolic.svg` | MiniMax |
 | `tidemark-moonshot-symbolic.svg` | Moonshot AI |
 | `tidemark-mimo-symbolic.svg` | Xiaomi Corporation |
+| `tidemark-mistral-symbolic.svg` | Mistral AI |
 | `tidemark-notion-symbolic.svg` | Notion Labs, Inc. |
 | `tidemark-nanogpt-symbolic.svg` | NanoGPT (nano-gpt.com) |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |

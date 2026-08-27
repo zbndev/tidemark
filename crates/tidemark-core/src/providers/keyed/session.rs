@@ -101,6 +101,49 @@ pub async fn session(
     query: &Query,
     url: &str,
 ) -> Result<Option<Session>, ProviderError> {
+    session_matching(
+        home,
+        storage,
+        selection,
+        |name| session_names.is_empty() || session_names.contains(&name),
+        query,
+        url,
+    )
+    .await
+}
+
+/// Reads a session whose cookie name *starts with* `prefix` — auth stacks that rotate the
+/// session cookie's suffix (Ory) cannot be gated on an exact name.
+pub async fn session_prefix(
+    home: Option<&Path>,
+    storage: &dyn SafeStorage,
+    selection: &Selection,
+    prefix: &str,
+    query: &Query,
+    url: &str,
+) -> Result<Option<Session>, ProviderError> {
+    session_matching(
+        home,
+        storage,
+        selection,
+        |name| name.starts_with(prefix),
+        query,
+        url,
+    )
+    .await
+}
+
+async fn session_matching<M>(
+    home: Option<&Path>,
+    storage: &dyn SafeStorage,
+    selection: &Selection,
+    matches: M,
+    query: &Query,
+    url: &str,
+) -> Result<Option<Session>, ProviderError>
+where
+    M: Fn(&str) -> bool,
+{
     let now = tidemark_types::Timestamp::now();
     let mut keyring_locked = false;
 
@@ -123,9 +166,7 @@ pub async fn session(
             .into_iter()
             .filter(|cookie| cookie.is_live(now))
             .collect();
-        let Some(cookie) = live.iter().find(|cookie| {
-            session_names.is_empty() || session_names.contains(&cookie.name.as_str())
-        }) else {
+        let Some(cookie) = live.iter().find(|cookie| matches(&cookie.name)) else {
             continue;
         };
         let header = browser::header_for(&live, url);
@@ -309,6 +350,36 @@ mod tests {
             .expect("finds any live cookie");
 
         assert_eq!(found.session_name, "provider-session");
+        assert_eq!(found.session_value, "tok");
+    }
+
+    #[test]
+    fn a_prefix_gate_accepts_a_session_whose_name_carries_a_suffix() {
+        // Ory rotates the session cookie's suffix, so an exact-name gate would reject a live session.
+        let home = crate::browser::tests::TestHome::new();
+        gecko_profile(
+            &home,
+            ".mozilla/firefox/aa",
+            &[("ory_session_admin", "tok")],
+        );
+        let selection = Selection {
+            browser: "firefox".into(),
+            profile: None,
+        };
+
+        let found = runtime()
+            .block_on(super::session_prefix(
+                Some(home.path()),
+                &NoKeyring,
+                &selection,
+                "ory_session_",
+                &query(),
+                "https://example.com/api",
+            ))
+            .expect("reads the selected store")
+            .expect("finds the prefixed session");
+
+        assert_eq!(found.session_name, "ory_session_admin");
         assert_eq!(found.session_value, "tok");
     }
 

@@ -1,0 +1,8 @@
+{
+  "wallet_amount": 12.5,
+  "credit_notes_amount": 2.25,
+  "ongoing_usage_balance": 1.5,
+  "currency": "USD",
+  "minimum_credits_purchase": 10,
+  "maximum_credits_purchase": 1000
+}
