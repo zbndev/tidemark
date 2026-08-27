@@ -1,0 +1,12 @@
+{
+  "code": 0,
+  "message": "",
+  "data": {
+    "currentLot": {
+      "totalToken": 50000000,
+      "consumedToken": 1212576,
+      "consumedRatio": 0.02425152,
+      "status": "ACTIVE"
+    }
+  }
+}

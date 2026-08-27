@@ -100,7 +100,7 @@ Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 **Local session**
 
-Abacus · Augment · CommandCode · Cursor · Manus · MiMo · Notion · Perplexity · Qoder
+Abacus · Augment · CommandCode · Cursor · LongCat · Manus · MiMo · Notion · Perplexity · Qoder
 
 Cursor uses a cursor.com session already signed in on this machine — Tidemark does not store
 an API key or session token. Its settings page asks you to choose one local source: the Cursor App, or one of
@@ -116,6 +116,9 @@ the account; Tidemark keeps that choice and does not store the session token.
 
 CommandCode uses a signed-in commandcode.ai browser session. Choose the browser profile that
 owns the account; Tidemark keeps that choice and does not store the session token.
+
+LongCat uses a signed-in longcat.chat browser session. Choose the browser profile that owns
+the account; Tidemark keeps that choice and does not store the session token.
 
 Notion uses a signed-in notion.com browser session. Choose the browser profile that owns the
 account; when the account belongs to several workspaces, name the one to report on — the

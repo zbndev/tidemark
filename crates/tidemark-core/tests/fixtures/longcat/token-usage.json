@@ -1,0 +1,18 @@
+{
+  "code": 0,
+  "message": "",
+  "data": {
+    "usage": {
+      "totalToken": 500000,
+      "usedToken": 120000,
+      "availableToken": 380000,
+      "freeAvailableToken": 380000
+    },
+    "extData": {
+      "LongCat-Flash-Lite": {
+        "totalToken": 50000000,
+        "usedToken": 0
+      }
+    }
+  }
+}

@@ -55,6 +55,7 @@ pub mod kilo;
 pub mod kimi;
 pub mod litellm;
 pub mod llmproxy;
+pub mod longcat;
 pub mod manus;
 pub mod mimo;
 pub mod minimax;
