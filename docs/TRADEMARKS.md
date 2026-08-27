@@ -7,6 +7,7 @@ whose services the cards are about:
 
 | File | Mark of |
 | --- | --- |
+| `tidemark-abacus-symbolic.svg` | Abacus AI, Inc. |
 | `tidemark-aiand-symbolic.svg` | ai& (console.aiand.com) |
 | `tidemark-amp-symbolic.svg` | Amp (ampcode.com) |
 | `tidemark-antigravity-symbolic.svg` | Google LLC (Antigravity) |

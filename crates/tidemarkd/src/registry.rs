@@ -25,9 +25,9 @@ use std::sync::Arc;
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
-    self, aiand, codebuff, cursor, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo,
-    litellm, llmproxy, manus, nanogpt, openai_api, openrouter, perplexity, poe, qoder, sub2api,
-    wayfinder, xai,
+    self, abacus, aiand, codebuff, cursor, deepgram, deepinfra, factory, fireworks, groq, ibmbob,
+    kilo, litellm, llmproxy, manus, nanogpt, openai_api, openrouter, perplexity, poe, qoder,
+    sub2api, wayfinder, xai,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -134,6 +134,7 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 /// `CredentialKind::External`; and a provider that answers without a credential says
 /// `CredentialKind::None` and is published, and built, with no key field at all.
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
+    &abacus::SPEC,
     &aiand::SPEC,
     &codebuff::SPEC,
     &cursor::SPEC,
