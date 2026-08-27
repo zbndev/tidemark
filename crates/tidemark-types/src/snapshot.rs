@@ -109,6 +109,7 @@ pub fn provider_label(slug: &str) -> String {
         "antigravity" => "Antigravity".to_owned(),
         "nanogpt" => "NanoGPT".to_owned(),
         "commandcode" => "CommandCode".to_owned(),
+        "mimo" => "MiMo".to_owned(),
         other => {
             let mut chars = other.chars();
             match chars.next() {
