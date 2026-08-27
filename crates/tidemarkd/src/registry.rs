@@ -291,7 +291,7 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
             ],
         }),
         qoder::PROVIDER_ID => Some(AuthSelector {
-            option: AUTH_SOURCE.into(),
+            option: cursor::AUTH_SOURCE.into(),
             modes: vec![AuthMode {
                 value: cursor::BROWSER_SOURCE.into(),
                 title: "Browser".into(),
@@ -828,7 +828,7 @@ mod tests {
         let selector = definition
             .browser_auth
             .expect("Qoder has local source selection");
-        assert_eq!(selector.option, AUTH_SOURCE);
+        assert_eq!(selector.option, cursor::AUTH_SOURCE);
         assert_eq!(
             selector
                 .modes
