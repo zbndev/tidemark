@@ -60,6 +60,7 @@ pub mod minimax;
 pub mod moonshot;
 pub mod nanogpt;
 pub mod neuralwatt;
+pub mod notion;
 // The slug carries a hyphen, which a module name cannot; the file keeps the slug so the
 // provider is greppable by its storage key.
 #[path = "openai-api.rs"]
