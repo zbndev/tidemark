@@ -49,6 +49,7 @@ whose services the cards are about:
 | `tidemark-perplexity-symbolic.svg` | Perplexity AI, Inc. |
 | `tidemark-poe-symbolic.svg` | Quora, Inc. (Poe) |
 | `tidemark-qoder-symbolic.svg` | Qoder (Alibaba Group) |
+| `tidemark-sakana-symbolic.svg` | Sakana AI |
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
 | `tidemark-venice-symbolic.svg` | Venice AI |
@@ -67,11 +68,11 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the thirty-one marks that CodexBar records as the provider icons of
+asset, and except the thirty-two marks that CodexBar records as the provider icons of
 ai&, Amp, Chutes, ClawRouter, ClinePass, Codebuff, Crof, Deepgram, DeepInfra, DeepSeek,
 ElevenLabs, Factory,
 Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, Ollama, OpenAI, OpenCode Go,
-OpenRouter, Poe, Qoder, sub2api, Synthetic, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
+OpenRouter, Poe, Qoder, Sakana, sub2api, Synthetic, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
 xAI's own, taken from
 [File:XAI Logo.svg](https://commons.wikimedia.org/wiki/File:XAI_Logo.svg) on Wikimedia
 Commons: the icon CodexBar files under `xai` is three strokes in the shape of an X and a
@@ -85,7 +86,7 @@ trace of NanoGPT's official
 [`Nano-gptFilled.png`](https://nano-gpt.com/logo/Nano-gptFilled.png) asset. Each was reduced to a
 single-colour path set and stripped of the fills, gradients, masks and filters the
 originals carry — a symbolic icon is recoloured by the theme and cannot keep
-them; the ai&, ClawRouter, Fireworks, LiteLLM, OpenRouter, Synthetic and Wayfinder marks were first
+them; the ai&, ClawRouter, Fireworks, LiteLLM, OpenRouter, Sakana, Synthetic and Wayfinder marks were first
 drawn as strokes, a stroke being as single-colour as a fill, and their strokes have since
 been outlined into the filled paths that ship — GTK's symbolic renderer paints `fill` and
 does not draw a `stroke` at all, so the stroked files rendered as blank or half-blank

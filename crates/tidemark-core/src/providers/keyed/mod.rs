@@ -74,6 +74,7 @@ pub mod openrouter;
 pub mod perplexity;
 pub mod poe;
 pub mod qoder;
+pub mod sakana;
 pub mod session;
 pub mod sub2api;
 pub mod synthetic;
