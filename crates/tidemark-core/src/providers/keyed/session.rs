@@ -232,6 +232,24 @@ where
     auth::inspect_prefix(stores(home), prefix, query, probe_url, storage, validate).await
 }
 
+/// Inspects browser profiles whose jars carry every cookie in `required` — the fetch
+/// gate of providers whose API authenticates against a cookie pair rather than one
+/// named session.
+pub async fn inspect_sources_all<F, Fut>(
+    home: Option<&Path>,
+    storage: &dyn SafeStorage,
+    required: &[&str],
+    query: &Query,
+    probe_url: &str,
+    validate: F,
+) -> Vec<AuthCandidate>
+where
+    F: Fn(auth::CandidateCredential) -> Fut,
+    Fut: Future<Output = auth::Validation>,
+{
+    auth::inspect_all(stores(home), required, query, probe_url, storage, validate).await
+}
+
 /// Puts scanned browser/profile candidates under the `browser` authentication mode.
 ///
 /// The settings protocol chooses a mode first, then renders its candidates. Browser stores
@@ -314,14 +332,20 @@ mod tests {
         profile: &str,
         cookies: &[(&str, &str)],
     ) {
-        gecko_profile_at(home, profile, "/", cookies)
+        let rows: Vec<(&str, &str, &str)> = cookies
+            .iter()
+            .map(|(name, value)| (*name, *value, "/"))
+            .collect();
+        gecko_jar(home, profile, &rows);
     }
 
-    fn gecko_profile_at(
+    /// Writes one profile's whole jar in a single database. `TestHome::gecko` empties the
+    /// database on every call, so a profile written twice keeps only its second jar —
+    /// scope tests need both rows of one jar to mean anything.
+    fn gecko_jar(
         home: &crate::browser::tests::TestHome,
         profile: &str,
-        path: &str,
-        cookies: &[(&str, &str)],
+        cookies: &[(&str, &str, &str)],
     ) {
         let database = home.gecko(profile);
         let connection = Connection::open(database).expect("opens");
@@ -337,7 +361,7 @@ mod tests {
                 );",
             )
             .expect("creates the table");
-        for (name, value) in cookies {
+        for (name, value, path) in cookies {
             connection
                 .execute(
                     "INSERT INTO moz_cookies (
@@ -474,17 +498,13 @@ mod tests {
         // Returning the jar anyway would let a provider send a bearer from a host or path
         // scope the request never carries — possibly another account's session.
         let home = crate::browser::tests::TestHome::new();
-        gecko_profile_at(
+        gecko_jar(
             &home,
             ".mozilla/firefox/aa",
-            "/settings",
-            &[("session", "narrow")],
-        );
-        gecko_profile_at(
-            &home,
-            ".mozilla/firefox/aa",
-            "/",
-            &[("analytics", "public")],
+            &[
+                ("session", "narrow", "/settings"),
+                ("analytics", "public", "/"),
+            ],
         );
         let selection = Selection {
             browser: "firefox".into(),
@@ -513,13 +533,11 @@ mod tests {
         // Taking the first same-named row in the jar instead of the scoped one would send
         // a path-scoped duplicate's value as the bearer beside the header's real cookie.
         let home = crate::browser::tests::TestHome::new();
-        gecko_profile_at(
+        gecko_jar(
             &home,
             ".mozilla/firefox/aa",
-            "/settings",
-            &[("session", "narrow")],
+            &[("session", "narrow", "/settings"), ("session", "root", "/")],
         );
-        gecko_profile_at(&home, ".mozilla/firefox/aa", "/", &[("session", "root")]);
         let selection = Selection {
             browser: "firefox".into(),
             profile: None,
@@ -574,6 +592,32 @@ mod tests {
             &query(),
             "https://example.com/api",
             |_| async { unreachable!("a non-session jar must not be validated") },
+        ));
+
+        assert_eq!(report[0].children[0].state, "missing");
+    }
+
+    #[test]
+    fn an_inspection_ignores_a_session_cookie_the_request_url_would_not_receive() {
+        // Gating on the whole jar would run the proof on a header that never carries the
+        // session, painting as rejected a source the poll itself treats as missing.
+        let home = crate::browser::tests::TestHome::new();
+        gecko_jar(
+            &home,
+            ".mozilla/firefox/aa",
+            &[
+                ("session", "narrow", "/settings"),
+                ("analytics", "public", "/"),
+            ],
+        );
+
+        let report = runtime().block_on(super::inspect_sources(
+            Some(home.path()),
+            &NoKeyring,
+            &["session"],
+            &query(),
+            "https://example.com/api",
+            |_| async { unreachable!("a jar without a scoped session must not be validated") },
         ));
 
         assert_eq!(report[0].children[0].state, "missing");

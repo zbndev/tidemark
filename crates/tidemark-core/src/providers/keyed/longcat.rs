@@ -163,7 +163,7 @@ impl LongCat {
         .await
         .ok()
         .and_then(|body| data_object(&body, "token packs").ok());
-        let usage = if active_lot(packs.as_ref()).is_none() {
+        let usage = if active_lot(packs.as_ref())?.is_none() {
             let data = data_object(
                 &super::request(
                     PROVIDER_ID,
@@ -318,14 +318,40 @@ fn data_object(body: &str, endpoint: &str) -> Result<Map<String, Value>, Provide
 }
 
 /// The pack lot currently being drained: ACTIVE status with a positive size. A missing,
-/// null, expired, or empty lot falls back to the legacy whole-account quota.
-fn active_lot(summary: Option<&Map<String, Value>>) -> Option<&Map<String, Value>> {
-    let lot = summary?.get("currentLot")?.as_object()?;
-    if lot.get("status")?.as_str()?.to_uppercase() != "ACTIVE" {
-        return None;
+/// null, expired, or empty lot falls back to the legacy whole-account quota; a lot the
+/// wire names as ACTIVE but refuses to describe is a recognised window failing to
+/// describe itself, and fails the fetch rather than hiding behind that fallback.
+fn active_lot(
+    summary: Option<&Map<String, Value>>,
+) -> Result<Option<&Map<String, Value>>, ProviderError> {
+    let Some(lot) = summary
+        .and_then(|summary| summary.get("currentLot"))
+        .filter(|lot| !lot.is_null())
+    else {
+        return Ok(None);
+    };
+    let Some(lot) = lot.as_object() else {
+        return Err(ProviderError::malformed(
+            "LongCat token packs name a current lot that is not an object",
+        ));
+    };
+    let active = lot
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status.to_uppercase() == "ACTIVE");
+    if !active {
+        return Ok(None);
     }
-    number(lot.get("totalToken")?).filter(|total| *total > 0.0)?;
-    Some(lot)
+    if !lot
+        .get("totalToken")
+        .and_then(number)
+        .is_some_and(|total| total > 0.0)
+    {
+        return Err(ProviderError::malformed(
+            "LongCat active lot states no readable total",
+        ));
+    }
+    Ok(Some(lot))
 }
 
 /// A number the console sends as a JSON number or a numeric string.
@@ -387,7 +413,7 @@ pub fn parse(
     // A quota the wire recognises but does not fully describe — an active lot without its
     // consumption, a usage without its used or remaining tokens — fails the fetch rather
     // than drawing zero, because "nothing spent" and "nothing said" are different answers.
-    let quota = if let Some(lot) = active_lot(token_pack_summary) {
+    let quota = if let Some(lot) = active_lot(token_pack_summary)? {
         let total = lot
             .get("totalToken")
             .and_then(number)
@@ -915,5 +941,46 @@ mod tests {
             Timestamp::from_unix(1_700_000_000).expect("plausible"),
         );
         assert!(matches!(from_usage, Err(ProviderError::Malformed(_))));
+    }
+
+    #[test]
+    fn an_active_lot_without_a_readable_total_fails_rather_than_falling_back() {
+        // Falling back to the legacy usage would hide the very window the console says
+        // it is draining — "cannot describe the lot" and "has no lot" are different
+        // answers, and only the second one is the fallback's to give.
+        for body in [
+            r#"{"currentLot":{"status":"ACTIVE","consumedToken":100}}"#,
+            r#"{"currentLot":{"status":"ACTIVE","totalToken":"many","consumedToken":100}}"#,
+            r#"{"currentLot":"coming soon"}"#,
+        ] {
+            let packs = object(body);
+            let result = parse(
+                None,
+                Some(&packs),
+                None,
+                None,
+                Timestamp::from_unix(1_700_000_000).expect("plausible"),
+            );
+            assert!(matches!(result, Err(ProviderError::Malformed(_))), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_broken_active_lot_fails_the_fetch_without_asking_the_legacy_usage() {
+        // The legacy call exists for accounts with no lot at all; serving it here would
+        // bury the console's own broken reading under a whole-account number.
+        let home = gecko_home();
+        let (base_url, _requests, server) = chained_server(&[
+            ("GET /api/v1/user-current", 200, USER_CURRENT),
+            (
+                "POST /api/pay/quota/metering/token-packs/summary",
+                200,
+                r#"{"code":0,"message":"","data":{"currentLot":{"status":"ACTIVE","consumedToken":100}}}"#,
+            ),
+        ]);
+        let result = fetch(&provider(&home, &base_url));
+        server.join().expect("server exits");
+
+        assert!(matches!(result, Err(ProviderError::Malformed(_))));
     }
 }

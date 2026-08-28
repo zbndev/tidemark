@@ -6,9 +6,9 @@
 //! refresh token, so the write-back replaces only the access token, the expiry instant
 //! and the id token, and every other byte of the document stays the CLI's. The CLI does
 //! not honor the advisory lock — it replaces the file atomically — so the write-back is
-//! conditional: the document is reread after the grant, and a file changed meanwhile is
-//! left alone, that poll spending the freshly obtained access token without persisting
-//! it. Tidemark runs no vendor program: an expired token with nothing to refresh it is
+//! conditional: the update itself rereads the document as it publishes, and a file
+//! changed meanwhile is left alone, that poll spending the freshly obtained access token
+//! without persisting it. Tidemark runs no vendor program: an expired token with nothing to refresh it is
 //! `NoCredential`, pointing at the sign-in.
 //!
 //! The quota is a per-model-family fraction, not a number of requests: `buckets[]` names
@@ -186,17 +186,21 @@ impl Gemini {
                 .ok_or(ProviderError::NoCredential)?;
             let refreshed = self.exchange_refresh(refresh_token).await?;
             // The CLI does not honor this lock: it replaces the file atomically while the
-            // grant runs. Write back only when the document is still the one the exchange
-            // was based on — a newer login or a fresher rotation keeps its tokens, and
+            // grant runs. Write back only when the document the update rereads is still
+            // the one the exchange was based on — the comparison and the publish read the
+            // same bytes, so a newer login or a fresher rotation keeps its tokens, and
             // this poll simply spends the access token it obtained.
-            let current = Stored::from_document(&locked.read_json().map_err(file_error)?)?;
-            if current.refresh_token == stored.refresh_token
-                && current.expiry_date == stored.expiry_date
-            {
-                locked
-                    .update_root_fields(&refreshed.fields(now_ms))
-                    .map_err(file_error)?;
-            }
+            locked
+                .update_root_fields_if_unchanged(
+                    |document| {
+                        Stored::from_document(document).is_ok_and(|current| {
+                            current.refresh_token == stored.refresh_token
+                                && current.expiry_date == stored.expiry_date
+                        })
+                    },
+                    &refreshed.fields(now_ms),
+                )
+                .map_err(file_error)?;
             (
                 refreshed.access_token,
                 refreshed.id_token.or(stored.id_token.clone()),

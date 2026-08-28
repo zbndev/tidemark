@@ -360,13 +360,19 @@ fn catalog_plan(plan_id: &str) -> Option<(&'static str, &'static str, f64)> {
         .map(|(id, name, total)| (*id, *name, *total))
 }
 
-/// Reads a window limit object. An absent window is simply not offered; a present one
-/// whose cap or usage cannot be read is a recognised window failing to describe itself,
-/// and fails the fetch rather than hiding or drawing at zero — the reset stays optional,
-/// because "no reset named" is a state the wire genuinely carries.
+/// Reads a window limit object. An absent window is simply not offered; a present one —
+/// even a `null`, a string, or an array — is a recognised window, and one whose shape,
+/// cap, or usage cannot be read fails the fetch rather than hiding or drawing at zero;
+/// the reset stays optional, because "no reset named" is a state the wire genuinely
+/// carries.
 fn limit(value: Option<&Value>, title: &str) -> Result<Option<Limit>, ProviderError> {
-    let Some(object) = value.and_then(Value::as_object) else {
+    let Some(value) = value else {
         return Ok(None);
+    };
+    let Some(object) = value.as_object() else {
+        return Err(ProviderError::malformed(format!(
+            "CommandCode {title} window is not an object"
+        )));
     };
     let cap = number(object.get("cap"))
         .filter(|cap| *cap > 0.0)
@@ -704,6 +710,9 @@ mod tests {
             r#"{"credits":{"monthlyCredits":10,"windowLimits":{"fiveHour":{}}}}"#,
             r#"{"credits":{"monthlyCredits":10,"windowLimits":{"fiveHour":{"cap":3}}}}"#,
             r#"{"credits":{"monthlyCredits":10,"windowLimits":{"weekly":{"used":0.7}}}}"#,
+            r#"{"credits":{"monthlyCredits":10,"windowLimits":{"fiveHour":null}}}"#,
+            r#"{"credits":{"monthlyCredits":10,"windowLimits":{"fiveHour":"soon"}}}"#,
+            r#"{"credits":{"monthlyCredits":10,"windowLimits":{"weekly":[]}}}"#,
         ] {
             let result = parse(
                 body,

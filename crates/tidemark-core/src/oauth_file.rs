@@ -224,18 +224,26 @@ impl LockedCredentialFile {
         Ok(UpdateOutcome::Published)
     }
 
-    /// Replaces or adds fields at the document root, merging into the rest of the file.
+    /// Replaces or adds fields at the document root, but only when the document is still
+    /// the one the caller's external work was based on.
     ///
     /// The counterpart of [`Self::update_top_level`] for a credential file with a flat
     /// shape — Gemini's `oauth_creds.json` keeps its tokens at the root, with no subtree
-    /// and no source value to compare against: Google's refresh grant never returns a new
-    /// refresh token, so this write can only repeat a rotation that already succeeded at
-    /// the provider. The document is reread under the lock and every unnamed field keeps
-    /// its bytes, as everywhere else in this module.
-    pub fn update_root_fields(
+    /// and no single source value to compare against, so the caller says in `unchanged`
+    /// what "still the same document" means for its credential. The document is reread
+    /// here, inside the update, and the comparison reads the same bytes the publish
+    /// merges into: a vendor that replaces the file while the caller worked — the Gemini
+    /// CLI honors no lock — is never overlaid, and the update is dropped as
+    /// [`UpdateOutcome::SourceChanged`]. Every unnamed field keeps its bytes, as
+    /// everywhere else in this module.
+    pub fn update_root_fields_if_unchanged<U>(
         &self,
+        unchanged: U,
         updates: &[(&str, serde_json::Value)],
-    ) -> Result<(), CredentialFileError> {
+    ) -> Result<UpdateOutcome, CredentialFileError>
+    where
+        U: Fn(&serde_json::Value) -> bool,
+    {
         if self.path != self.canonical {
             return Err(CredentialFileError::NotCanonical {
                 path: self.path.clone(),
@@ -246,11 +254,17 @@ impl LockedCredentialFile {
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
             return Err(CredentialFileError::NotRegularFile(self.path.clone()));
         }
-        let mut updated = fs::read(&self.path)?;
+        let original = fs::read(&self.path)?;
+        let document: serde_json::Value = serde_json::from_slice(&original)?;
+        if !unchanged(&document) {
+            return Ok(UpdateOutcome::SourceChanged);
+        }
+        let mut updated = original;
         for (name, value) in updates {
             update_field(&mut updated, "", Field::Root(name), value)?;
         }
-        atomic_private_publish(&self.path, &updated, || Ok(()))
+        atomic_private_publish(&self.path, &updated, || Ok(()))?;
+        Ok(UpdateOutcome::Published)
     }
 
     /// Writes an exact private backup beside the credential file before token exchange.
@@ -702,10 +716,13 @@ mod tests {
             .lock()
             .expect("lock acquired");
         locked
-            .update_root_fields(&[
-                ("access_token", serde_json::Value::from("new")),
-                ("expiry_date", serde_json::Value::from(123_i64)),
-            ])
+            .update_root_fields_if_unchanged(
+                |_| true,
+                &[
+                    ("access_token", serde_json::Value::from("new")),
+                    ("expiry_date", serde_json::Value::from(123_i64)),
+                ],
+            )
             .expect("update published");
         drop(locked);
 
@@ -717,6 +734,51 @@ mod tests {
         assert_eq!(updated["unrelated"]["nested"], true);
         let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "published private");
+        fs::remove_dir_all(&dir).expect("test cleanup");
+    }
+
+    #[test]
+    fn a_root_update_on_a_file_replaced_underneath_is_dropped_rather_than_overlaid() {
+        // The Gemini CLI honors no lock and replaces the file atomically: comparing
+        // before the publish leaves a check-then-write race, so the gate must read the
+        // same bytes the merge does.
+        let dir = std::env::temp_dir().join(format!(
+            "tidemark-root-cas-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).expect("test directory");
+        let path = dir.join("oauth_creds.json");
+        fs::write(
+            &path,
+            r#"{"access_token":"old","refresh_token":"first","unrelated":"kept"}"#,
+        )
+        .expect("write credentials");
+
+        let locked = CredentialFile::new(path.clone(), path.clone())
+            .lock()
+            .expect("lock acquired");
+        // The vendor's atomic replacement lands while the caller's exchange runs.
+        fs::write(
+            &path,
+            r#"{"access_token":"cli","refresh_token":"second","unrelated":"cli-kept"}"#,
+        )
+        .expect("the CLI replaces the file");
+        let outcome = locked
+            .update_root_fields_if_unchanged(
+                |document| document.get("refresh_token") == Some(&serde_json::Value::from("first")),
+                &[("access_token", serde_json::Value::from("new"))],
+            )
+            .expect("no filesystem error");
+        drop(locked);
+
+        assert_eq!(outcome, UpdateOutcome::SourceChanged);
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("reread")).expect("JSON");
+        assert_eq!(after["access_token"], "cli");
+        assert_eq!(after["refresh_token"], "second");
+        assert_eq!(after["unrelated"], "cli-kept");
         fs::remove_dir_all(&dir).expect("test cleanup");
     }
 

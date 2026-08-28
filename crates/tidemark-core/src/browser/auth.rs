@@ -1,6 +1,6 @@
 //! Generic inspection of browser-cookie authentication sources.
 
-use super::{CookieError, Query, SafeStorage, Store, header_for};
+use super::{Cookie, CookieError, Query, SafeStorage, Store, header_of, scoped};
 use std::future::Future;
 use tidemark_types::{AuthCandidate, AuthCandidateState};
 
@@ -89,7 +89,44 @@ where
         query,
         request_url,
         storage,
-        |name| names.is_empty() || names.contains(&name),
+        |scoped: &[&Cookie]| {
+            names.is_empty()
+                || scoped
+                    .iter()
+                    .any(|cookie| names.contains(&cookie.name.as_str()))
+        },
+        validate,
+    )
+    .await
+}
+
+/// Inspects browser profiles whose usable jars carry every one of `required`.
+///
+/// The gate for providers whose API authenticates against a cookie *pair* — a jar with
+/// only half of it never signed in, so it must not be advertised as a rejected source
+/// the person could select.
+pub async fn inspect_all<F, Fut>(
+    stores: Vec<Store>,
+    required: &[&str],
+    query: &Query,
+    request_url: &str,
+    storage: &dyn SafeStorage,
+    validate: F,
+) -> Vec<AuthCandidate>
+where
+    F: Fn(CandidateCredential) -> Fut,
+    Fut: Future<Output = Validation>,
+{
+    inspect_matching(
+        stores,
+        query,
+        request_url,
+        storage,
+        |scoped: &[&Cookie]| {
+            required
+                .iter()
+                .all(|name| scoped.iter().any(|cookie| cookie.name.as_str() == *name))
+        },
         validate,
     )
     .await
@@ -116,7 +153,7 @@ where
         query,
         request_url,
         storage,
-        |name| name.starts_with(prefix),
+        |scoped: &[&Cookie]| scoped.iter().any(|cookie| cookie.name.starts_with(prefix)),
         validate,
     )
     .await
@@ -127,13 +164,13 @@ async fn inspect_matching<F, Fut, M>(
     query: &Query,
     request_url: &str,
     storage: &dyn SafeStorage,
-    matches: M,
+    usable: M,
     validate: F,
 ) -> Vec<AuthCandidate>
 where
     F: Fn(CandidateCredential) -> Fut,
     Fut: Future<Output = Validation>,
-    M: Fn(&str) -> bool,
+    M: Fn(&[&Cookie]) -> bool,
 {
     let now = tidemark_types::Timestamp::now();
     let mut browsers: Vec<(super::Browser, Vec<AuthCandidate>)> = Vec::new();
@@ -145,8 +182,12 @@ where
                     .into_iter()
                     .filter(|cookie| cookie.is_live(now))
                     .collect();
-                let header = header_for(&live, request_url);
-                if !live.iter().any(|cookie| matches(&cookie.name)) || header.is_empty() {
+                // Scope first, then gate — the rule the fetch side applies: a session
+                // cookie the request URL would not receive must not make its jar look
+                // usable, or the proof runs on a header that never carries it.
+                let scoped = scoped(&live, request_url);
+                let header = header_of(&scoped);
+                if scoped.is_empty() || !usable(&scoped) {
                     AuthCandidateState::Missing
                 } else {
                     match validate(CandidateCredential {

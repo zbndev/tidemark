@@ -36,6 +36,9 @@ const SESSION_URL: &str = "https://platform.xiaomimimo.com/";
 /// *and* [`USER_ID_COOKIE`] together.
 const SESSION_COOKIE_NAMES: &[&str] = &["api-platform_serviceToken"];
 const USER_ID_COOKIE: &str = "userId";
+/// What inspection requires before a jar is worth proving: the whole session pair, so a
+/// half pair reads as never having signed in rather than as a provider's rejection.
+const SESSION_PAIR: &[&str] = &["api-platform_serviceToken", USER_ID_COOKIE];
 const COOKIE_DOMAINS: &[&str] = &["platform.xiaomimimo.com", "www.platform.xiaomimimo.com"];
 /// The token plan is a calendar-month pool, so its window carries the monthly length.
 const MONTHLY: u64 = 2_592_000;
@@ -157,11 +160,6 @@ impl MiMo {
     }
 
     async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
-        // The helper gates on one name; MiMo's API wants the pair, and a jar holding the
-        // service token without the user id never signed in to the platform.
-        if !has_cookie(header, USER_ID_COOKIE) {
-            return crate::browser::auth::Validation::Rejected;
-        }
         let Ok(request) = self.api_request(&self.url(BALANCE_URL), header) else {
             return crate::browser::auth::Validation::Unreachable;
         };
@@ -183,10 +181,10 @@ impl MiMo {
     }
 
     async fn inspect_sources(&self) -> Vec<AuthCandidate> {
-        session::inspect_sources(
+        session::inspect_sources_all(
             self.home.as_deref(),
             self.storage.as_ref(),
-            SESSION_COOKIE_NAMES,
+            SESSION_PAIR,
             &cookie_query(),
             BALANCE_URL,
             |credential| async move { self.validate_header(credential.header()).await },
@@ -784,24 +782,46 @@ mod tests {
     }
 
     #[test]
-    fn an_inspection_proof_rejects_the_half_pair_without_reaching_the_api() {
-        // A proof that called the API anyway would judge a jar the fetch always refuses.
+    fn an_inspection_treats_either_half_of_the_pair_as_never_signed_in() {
+        // Proving the half pair would paint the source rejected when the poll itself
+        // answers that there is no credential; the pair is the gate, not the proof.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
-        let provider = provider(
-            &gecko_home(&[("api-platform_serviceToken", "svc-token")]),
-            "http://127.0.0.1:9",
-        );
+        for cookies in [
+            &[("api-platform_serviceToken", "svc-token")][..],
+            &[("userId", "123")][..],
+        ] {
+            let home = gecko_home(cookies);
+            let provider = provider(&home, "http://127.0.0.1:9");
 
-        let verdict =
-            runtime.block_on(provider.validate_header("api-platform_serviceToken=svc-token"));
+            let report = runtime.block_on(provider.inspect_sources());
 
-        assert!(matches!(
-            verdict,
-            crate::browser::auth::Validation::Rejected
-        ));
+            assert_eq!(
+                report[0].children[0].state, "missing",
+                "the half pair {cookies:?} is not a credential"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inspection_proves_a_jar_that_carries_the_whole_pair() {
+        // Port 9 has nothing listening: only a proven jar can report unreachable, so the
+        // state says whether the pair gate let the proof run at all.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let home = gecko_home(&[
+            ("api-platform_serviceToken", "svc-token"),
+            ("userId", "123"),
+        ]);
+        let provider = provider(&home, "http://127.0.0.1:9");
+
+        let report = runtime.block_on(provider.inspect_sources());
+
+        assert_eq!(report[0].children[0].state, "unreachable");
     }
 
     #[test]
