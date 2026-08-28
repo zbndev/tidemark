@@ -28,7 +28,7 @@ use tidemark_core::providers::keyed::{
     self, abacus, aiand, augment, codebuff, commandcode, cursor, deepgram, deepinfra, factory,
     fireworks, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo, mistral, nanogpt,
     notion, ollama, openai_api, opencode, openrouter, perplexity, poe, qoder, sakana, sub2api,
-    t3chat, wayfinder, xai,
+    t3chat, wayfinder, xai, zoommate,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -168,6 +168,7 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &t3chat::SPEC,
     &wayfinder::SPEC,
     &xai::SPEC,
+    &zoommate::SPEC,
 ];
 
 /// The catalog's own spelling of a provider's name, for the places the daemon speaks to a
@@ -302,7 +303,7 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
                 },
             ],
         }),
-        qoder::PROVIDER_ID => Some(AuthSelector {
+        qoder::PROVIDER_ID | zoommate::PROVIDER_ID => Some(AuthSelector {
             option: cursor::AUTH_SOURCE.into(),
             modes: vec![AuthMode {
                 value: cursor::BROWSER_SOURCE.into(),
@@ -869,6 +870,43 @@ mod tests {
     }
 
     #[test]
+    fn zoommate_publishes_browser_auth_and_restores_its_selected_profile() {
+        let definition = catalog(&empty_config())
+            .into_iter()
+            .find(|definition| definition.provider == zoommate::PROVIDER_ID)
+            .expect("ZoomMate is in the catalog");
+        let selector = definition
+            .browser_auth
+            .expect("ZoomMate has local source selection");
+        assert_eq!(selector.option, cursor::AUTH_SOURCE);
+        assert_eq!(
+            selector
+                .modes
+                .iter()
+                .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                .collect::<Vec<_>>(),
+            [(cursor::BROWSER_SOURCE, "Browser")]
+        );
+
+        let path = scratch_config(
+            "zoommate-browser-selection",
+            "providers = [\"zoommate\"]\n\n[provider.zoommate]\nauth-source = \"browser\"\nauth-browser = \"firefox\"\nauth-profile = \"Default\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let account = account(zoommate::PROVIDER_ID, &secrets(), &config)
+            .expect("builds")
+            .expect("ZoomMate account builds");
+        assert_eq!(
+            account.status().auth_selection,
+            Some(tidemark_types::AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some("firefox/Default".into()),
+            })
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn the_credential_choice_reports_the_stored_value_verbatim() {
         for slug in [
             antigravity::PROVIDER_ID,
@@ -1084,7 +1122,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 53);
+        assert_eq!(definitions.len(), 54);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(

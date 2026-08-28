@@ -86,6 +86,7 @@ pub mod wayfinder;
 pub mod xai;
 pub mod zai;
 pub mod zenmux;
+pub mod zoommate;
 
 use super::{BoxFuture, Credential, Provider, ProviderError, http};
 use crate::debug;

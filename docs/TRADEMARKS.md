@@ -60,6 +60,7 @@ whose services the cards are about:
 | `tidemark-xai-symbolic.svg` | xAI Corp. |
 | `tidemark-zai-symbolic.svg` | Z.ai (Zhipu AI) |
 | `tidemark-zenmux-symbolic.svg` | ZenMux |
+| `tidemark-zoommate-symbolic.svg` | Zoom Video Communications, Inc. (ZoomMate) |
 
 They are used nominatively — to identify which service a card is reporting on — and for no
 other purpose. Tidemark is not affiliated with, endorsed by, or sponsored by any of them.
@@ -74,7 +75,7 @@ asset, and except the thirty-four marks that CodexBar records as the provider ic
 ai&, Amp, Chutes, ClawRouter, ClinePass, Codebuff, Crof, Deepgram, DeepInfra, DeepSeek,
 ElevenLabs, Factory,
 Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, Ollama, OpenAI, OpenCode, OpenCode Go,
-OpenRouter, Poe, Qoder, Sakana, sub2api, Synthetic, T3 Chat, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
+OpenRouter, Poe, Qoder, Sakana, sub2api, Synthetic, T3 Chat, Venice, Warp, Wayfinder, ZenMux and ZoomMate — and except the xAI mark, which is
 xAI's own, taken from
 [File:XAI Logo.svg](https://commons.wikimedia.org/wiki/File:XAI_Logo.svg) on Wikimedia
 Commons: the icon CodexBar files under `xai` is three strokes in the shape of an X and a

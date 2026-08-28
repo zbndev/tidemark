@@ -200,6 +200,22 @@ where
     auth::inspect(stores(home), query, probe_url, storage, validate).await
 }
 
+/// Inspects browser profiles with a live cookie whose name starts with `prefix`.
+pub async fn inspect_sources_prefix<F, Fut>(
+    home: Option<&Path>,
+    storage: &dyn SafeStorage,
+    prefix: &str,
+    query: &Query,
+    probe_url: &str,
+    validate: F,
+) -> Vec<AuthCandidate>
+where
+    F: Fn(auth::CandidateCredential) -> Fut,
+    Fut: Future<Output = auth::Validation>,
+{
+    auth::inspect_prefix(stores(home), prefix, query, probe_url, storage, validate).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AUTH_BROWSER, AUTH_PROFILE, selection, session, store_selection};
@@ -381,6 +397,25 @@ mod tests {
 
         assert_eq!(found.session_name, "ory_session_admin");
         assert_eq!(found.session_value, "tok");
+    }
+
+    #[test]
+    fn inspecting_a_prefixed_session_ignores_an_unrelated_cookie_jar() {
+        // Advertising a source as selectable based on analytics cookies would defer a missing
+        // credential error until the next poll.
+        let home = crate::browser::tests::TestHome::new();
+        gecko_profile(&home, ".mozilla/firefox/aa", &[("_ga", "analytics")]);
+
+        let report = runtime().block_on(super::inspect_sources_prefix(
+            Some(home.path()),
+            &NoKeyring,
+            "_zm_",
+            &query(),
+            "https://example.com/api",
+            |_| async { unreachable!("a non-session jar must not be validated") },
+        ));
+
+        assert_eq!(report[0].children[0].state, "missing");
     }
 
     #[test]

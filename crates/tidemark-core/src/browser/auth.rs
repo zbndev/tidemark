@@ -81,6 +81,49 @@ where
     F: Fn(CandidateCredential) -> Fut,
     Fut: Future<Output = Validation>,
 {
+    inspect_matching(stores, query, request_url, storage, |_| true, validate).await
+}
+
+/// Inspects browser profiles whose usable jars contain a live cookie name with `prefix`.
+///
+/// Providers with rotating session-cookie suffixes use this to avoid treating an unrelated
+/// cookie jar as a selectable credential source.
+pub async fn inspect_prefix<F, Fut>(
+    stores: Vec<Store>,
+    prefix: &str,
+    query: &Query,
+    request_url: &str,
+    storage: &dyn SafeStorage,
+    validate: F,
+) -> Vec<AuthCandidate>
+where
+    F: Fn(CandidateCredential) -> Fut,
+    Fut: Future<Output = Validation>,
+{
+    inspect_matching(
+        stores,
+        query,
+        request_url,
+        storage,
+        |name| name.starts_with(prefix),
+        validate,
+    )
+    .await
+}
+
+async fn inspect_matching<F, Fut, M>(
+    stores: Vec<Store>,
+    query: &Query,
+    request_url: &str,
+    storage: &dyn SafeStorage,
+    matches: M,
+    validate: F,
+) -> Vec<AuthCandidate>
+where
+    F: Fn(CandidateCredential) -> Fut,
+    Fut: Future<Output = Validation>,
+    M: Fn(&str) -> bool,
+{
     let now = tidemark_types::Timestamp::now();
     let mut browsers: Vec<(super::Browser, Vec<AuthCandidate>)> = Vec::new();
 
@@ -92,7 +135,7 @@ where
                     .filter(|cookie| cookie.is_live(now))
                     .collect();
                 let header = header_for(&live, request_url);
-                if header.is_empty() {
+                if !live.iter().any(|cookie| matches(&cookie.name)) || header.is_empty() {
                     AuthCandidateState::Missing
                 } else {
                     match validate(CandidateCredential {

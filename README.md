@@ -100,7 +100,7 @@ Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 **Local session**
 
-Abacus · Augment · CommandCode · Cursor · LongCat · Manus · MiMo · Mistral · Notion · Ollama · OpenCode · Perplexity · Qoder · Sakana · T3 Chat
+Abacus · Augment · CommandCode · Cursor · LongCat · Manus · MiMo · Mistral · Notion · Ollama · OpenCode · Perplexity · Qoder · Sakana · T3 Chat · ZoomMate
 
 Cursor uses a cursor.com session already signed in on this machine — Tidemark does not store
 an API key or session token. Its settings page asks you to choose one local source: the Cursor App, or one of
@@ -150,6 +150,9 @@ owns the account; Tidemark keeps that choice and does not store the session toke
 
 T3 Chat uses a signed-in t3.chat browser session. Choose the browser profile that owns the
 account; Tidemark keeps that choice and does not store the session token.
+
+ZoomMate uses a signed-in zoommate.zoom.us browser session. Choose the browser profile that
+owns the account; Tidemark mints a fresh short-lived bearer for every poll and does not store it.
 
 **No credential needed**
 
