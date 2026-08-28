@@ -28,6 +28,7 @@ whose services the cards are about:
 | `tidemark-factory-symbolic.svg` | Factory AI, Inc. (Factory) |
 | `tidemark-fireworks-symbolic.svg` | Fireworks AI |
 | `tidemark-gemini-symbolic.svg` | Google LLC (Gemini) |
+| `tidemark-grok-symbolic.svg` | xAI Corp. (Grok) |
 | `tidemark-groq-symbolic.svg` | Groq, Inc. |
 | `tidemark-ibmbob-symbolic.svg` | IBM (Bob) |
 | `tidemark-kilo-symbolic.svg` | Kilo Code, Inc. |

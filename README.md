@@ -100,7 +100,7 @@ Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 **Local session**
 
-Abacus · Augment · CommandCode · Cursor · Gemini · LongCat · Manus · MiMo · Mistral · Notion · Ollama · OpenCode · Perplexity · Qoder · Sakana · T3 Chat · ZoomMate
+Abacus · Augment · CommandCode · Cursor · Gemini · Grok · LongCat · Manus · MiMo · Mistral · Notion · Ollama · OpenCode · Perplexity · Qoder · Sakana · T3 Chat · ZoomMate
 
 Cursor uses a cursor.com session already signed in on this machine — Tidemark does not store
 an API key or session token. Its settings page asks you to choose one local source: the Cursor App, or one of
@@ -111,6 +111,10 @@ switching to another browser or the App.
 Gemini reads the Gemini CLI's own Google login in `~/.gemini/oauth_creds.json`. Run `gemini`
 once and sign in; Tidemark refreshes the token in place, in the file's own shape, and stores
 nothing of its own.
+
+Grok reads the grok CLI's own login in `~/.grok/auth.json`. Run `grok login` once; Tidemark
+reads the file in place, stores nothing of its own, and refreshes nothing — the CLI owns the
+login, and an expired one asks for `grok login` again.
 
 Abacus uses a signed-in abacus.ai browser session. Choose the browser profile that owns the
 account; Tidemark keeps that choice and does not store the session token.

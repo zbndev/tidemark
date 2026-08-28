@@ -50,6 +50,7 @@ pub mod elevenlabs;
 pub mod factory;
 pub mod fireworks;
 pub mod gemini;
+pub mod grok;
 pub mod groq;
 pub mod ibmbob;
 pub mod kilo;

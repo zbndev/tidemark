@@ -26,7 +26,7 @@ use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
     self, abacus, aiand, augment, codebuff, commandcode, cursor, deepgram, deepinfra, factory,
-    fireworks, gemini, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo, mistral,
+    fireworks, gemini, grok, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo, mistral,
     nanogpt, notion, ollama, openai_api, opencode, openrouter, perplexity, poe, qoder, sakana,
     sub2api, t3chat, wayfinder, xai, zoommate,
 };
@@ -146,6 +146,7 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &factory::SPEC,
     &fireworks::SPEC,
     &gemini::SPEC,
+    &grok::SPEC,
     &groq::SPEC,
     &ibmbob::SPEC,
     &kilo::SPEC,
@@ -511,6 +512,7 @@ pub fn external_present(provider: &str) -> Option<bool> {
         gemini::PROVIDER_ID => {
             Some(gemini::cli_credentials_path().is_some_and(|path| path.exists()))
         }
+        grok::PROVIDER_ID => Some(grok::cli_credentials_path().is_some_and(|path| path.exists())),
         _ => None,
     }
 }
@@ -1232,7 +1234,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 55);
+        assert_eq!(definitions.len(), 56);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(
