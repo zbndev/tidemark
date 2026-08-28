@@ -98,80 +98,9 @@ DeepSeek · ElevenLabs · Factory · Fireworks · Groq · IBM Bob · Kilo · Kim
 LLM Proxy · MiniMax · Moonshot · NanoGPT · Neuralwatt · OpenAI · OpenCode Go · OpenRouter ·
 Poe · StepFun · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
-Alibaba Coding Plan reads a Coding Plan subscription with a DashScope API key from the Model
-Studio console. The same quota query lives on an international and a China-mainland gateway;
-Tidemark tries the international one first and retries the other when the answer says
-"region", not "account".
-
-StepFun reads a Step Plan account with the Oasis-Token cookie from platform.stepfun.com. The
-token's JWT payload names the device it was issued to; Tidemark derives that device at add
-time and replays both as cookies. The rate-limit answer carries either rolling five-hour and
-weekly windows or the Token Plan's monthly credit pool, and Tidemark draws whichever the
-payload actually holds.
-
 **Local session**
 
 Abacus · Augment · CommandCode · Cursor · Gemini · Grok · LongCat · Manus · MiMo · Mistral · Notion · Ollama · OpenCode · Perplexity · Qoder · Sakana · T3 Chat · ZoomMate
-
-Cursor uses a cursor.com session already signed in on this machine — Tidemark does not store
-an API key or session token. Its settings page asks you to choose one local source: the Cursor App, or one of
-your browsers (and one of its profiles, if it keeps more than one). That choice is kept and
-used alone; if the chosen source later signs out, Tidemark tells you instead of silently
-switching to another browser or the App.
-
-Gemini reads the Gemini CLI's own Google login in `~/.gemini/oauth_creds.json`. Run `gemini`
-once and sign in; Tidemark refreshes the token in place, in the file's own shape, and stores
-nothing of its own.
-
-Grok reads the grok CLI's own login in `~/.grok/auth.json`. Run `grok login` once; Tidemark
-reads the file in place, stores nothing of its own, and refreshes nothing — the CLI owns the
-login, and an expired one asks for `grok login` again.
-
-Abacus uses a signed-in abacus.ai browser session. Choose the browser profile that owns the
-account; Tidemark keeps that choice and does not store the session token.
-
-Augment uses a signed-in augmentcode.com browser session. Choose the browser profile that owns
-the account; Tidemark keeps that choice and does not store the session token.
-
-CommandCode uses a signed-in commandcode.ai browser session. Choose the browser profile that
-owns the account; Tidemark keeps that choice and does not store the session token.
-
-LongCat uses a signed-in longcat.chat browser session. Choose the browser profile that owns
-the account; Tidemark keeps that choice and does not store the session token.
-
-Mistral uses a signed-in mistral.ai browser session. Choose the browser profile that owns
-the account; Tidemark keeps that choice and does not store the session token.
-
-Notion uses a signed-in notion.com browser session. Choose the browser profile that owns the
-account; when the account belongs to several workspaces, name the one to report on — the
-first workspace is used otherwise.
-
-Ollama uses a signed-in ollama.com browser session. Choose the browser profile that owns the
-account; Tidemark keeps that choice and does not store the session token.
-
-OpenCode uses a signed-in opencode.ai browser session. Choose the browser profile that owns
-the account; Tidemark keeps that choice and does not store the session token.
-
-Perplexity uses a signed-in perplexity.ai browser session. Choose the browser profile that owns
-the account; Tidemark keeps that choice and does not store the session token.
-
-Manus uses a signed-in manus.im browser session. Choose the browser profile that owns the
-account; Tidemark keeps that choice and does not store the session token.
-
-MiMo uses a signed-in platform.xiaomimimo.com browser session. Choose the browser profile that
-owns the account; Tidemark keeps that choice and does not store the session token.
-
-Qoder uses a signed-in qoder.com or qoder.com.cn browser session. Choose the browser profile
-that owns the account; Tidemark keeps that choice and does not store the session token.
-
-Sakana uses a signed-in console.sakana.ai browser session. Choose the browser profile that
-owns the account; Tidemark keeps that choice and does not store the session token.
-
-T3 Chat uses a signed-in t3.chat browser session. Choose the browser profile that owns the
-account; Tidemark keeps that choice and does not store the session token.
-
-ZoomMate uses a signed-in zoommate.zoom.us browser session. Choose the browser profile that
-owns the account; Tidemark mints a fresh short-lived bearer for every poll and does not store it.
 
 **No credential needed**
 
