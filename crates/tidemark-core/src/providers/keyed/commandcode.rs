@@ -177,6 +177,7 @@ impl CommandCode {
         session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
+            SESSION_COOKIE_NAMES,
             &cookie_query(),
             CREDITS_URL,
             |credential| async move { self.validate_header(credential.header()).await },
@@ -254,8 +255,11 @@ pub fn parse(
         .get("windowLimits")
         .and_then(Value::as_object)
         .or_else(|| credits.get("windowLimits").and_then(Value::as_object));
-    let five_hour = limits.and_then(|limits| limit(limits.get("fiveHour")));
-    let weekly = limits.and_then(|limits| limit(limits.get("weekly")));
+    let five_hour = limit(
+        limits.and_then(|limits| limits.get("fiveHour")),
+        "five-hour",
+    )?;
+    let weekly = limit(limits.and_then(|limits| limits.get("weekly")), "weekly")?;
 
     let subscription = subscriptions_body
         .and_then(|body| subscription(body).ok())
@@ -356,15 +360,27 @@ fn catalog_plan(plan_id: &str) -> Option<(&'static str, &'static str, f64)> {
         .map(|(id, name, total)| (*id, *name, *total))
 }
 
-/// Reads a window limit object: present but capless windows are skipped, not failed.
-fn limit(value: Option<&Value>) -> Option<Limit> {
-    let object = value?.as_object()?;
-    let cap = number(object.get("cap")).filter(|cap| *cap > 0.0)?;
-    Some(Limit {
+/// Reads a window limit object. An absent window is simply not offered; a present one
+/// whose cap or usage cannot be read is a recognised window failing to describe itself,
+/// and fails the fetch rather than hiding or drawing at zero — the reset stays optional,
+/// because "no reset named" is a state the wire genuinely carries.
+fn limit(value: Option<&Value>, title: &str) -> Result<Option<Limit>, ProviderError> {
+    let Some(object) = value.and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let cap = number(object.get("cap"))
+        .filter(|cap| *cap > 0.0)
+        .ok_or_else(|| {
+            ProviderError::malformed(format!("CommandCode {title} window has no readable cap"))
+        })?;
+    let used = number(object.get("used")).ok_or_else(|| {
+        ProviderError::malformed(format!("CommandCode {title} window has no readable usage"))
+    })?;
+    Ok(Some(Limit {
         cap,
-        used: number(object.get("used")).unwrap_or(0.0),
+        used,
         reset: object.get("resetAt").and_then(reset_time),
-    })
+    }))
 }
 
 /// Reads a subscriptions body: `success` with explicit `data`, `null` meaning the free
@@ -678,6 +694,27 @@ mod tests {
             snapshot.details[0].title,
             tidemark_types::DetailSection::BALANCE
         );
+    }
+
+    #[test]
+    fn a_present_window_without_a_cap_or_usage_fails_rather_than_hiding_or_zeroing() {
+        // Skipping a recognised window would hide it; defaulting its usage to zero would
+        // paint headroom the wire never stated.
+        for body in [
+            r#"{"credits":{"monthlyCredits":10,"windowLimits":{"fiveHour":{}}}}"#,
+            r#"{"credits":{"monthlyCredits":10,"windowLimits":{"fiveHour":{"cap":3}}}}"#,
+            r#"{"credits":{"monthlyCredits":10,"windowLimits":{"weekly":{"used":0.7}}}}"#,
+        ] {
+            let result = parse(
+                body,
+                None,
+                Timestamp::from_unix(1_740_000_000).expect("plausible"),
+            );
+            assert!(
+                matches!(result, Err(ProviderError::Malformed(_))),
+                "{body} must fail"
+            );
+        }
     }
 
     #[test]

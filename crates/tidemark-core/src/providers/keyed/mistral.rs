@@ -217,9 +217,10 @@ impl Mistral {
     }
 
     async fn inspect_sources(&self) -> Vec<AuthCandidate> {
-        session::inspect_sources(
+        session::inspect_sources_prefix(
             self.home.as_deref(),
             self.storage.as_ref(),
+            SESSION_PREFIX,
             &cookie_query(),
             USAGE_URL,
             |credential| async move { self.validate_header(credential.header()).await },

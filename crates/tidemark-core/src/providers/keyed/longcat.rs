@@ -207,15 +207,23 @@ impl LongCat {
     }
 
     async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
-        let Ok(request) = self.get(USER_CURRENT_URL, header) else {
+        let Ok(request) = self.get(&self.url(USER_CURRENT_URL), header) else {
             return crate::browser::auth::Validation::Unreachable;
         };
-        match super::validate(&self.client, request).await {
-            Ok(()) => crate::browser::auth::Validation::Ready,
+        // LongCat refuses a session inside a 200 envelope's `code`, so the proof must read
+        // the body: a status-only check would call an expired login ready.
+        match super::validate_body(&self.client, request).await {
             Err(ProviderError::Credential { status: 401 | 403 }) => {
                 crate::browser::auth::Validation::Rejected
             }
             Err(_) => crate::browser::auth::Validation::Unreachable,
+            Ok(body) => match envelope(&body, "user current") {
+                Ok(_) => crate::browser::auth::Validation::Ready,
+                Err(ProviderError::Credential { status: 401 | 403 }) => {
+                    crate::browser::auth::Validation::Rejected
+                }
+                Err(_) => crate::browser::auth::Validation::Unreachable,
+            },
         }
     }
 
@@ -223,6 +231,7 @@ impl LongCat {
         session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
+            &[],
             &cookie_query(),
             USER_CURRENT_URL,
             |credential| async move { self.validate_header(credential.header()).await },
@@ -375,32 +384,41 @@ pub fn parse(
     pending_fuel: Option<&Map<String, Value>>,
     captured_at: Timestamp,
 ) -> Result<Snapshot, ProviderError> {
+    // A quota the wire recognises but does not fully describe — an active lot without its
+    // consumption, a usage without its used or remaining tokens — fails the fetch rather
+    // than drawing zero, because "nothing spent" and "nothing said" are different answers.
     let quota = if let Some(lot) = active_lot(token_pack_summary) {
-        lot.get("totalToken")
+        let total = lot
+            .get("totalToken")
             .and_then(number)
             .filter(|total| *total > 0.0)
-            .map(|total| {
-                let used = lot.get("consumedToken").and_then(number).unwrap_or(0.0);
-                (total, used)
-            })
-    } else {
-        token_usage.and_then(|usage| {
-            usage
-                .get("totalToken")
+            .ok_or_else(|| ProviderError::malformed("LongCat active lot states no total"))?;
+        let used = lot
+            .get("consumedToken")
+            .and_then(number)
+            .ok_or_else(|| ProviderError::malformed("LongCat active lot states no consumption"))?;
+        Some((total, used))
+    } else if let Some(usage) = token_usage {
+        let total = usage
+            .get("totalToken")
+            .and_then(number)
+            .filter(|total| *total > 0.0)
+            .ok_or_else(|| ProviderError::malformed("LongCat token usage states no total"))?;
+        let used = match usage.get("usedToken").and_then(number) {
+            Some(used) => used.max(0.0),
+            None => usage
+                .get("availableToken")
                 .and_then(number)
-                .filter(|total| *total > 0.0)
-                .map(|total| {
-                    let used = match usage.get("usedToken").and_then(number) {
-                        Some(used) => used.max(0.0),
-                        None => usage
-                            .get("availableToken")
-                            .and_then(number)
-                            .map(|remaining| (total - remaining).max(0.0))
-                            .unwrap_or(0.0),
-                    };
-                    (total, used)
-                })
-        })
+                .map(|remaining| (total - remaining).max(0.0))
+                .ok_or_else(|| {
+                    ProviderError::malformed(
+                        "LongCat token usage states neither used nor remaining tokens",
+                    )
+                })?,
+        };
+        Some((total, used))
+    } else {
+        None
     };
     let mut windows = Vec::new();
     if let Some((total, used)) = quota {
@@ -768,6 +786,47 @@ mod tests {
     }
 
     #[test]
+    fn an_inspection_proof_rejects_a_session_refused_inside_a_200() {
+        // A status-only proof would store an expired session as ready.
+        let home = gecko_home();
+        let (base_url, _requests, server) = chained_server(&[(
+            "GET /api/v1/user-current",
+            200,
+            r#"{"code":401,"message":"unauthorized"}"#,
+        )]);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let verdict =
+            runtime.block_on(provider(&home, &base_url).validate_header("session=chosen-session"));
+        server.join().expect("server exits");
+
+        assert!(matches!(
+            verdict,
+            crate::browser::auth::Validation::Rejected
+        ));
+    }
+
+    #[test]
+    fn an_inspection_proof_accepts_a_jar_the_envelope_confirms() {
+        let home = gecko_home();
+        let (base_url, _requests, server) =
+            chained_server(&[("GET /api/v1/user-current", 200, USER_CURRENT)]);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let verdict =
+            runtime.block_on(provider(&home, &base_url).validate_header("session=chosen-session"));
+        server.join().expect("server exits");
+
+        assert!(matches!(verdict, crate::browser::auth::Validation::Ready));
+    }
+
+    #[test]
     fn a_legacy_usage_body_without_total_token_is_malformed() {
         // Accepting it would draw a quota whose size the console never stated.
         let home = gecko_home();
@@ -831,5 +890,30 @@ mod tests {
 
         assert_eq!(snapshot.windows.len(), 1);
         assert_eq!(snapshot.windows[0].key, WindowKey::named("tokens"));
+    }
+
+    #[test]
+    fn a_recognised_quota_that_states_no_consumption_fails_rather_than_drawing_zero() {
+        // Defaulting a missing figure to zero would paint fresh headroom the wire never
+        // stated, on the quota window the console itself is draining.
+        let lot = object(r#"{"currentLot":{"totalToken":50000000,"status":"ACTIVE"}}"#);
+        let from_lot = parse(
+            None,
+            Some(&lot),
+            None,
+            None,
+            Timestamp::from_unix(1_700_000_000).expect("plausible"),
+        );
+        assert!(matches!(from_lot, Err(ProviderError::Malformed(_))));
+
+        let usage = object(r#"{"totalToken":500000}"#);
+        let from_usage = parse(
+            None,
+            None,
+            Some(&usage),
+            None,
+            Timestamp::from_unix(1_700_000_000).expect("plausible"),
+        );
+        assert!(matches!(from_usage, Err(ProviderError::Malformed(_))));
     }
 }

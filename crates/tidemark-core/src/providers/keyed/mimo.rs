@@ -157,15 +157,28 @@ impl MiMo {
     }
 
     async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
-        let Ok(request) = self.api_request(BALANCE_URL, header) else {
+        // The helper gates on one name; MiMo's API wants the pair, and a jar holding the
+        // service token without the user id never signed in to the platform.
+        if !has_cookie(header, USER_ID_COOKIE) {
+            return crate::browser::auth::Validation::Rejected;
+        }
+        let Ok(request) = self.api_request(&self.url(BALANCE_URL), header) else {
             return crate::browser::auth::Validation::Unreachable;
         };
-        match super::validate(&self.client, request).await {
-            Ok(()) => crate::browser::auth::Validation::Ready,
+        // The platform refuses a session inside a 200 envelope, so the proof must read the
+        // body: a status-only check would call an expired login ready.
+        match super::validate_body(&self.client, request).await {
             Err(ProviderError::Credential { status: 401 | 403 }) => {
                 crate::browser::auth::Validation::Rejected
             }
             Err(_) => crate::browser::auth::Validation::Unreachable,
+            Ok(body) => match parse_balance(&body) {
+                Ok(_) => crate::browser::auth::Validation::Ready,
+                Err(ProviderError::Credential { status: 401 | 403 }) => {
+                    crate::browser::auth::Validation::Rejected
+                }
+                Err(_) => crate::browser::auth::Validation::Unreachable,
+            },
         }
     }
 
@@ -173,6 +186,7 @@ impl MiMo {
         session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
+            SESSION_COOKIE_NAMES,
             &cookie_query(),
             BALANCE_URL,
             |credential| async move { self.validate_header(credential.header()).await },
@@ -767,6 +781,71 @@ mod tests {
         let result = fetch(&provider(&home, "http://127.0.0.1:1"));
 
         assert!(matches!(result, Err(ProviderError::NoCredential)));
+    }
+
+    #[test]
+    fn an_inspection_proof_rejects_the_half_pair_without_reaching_the_api() {
+        // A proof that called the API anyway would judge a jar the fetch always refuses.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let provider = provider(
+            &gecko_home(&[("api-platform_serviceToken", "svc-token")]),
+            "http://127.0.0.1:9",
+        );
+
+        let verdict =
+            runtime.block_on(provider.validate_header("api-platform_serviceToken=svc-token"));
+
+        assert!(matches!(
+            verdict,
+            crate::browser::auth::Validation::Rejected
+        ));
+    }
+
+    #[test]
+    fn an_inspection_proof_rejects_a_session_refused_inside_a_200() {
+        // A status-only proof would store an expired session as ready.
+        let home = gecko_home(&[
+            ("api-platform_serviceToken", "svc-token"),
+            ("userId", "123"),
+        ]);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request accepted");
+            let mut reader = BufReader::new(&mut stream);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("reads request line");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            let body = r#"{"code":401,"message":"please login"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("writes response");
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let verdict = runtime.block_on(
+            provider(&home, &format!("http://{address}"))
+                .validate_header("api-platform_serviceToken=svc-token; userId=123"),
+        );
+        server.join().expect("server exits");
+
+        assert!(matches!(
+            verdict,
+            crate::browser::auth::Validation::Rejected
+        ));
     }
 
     #[test]

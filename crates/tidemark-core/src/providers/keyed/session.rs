@@ -168,17 +168,18 @@ where
             .into_iter()
             .filter(|cookie| cookie.is_live(now))
             .collect();
-        let Some(cookie) = live.iter().find(|cookie| matches(&cookie.name)) else {
+        // Scope first, then gate: the session value must be a cookie the request URL would
+        // actually receive, or a same-named cookie from another host or path — another
+        // account's — could travel as a bearer while the header carried the right one.
+        let scoped = browser::scoped(&live, url);
+        let Some(cookie) = scoped.iter().find(|cookie| matches(&cookie.name)) else {
             continue;
         };
-        let header = browser::header_for(&live, url);
-        if !header.is_empty() {
-            return Ok(Some(Session {
-                header,
-                session_name: cookie.name.clone(),
-                session_value: cookie.value.clone(),
-            }));
-        }
+        return Ok(Some(Session {
+            header: browser::header_of(&scoped),
+            session_name: cookie.name.clone(),
+            session_value: cookie.value.clone(),
+        }));
     }
 
     if keyring_locked {
@@ -188,9 +189,14 @@ where
 }
 
 /// Inspects every local browser profile while leaving its session values inside core.
+///
+/// The `session_names` gate must be the same one [`session`] applies for the poll: an
+/// inspection that accepts a jar the fetch would refuse advertises a source that fails
+/// only after the person has selected it.
 pub async fn inspect_sources<F, Fut>(
     home: Option<&Path>,
     storage: &dyn SafeStorage,
+    session_names: &[&str],
     query: &Query,
     probe_url: &str,
     validate: F,
@@ -199,7 +205,15 @@ where
     F: Fn(auth::CandidateCredential) -> Fut,
     Fut: Future<Output = auth::Validation>,
 {
-    auth::inspect(stores(home), query, probe_url, storage, validate).await
+    auth::inspect_named(
+        stores(home),
+        session_names,
+        query,
+        probe_url,
+        storage,
+        validate,
+    )
+    .await
 }
 
 /// Inspects browser profiles with a live cookie whose name starts with `prefix`.
@@ -300,8 +314,17 @@ mod tests {
         profile: &str,
         cookies: &[(&str, &str)],
     ) {
-        let path = home.gecko(profile);
-        let connection = Connection::open(path).expect("opens");
+        gecko_profile_at(home, profile, "/", cookies)
+    }
+
+    fn gecko_profile_at(
+        home: &crate::browser::tests::TestHome,
+        profile: &str,
+        path: &str,
+        cookies: &[(&str, &str)],
+    ) {
+        let database = home.gecko(profile);
+        let connection = Connection::open(database).expect("opens");
         connection
             .execute_batch(
                 "CREATE TABLE moz_cookies (
@@ -320,8 +343,8 @@ mod tests {
                     "INSERT INTO moz_cookies (
                         host, name, value, path, expiry, isSecure, lastAccessed,
                         creationTime, isHttpOnly
-                    ) VALUES ('.example.com', ?1, ?2, '/', 0, 1, 0, 0, 0)",
-                    (name, value),
+                    ) VALUES ('.example.com', ?1, ?2, ?3, 0, 1, 0, 0, 0)",
+                    (name, value, path),
                 )
                 .expect("inserts a cookie");
         }
@@ -447,6 +470,78 @@ mod tests {
     }
 
     #[test]
+    fn a_session_cookie_the_request_url_would_not_receive_is_not_a_credential() {
+        // Returning the jar anyway would let a provider send a bearer from a host or path
+        // scope the request never carries — possibly another account's session.
+        let home = crate::browser::tests::TestHome::new();
+        gecko_profile_at(
+            &home,
+            ".mozilla/firefox/aa",
+            "/settings",
+            &[("session", "narrow")],
+        );
+        gecko_profile_at(
+            &home,
+            ".mozilla/firefox/aa",
+            "/",
+            &[("analytics", "public")],
+        );
+        let selection = Selection {
+            browser: "firefox".into(),
+            profile: None,
+        };
+
+        let found = runtime()
+            .block_on(session(
+                Some(home.path()),
+                &NoKeyring,
+                &selection,
+                &["session"],
+                &query(),
+                "https://example.com/api",
+            ))
+            .expect("reads the selected store");
+
+        assert!(
+            found.is_none(),
+            "the only session cookie is path-scoped away"
+        );
+    }
+
+    #[test]
+    fn the_session_value_is_the_same_named_cookie_the_header_carries() {
+        // Taking the first same-named row in the jar instead of the scoped one would send
+        // a path-scoped duplicate's value as the bearer beside the header's real cookie.
+        let home = crate::browser::tests::TestHome::new();
+        gecko_profile_at(
+            &home,
+            ".mozilla/firefox/aa",
+            "/settings",
+            &[("session", "narrow")],
+        );
+        gecko_profile_at(&home, ".mozilla/firefox/aa", "/", &[("session", "root")]);
+        let selection = Selection {
+            browser: "firefox".into(),
+            profile: None,
+        };
+
+        let found = runtime()
+            .block_on(session(
+                Some(home.path()),
+                &NoKeyring,
+                &selection,
+                &["session"],
+                &query(),
+                "https://example.com/api",
+            ))
+            .expect("reads the selected store")
+            .expect("finds the scoped session");
+
+        assert_eq!(found.session_value, "root");
+        assert_eq!(found.header, "session=root");
+    }
+
+    #[test]
     fn inspecting_a_prefixed_session_ignores_an_unrelated_cookie_jar() {
         // Advertising a source as selectable based on analytics cookies would defer a missing
         // credential error until the next poll.
@@ -463,6 +558,43 @@ mod tests {
         ));
 
         assert_eq!(report[0].children[0].state, "missing");
+    }
+
+    #[test]
+    fn a_named_inspection_ignores_a_jar_without_any_of_the_names() {
+        // Advertising a source as selectable because it holds analytics cookies would
+        // defer a missing credential error until the person has selected the source.
+        let home = crate::browser::tests::TestHome::new();
+        gecko_profile(&home, ".mozilla/firefox/aa", &[("_ga", "analytics")]);
+
+        let report = runtime().block_on(super::inspect_sources(
+            Some(home.path()),
+            &NoKeyring,
+            &["session"],
+            &query(),
+            "https://example.com/api",
+            |_| async { unreachable!("a non-session jar must not be validated") },
+        ));
+
+        assert_eq!(report[0].children[0].state, "missing");
+    }
+
+    #[test]
+    fn a_whole_jar_inspection_accepts_any_live_cookie_in_the_jar() {
+        // The whole-jar providers gate on nothing: an empty names slice is their fetch gate.
+        let home = crate::browser::tests::TestHome::new();
+        gecko_profile(&home, ".mozilla/firefox/aa", &[("provider-session", "tok")]);
+
+        let report = runtime().block_on(super::inspect_sources(
+            Some(home.path()),
+            &NoKeyring,
+            &[],
+            &query(),
+            "https://example.com/api",
+            |_| async { crate::browser::auth::Validation::Ready },
+        ));
+
+        assert_eq!(report[0].children[0].state, "ready");
     }
 
     #[test]

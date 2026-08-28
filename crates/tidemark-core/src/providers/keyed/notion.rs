@@ -219,6 +219,7 @@ impl Notion {
         session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
+            SESSION_COOKIE_NAMES,
             &cookie_query(),
             SPACES_URL,
             |credential| async move { self.validate_header(credential.header()).await },
@@ -296,8 +297,10 @@ struct Status {
 /// Turns the `getSpaces` and `getCreditRateLimitStatus` bodies into the rolling and
 /// billing-period windows.
 ///
-/// A window whose usage or limit is missing carries nothing measurable and is skipped
-/// rather than drawn at zero — "no data" and "plenty of headroom" are different answers.
+/// A window object that is present but states no readable usage pair is a recognised
+/// window failing to describe itself and fails the fetch: skipping it would paint the
+/// remaining window as the whole truth, and drawing it at zero would paint headroom the
+/// wire never stated.
 pub fn parse(
     spaces_body: &str,
     status_body: &str,
@@ -326,10 +329,10 @@ pub fn parse(
     }
 
     let mut windows = Vec::new();
-    if let Some(rolling) = &status.window
-        && let (Some(used), Some(limit)) = (rolling.used, rolling.limit)
-        && limit > 0.0
-    {
+    if let Some(rolling) = &status.window {
+        let (used, limit) = measurable(rolling.used, rolling.limit).ok_or_else(|| {
+            ProviderError::malformed("Notion rolling window states no readable usage pair")
+        })?;
         // A rolling window the wire calls a month has no honest length: it is the billing
         // period, so it is drawn name-keyed rather than mislabeled "30 days" — and never
         // keyed where it would collide with the billing window below.
@@ -362,10 +365,10 @@ pub fn parse(
             length,
         });
     }
-    if let Some(billing) = &status.billing_period_window
-        && let (Some(used), Some(limit)) = (billing.used, billing.limit)
-        && limit > 0.0
-    {
+    if let Some(billing) = &status.billing_period_window {
+        let (used, limit) = measurable(billing.used, billing.limit).ok_or_else(|| {
+            ProviderError::malformed("Notion billing window states no readable usage pair")
+        })?;
         let length = WindowLength::from_secs(MONTH_SECS).expect("a fixed span is not zero");
         windows.push(Window {
             key: WindowKey::for_length(length),
@@ -429,6 +432,11 @@ pub fn parse(
         windows,
         details,
     })
+}
+
+/// A usable usage pair: both numbers on the wire, the limit positive.
+fn measurable(used: Option<f64>, limit: Option<f64>) -> Option<(f64, f64)> {
+    Some((used?, limit?)).filter(|(_, limit)| *limit > 0.0)
 }
 
 /// The space id the status call should ask about.
@@ -769,23 +777,22 @@ mod tests {
     }
 
     #[test]
-    fn a_window_without_a_measurable_limit_is_skipped_rather_than_drawn_at_zero() {
-        // Drawing an unmeasurable window would read as headroom the workspace may not have.
+    fn a_present_window_without_a_readable_pair_fails_rather_than_hiding() {
+        // Skipping the unmeasurable rolling window would paint the billing window as the
+        // whole truth; drawing it at zero would paint headroom the wire never stated.
         let body = r#"{
           "status": "within_limit",
           "window": { "window": "6h", "used": 42.5 },
           "billingPeriodWindow": { "used": 18.0, "limit": 100, "periodEndMs": 1788000000000 }
         }"#;
-        let snapshot = parse(
+        let result = parse(
             SPACES,
             body,
             None,
             Timestamp::from_unix(1_740_000_000).expect("plausible"),
-        )
-        .expect("parses the body");
+        );
 
-        assert_eq!(snapshot.windows.len(), 1);
-        assert_eq!(snapshot.windows[0].key, key_of(2_592_000));
+        assert!(matches!(result, Err(ProviderError::Malformed(_))));
     }
 
     #[test]

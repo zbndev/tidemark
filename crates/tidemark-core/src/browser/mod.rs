@@ -321,11 +321,18 @@ impl fmt::Debug for Cookie {
 /// of them makes the remote server choose a session rather than the browser's own matching
 /// rules, so this keeps request host/path/secure scope and the first matching name only.
 pub fn header_for(cookies: &[Cookie], request_url: &str) -> String {
+    header_of(&scoped(cookies, request_url))
+}
+
+/// The cookies a browser would send to one request URL: request host/path/secure scope,
+/// first of each name only, in jar order. What [`header_for`] renders, exposed so a caller
+/// that needs one cookie's value picks it from exactly the set the request would carry.
+pub(crate) fn scoped<'a>(cookies: &'a [Cookie], request_url: &str) -> Vec<&'a Cookie> {
     let Ok(url) = reqwest::Url::parse(request_url) else {
-        return String::new();
+        return Vec::new();
     };
     let Some(host) = url.host_str() else {
-        return String::new();
+        return Vec::new();
     };
     let path = url.path();
     let secure = url.scheme() == "https";
@@ -339,6 +346,13 @@ pub fn header_for(cookies: &[Cookie], request_url: &str) -> String {
                 && cookie_path_matches(&cookie.path, path)
                 && names.insert(&cookie.name)
         })
+        .collect()
+}
+
+/// Renders a [`scoped`] selection as the header text.
+pub(crate) fn header_of(scoped: &[&Cookie]) -> String {
+    scoped
+        .iter()
         .map(|cookie| format!("{}={}", cookie.name, cookie.value))
         .collect::<Vec<_>>()
         .join("; ")

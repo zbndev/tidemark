@@ -430,6 +430,27 @@ pub async fn validate(
     http::check(response.status(), retry_after.as_deref())
 }
 
+/// Sends a credential proof request and returns its body, still without recording it.
+///
+/// Several providers refuse a session inside an HTTP 200 envelope, so a status-only proof
+/// would call an expired login ready. The no-log rule is the one thing inherited from
+/// [`validate`]: the body may carry account data and is read only to classify it.
+pub async fn validate_body(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+) -> Result<String, ProviderError> {
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|error| ProviderError::Transport(redact_query(error)))?;
+    let retry_after = http::retry_after_header(&response).map(str::to_owned);
+    http::check(response.status(), retry_after.as_deref())?;
+    response
+        .text()
+        .await
+        .map_err(|error| ProviderError::Transport(redact_query(error)))
+}
+
 /// Reads a required option, refusing the build with the setting's name when it is unset
 /// or blank — the check [`Keyed::new`] makes generically, factored out for the
 /// hand-written providers whose builds are their own.

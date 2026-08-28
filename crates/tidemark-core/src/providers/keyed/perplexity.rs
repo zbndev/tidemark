@@ -144,6 +144,7 @@ impl Perplexity {
         session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
+            SESSION_COOKIE_NAMES,
             &cookie_query(),
             CREDITS_URL,
             |credential| async move { self.validate_header(credential.header()).await },

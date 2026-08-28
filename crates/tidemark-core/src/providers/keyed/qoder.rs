@@ -193,6 +193,7 @@ impl Qoder {
         let international = session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
+            &[],
             &cookie_query(),
             INTERNATIONAL_URL,
             |credential| async move { self.validate_header(credential.header(), false).await },
@@ -201,6 +202,7 @@ impl Qoder {
         let china = session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
+            &[],
             &cookie_query(),
             CHINA_URL,
             |credential| async move { self.validate_header(credential.header(), true).await },

@@ -10,11 +10,12 @@
 //! whose payload names no device is refused at build time, where the value can still be
 //! fixed. The rate-limit answer runs one of two billing shapes: rolling five-hour and
 //! weekly windows (`*_usage_left_rate`, *remaining* fractions, so what is used is their
-//! complement), or the monthly credit pool of the Token Plan (`plan_credit_rate_limit`,
-//! bucket balances weighted by their sizes). Which shape a payload carries is decided by
-//! what it actually contains — a live window means the rolling plan, a credit field
-//! means the pool, and the `plan_family` id only breaks ties — upstream's own
-//! classification.
+//! complement), or the credit pool of the Token Plan (`plan_credit_rate_limit`, bucket
+//! balances weighted by their sizes). Which shape a payload carries is decided by what
+//! it actually contains — a live window means the rolling plan, a credit field means the
+//! pool, and the `plan_family` id only breaks ties — upstream's own classification. The
+//! pool names when it resets but never the length of its cycle, so its window claims no
+//! length: the reset instant is drawn, no pace mark is, and the key stays on the name.
 //!
 //! Not ported, on purpose: the username/password login with its device registration and
 //! INGRESSCOOKIE bootstrap, and the RefreshToken recovery flow — a pasted token only,
@@ -46,11 +47,9 @@ const PLAN_STATUS_PATH: &str = "/api/step.openapi.devcenter.Dashboard/GetStepPla
 /// The Oasis application id the console's own web client sends.
 const APP_ID: &str = "10300";
 
-/// The rolling windows' lengths, and upstream's 30-day spelling of the credit pool's
-/// monthly cycle.
+/// The rolling windows' lengths.
 const FIVE_HOURS: u64 = 5 * 60 * 60;
 const WEEK: u64 = 7 * 24 * 60 * 60;
-const MONTH: u64 = 30 * 24 * 60 * 60;
 
 /// StepFun as the settings dialog sees it.
 pub static SPEC: HandSpec = HandSpec {
@@ -311,8 +310,9 @@ fn parse_rate_limit(body: &str) -> Result<Vec<Window>, ProviderError> {
 
 /// The credit pool as one window: the buckets' absolute balances weighted by their
 /// sizes when every bucket carries both figures, else the subscription rate — the
-/// primary allowance — or, without one, the top-up rate. A pool whose reset is not
-/// named keeps its percentage but claims no length and draws no pace mark.
+/// primary allowance — or, without one, the top-up rate. The wire names when the pool
+/// resets but never the length of its cycle, so the window claims no length and draws
+/// no pace mark; the length a card cannot read is not one to guess at thirty days.
 fn credit_window(response: &Map<String, Value>) -> Result<Window, ProviderError> {
     let credit = response
         .get("plan_credit_rate_limit")
@@ -326,14 +326,14 @@ fn credit_window(response: &Map<String, Value>) -> Result<Window, ProviderError>
         .and_then(|credit| flexible_int(credit.get("subscription_credit_reset_time")))
         .and_then(reset_at);
     Ok(Window {
-        // One identity across responses: the pool is the same window whether this
-        // answer names its reset or not, so the key claims no length.
+        // A pool with no stated length keys on its name — the length-derived keys are for
+        // windows whose span the wire itself states.
         key: WindowKey::named("credit"),
         title: "Credit".into(),
         subtitle: None,
         used_percent: used_from_rate(rate),
         resets_at: reset,
-        length: reset.map(|_| MONTH).and_then(WindowLength::from_secs),
+        length: None,
     })
 }
 
@@ -638,7 +638,10 @@ mod tests {
     }
 
     #[test]
-    fn a_credit_pool_draws_one_credit_window_at_its_monthly_length() {
+    fn a_credit_pool_draws_one_credit_window_at_its_stated_reset_and_no_invented_length() {
+        // The wire names when the pool resets but never the length of its cycle; a
+        // 30-day length assumed from the reset's presence would draw a pace mark the
+        // platform never stated.
         let windows = parse_rate_limit(MINI_PLAN).expect("parses the recorded Mini-plan body");
 
         assert_eq!(windows.len(), 1);
@@ -653,10 +656,7 @@ mod tests {
             credit.used_percent
         );
         assert_eq!(credit.resets_at, Some(at(1_786_288_293)));
-        assert_eq!(
-            credit.length,
-            Some(WindowLength::from_secs(30 * 24 * 60 * 60).expect("a fixed span"))
-        );
+        assert_eq!(credit.length, None);
     }
 
     #[test]

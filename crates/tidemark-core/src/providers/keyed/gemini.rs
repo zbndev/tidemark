@@ -4,16 +4,20 @@
 //! back into it, per ADR 0001 — never created here, never replaced wholesale. The CLI has
 //! no headless way to renew the login; the refresh grant itself does not rotate the
 //! refresh token, so the write-back replaces only the access token, the expiry instant
-//! and the id token, and every other byte of the document stays the CLI's. Tidemark runs
-//! no vendor program: an expired token with nothing to refresh it is `NoCredential`,
-//! pointing at the sign-in.
+//! and the id token, and every other byte of the document stays the CLI's. The CLI does
+//! not honor the advisory lock — it replaces the file atomically — so the write-back is
+//! conditional: the document is reread after the grant, and a file changed meanwhile is
+//! left alone, that poll spending the freshly obtained access token without persisting
+//! it. Tidemark runs no vendor program: an expired token with nothing to refresh it is
+//! `NoCredential`, pointing at the sign-in.
 //!
 //! The quota is a per-model-family fraction, not a number of requests: `buckets[]` names
 //! each model and the share of its daily allowance left, and the card draws the tiers —
 //! Pro, Flash, Flash-Lite — at the lowest fraction any of their models reported, which is
-//! how the CLI's own status line reads the same body. A bucket with no numbers in it, or
-//! a model outside the three families, draws no window anyone could size; like upstream,
-//! the card skips it rather than inventing a limit.
+//! how the CLI's own status line reads the same body. A model outside the three families
+//! draws no window anyone could size; like upstream, the card skips it rather than
+//! inventing a limit. A bucket that names a known family but states no fraction fails the
+//! fetch: quietly dropping it would hide a tier the card promises to draw.
 //!
 //! Two hops stand between the token and the quota: `loadCodeAssist` names the account's
 //! tier and — usually — its Cloud Code project, and when it names none, the resource
@@ -181,9 +185,18 @@ impl Gemini {
                 .as_deref()
                 .ok_or(ProviderError::NoCredential)?;
             let refreshed = self.exchange_refresh(refresh_token).await?;
-            locked
-                .update_root_fields(&refreshed.fields(now_ms))
-                .map_err(file_error)?;
+            // The CLI does not honor this lock: it replaces the file atomically while the
+            // grant runs. Write back only when the document is still the one the exchange
+            // was based on — a newer login or a fresher rotation keeps its tokens, and
+            // this poll simply spends the access token it obtained.
+            let current = Stored::from_document(&locked.read_json().map_err(file_error)?)?;
+            if current.refresh_token == stored.refresh_token
+                && current.expiry_date == stored.expiry_date
+            {
+                locked
+                    .update_root_fields(&refreshed.fields(now_ms))
+                    .map_err(file_error)?;
+            }
             (
                 refreshed.access_token,
                 refreshed.id_token.or(stored.id_token.clone()),
@@ -449,12 +462,19 @@ pub fn parse_quota(body: &str, captured_at: Timestamp) -> Result<Snapshot, Provi
     // seen through different token counts, and the tightest one is the truth.
     let mut lowest = [None; 3];
     for bucket in buckets {
-        let (Some(model_id), Some(fraction)) = (bucket.model_id, bucket.remaining_fraction) else {
+        let Some(model_id) = bucket.model_id else {
             continue;
         };
         let Some(tier) = Tier::of(&model_id) else {
             continue;
         };
+        // A family bucket that names no fraction is a recognised tier refusing to say how
+        // much of its allowance is left — fail rather than drop the tier from the card.
+        let fraction = bucket.remaining_fraction.ok_or_else(|| {
+            ProviderError::malformed(format!(
+                "the Gemini quota response names {model_id} without a remaining fraction"
+            ))
+        })?;
         let index = Tier::ALL
             .iter()
             .position(|known| *known == tier)
@@ -907,11 +927,10 @@ mod tests {
     }
 
     #[test]
-    fn a_bucket_without_numbers_and_a_model_outside_the_tiers_are_skipped() {
-        // A fraction-less bucket and a model outside the three families draw no window;
-        // the flash bucket beside them still does.
+    fn a_model_outside_the_tiers_is_skipped() {
+        // A model the three families cannot classify draws no window anyone could size;
+        // the flash bucket beside it still does.
         let body = r#"{"buckets":[
-            {"modelId":"gemini-2.5-pro","resetTime":"2025-01-01T00:00:00Z"},
             {"modelId":"gemini-exp-1206","remainingFraction":0.5,"resetTime":"2025-01-01T00:00:00Z"},
             {"modelId":"gemini-2.5-flash","remainingFraction":0.25,"resetTime":"2025-01-01T00:00:00Z"}]}"#;
 
@@ -920,6 +939,19 @@ mod tests {
         assert_eq!(snapshot.windows.len(), 1);
         assert_eq!(snapshot.windows[0].key, WindowKey::for_pool("flash", day()));
         assert!((snapshot.windows[0].used_percent - 75.0).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn a_known_tier_bucket_without_a_fraction_fails_rather_than_hiding_the_tier() {
+        // Dropping the fraction-less pro bucket would draw flash alone and read as the
+        // whole account, hiding the tier the response itself named.
+        let body = r#"{"buckets":[
+            {"modelId":"gemini-2.5-pro","resetTime":"2025-01-01T00:00:00Z"},
+            {"modelId":"gemini-2.5-flash","remainingFraction":0.25,"resetTime":"2025-01-01T00:00:00Z"}]}"#;
+
+        let result = parse_quota(body, at(1_700_000_000));
+
+        assert!(matches!(result, Err(ProviderError::Malformed(_))));
     }
 
     #[test]
@@ -1123,6 +1155,85 @@ mod tests {
             matches!(result, Err(ProviderError::NoCredential)),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn a_credential_file_replaced_during_the_exchange_is_never_overlaid() {
+        // The CLI replaces the file atomically and honors no advisory lock. A write-back
+        // from an exchange that started against the old document would overlay a newer
+        // login with older tokens; the compare-and-skip must leave it alone while the
+        // poll still spends its own freshly obtained access token.
+        let home = TestHome::new();
+        home.write_credentials(expired_credentials());
+        home.write_settings("oauth-personal");
+        let refreshed = r#"{"access_token":"new-access","expires_in":3600,"id_token":""#.to_owned()
+            + &id_token("user@example.com")
+            + r#""}"#;
+        let cli_document = json!({
+            "access_token": "cli-access",
+            "refresh_token": "cli-refresh",
+            "id_token": id_token("cli@example.com"),
+            "expiry_date": 4_000_000_000_000_i64,
+            "unrelated": "cli-kept",
+        })
+        .to_string();
+
+        let credentials = home.path().join(".gemini/oauth_creds.json");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            for (index, (expected, status, body)) in [
+                ("POST /token", 200, refreshed),
+                ("POST /v1internal:loadCodeAssist", 200, LOAD.to_owned()),
+                ("GET /v1/projects", 200, r#"{"projects": []}"#.to_owned()),
+                ("POST /v1internal:retrieveUserQuota", 200, QUOTA.to_owned()),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (mut stream, _) = listener.accept().expect("request accepted");
+                let mut reader = BufReader::new(&mut stream);
+                let mut request = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("reads request line");
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    request.push_str(&line);
+                }
+                assert!(
+                    request.starts_with(expected),
+                    "expected {expected}: {request}"
+                );
+                if index == 0 {
+                    // The CLI's atomic replacement lands while the grant is in flight.
+                    fs::write(&credentials, &cli_document).expect("the CLI replaces the file");
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("writes response");
+            }
+        });
+        let provider = Gemini::for_test(home.path(), &format!("http://{address}")).expect("builds");
+
+        let snapshot = fetch(&provider).expect("the poll succeeds on its own fresh token");
+        server.join().expect("server exits");
+
+        assert_eq!(snapshot.windows.len(), 3);
+        let after = home.document();
+        assert_eq!(
+            after["refresh_token"], "cli-refresh",
+            "the newer login's refresh token survives"
+        );
+        assert_eq!(
+            after["access_token"], "cli-access",
+            "the older exchange must not clobber the CLI's newer token"
+        );
+        assert_eq!(after["unrelated"], "cli-kept");
     }
 
     #[test]

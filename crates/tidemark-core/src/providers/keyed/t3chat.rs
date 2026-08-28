@@ -158,6 +158,7 @@ impl T3Chat {
         session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
+            &[],
             &cookie_query(),
             API_URL,
             |credential| async move { self.validate_header(credential.header()).await },

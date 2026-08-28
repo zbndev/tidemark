@@ -168,15 +168,23 @@ impl Abacus {
     }
 
     async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
-        let Ok(request) = self.compute_request(COMPUTE_POINTS_URL, header) else {
+        let Ok(request) = self.compute_request(&self.compute_url(), header) else {
             return crate::browser::auth::Validation::Unreachable;
         };
-        match super::validate(&self.client, request).await {
-            Ok(()) => crate::browser::auth::Validation::Ready,
+        // Abacus refuses a session inside a 200 envelope, so the proof must read the body:
+        // a status-only check would call an expired login ready.
+        match super::validate_body(&self.client, request).await {
             Err(ProviderError::Credential { status: 401 | 403 }) => {
                 crate::browser::auth::Validation::Rejected
             }
             Err(_) => crate::browser::auth::Validation::Unreachable,
+            Ok(body) => match envelope(&body, "compute points") {
+                Ok(_) => crate::browser::auth::Validation::Ready,
+                Err(ProviderError::Credential { status: 401 | 403 }) => {
+                    crate::browser::auth::Validation::Rejected
+                }
+                Err(_) => crate::browser::auth::Validation::Unreachable,
+            },
         }
     }
 
@@ -184,6 +192,7 @@ impl Abacus {
         session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
+            SESSION_COOKIE_NAMES,
             &cookie_query(),
             COMPUTE_POINTS_URL,
             |credential| async move { self.validate_header(credential.header()).await },
@@ -454,6 +463,77 @@ mod tests {
 
     const POINTS: &str = include_str!("../../../tests/fixtures/abacus/compute-points.json");
     const BILLING: &str = include_str!("../../../tests/fixtures/abacus/billing-info.json");
+
+    /// A loopback server answering one request, for the inspection proofs.
+    fn one_route_server(status: u16, body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request accepted");
+            let mut reader = BufReader::new(&mut stream);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("reads request line");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("writes response");
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn proof(
+        home: &crate::browser::tests::TestHome,
+        base_url: &str,
+    ) -> crate::browser::auth::Validation {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(provider(home, base_url).validate_header("sessionid=chosen-session"))
+    }
+
+    #[test]
+    fn an_inspection_proof_accepts_a_jar_the_envelope_confirms() {
+        let (base_url, server) = one_route_server(200, POINTS);
+
+        assert!(matches!(
+            proof(&gecko_home(), &base_url),
+            crate::browser::auth::Validation::Ready
+        ));
+        server.join().expect("server exits");
+    }
+
+    #[test]
+    fn an_inspection_proof_rejects_a_session_refused_inside_a_200() {
+        // A status-only proof would store an expired session as ready.
+        let (base_url, server) =
+            one_route_server(200, r#"{"success":false,"error":"session expired"}"#);
+
+        assert!(matches!(
+            proof(&gecko_home(), &base_url),
+            crate::browser::auth::Validation::Rejected
+        ));
+        server.join().expect("server exits");
+    }
+
+    #[test]
+    fn an_inspection_proof_is_unreachable_on_an_unreadable_envelope() {
+        // An answer that is neither quota nor a refusal says nothing about the session.
+        let (base_url, server) = one_route_server(200, r#"{"success":false,"error":"boom"}"#);
+
+        assert!(matches!(
+            proof(&gecko_home(), &base_url),
+            crate::browser::auth::Validation::Unreachable
+        ));
+        server.join().expect("server exits");
+    }
 
     #[test]
     fn a_recorded_compute_points_response_draws_the_points_window_with_its_billing() {

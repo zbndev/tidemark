@@ -133,15 +133,21 @@ impl Manus {
         let Some(session_value) = session_value(header) else {
             return crate::browser::auth::Validation::Rejected;
         };
-        let Ok(request) = self.request(CREDITS_URL, session_value) else {
+        let Ok(request) = self.request(&self.credits_url(), session_value) else {
             return crate::browser::auth::Validation::Unreachable;
         };
-        match super::validate(&self.client, request).await {
-            Ok(()) => crate::browser::auth::Validation::Ready,
+        // The platform can refuse a session inside a 200 envelope, so the proof must read
+        // the body: a status-only check would call an expired login ready. An envelope the
+        // parser cannot read at all is inconclusive, not a rejection.
+        match super::validate_body(&self.client, request).await {
             Err(ProviderError::Credential { status: 401 | 403 }) => {
                 crate::browser::auth::Validation::Rejected
             }
             Err(_) => crate::browser::auth::Validation::Unreachable,
+            Ok(body) => match parse(&body, Timestamp::now()) {
+                Ok(_) => crate::browser::auth::Validation::Ready,
+                Err(_) => crate::browser::auth::Validation::Unreachable,
+            },
         }
     }
 
@@ -149,6 +155,7 @@ impl Manus {
         session::inspect_sources(
             self.home.as_deref(),
             self.storage.as_ref(),
+            SESSION_COOKIE_NAMES,
             &cookie_query(),
             SESSION_URL,
             |credential| async move { self.validate_header(credential.header()).await },
@@ -533,6 +540,35 @@ mod tests {
             result,
             Err(ProviderError::Credential { status: 401 })
         ));
+    }
+
+    #[test]
+    fn an_inspection_proof_judges_the_envelope_and_not_only_the_status() {
+        // A status-only proof would store an expired session as ready; an envelope the
+        // parser cannot read at all is inconclusive rather than ready.
+        for (body, expected) in [
+            (
+                include_str!("../../../tests/fixtures/manus/credits.json"),
+                crate::browser::auth::Validation::Ready,
+            ),
+            (
+                r#"{"error":"expired"}"#,
+                crate::browser::auth::Validation::Unreachable,
+            ),
+        ] {
+            let home = gecko_home();
+            let (base_url, _requests, server) = server(200, body);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+
+            let verdict = runtime
+                .block_on(provider(&home, &base_url).validate_header("session_id=chosen-session"));
+            server.join().expect("server exits");
+
+            assert_eq!(verdict, expected, "{body}");
+        }
     }
 
     #[test]

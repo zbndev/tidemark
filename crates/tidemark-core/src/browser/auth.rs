@@ -64,14 +64,17 @@ impl CandidateCredential {
     }
 }
 
-/// Inspects browser profiles in caller-provided scan order without exposing cookies.
+/// Inspects browser profiles holding a live cookie whose name is one of `names`.
 ///
-/// A profile with no live matching cookie is missing. A locked Safe Storage keyring is
-/// deliberately distinct from a missing source. Every other local read error and an
-/// inconclusive proof request is temporarily unreachable, so the UI never paints a source
-/// invalid without Cursor (or a future provider) having actually rejected it.
-pub async fn inspect<F, Fut>(
+/// The gate must be the provider's own fetch gate: advertising a source the poll would
+/// refuse defers a missing-credential error until after the person has selected it. An
+/// empty `names` slice means any live cookie — the whole-jar providers. A locked Safe
+/// Storage keyring is deliberately distinct from a missing source. Every other local read
+/// error and an inconclusive proof request is temporarily unreachable, so the UI never
+/// paints a source invalid without a provider having actually rejected it.
+pub async fn inspect_named<F, Fut>(
     stores: Vec<Store>,
+    names: &[&str],
     query: &Query,
     request_url: &str,
     storage: &dyn SafeStorage,
@@ -81,7 +84,15 @@ where
     F: Fn(CandidateCredential) -> Fut,
     Fut: Future<Output = Validation>,
 {
-    inspect_matching(stores, query, request_url, storage, |_| true, validate).await
+    inspect_matching(
+        stores,
+        query,
+        request_url,
+        storage,
+        |name| names.is_empty() || names.contains(&name),
+        validate,
+    )
+    .await
 }
 
 /// Inspects browser profiles whose usable jars contain a live cookie name with `prefix`.
@@ -283,8 +294,9 @@ mod tests {
             .build()
             .expect("runtime");
 
-        let report = runtime.block_on(inspect(
+        let report = runtime.block_on(inspect_named(
             stores_in(home.path()),
+            &["session"],
             &query,
             "https://cursor.com/api/usage-summary",
             &NoKeyring,
