@@ -7,15 +7,19 @@ whose services the cards are about:
 
 | File | Mark of |
 | --- | --- |
+| `tidemark-abacus-symbolic.svg` | Abacus AI, Inc. |
 | `tidemark-aiand-symbolic.svg` | ai& (console.aiand.com) |
+| `tidemark-alibaba-symbolic.svg` | Alibaba Cloud (Alibaba Coding Plan) |
 | `tidemark-amp-symbolic.svg` | Amp (ampcode.com) |
 | `tidemark-antigravity-symbolic.svg` | Google LLC (Antigravity) |
+| `tidemark-augment-symbolic.svg` | Augment Code, Inc. |
 | `tidemark-chutes-symbolic.svg` | Chutes AI (Chutes) |
 | `tidemark-claude-symbolic.svg` | Anthropic PBC (Claude) |
 | `tidemark-clawrouter-symbolic.svg` | The OpenClaw project (ClawRouter) |
 | `tidemark-clinepass-symbolic.svg` | Cline (ClinePass) |
 | `tidemark-codex-symbolic.svg` | OpenAI (Codex) |
 | `tidemark-codebuff-symbolic.svg` | Codebuff, Inc. |
+| `tidemark-commandcode-symbolic.svg` | CommandCode (commandcode.ai) |
 | `tidemark-crof-symbolic.svg` | Crof |
 | `tidemark-cursor-symbolic.svg` | Anysphere, Inc. (Cursor) |
 | `tidemark-deepinfra-symbolic.svg` | DeepInfra |
@@ -24,28 +28,43 @@ whose services the cards are about:
 | `tidemark-elevenlabs-symbolic.svg` | ElevenLabs |
 | `tidemark-factory-symbolic.svg` | Factory AI, Inc. (Factory) |
 | `tidemark-fireworks-symbolic.svg` | Fireworks AI |
+| `tidemark-gemini-symbolic.svg` | Google LLC (Gemini) |
+| `tidemark-grok-symbolic.svg` | xAI Corp. (Grok) |
 | `tidemark-groq-symbolic.svg` | Groq, Inc. |
 | `tidemark-ibmbob-symbolic.svg` | IBM (Bob) |
 | `tidemark-kilo-symbolic.svg` | Kilo Code, Inc. |
 | `tidemark-kimi-symbolic.svg` | Moonshot AI (Kimi) |
 | `tidemark-litellm-symbolic.svg` | The LiteLLM project |
 | `tidemark-llmproxy-symbolic.svg` | The LLM Proxy project |
+| `tidemark-longcat-symbolic.svg` | LongCat AI (Meituan) |
+| `tidemark-manus-symbolic.svg` | Manus AI |
 | `tidemark-minimax-symbolic.svg` | MiniMax |
 | `tidemark-moonshot-symbolic.svg` | Moonshot AI |
+| `tidemark-mimo-symbolic.svg` | Xiaomi Corporation |
+| `tidemark-mistral-symbolic.svg` | Mistral AI |
+| `tidemark-notion-symbolic.svg` | Notion Labs, Inc. |
+| `tidemark-ollama-symbolic.svg` | Ollama, Inc. |
 | `tidemark-nanogpt-symbolic.svg` | NanoGPT (nano-gpt.com) |
 | `tidemark-neuralwatt-symbolic.svg` | Neuralwatt |
 | `tidemark-openai-api-symbolic.svg` | OpenAI |
+| `tidemark-opencode-symbolic.svg` | The OpenCode project |
 | `tidemark-opencodego-symbolic.svg` | The OpenCode project (OpenCode Go) |
 | `tidemark-openrouter-symbolic.svg` | OpenRouter |
+| `tidemark-perplexity-symbolic.svg` | Perplexity AI, Inc. |
 | `tidemark-poe-symbolic.svg` | Quora, Inc. (Poe) |
+| `tidemark-qoder-symbolic.svg` | Qoder (Alibaba Group) |
+| `tidemark-sakana-symbolic.svg` | Sakana AI |
+| `tidemark-stepfun-symbolic.svg` | StepFun (stepfun.ai) |
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
+| `tidemark-t3chat-symbolic.svg` | T3 Chat (Theo Browne) |
 | `tidemark-venice-symbolic.svg` | Venice AI |
 | `tidemark-warp-symbolic.svg` | Warp (warp.dev) |
 | `tidemark-wayfinder-symbolic.svg` | The Wayfinder project (wayfinder-router) |
 | `tidemark-xai-symbolic.svg` | xAI Corp. |
 | `tidemark-zai-symbolic.svg` | Z.ai (Zhipu AI) |
 | `tidemark-zenmux-symbolic.svg` | ZenMux |
+| `tidemark-zoommate-symbolic.svg` | Zoom Video Communications, Inc. (ZoomMate) |
 
 They are used nominatively — to identify which service a card is reporting on — and for no
 other purpose. Tidemark is not affiliated with, endorsed by, or sponsored by any of them.
@@ -56,11 +75,11 @@ repository should be read as granting one.
 
 Traced from the SVGs in [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT code,
 marks not the project's to license), except the Z.ai Z, which comes from Z.ai's own brand
-asset, and except the thirty marks that CodexBar records as the provider icons of
+asset, and except the thirty-four marks that CodexBar records as the provider icons of
 ai&, Amp, Chutes, ClawRouter, ClinePass, Codebuff, Crof, Deepgram, DeepInfra, DeepSeek,
 ElevenLabs, Factory,
-Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, OpenAI, OpenCode Go,
-OpenRouter, Poe, sub2api, Synthetic, Venice, Warp, Wayfinder and ZenMux — and except the xAI mark, which is
+Fireworks, Groq, IBM Bob, Kilo, LiteLLM, LLM Proxy, MiniMax, Neuralwatt, Ollama, OpenAI, OpenCode, OpenCode Go,
+OpenRouter, Poe, Qoder, Sakana, sub2api, Synthetic, T3 Chat, Venice, Warp, Wayfinder, ZenMux and ZoomMate — and except the xAI mark, which is
 xAI's own, taken from
 [File:XAI Logo.svg](https://commons.wikimedia.org/wiki/File:XAI_Logo.svg) on Wikimedia
 Commons: the icon CodexBar files under `xai` is three strokes in the shape of an X and a
@@ -74,7 +93,7 @@ trace of NanoGPT's official
 [`Nano-gptFilled.png`](https://nano-gpt.com/logo/Nano-gptFilled.png) asset. Each was reduced to a
 single-colour path set and stripped of the fills, gradients, masks and filters the
 originals carry — a symbolic icon is recoloured by the theme and cannot keep
-them; the ai&, ClawRouter, Fireworks, LiteLLM, OpenRouter, Synthetic and Wayfinder marks were first
+them; the ai&, ClawRouter, Fireworks, LiteLLM, OpenRouter, Sakana, Synthetic and Wayfinder marks were first
 drawn as strokes, a stroke being as single-colour as a fill, and their strokes have since
 been outlined into the filled paths that ship — GTK's symbolic renderer paints `fill` and
 does not draw a `stroke` at all, so the stroked files rendered as blank or half-blank

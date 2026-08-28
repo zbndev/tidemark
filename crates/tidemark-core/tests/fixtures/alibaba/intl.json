@@ -1,0 +1,19 @@
+{
+  "data": {
+    "codingPlanInstanceInfos": [
+      { "planName": "Alibaba Coding Plan Pro" }
+    ],
+    "codingPlanQuotaInfo": {
+      "per5HourUsedQuota": 52,
+      "per5HourTotalQuota": 1000,
+      "per5HourQuotaNextRefreshTime": 1700000300000,
+      "perWeekUsedQuota": 800,
+      "perWeekTotalQuota": 5000,
+      "perWeekQuotaNextRefreshTime": 1700100000000,
+      "perBillMonthUsedQuota": 1200,
+      "perBillMonthTotalQuota": 20000,
+      "perBillMonthQuotaNextRefreshTime": 1701000000000
+    }
+  },
+  "status_code": 0
+}

@@ -1,0 +1,11 @@
+<!-- The OpenCode mark belongs to the OpenCode project. Not covered by Tidemark's MIT
+     licence; used nominatively to identify the service a card reports on. See
+     docs/TRADEMARKS.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 54 42" fill="#000">
+  <g transform="translate(2.24 20.99) scale(0.917)">
+    <path d="M18 30H6V18H18V30Z"/>
+    <path d="M18 12H6V30H18V12ZM24 36H0V6H24V36Z"/>
+    <path d="M54 30H36V18H54V30Z"/>
+    <path d="M54 12H36V30H54V36H30V6H54V12Z"/>
+  </g>
+</svg>

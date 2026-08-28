@@ -1,0 +1,4 @@
+{"json":{"0":[[0],[null,0,0]]}}
+{"json":[0,0,[[{"result":0}],["result",0,1]]]}
+{"json":[1,0,[[{"data":0}],["data",0,2]]]}
+{"json":[2,0,[[{"subTier":"pro","subscription":{"productId":"pro","productName":"pro","status":"active","currentPeriodStart":1778084609000,"currentPeriodEnd":1780763009000,"canceledAt":null,"trialEndsAt":null},"lifetimeBalance":0,"usageBand":"max","billingNextResetAt":1779366216920,"usageFourHourPercentage":12.5,"usageMonthPercentage":34.25,"usageFourHourNextResetAt":1779366216920,"usagePeriodPercentage":44,"usageWindowNextResetAt":1779366216920}]]]}

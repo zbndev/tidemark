@@ -1,0 +1,24 @@
+{
+  "userId": "redacted",
+  "quotaKey": "big_model_credits",
+  "nextResetAt": "2024-09-01T00:00:00Z",
+  "status": "active",
+  "totalQuota": {
+    "quotaSummary": {
+      "usedValue": 1500,
+      "limitValue": 1500,
+      "remainingValue": 0,
+      "usagePercentage": 100,
+      "unit": "credit"
+    }
+  },
+  "sharedQuota": {
+    "quotaSummary": {
+      "usedValue": 200,
+      "limitValue": 1000,
+      "remainingValue": 800,
+      "usagePercentage": 20,
+      "unit": "credit"
+    }
+  }
+}

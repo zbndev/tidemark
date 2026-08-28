@@ -1,0 +1,6 @@
+<!-- The Perplexity mark belongs to Perplexity AI, Inc. Not covered by Tidemark's MIT
+     licence; used nominatively to identify the service a card reports on. See
+     docs/TRADEMARKS.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="currentColor" fill-rule="evenodd">
+  <path d="M84.659 33.632h-7.702V.225L51.628 21.406V.526h-3.851v20.655L24.966 0v23.632H5.341v34.658h19.625V80l22.812-21.197v20.668h3.851V59.315L74.735 79.917V58.293h9.924V33.632zm-11.552-15.103v15.103H55.256l17.851-15.103zm-44.287.225 16.23 14.878H28.82V18.754zM9.192 54.44V27.483h26.158L14.967 47.865v6.575H9.192zm9.628 16.801V58.293h.001v-8.829l19.254-19.254v23.37L18.82 71.241zm42.361.083-19.255-17.17V30.21l19.255 19.255v21.859zm9.627-16.884h-5.777v-6.575L44.649 27.483h26.159V54.44z"/>
+</svg>

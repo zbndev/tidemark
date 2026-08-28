@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use tidemark_core::config::Config;
 use tidemark_core::providers::http::{self, Proxy};
+use tidemark_core::providers::keyed::session;
 use tidemark_core::providers::{Credential, Provider, ProviderError};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
@@ -572,10 +573,11 @@ impl Engine {
             .client
             .as_ref()
             .ok_or_else(|| format!("{provider} has no client for authentication inspection"))?;
-        client
+        let sources = client
             .inspect_auth_sources()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(browser_mode_report(provider, sources))
     }
 
     /// Revalidates, then atomically persists one selected dynamic local source.
@@ -1297,6 +1299,18 @@ impl Engine {
     }
 }
 
+/// Gives browser-profile candidates the mode body the settings protocol renders.
+fn browser_mode_report(provider: &str, sources: Vec<AuthCandidate>) -> Vec<AuthCandidate> {
+    if crate::registry::has_browser_session_auth(provider)
+        && !sources
+            .iter()
+            .any(|candidate| candidate.id == session::BROWSER_SOURCE)
+    {
+        return session::browser_sources(sources);
+    }
+    sources
+}
+
 /// Which schema a credential of this kind is stored under, or `None` where Tidemark stores
 /// nothing of its own.
 pub fn stored_kind(credential: CredentialKind) -> Option<Kind> {
@@ -1413,6 +1427,44 @@ mod tests {
         assert_eq!(
             state_for(&ProviderError::NoCredential),
             ProviderState::NoCredential
+        );
+    }
+
+    #[test]
+    fn a_browser_only_provider_wraps_its_profile_report_in_the_browser_mode() {
+        // BrowserAuth renders by mode id. Handing it a Firefox root directly makes the
+        // selected Browser half look unavailable even when the profile was discovered.
+        let report = browser_mode_report(
+            "t3chat",
+            vec![AuthCandidate {
+                id: "firefox".into(),
+                title: "Firefox".into(),
+                subtitle: None,
+                state: "ready".into(),
+                children: vec![AuthCandidate {
+                    id: "firefox/Default".into(),
+                    title: "Default".into(),
+                    subtitle: None,
+                    state: "ready".into(),
+                    children: Vec::new(),
+                }],
+            }],
+        );
+
+        assert_eq!(report[0].id, "browser");
+        assert_eq!(report[0].children[0].id, "firefox");
+        assert_eq!(
+            ready_auth_selection(
+                &report,
+                &AuthSelection {
+                    mode: "browser".into(),
+                    candidate: Some("firefox".into()),
+                },
+            ),
+            Some(AuthSelection {
+                mode: "browser".into(),
+                candidate: Some("firefox/Default".into()),
+            })
         );
     }
 

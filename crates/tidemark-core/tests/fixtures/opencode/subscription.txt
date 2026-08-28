@@ -1,0 +1,1 @@
+$R[16]($R[30],$R[41]={rollingUsage:$R[42]={status:"ok",resetInSec:5944,usagePercent:17},weeklyUsage:$R[43]={status:"ok",resetInSec:278201,usagePercent:75}});

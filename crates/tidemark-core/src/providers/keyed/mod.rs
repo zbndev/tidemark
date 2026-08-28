@@ -32,12 +32,16 @@
 //! [`CATALOG`]; everything the settings dialog needs from them is the same shape as a
 //! `Spec`'s, so the dialog does not distinguish the tables.
 
+pub mod abacus;
 pub mod aiand;
+pub mod alibaba;
 pub mod amp;
+pub mod augment;
 pub mod chutes;
 pub mod clawrouter;
 pub mod clinepass;
 pub mod codebuff;
+pub mod commandcode;
 pub mod crof;
 pub mod cursor;
 pub mod deepgram;
@@ -46,31 +50,47 @@ pub mod deepseek;
 pub mod elevenlabs;
 pub mod factory;
 pub mod fireworks;
+pub mod gemini;
+pub mod grok;
 pub mod groq;
 pub mod ibmbob;
 pub mod kilo;
 pub mod kimi;
 pub mod litellm;
 pub mod llmproxy;
+pub mod longcat;
+pub mod manus;
+pub mod mimo;
 pub mod minimax;
+pub mod mistral;
 pub mod moonshot;
 pub mod nanogpt;
 pub mod neuralwatt;
+pub mod notion;
+pub mod ollama;
 // The slug carries a hyphen, which a module name cannot; the file keeps the slug so the
 // provider is greppable by its storage key.
 #[path = "openai-api.rs"]
 pub mod openai_api;
+pub mod opencode;
 pub mod opencodego;
 pub mod openrouter;
+pub mod perplexity;
 pub mod poe;
+pub mod qoder;
+pub mod sakana;
+pub mod session;
+pub mod stepfun;
 pub mod sub2api;
 pub mod synthetic;
+pub mod t3chat;
 pub mod venice;
 pub mod warp;
 pub mod wayfinder;
 pub mod xai;
 pub mod zai;
 pub mod zenmux;
+pub mod zoommate;
 
 use super::{BoxFuture, Credential, Provider, ProviderError, http};
 use crate::debug;
@@ -297,6 +317,37 @@ pub async fn request(
     client: &reqwest::Client,
     request: reqwest::Request,
 ) -> Result<String, ProviderError> {
+    request_with_url(provider, client, request)
+        .await
+        .map(|(body, _)| body)
+}
+
+/// [`request`], also reporting the URL the exchange finally landed on, redirect following
+/// included — which is how a provider whose expired session shows up as a bounce to a
+/// sign-in page recognises the bounce. A provider that does not care where the answer
+/// came from stays on [`request`].
+pub async fn request_with_url(
+    provider: &str,
+    client: &reqwest::Client,
+    request: reqwest::Request,
+) -> Result<(String, reqwest::Url), ProviderError> {
+    request_inspected(provider, client, request, |_| Ok(())).await
+}
+
+/// [`request_with_url`] with one hook: the response is shown to `inspect` before the
+/// status mapping runs, for the provider whose refusal is only recognisable from a
+/// response header — T3 Chat's Vercel challenge arrives stamped as a 429 and would
+/// otherwise be read as a rate limit. An `Err` from the hook is the exchange's error;
+/// everything else about the exchange is [`request`]'s.
+pub async fn request_inspected<F>(
+    provider: &str,
+    client: &reqwest::Client,
+    request: reqwest::Request,
+    inspect: F,
+) -> Result<(String, reqwest::Url), ProviderError>
+where
+    F: FnOnce(&reqwest::Response) -> Result<(), ProviderError>,
+{
     let sent = debug::Recorded::of(&request);
     let note = |answer| {
         if let Some(sent) = &sent {
@@ -320,7 +371,14 @@ pub async fn request(
     };
 
     let status = response.status();
+    let url = response.url().clone();
     let retry_after = http::retry_after_header(&response).map(str::to_owned);
+    if let Err(error) = inspect(&response) {
+        note(debug::Answer::Refused {
+            status: status.as_u16(),
+        });
+        return Err(error);
+    }
     if let Err(error) = http::check(status, retry_after.as_deref()) {
         // Refused on its status: `reqwest` has not read the body and neither have we, so
         // the line says what came back without pretending to a body it never held.
@@ -353,7 +411,7 @@ pub async fn request(
             "the provider answered an empty body",
         ));
     }
-    Ok(body)
+    Ok((body, url))
 }
 
 /// Sends a credential proof request without reading or recording its response body.
@@ -370,6 +428,27 @@ pub async fn validate(
         .map_err(|error| ProviderError::Transport(redact_query(error)))?;
     let retry_after = http::retry_after_header(&response).map(str::to_owned);
     http::check(response.status(), retry_after.as_deref())
+}
+
+/// Sends a credential proof request and returns its body, still without recording it.
+///
+/// Several providers refuse a session inside an HTTP 200 envelope, so a status-only proof
+/// would call an expired login ready. The no-log rule is the one thing inherited from
+/// [`validate`]: the body may carry account data and is read only to classify it.
+pub async fn validate_body(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+) -> Result<String, ProviderError> {
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|error| ProviderError::Transport(redact_query(error)))?;
+    let retry_after = http::retry_after_header(&response).map(str::to_owned);
+    http::check(response.status(), retry_after.as_deref())?;
+    response
+        .text()
+        .await
+        .map_err(|error| ProviderError::Transport(redact_query(error)))
 }
 
 /// Reads a required option, refusing the build with the setting's name when it is unset

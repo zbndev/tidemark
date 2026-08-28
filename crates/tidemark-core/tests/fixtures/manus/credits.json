@@ -1,0 +1,10 @@
+{
+  "totalCredits": 2869,
+  "freeCredits": 1500,
+  "periodicCredits": 1369,
+  "proMonthlyCredits": 4000,
+  "maxRefreshCredits": 300,
+  "nextRefreshTime": "2026-04-13T00:00:00Z",
+  "refreshInterval": "daily",
+  "userFlag": { "drc16": true }
+}

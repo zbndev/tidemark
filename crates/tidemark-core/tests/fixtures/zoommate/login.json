@@ -1,0 +1,11 @@
+{
+  "success": true,
+  "data": {
+    "nak": "fake-minted-jwt",
+    "user_profile": {
+      "user_id": "fake-user-id",
+      "email": "fake.user@example.com",
+      "display_name": "Fake User"
+    }
+  }
+}

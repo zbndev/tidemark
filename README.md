@@ -93,20 +93,14 @@ Antigravity · Claude · Codex
 
 **Paste an API key**
 
-ai& · Amp · Chutes · ClawRouter · ClinePass · Codebuff · Crof · Deepgram · DeepInfra ·
+ai& · Alibaba Coding Plan · Amp · Chutes · ClawRouter · ClinePass · Codebuff · Crof · Deepgram · DeepInfra ·
 DeepSeek · ElevenLabs · Factory · Fireworks · Groq · IBM Bob · Kilo · Kimi · LiteLLM ·
 LLM Proxy · MiniMax · Moonshot · NanoGPT · Neuralwatt · OpenAI · OpenCode Go · OpenRouter ·
-Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
+Poe · StepFun · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 **Local session**
 
-Cursor
-
-Cursor uses a cursor.com session already signed in on this machine — Tidemark does not store
-an API key or session token. Its settings page asks you to choose one local source: the Cursor App, or one of
-your browsers (and one of its profiles, if it keeps more than one). That choice is kept and
-used alone; if the chosen source later signs out, Tidemark tells you instead of silently
-switching to another browser or the App.
+Abacus · Augment · CommandCode · Cursor · Gemini · Grok · LongCat · Manus · MiMo · Mistral · Notion · Ollama · OpenCode · Perplexity · Qoder · Sakana · T3 Chat · ZoomMate
 
 **No credential needed**
 

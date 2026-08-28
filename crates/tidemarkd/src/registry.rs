@@ -25,8 +25,10 @@ use std::sync::Arc;
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
-    self, aiand, codebuff, cursor, deepgram, deepinfra, factory, fireworks, groq, ibmbob, kilo,
-    litellm, llmproxy, nanogpt, openai_api, openrouter, poe, sub2api, wayfinder, xai,
+    self, abacus, aiand, alibaba, augment, codebuff, commandcode, cursor, deepgram, deepinfra,
+    factory, fireworks, gemini, grok, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo,
+    mistral, nanogpt, notion, ollama, openai_api, opencode, openrouter, perplexity, poe, qoder,
+    sakana, stepfun, sub2api, t3chat, wayfinder, xai, zoommate,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -108,6 +110,8 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 
 /// The hand-written key-authenticated providers: those whose fetch is more than one
 /// request, so a `keyed::Spec` cannot describe them — ai& pages a request log,
+/// Alibaba Coding Plan retries its one quota POST across the international and
+/// China-mainland gateways,
 /// Codebuff posts for credits and then reads a subscription it can do without,
 /// Cursor reads a usage summary and then the identity, legacy request quota and weekly Bot
 /// allowance an account may or may not have, signing every request with the session cookie
@@ -118,9 +122,11 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 /// auth/billing/usage ladder, Fireworks reads a rolling billing
 /// window, Groq reads four Prometheus rate queries, IBM Bob reads a profile then
 /// per-team regional budgets, Kilo reads a tRPC batch and then a profile, LiteLLM walks a
-/// two-request management ladder, NanoGPT reads subscription quotas and a prepaid balance,
+/// two-request management ladder, Manus reads its browser session's credit inventory, NanoGPT reads subscription quotas and a prepaid balance,
 /// OpenAI pages two Admin API endpoints, OpenRouter reads credits and key quota, Poe pages
-/// through a usage history, xAI reads a prepaid balance and a spend
+/// through a usage history, StepFun asks a rate-limit RPC and then a plan-status one,
+/// deriving the device id its cookie pair needs from the token's own JWT payload at
+/// build time, xAI reads a prepaid balance and a spend
 /// history — and those whose single request hangs from a required base URL with no
 /// default host, where the shared reader's refusal of a bad value must happen at
 /// build time rather than inside an endpoint closure: LLM Proxy and sub2api — and
@@ -128,31 +134,49 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 /// health, routes and savings in three requests. Each
 /// entry is the provider's own [`keyed::HandSpec`], which carries everything a
 /// `Spec` carries except the single endpoint, and says how to build a client from
-/// the stored key and the account's settings. Each entry says how it is authenticated:
-/// the same pasted key as the catalog's, `CredentialKind::Key`, for all of them so far,
-/// so the credentials dialog is unchanged — but a provider that answers without a
-/// credential says `CredentialKind::None` here and is published, and built, with no key
-/// field at all.
+/// the stored key and the account's settings. An ordinary entry says it uses the same
+/// pasted key as the catalog's, `CredentialKind::Key`; a browser-session provider says
+/// `CredentialKind::External`; and a provider that answers without a credential says
+/// `CredentialKind::None` and is published, and built, with no key field at all.
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
+    &abacus::SPEC,
     &aiand::SPEC,
+    &alibaba::SPEC,
+    &augment::SPEC,
     &codebuff::SPEC,
+    &commandcode::SPEC,
     &cursor::SPEC,
     &deepgram::SPEC,
     &deepinfra::SPEC,
     &factory::SPEC,
     &fireworks::SPEC,
+    &gemini::SPEC,
+    &grok::SPEC,
     &groq::SPEC,
     &ibmbob::SPEC,
     &kilo::SPEC,
     &litellm::SPEC,
     &llmproxy::SPEC,
+    &longcat::SPEC,
+    &manus::SPEC,
+    &mimo::SPEC,
+    &mistral::SPEC,
     &nanogpt::SPEC,
+    &notion::SPEC,
+    &ollama::SPEC,
     &openai_api::SPEC,
+    &opencode::SPEC,
     &openrouter::SPEC,
+    &perplexity::SPEC,
     &poe::SPEC,
+    &qoder::SPEC,
+    &sakana::SPEC,
+    &stepfun::SPEC,
     &sub2api::SPEC,
+    &t3chat::SPEC,
     &wayfinder::SPEC,
     &xai::SPEC,
+    &zoommate::SPEC,
 ];
 
 /// The catalog's own spelling of a provider's name, for the places the daemon speaks to a
@@ -273,18 +297,53 @@ pub fn account(
 /// This is daemon metadata rather than a GUI branch: a later browser-cookie provider adds
 /// its selector here and gets the same wire contract, engine lifecycle and GTK rendering.
 fn browser_auth(provider: &str) -> Option<AuthSelector> {
-    (provider == cursor::PROVIDER_ID).then(|| AuthSelector {
-        option: cursor::AUTH_SOURCE.into(),
-        modes: vec![
-            AuthMode {
-                value: cursor::CURSOR_APP_SOURCE.into(),
-                title: "Cursor App".into(),
-            },
-            AuthMode {
+    match provider {
+        cursor::PROVIDER_ID => Some(AuthSelector {
+            option: cursor::AUTH_SOURCE.into(),
+            modes: vec![
+                AuthMode {
+                    value: cursor::CURSOR_APP_SOURCE.into(),
+                    title: "Cursor App".into(),
+                },
+                AuthMode {
+                    value: cursor::BROWSER_SOURCE.into(),
+                    title: "Browser".into(),
+                },
+            ],
+        }),
+        abacus::PROVIDER_ID
+        | augment::PROVIDER_ID
+        | commandcode::PROVIDER_ID
+        | longcat::PROVIDER_ID
+        | manus::PROVIDER_ID
+        | mimo::PROVIDER_ID
+        | mistral::PROVIDER_ID
+        | notion::PROVIDER_ID
+        | ollama::PROVIDER_ID
+        | opencode::PROVIDER_ID
+        | perplexity::PROVIDER_ID
+        | qoder::PROVIDER_ID
+        | sakana::PROVIDER_ID
+        | t3chat::PROVIDER_ID
+        | zoommate::PROVIDER_ID => Some(AuthSelector {
+            option: cursor::AUTH_SOURCE.into(),
+            modes: vec![AuthMode {
                 value: cursor::BROWSER_SOURCE.into(),
                 title: "Browser".into(),
-            },
-        ],
+            }],
+        }),
+        _ => None,
+    }
+}
+
+/// Whether a provider's local-auth report contains only the browser mode.
+///
+/// Cursor has a second, Cursor-App mode and already returns mode bodies itself. The other
+/// browser-session providers return browser/profile candidates, which the engine puts under
+/// the sole mode before publishing them over D-Bus.
+pub(crate) fn has_browser_session_auth(provider: &str) -> bool {
+    browser_auth(provider).is_some_and(|selector| {
+        selector.modes.len() == 1 && selector.modes[0].value == keyed::session::BROWSER_SOURCE
     })
 }
 
@@ -456,6 +515,10 @@ pub fn external_present(provider: &str) -> Option<bool> {
         }
         codex::PROVIDER_ID => Some(codex::cli_credentials_path().is_some_and(|path| path.exists())),
         antigravity::PROVIDER_ID => Some(antigravity::agy::is_available()),
+        gemini::PROVIDER_ID => {
+            Some(gemini::cli_credentials_path().is_some_and(|path| path.exists()))
+        }
+        grok::PROVIDER_ID => Some(grok::cli_credentials_path().is_some_and(|path| path.exists())),
         _ => None,
     }
 }
@@ -807,6 +870,161 @@ mod tests {
     }
 
     #[test]
+    fn qoder_publishes_browser_auth_and_restores_its_selected_profile() {
+        let definition = catalog(&empty_config())
+            .into_iter()
+            .find(|definition| definition.provider == qoder::PROVIDER_ID)
+            .expect("Qoder is in the catalog");
+        let selector = definition
+            .browser_auth
+            .expect("Qoder has local source selection");
+        assert_eq!(selector.option, cursor::AUTH_SOURCE);
+        assert_eq!(
+            selector
+                .modes
+                .iter()
+                .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                .collect::<Vec<_>>(),
+            [(cursor::BROWSER_SOURCE, "Browser")]
+        );
+
+        let path = scratch_config(
+            "qoder-browser-selection",
+            "providers = [\"qoder\"]\n\n[provider.qoder]\nauth-source = \"browser\"\nauth-browser = \"firefox\"\nauth-profile = \"Default\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let account = account(qoder::PROVIDER_ID, &secrets(), &config)
+            .expect("builds")
+            .expect("Qoder account builds");
+        assert_eq!(
+            account.status().auth_selection,
+            Some(tidemark_types::AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some("firefox/Default".into()),
+            })
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn t3chat_publishes_browser_auth_and_restores_its_selected_profile() {
+        // Without the selector, the settings dialog cannot write a Firefox choice and the
+        // provider necessarily reports NoCredential despite a signed-in browser profile.
+        let definition = catalog(&empty_config())
+            .into_iter()
+            .find(|definition| definition.provider == t3chat::PROVIDER_ID)
+            .expect("T3 Chat is in the catalog");
+        let selector = definition
+            .browser_auth
+            .expect("T3 Chat has local source selection");
+        assert_eq!(selector.option, cursor::AUTH_SOURCE);
+        assert_eq!(
+            selector
+                .modes
+                .iter()
+                .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                .collect::<Vec<_>>(),
+            [(cursor::BROWSER_SOURCE, "Browser")]
+        );
+
+        let path = scratch_config(
+            "t3chat-browser-selection",
+            "providers = [\"t3chat\"]\n\n[provider.t3chat]\nauth-source = \"browser\"\nauth-browser = \"firefox\"\nauth-profile = \"Default\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let account = account(t3chat::PROVIDER_ID, &secrets(), &config)
+            .expect("builds")
+            .expect("T3 Chat account builds");
+        assert_eq!(
+            account.status().auth_selection,
+            Some(tidemark_types::AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some("firefox/Default".into()),
+            })
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn every_browser_session_provider_publishes_a_browser_selector() {
+        // A HandSpec with session::OPTIONS cannot work until the selector exposes those
+        // options to the settings client, so adding a provider without this registration
+        // must be caught here rather than by a person seeing NoCredential.
+        for provider in [
+            abacus::PROVIDER_ID,
+            augment::PROVIDER_ID,
+            commandcode::PROVIDER_ID,
+            longcat::PROVIDER_ID,
+            manus::PROVIDER_ID,
+            mimo::PROVIDER_ID,
+            mistral::PROVIDER_ID,
+            notion::PROVIDER_ID,
+            ollama::PROVIDER_ID,
+            opencode::PROVIDER_ID,
+            perplexity::PROVIDER_ID,
+            qoder::PROVIDER_ID,
+            sakana::PROVIDER_ID,
+            t3chat::PROVIDER_ID,
+            zoommate::PROVIDER_ID,
+        ] {
+            let definition = catalog(&empty_config())
+                .into_iter()
+                .find(|definition| definition.provider == provider)
+                .expect("browser-session provider is in the catalog");
+            let selector = definition
+                .browser_auth
+                .expect("browser-session provider has local source selection");
+            assert_eq!(selector.option, cursor::AUTH_SOURCE, "{provider}");
+            assert_eq!(
+                selector
+                    .modes
+                    .iter()
+                    .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                    .collect::<Vec<_>>(),
+                [(cursor::BROWSER_SOURCE, "Browser")],
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn zoommate_publishes_browser_auth_and_restores_its_selected_profile() {
+        let definition = catalog(&empty_config())
+            .into_iter()
+            .find(|definition| definition.provider == zoommate::PROVIDER_ID)
+            .expect("ZoomMate is in the catalog");
+        let selector = definition
+            .browser_auth
+            .expect("ZoomMate has local source selection");
+        assert_eq!(selector.option, cursor::AUTH_SOURCE);
+        assert_eq!(
+            selector
+                .modes
+                .iter()
+                .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                .collect::<Vec<_>>(),
+            [(cursor::BROWSER_SOURCE, "Browser")]
+        );
+
+        let path = scratch_config(
+            "zoommate-browser-selection",
+            "providers = [\"zoommate\"]\n\n[provider.zoommate]\nauth-source = \"browser\"\nauth-browser = \"firefox\"\nauth-profile = \"Default\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let account = account(zoommate::PROVIDER_ID, &secrets(), &config)
+            .expect("builds")
+            .expect("ZoomMate account builds");
+        assert_eq!(
+            account.status().auth_selection,
+            Some(tidemark_types::AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some("firefox/Default".into()),
+            })
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn the_credential_choice_reports_the_stored_value_verbatim() {
         for slug in [
             antigravity::PROVIDER_ID,
@@ -1022,7 +1240,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 39);
+        assert_eq!(definitions.len(), 58);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(

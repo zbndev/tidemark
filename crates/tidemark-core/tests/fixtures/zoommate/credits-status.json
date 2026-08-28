@@ -1,0 +1,17 @@
+{
+  "data": {
+    "credit_status": {
+      "budget_cap": 12345.0,
+      "used_credit": 678.0,
+      "remaining_credit": 11667.0,
+      "overage_credit": 0.0,
+      "allow_overage": false,
+      "cycle_start_date": 1893456000000,
+      "cycle_end_date": 1896134399000,
+      "is_quota_available": true,
+      "is_unlimited": false
+    }
+  },
+  "status_code": 200,
+  "error_message": null
+}

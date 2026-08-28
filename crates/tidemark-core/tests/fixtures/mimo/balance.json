@@ -1,0 +1,13 @@
+{
+  "code": 0,
+  "message": "",
+  "data": {
+    "balance": "50.00",
+    "frozenBalance": null,
+    "currency": "USD",
+    "overdraftLimit": null,
+    "remainingOverdraftLimit": null,
+    "giftBalance": "20.00",
+    "cashBalance": "30.00"
+  }
+}
