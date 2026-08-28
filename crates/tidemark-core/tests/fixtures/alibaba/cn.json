@@ -1,0 +1,1 @@
+{"successResponse":{"body":"{\"data\":{\"codingPlanInstanceInfos\":[{\"planName\":\"Coding Plan Lite\",\"status\":\"VALID\",\"codingPlanQuotaInfo\":{\"per5HourUsedQuota\":0,\"per5HourTotalQuota\":1000,\"per5HourQuotaNextRefreshTime\":1700000300000}}]},\"statusCode\":200}"}}

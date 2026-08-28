@@ -25,10 +25,10 @@ use std::sync::Arc;
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
 use tidemark_core::providers::keyed::{
-    self, abacus, aiand, augment, codebuff, commandcode, cursor, deepgram, deepinfra, factory,
-    fireworks, gemini, grok, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo, mistral,
-    nanogpt, notion, ollama, openai_api, opencode, openrouter, perplexity, poe, qoder, sakana,
-    sub2api, t3chat, wayfinder, xai, zoommate,
+    self, abacus, aiand, alibaba, augment, codebuff, commandcode, cursor, deepgram, deepinfra,
+    factory, fireworks, gemini, grok, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo,
+    mistral, nanogpt, notion, ollama, openai_api, opencode, openrouter, perplexity, poe, qoder,
+    sakana, sub2api, t3chat, wayfinder, xai, zoommate,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -110,6 +110,8 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 
 /// The hand-written key-authenticated providers: those whose fetch is more than one
 /// request, so a `keyed::Spec` cannot describe them — ai& pages a request log,
+/// Alibaba Coding Plan retries its one quota POST across the international and
+/// China-mainland gateways,
 /// Codebuff posts for credits and then reads a subscription it can do without,
 /// Cursor reads a usage summary and then the identity, legacy request quota and weekly Bot
 /// allowance an account may or may not have, signing every request with the session cookie
@@ -137,6 +139,7 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &abacus::SPEC,
     &aiand::SPEC,
+    &alibaba::SPEC,
     &augment::SPEC,
     &codebuff::SPEC,
     &commandcode::SPEC,
@@ -1234,7 +1237,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 56);
+        assert_eq!(definitions.len(), 57);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(

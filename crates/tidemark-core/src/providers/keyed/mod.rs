@@ -34,6 +34,7 @@
 
 pub mod abacus;
 pub mod aiand;
+pub mod alibaba;
 pub mod amp;
 pub mod augment;
 pub mod chutes;

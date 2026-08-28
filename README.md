@@ -93,10 +93,15 @@ Antigravity · Claude · Codex
 
 **Paste an API key**
 
-ai& · Amp · Chutes · ClawRouter · ClinePass · Codebuff · Crof · Deepgram · DeepInfra ·
+ai& · Alibaba Coding Plan · Amp · Chutes · ClawRouter · ClinePass · Codebuff · Crof · Deepgram · DeepInfra ·
 DeepSeek · ElevenLabs · Factory · Fireworks · Groq · IBM Bob · Kilo · Kimi · LiteLLM ·
 LLM Proxy · MiniMax · Moonshot · NanoGPT · Neuralwatt · OpenAI · OpenCode Go · OpenRouter ·
 Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
+
+Alibaba Coding Plan reads a Coding Plan subscription with a DashScope API key from the Model
+Studio console. The same quota query lives on an international and a China-mainland gateway;
+Tidemark tries the international one first and retries the other when the answer says
+"region", not "account".
 
 **Local session**
 

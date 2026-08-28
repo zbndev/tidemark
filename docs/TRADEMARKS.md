@@ -9,6 +9,7 @@ whose services the cards are about:
 | --- | --- |
 | `tidemark-abacus-symbolic.svg` | Abacus AI, Inc. |
 | `tidemark-aiand-symbolic.svg` | ai& (console.aiand.com) |
+| `tidemark-alibaba-symbolic.svg` | Alibaba Cloud (Alibaba Coding Plan) |
 | `tidemark-amp-symbolic.svg` | Amp (ampcode.com) |
 | `tidemark-antigravity-symbolic.svg` | Google LLC (Antigravity) |
 | `tidemark-augment-symbolic.svg` | Augment Code, Inc. |
