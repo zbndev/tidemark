@@ -15,7 +15,9 @@ pub mod window;
 pub mod wire;
 
 pub use present::{duration, icon_name, percent};
-pub use snapshot::{AccountId, DetailRow, DetailSection, ProviderId, Snapshot, provider_label};
+pub use snapshot::{
+    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, lead_window_key, provider_label,
+};
 pub use time::{AbsurdTimestamp, Timestamp};
 pub use window::{DANGER_AT, WARNING_AT, Window, WindowKey, WindowLength};
 pub use wire::{

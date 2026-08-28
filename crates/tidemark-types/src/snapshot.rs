@@ -125,6 +125,24 @@ pub fn provider_label(slug: &str) -> String {
     }
 }
 
+/// The stable key of the window a provider's card leads with, when the shortest present
+/// window is not it.
+///
+/// Presentation, but shared, for the same reason [`provider_label`] is: the card, the
+/// tray menu and the detail dialog's initial selection must all lead with the same
+/// window, and they run in two different processes. A provider appears here when its
+/// shortest window is the wrong headline — NanoGPT meters a hundred images a day
+/// alongside the weekly input pool that *is* the subscription, and shortest-first would
+/// spend every day showing the images allowance sitting at zero. The key is the
+/// window's stable identity, so a pool the provider stops reporting falls back to the
+/// shortest present window rather than to a window that is not there.
+pub fn lead_window_key(slug: &str) -> Option<&'static str> {
+    match slug {
+        "nanogpt" => Some("input-tokens/w604800"),
+        _ => None,
+    }
+}
+
 /// Everything one poll of one account produced.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -142,7 +160,8 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// The window the card leads with: the shortest one *present*.
+    /// The window the card leads with: the one the provider names for the role when it
+    /// names one — see [`lead_window_key`] — otherwise the shortest one *present*.
     ///
     /// Shortest, because that is the limit a user is about to hit. Present, because a
     /// window the provider did not report this time is not drawn at all — OpenAI switched
@@ -152,6 +171,11 @@ impl Snapshot {
     /// Windows without a declared length sort last: an unknown length cannot be claimed to
     /// be the shortest.
     pub fn dominant_window(&self) -> Option<&Window> {
+        if let Some(key) = lead_window_key(self.provider.as_str())
+            && let Some(named) = self.windows.iter().find(|w| w.key.as_str() == key)
+        {
+            return Some(named);
+        }
         self.windows
             .iter()
             .min_by_key(|w| (w.length.is_none(), w.length.map(WindowLength::as_secs)))
@@ -183,6 +207,26 @@ mod tests {
         }
     }
 
+    fn provider_snapshot(provider: &str, keyed_lengths: &[(&str, Option<u64>)]) -> Snapshot {
+        Snapshot {
+            provider: ProviderId::new(provider),
+            account: AccountId::default(),
+            captured_at: Timestamp::from_unix(1_785_700_000).expect("plausible"),
+            windows: keyed_lengths
+                .iter()
+                .map(|(key, len)| Window {
+                    key: WindowKey::named(key),
+                    title: (*key).to_owned(),
+                    subtitle: None,
+                    used_percent: 0.0,
+                    resets_at: None,
+                    length: len.and_then(WindowLength::from_secs),
+                })
+                .collect(),
+            details: Vec::new(),
+        }
+    }
+
     #[test]
     fn the_dominant_window_is_the_shortest_one() {
         let s = snapshot(&[Some(604_800), Some(18_000), Some(2_592_000)]);
@@ -190,6 +234,33 @@ mod tests {
             s.dominant_window().expect("present").length,
             WindowLength::from_secs(18_000)
         );
+    }
+
+    #[test]
+    fn a_provider_that_names_a_lead_window_leads_with_it_over_a_shorter_one() {
+        // NanoGPT is the reason the naming exists: a hundred images a day sit at
+        // zero while the weekly input pool is the substance of the subscription,
+        // and shortest-first would make the zero the card's large number.
+        let s = provider_snapshot(
+            "nanogpt",
+            &[
+                ("images/w86400", Some(86_400)),
+                ("input-tokens/w604800", Some(604_800)),
+            ],
+        );
+        assert_eq!(
+            s.dominant_window().expect("present").key.as_str(),
+            "input-tokens/w604800"
+        );
+    }
+
+    #[test]
+    fn a_named_lead_window_that_is_not_there_falls_back_to_the_shortest() {
+        // The lead is a stable key, not a promise the pool is still metered. The
+        // documented NanoGPT shape has no weekly input pool; its card leads with
+        // the day it does meter.
+        let s = provider_snapshot("nanogpt", &[("monthly", None), ("w86400", Some(86_400))]);
+        assert_eq!(s.dominant_window().expect("present").key.as_str(), "w86400");
     }
 
     #[test]
