@@ -9,12 +9,14 @@ use crate::browser::{
 use std::fmt;
 use std::future::Future;
 use std::path::Path;
-use tidemark_types::AuthCandidate;
+use tidemark_types::{AuthCandidate, AuthCandidateState};
 
 /// The selected browser's stable slug.
 pub const AUTH_BROWSER: &str = "auth-browser";
 /// The selected browser profile, when the person chose one explicitly.
 pub const AUTH_PROFILE: &str = "auth-profile";
+/// The browser mode that contains scanned browser and profile candidates on D-Bus.
+pub const BROWSER_SOURCE: &str = "browser";
 
 /// The browser options every browser-session provider publishes.
 pub static OPTIONS: &[OptionSchema] = &[
@@ -216,13 +218,58 @@ where
     auth::inspect_prefix(stores(home), prefix, query, probe_url, storage, validate).await
 }
 
+/// Puts scanned browser/profile candidates under the `browser` authentication mode.
+///
+/// The settings protocol chooses a mode first, then renders its candidates. Browser stores
+/// therefore cannot be the report's top-level entries even when only one browser mode exists.
+pub fn browser_sources(children: Vec<AuthCandidate>) -> Vec<AuthCandidate> {
+    let state = aggregate_state(&children);
+    vec![AuthCandidate {
+        id: BROWSER_SOURCE.into(),
+        title: "Browser".into(),
+        subtitle: None,
+        state: state.as_wire().to_owned(),
+        children,
+    }]
+}
+
+fn aggregate_state(candidates: &[AuthCandidate]) -> AuthCandidateState {
+    let states = candidates.iter().filter_map(AuthCandidate::state);
+    if states
+        .clone()
+        .any(|state| state == AuthCandidateState::Ready)
+    {
+        return AuthCandidateState::Ready;
+    }
+    if states
+        .clone()
+        .any(|state| state == AuthCandidateState::WaitingForKeyring)
+    {
+        return AuthCandidateState::WaitingForKeyring;
+    }
+    if states
+        .clone()
+        .any(|state| state == AuthCandidateState::Unreachable)
+    {
+        return AuthCandidateState::Unreachable;
+    }
+    if states
+        .clone()
+        .any(|state| state == AuthCandidateState::Rejected)
+    {
+        return AuthCandidateState::Rejected;
+    }
+    AuthCandidateState::Missing
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AUTH_BROWSER, AUTH_PROFILE, selection, session, store_selection};
+    use super::{AUTH_BROWSER, AUTH_PROFILE, BROWSER_SOURCE, selection, session, store_selection};
     use crate::browser::{Query, SafeStorage, auth::Selection};
     use crate::providers::ProviderError;
     use crate::secrets::SecretError;
     use rusqlite::Connection;
+    use tidemark_types::AuthCandidate;
 
     #[derive(Debug)]
     struct NoKeyring;
@@ -416,6 +463,46 @@ mod tests {
         ));
 
         assert_eq!(report[0].children[0].state, "missing");
+    }
+
+    #[test]
+    fn browser_sources_wrap_profiles_in_the_browser_mode() {
+        // Returning Firefox at the top level leaves a Browser mode with no matching body,
+        // so the settings UI has to say that its selected mode is not offered.
+        let report = super::browser_sources(vec![AuthCandidate {
+            id: "firefox".into(),
+            title: "Firefox".into(),
+            subtitle: None,
+            state: "ready".into(),
+            children: Vec::new(),
+        }]);
+
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].id, BROWSER_SOURCE);
+        assert_eq!(report[0].state, "ready");
+        assert_eq!(report[0].children[0].id, "firefox");
+    }
+
+    #[test]
+    fn a_ready_browser_keeps_the_mode_ready_when_another_source_waits_for_the_keyring() {
+        let report = super::browser_sources(vec![
+            AuthCandidate {
+                id: "firefox".into(),
+                title: "Firefox".into(),
+                subtitle: None,
+                state: "ready".into(),
+                children: Vec::new(),
+            },
+            AuthCandidate {
+                id: "chromium".into(),
+                title: "Chromium".into(),
+                subtitle: None,
+                state: "waiting-for-keyring".into(),
+                children: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(report[0].state, "ready");
     }
 
     #[test]

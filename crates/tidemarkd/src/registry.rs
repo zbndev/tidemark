@@ -310,6 +310,7 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
         | manus::PROVIDER_ID
         | mimo::PROVIDER_ID
         | mistral::PROVIDER_ID
+        | notion::PROVIDER_ID
         | ollama::PROVIDER_ID
         | opencode::PROVIDER_ID
         | perplexity::PROVIDER_ID
@@ -325,6 +326,17 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
         }),
         _ => None,
     }
+}
+
+/// Whether a provider's local-auth report contains only the browser mode.
+///
+/// Cursor has a second, Cursor-App mode and already returns mode bodies itself. The other
+/// browser-session providers return browser/profile candidates, which the engine puts under
+/// the sole mode before publishing them over D-Bus.
+pub(crate) fn has_browser_session_auth(provider: &str) -> bool {
+    browser_auth(provider).is_some_and(|selector| {
+        selector.modes.len() == 1 && selector.modes[0].value == keyed::session::BROWSER_SOURCE
+    })
 }
 
 /// The durable config source an account is already constrained to, if it is complete.
@@ -934,6 +946,7 @@ mod tests {
             manus::PROVIDER_ID,
             mimo::PROVIDER_ID,
             mistral::PROVIDER_ID,
+            notion::PROVIDER_ID,
             ollama::PROVIDER_ID,
             opencode::PROVIDER_ID,
             perplexity::PROVIDER_ID,
