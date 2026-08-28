@@ -224,6 +224,35 @@ impl LockedCredentialFile {
         Ok(UpdateOutcome::Published)
     }
 
+    /// Replaces or adds fields at the document root, merging into the rest of the file.
+    ///
+    /// The counterpart of [`Self::update_top_level`] for a credential file with a flat
+    /// shape — Gemini's `oauth_creds.json` keeps its tokens at the root, with no subtree
+    /// and no source value to compare against: Google's refresh grant never returns a new
+    /// refresh token, so this write can only repeat a rotation that already succeeded at
+    /// the provider. The document is reread under the lock and every unnamed field keeps
+    /// its bytes, as everywhere else in this module.
+    pub fn update_root_fields(
+        &self,
+        updates: &[(&str, serde_json::Value)],
+    ) -> Result<(), CredentialFileError> {
+        if self.path != self.canonical {
+            return Err(CredentialFileError::NotCanonical {
+                path: self.path.clone(),
+                canonical: self.canonical.clone(),
+            });
+        }
+        let metadata = fs::symlink_metadata(&self.path)?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(CredentialFileError::NotRegularFile(self.path.clone()));
+        }
+        let mut updated = fs::read(&self.path)?;
+        for (name, value) in updates {
+            update_field(&mut updated, "", Field::Root(name), value)?;
+        }
+        atomic_private_publish(&self.path, &updated, || Ok(()))
+    }
+
     /// Writes an exact private backup beside the credential file before token exchange.
     pub fn backup(&self) -> Result<PathBuf, CredentialFileError> {
         if self.path != self.canonical {
@@ -656,6 +685,40 @@ impl Drop for VendorWriteLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_root_update_replaces_named_fields_and_keeps_the_rest_of_the_document() {
+        let dir = std::env::temp_dir().join(format!("tidemark-root-update-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).expect("test directory");
+        let path = dir.join("oauth_creds.json");
+        fs::write(
+            &path,
+            r#"{"access_token":"old","refresh_token":"keep","unrelated":{"nested":true}}"#,
+        )
+        .expect("write credentials");
+
+        let locked = CredentialFile::new(path.clone(), path.clone())
+            .lock()
+            .expect("lock acquired");
+        locked
+            .update_root_fields(&[
+                ("access_token", serde_json::Value::from("new")),
+                ("expiry_date", serde_json::Value::from(123_i64)),
+            ])
+            .expect("update published");
+        drop(locked);
+
+        let updated: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("reread")).expect("JSON");
+        assert_eq!(updated["access_token"], "new");
+        assert_eq!(updated["expiry_date"], 123);
+        assert_eq!(updated["refresh_token"], "keep");
+        assert_eq!(updated["unrelated"]["nested"], true);
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "published private");
+        fs::remove_dir_all(&dir).expect("test cleanup");
+    }
 
     #[test]
     fn a_replaced_vendor_lock_is_neither_used_nor_released() {
