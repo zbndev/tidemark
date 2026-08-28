@@ -303,7 +303,20 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
                 },
             ],
         }),
-        qoder::PROVIDER_ID | zoommate::PROVIDER_ID => Some(AuthSelector {
+        abacus::PROVIDER_ID
+        | augment::PROVIDER_ID
+        | commandcode::PROVIDER_ID
+        | longcat::PROVIDER_ID
+        | manus::PROVIDER_ID
+        | mimo::PROVIDER_ID
+        | mistral::PROVIDER_ID
+        | ollama::PROVIDER_ID
+        | opencode::PROVIDER_ID
+        | perplexity::PROVIDER_ID
+        | qoder::PROVIDER_ID
+        | sakana::PROVIDER_ID
+        | t3chat::PROVIDER_ID
+        | zoommate::PROVIDER_ID => Some(AuthSelector {
             option: cursor::AUTH_SOURCE.into(),
             modes: vec![AuthMode {
                 value: cursor::BROWSER_SOURCE.into(),
@@ -867,6 +880,86 @@ mod tests {
             })
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn t3chat_publishes_browser_auth_and_restores_its_selected_profile() {
+        // Without the selector, the settings dialog cannot write a Firefox choice and the
+        // provider necessarily reports NoCredential despite a signed-in browser profile.
+        let definition = catalog(&empty_config())
+            .into_iter()
+            .find(|definition| definition.provider == t3chat::PROVIDER_ID)
+            .expect("T3 Chat is in the catalog");
+        let selector = definition
+            .browser_auth
+            .expect("T3 Chat has local source selection");
+        assert_eq!(selector.option, cursor::AUTH_SOURCE);
+        assert_eq!(
+            selector
+                .modes
+                .iter()
+                .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                .collect::<Vec<_>>(),
+            [(cursor::BROWSER_SOURCE, "Browser")]
+        );
+
+        let path = scratch_config(
+            "t3chat-browser-selection",
+            "providers = [\"t3chat\"]\n\n[provider.t3chat]\nauth-source = \"browser\"\nauth-browser = \"firefox\"\nauth-profile = \"Default\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let account = account(t3chat::PROVIDER_ID, &secrets(), &config)
+            .expect("builds")
+            .expect("T3 Chat account builds");
+        assert_eq!(
+            account.status().auth_selection,
+            Some(tidemark_types::AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some("firefox/Default".into()),
+            })
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn every_browser_session_provider_publishes_a_browser_selector() {
+        // A HandSpec with session::OPTIONS cannot work until the selector exposes those
+        // options to the settings client, so adding a provider without this registration
+        // must be caught here rather than by a person seeing NoCredential.
+        for provider in [
+            abacus::PROVIDER_ID,
+            augment::PROVIDER_ID,
+            commandcode::PROVIDER_ID,
+            longcat::PROVIDER_ID,
+            manus::PROVIDER_ID,
+            mimo::PROVIDER_ID,
+            mistral::PROVIDER_ID,
+            ollama::PROVIDER_ID,
+            opencode::PROVIDER_ID,
+            perplexity::PROVIDER_ID,
+            qoder::PROVIDER_ID,
+            sakana::PROVIDER_ID,
+            t3chat::PROVIDER_ID,
+            zoommate::PROVIDER_ID,
+        ] {
+            let definition = catalog(&empty_config())
+                .into_iter()
+                .find(|definition| definition.provider == provider)
+                .expect("browser-session provider is in the catalog");
+            let selector = definition
+                .browser_auth
+                .expect("browser-session provider has local source selection");
+            assert_eq!(selector.option, cursor::AUTH_SOURCE, "{provider}");
+            assert_eq!(
+                selector
+                    .modes
+                    .iter()
+                    .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                    .collect::<Vec<_>>(),
+                [(cursor::BROWSER_SOURCE, "Browser")],
+                "{provider}"
+            );
+        }
     }
 
     #[test]
