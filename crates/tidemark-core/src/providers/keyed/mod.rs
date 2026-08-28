@@ -80,6 +80,7 @@ pub mod poe;
 pub mod qoder;
 pub mod sakana;
 pub mod session;
+pub mod stepfun;
 pub mod sub2api;
 pub mod synthetic;
 pub mod t3chat;

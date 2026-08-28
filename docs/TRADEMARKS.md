@@ -54,6 +54,7 @@ whose services the cards are about:
 | `tidemark-poe-symbolic.svg` | Quora, Inc. (Poe) |
 | `tidemark-qoder-symbolic.svg` | Qoder (Alibaba Group) |
 | `tidemark-sakana-symbolic.svg` | Sakana AI |
+| `tidemark-stepfun-symbolic.svg` | StepFun (stepfun.ai) |
 | `tidemark-sub2api-symbolic.svg` | The sub2api project |
 | `tidemark-synthetic-symbolic.svg` | Synthetic |
 | `tidemark-t3chat-symbolic.svg` | T3 Chat (Theo Browne) |

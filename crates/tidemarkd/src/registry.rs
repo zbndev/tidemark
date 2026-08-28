@@ -28,7 +28,7 @@ use tidemark_core::providers::keyed::{
     self, abacus, aiand, alibaba, augment, codebuff, commandcode, cursor, deepgram, deepinfra,
     factory, fireworks, gemini, grok, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo,
     mistral, nanogpt, notion, ollama, openai_api, opencode, openrouter, perplexity, poe, qoder,
-    sakana, sub2api, t3chat, wayfinder, xai, zoommate,
+    sakana, stepfun, sub2api, t3chat, wayfinder, xai, zoommate,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -124,7 +124,9 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 /// per-team regional budgets, Kilo reads a tRPC batch and then a profile, LiteLLM walks a
 /// two-request management ladder, Manus reads its browser session's credit inventory, NanoGPT reads subscription quotas and a prepaid balance,
 /// OpenAI pages two Admin API endpoints, OpenRouter reads credits and key quota, Poe pages
-/// through a usage history, xAI reads a prepaid balance and a spend
+/// through a usage history, StepFun asks a rate-limit RPC and then a plan-status one,
+/// deriving the device id its cookie pair needs from the token's own JWT payload at
+/// build time, xAI reads a prepaid balance and a spend
 /// history — and those whose single request hangs from a required base URL with no
 /// default host, where the shared reader's refusal of a bad value must happen at
 /// build time rather than inside an endpoint closure: LLM Proxy and sub2api — and
@@ -169,6 +171,7 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &poe::SPEC,
     &qoder::SPEC,
     &sakana::SPEC,
+    &stepfun::SPEC,
     &sub2api::SPEC,
     &t3chat::SPEC,
     &wayfinder::SPEC,
@@ -1237,7 +1240,7 @@ mod tests {
                 .is_empty()
         );
         let definitions = catalog(&config);
-        assert_eq!(definitions.len(), 57);
+        assert_eq!(definitions.len(), 58);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
         assert_eq!(

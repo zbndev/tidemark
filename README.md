@@ -96,12 +96,18 @@ Antigravity · Claude · Codex
 ai& · Alibaba Coding Plan · Amp · Chutes · ClawRouter · ClinePass · Codebuff · Crof · Deepgram · DeepInfra ·
 DeepSeek · ElevenLabs · Factory · Fireworks · Groq · IBM Bob · Kilo · Kimi · LiteLLM ·
 LLM Proxy · MiniMax · Moonshot · NanoGPT · Neuralwatt · OpenAI · OpenCode Go · OpenRouter ·
-Poe · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
+Poe · StepFun · sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 Alibaba Coding Plan reads a Coding Plan subscription with a DashScope API key from the Model
 Studio console. The same quota query lives on an international and a China-mainland gateway;
 Tidemark tries the international one first and retries the other when the answer says
 "region", not "account".
+
+StepFun reads a Step Plan account with the Oasis-Token cookie from platform.stepfun.com. The
+token's JWT payload names the device it was issued to; Tidemark derives that device at add
+time and replays both as cookies. The rate-limit answer carries either rolling five-hour and
+weekly windows or the Token Plan's monthly credit pool, and Tidemark draws whichever the
+payload actually holds.
 
 **Local session**
 
