@@ -34,18 +34,20 @@ pub fn name(titles: &Titles, slug: &str) -> String {
 
 /// The windows of a reading, in the order the card draws them.
 ///
-/// Shortest first, windows of unknown length last — the same rule as
-/// [`Snapshot::dominant_window`], which is why the first element of this list *is* the
-/// dominant window. A test below pins them together, because two implementations of one
-/// rule is exactly how the card ends up leading with a different window than the one the
-/// rest of the program calls dominant.
+/// The dominant window first — placed there by construction, using the one rule in
+/// [`Snapshot::dominant_window`], so the two cannot drift — then shortest first, windows
+/// of unknown length last. A test below still pins the first element to the dominant
+/// window, because two implementations of one rule is exactly how the card ends up
+/// leading with a different window than the one the rest of the program calls dominant.
 ///
 /// Nothing is added and nothing is filled in: a provider that reported one window this time
 /// and three the last gets one row, and the card silently rearranges.
 pub fn ordered_windows(snapshot: &Snapshot) -> Vec<Window> {
+    let lead = snapshot.dominant_window().map(|window| window.key.clone());
     let mut windows = snapshot.windows.clone();
     windows.sort_by_key(|window| {
         (
+            !lead.as_ref().is_some_and(|key| *key == window.key),
             window.length.is_none(),
             window.length.map(WindowLength::as_secs),
         )
@@ -99,6 +101,17 @@ mod tests {
         }
     }
 
+    fn keyed_window(key: &str, length: Option<u64>) -> Window {
+        Window {
+            key: WindowKey::named(key),
+            title: key.to_owned(),
+            subtitle: None,
+            used_percent: 0.0,
+            resets_at: None,
+            length: length.and_then(WindowLength::from_secs),
+        }
+    }
+
     #[test]
     fn a_provider_is_called_what_the_catalog_calls_it() {
         let definitions = [ProviderDefinition {
@@ -141,6 +154,21 @@ mod tests {
             lengths,
             [Some(18_000), Some(604_800), Some(2_592_000), None]
         );
+    }
+
+    #[test]
+    fn the_window_a_provider_leads_with_is_drawn_first_even_when_it_is_not_the_shortest() {
+        // NanoGPT's weekly input pool is what its card is about; the hundred-images-a-day
+        // allowance beside it is the secondary row.
+        let mut card = snapshot(vec![
+            keyed_window("images/w86400", Some(86_400)),
+            keyed_window("input-tokens/w604800", Some(604_800)),
+        ]);
+        card.provider = ProviderId::new("nanogpt");
+
+        let ordered = ordered_windows(&card);
+        let keys: Vec<&str> = ordered.iter().map(|w| w.key.as_str()).collect();
+        assert_eq!(keys, ["input-tokens/w604800", "images/w86400"]);
     }
 
     #[test]

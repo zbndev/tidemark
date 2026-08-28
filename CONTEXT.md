@@ -462,10 +462,13 @@ history that does not exist yet.
 - **Empty state** — when there are no configured providers, the main window says
   `Welcome to Tidemark` and `Add a provider to start tracking your quota.` The providers
   button remains available while the daemon is connected.
-- **Card** — logo, name, plan, state chip; the shortest present window as a large number
+- **Card** — logo, name, plan, state chip; the dominant window as a large number
   over a bar with a pace mark; remaining windows as thin rows; and one quiet line along the
-  bottom saying when the reading was taken. The plan is a convention rather than a field:
-  the first row of the detail section a provider titles `Plan`.
+  bottom saying when the reading was taken. The dominant window is the shortest present
+  one, unless the provider names a lead window of its own — NanoGPT does, because its
+  weekly input pool is the subscription and the hundred-images-a-day allowance beside it
+  would otherwise be the headline at zero, every day. The plan is a convention rather than
+  a field: the first row of the detail section a provider titles `Plan`.
 - **The mark, the name and the plan stand on one baseline**, and the mark is the largest
   thing in the row — it is what the eye finds a card by. Bottom-aligning the widgets does
   not achieve this: GTK aligns allocations, and a label's allocation ends at its font's
@@ -575,7 +578,7 @@ history that does not exist yet.
   machine the bug is on.
 - **Tray** — a static StatusNotifierItem, owned by the interface process rather than by the
   daemon. Left click shows the window; the menu lists the configured accounts with the
-  percentage of their shortest window, in the order the grid uses, and ends with Open,
+  percentage of their dominant window, in the order the grid uses, and ends with Open,
   Refresh and Quit. The icon takes the `NeedsAttention` status at the same threshold the
   bar changes colour at and the notification fires at, so the panel cannot become a third
   opinion about when a window got worrying.

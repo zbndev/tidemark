@@ -28,7 +28,10 @@
 //! `images/w86400` and `input-tokens/w86400` are two windows, not one. A period this build
 //! has never seen is skipped; a pool whose numbers cannot be read fails the whole fetch. A
 //! stated limit becomes the absolutes under the bar, and a pool with no stated limit keeps
-//! its percentage and prints nothing it would have to invent.
+//! its percentage and prints nothing it would have to invent. The weekly input pool is the
+//! substance of the subscription, so it is the window the card leads with — named in
+//! `tidemark_types::lead_window_key` — and it is published first; the images allowance
+//! beside it is a secondary row.
 //!
 //! A prepaid balance has no denominator. USD is therefore the first row of
 //! [`DetailSection::BALANCE`], which lets the card show the amount without inventing a bar;
@@ -42,7 +45,7 @@ use std::fmt;
 use std::sync::Arc;
 use tidemark_types::{
     AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window,
-    WindowKey, WindowLength,
+    WindowKey, WindowLength, lead_window_key,
 };
 
 pub const PROVIDER_ID: &str = "nanogpt";
@@ -335,12 +338,20 @@ fn parse(
             limit,
         )?);
     }
-    // Shortest window first, the order the card reads best in. `serde_json` hands back a
-    // sorted map, so this is a presentation order rather than a tie-break for randomness.
+    // The weekly input pool is published first — it is the window the card leads with
+    // (`lead_window_key`), and the detail dialog and any wire client list windows in this
+    // order. After it, shortest first; `serde_json` hands back a sorted map, so this is a
+    // presentation order rather than a tie-break for randomness.
+    let lead = lead_window_key(PROVIDER_ID);
     windows.sort_by(|left, right| {
-        let length = |window: &Window| window.length.map_or(u64::MAX, WindowLength::as_secs);
-        length(left)
-            .cmp(&length(right))
+        let leads = |window: &Window| Some(window.key.as_str()) == lead;
+        leads(right)
+            .cmp(&leads(left))
+            .then_with(|| {
+                let length =
+                    |window: &Window| window.length.map_or(u64::MAX, WindowLength::as_secs);
+                length(left).cmp(&length(right))
+            })
             .then_with(|| left.title.cmp(&right.title))
     });
 
@@ -421,18 +432,15 @@ mod tests {
         let snapshot = parse(LIVE, BALANCE, at(1_787_600_000)).expect("parses");
 
         assert_eq!(snapshot.provider.as_str(), "nanogpt");
-        // Three pools are named; `dailyInputTokens` is null, so two are reported.
+        // Three pools are named; `dailyInputTokens` is null, so two are reported. The
+        // weekly input pool is what the card leads with, so it is published first.
         assert_eq!(snapshot.windows.len(), 2);
+        assert_eq!(
+            snapshot.dominant_window().expect("present").key.as_str(),
+            "input-tokens/w604800"
+        );
 
-        let images = &snapshot.windows[0];
-        assert_eq!(images.key.as_str(), "images/w86400");
-        assert_eq!(images.title, "Daily images");
-        assert_eq!(images.used_percent, 0.0);
-        assert_eq!(images.subtitle.as_deref(), Some("0 / 100 images"));
-        assert_eq!(images.length.expect("known").as_secs(), 86_400);
-        assert_eq!(images.resets_at.expect("reported").as_unix(), 1_787_616_000);
-
-        let tokens = &snapshot.windows[1];
+        let tokens = &snapshot.windows[0];
         assert_eq!(tokens.key.as_str(), "input-tokens/w604800");
         assert_eq!(tokens.title, "Weekly input tokens");
         assert!((tokens.used_percent - 0.155_293_333_333_333_34).abs() < 1e-12);
@@ -442,6 +450,14 @@ mod tests {
         );
         assert_eq!(tokens.length.expect("known").as_secs(), 604_800);
         assert_eq!(tokens.resets_at.expect("reported").as_unix(), 1_788_134_400);
+
+        let images = &snapshot.windows[1];
+        assert_eq!(images.key.as_str(), "images/w86400");
+        assert_eq!(images.title, "Daily images");
+        assert_eq!(images.used_percent, 0.0);
+        assert_eq!(images.subtitle.as_deref(), Some("0 / 100 images"));
+        assert_eq!(images.length.expect("known").as_secs(), 86_400);
+        assert_eq!(images.resets_at.expect("reported").as_unix(), 1_787_616_000);
 
         let balance = snapshot
             .details
@@ -474,13 +490,13 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "input-tokens/w604800",
                 "images/w86400",
-                "input-tokens/w86400",
-                "input-tokens/w604800"
+                "input-tokens/w86400"
             ]
         );
 
-        let tokens = &snapshot.windows[1];
+        let tokens = &snapshot.windows[2];
         assert_eq!(tokens.title, "Daily input tokens");
         assert_eq!(tokens.used_percent, 100.0);
         assert_eq!(tokens.subtitle, None, "no limit is stated for this pool");
@@ -547,6 +563,12 @@ mod tests {
         let snapshot = parse(DOCUMENTED, BALANCE, at(1_738_000_000)).expect("parses");
 
         assert_eq!(snapshot.windows.len(), 2);
+        // No weekly input pool is metered here, so the named lead window is not there and
+        // the card falls back to the shortest present window.
+        assert_eq!(
+            snapshot.dominant_window().expect("present").key.as_str(),
+            "w86400"
+        );
 
         let daily = &snapshot.windows[0];
         assert_eq!(daily.key.as_str(), "w86400");
