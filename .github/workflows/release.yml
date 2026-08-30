@@ -92,8 +92,8 @@ jobs:
     steps:
       - name: Bootstrap the container
         run: |
-          dnf install -y git gcc cmake gtk4-devel libadwaita-devel sqlite-devel \
-            pkgconf-pkg-config rpm-build
+          dnf install -y git gcc gcc-c++ cmake clang-devel gtk4-devel \
+            libadwaita-devel sqlite-devel pkgconf-pkg-config rpm-build
       - uses: actions/checkout@v5
       - name: Install rustup
         run: |

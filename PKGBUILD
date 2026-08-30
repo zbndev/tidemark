@@ -23,7 +23,7 @@ license=('MIT')
 # rustls and oo7's native crypto keep OpenSSL and libsecret out; SQLite is the system
 # library rather than a vendored copy, on purpose (CONTEXT.md § API floor).
 depends=('gtk4' 'libadwaita' 'sqlite' 'dbus')
-makedepends=('cargo' 'cmake')
+makedepends=('cargo' 'cmake' 'clang')
 install=tidemark.install
 source=()
 # !lto is not a preference, it is a link requirement. rustls pulls aws-lc-sys, whose C and
