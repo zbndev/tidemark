@@ -1,9 +1,12 @@
 //! The one place an outbound HTTP client is built, and the proxy it is built against.
 //!
-//! Everything that leaves this process identifies itself as `Tidemark/<version>`, and that
-//! is load-bearing rather than polite: `platform.claude.com` sits behind Cloudflare and
-//! answers a request with no user agent with `403 browser_signature_banned`. See
-//! `CONTEXT.md` § Networking.
+//! Everything that leaves this process through this builder identifies itself as
+//! `Tidemark/<version>`, and that is load-bearing rather than polite:
+//! `platform.claude.com` sits behind Cloudflare and answers a request with no user agent
+//! with `403 browser_signature_banned`. See `CONTEXT.md` § Networking. The one client
+//! that deliberately does not start here is T3 Chat's: its edge admits only
+//! browser-shaped clients, so it rides an emulating stack instead — see
+//! `keyed/t3chat.rs`.
 //!
 //! # Why the proxy is process-wide rather than a parameter
 //!

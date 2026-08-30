@@ -6,11 +6,16 @@
 //! the lines around it are tRPC bookkeeping that has changed shape before. Two meters
 //! matter: the four-hour base allowance, and the month's overage, whose reset is the
 //! subscription period's end and nothing else — the billing reset timestamp tracks the
-//! usage window. Vercel fronts the site with a browser challenge; when it asks, that is
-//! reported as a sentence, because this client identifies itself as Tidemark and will not
-//! pretend to be a browser to get past it.
+//! usage window. Vercel fronts the site with a challenge that gates on the client's TLS
+//! and HTTP/2 fingerprints rather than on cookies or headers — this program's honest
+//! rustls client is challenged no matter what it says, and a real browser is let through
+//! with no session at all — so this one provider rides an emulating stack (`wreq`,
+//! BoringSSL under a Chrome or Firefox fingerprint, whichever family the chosen session's
+//! browser is) carrying the session's own cookies. The impersonation is transport-level
+//! only; no web engine runs inside this process. When the edge challenges even that, it
+//! is reported as a sentence.
 
-use super::{HandSpec, Options, ProviderError, redact_query, session};
+use super::{HandSpec, Options, ProviderError, http, session};
 use crate::browser::{self, Keyring, SafeStorage, auth::Selection};
 use crate::providers::{BoxFuture, Credential, Provider};
 use serde::Deserialize;
@@ -21,6 +26,7 @@ use tidemark_types::{
     AccountId, AuthCandidate, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot,
     Timestamp, Window, WindowKey, WindowLength,
 };
+use wreq_util::Emulation;
 
 #[cfg(test)]
 use std::path::Path;
@@ -55,7 +61,7 @@ fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>
 /// One T3 Chat account, authenticated by one explicitly chosen browser profile. The gate
 /// is the whole jar: the site's session cookie has no name worth pinning.
 pub struct T3Chat {
-    client: reqwest::Client,
+    client: wreq::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
     selection: Option<Selection>,
@@ -65,11 +71,15 @@ pub struct T3Chat {
 
 impl T3Chat {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        let selection = session::selection(options);
+        let browser = selection
+            .as_ref()
+            .map_or("chrome", |selection| selection.browser.as_str());
         Ok(Self {
-            client: super::http::client()?,
+            client: Self::browser_client(browser)?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
-            selection: session::selection(options),
+            selection,
             #[cfg(test)]
             base_url: None,
         })
@@ -82,7 +92,7 @@ impl T3Chat {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
-            client: super::http::client()?,
+            client: Self::browser_client("firefox")?,
             home: Some(home.to_path_buf()),
             storage,
             selection: Some(Selection {
@@ -90,6 +100,31 @@ impl T3Chat {
                 profile: None,
             }),
             base_url: Some(base_url.trim_end_matches('/').to_owned()),
+        })
+    }
+
+    /// The browser-shaped client this provider's edge demands: the same proxy policy and
+    /// timeouts as [`http::client`], but wearing a browser's TLS and HTTP/2 fingerprint
+    /// instead of this program's name — see the module docs.
+    fn browser_client(browser: &str) -> Result<wreq::Client, ProviderError> {
+        let mut builder = wreq::Client::builder()
+            .emulation(emulation_for(browser))
+            .timeout(http::REQUEST_TIMEOUT)
+            .connect_timeout(http::CONNECT_TIMEOUT);
+        if let Some(proxy) = http::proxy() {
+            let proxy = wreq::Proxy::all(proxy.url())
+                .map(|proxy| proxy.no_proxy(wreq::NoProxy::from_string(http::NO_PROXY)))
+                .map_err(|error| {
+                    ProviderError::Emulated(format!(
+                        "could not build the browser-emulating client: {error}"
+                    ))
+                })?;
+            builder = builder.proxy(proxy);
+        }
+        builder.build().map_err(|error| {
+            ProviderError::Emulated(format!(
+                "could not build the browser-emulating client: {error}"
+            ))
         })
     }
 
@@ -102,18 +137,20 @@ impl T3Chat {
         url.to_owned()
     }
 
-    fn data_request(&self, url: &str, cookie: &str) -> Result<reqwest::Request, ProviderError> {
+    fn data_request(&self, url: &str, cookie: &str) -> Result<wreq::Request, ProviderError> {
         self.client
             .get(url)
             .query(&[("batch", "1"), ("input", INPUT)])
             .header("trpc-accept", "application/jsonl")
             .header("x-trpc-source", "web-client")
             .header("x-trpc-batch", "true")
-            .header(reqwest::header::REFERER, REFERER)
-            .header(reqwest::header::ORIGIN, ORIGIN)
-            .header(reqwest::header::COOKIE, cookie)
+            .header("referer", REFERER)
+            .header("origin", ORIGIN)
+            .header("cookie", cookie)
             .build()
-            .map_err(|error| ProviderError::Client(redact_query(error)))
+            .map_err(|error| {
+                ProviderError::Emulated(format!("could not build the T3 Chat request: {error}"))
+            })
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
@@ -129,28 +166,99 @@ impl T3Chat {
         .await?
         .ok_or(ProviderError::NoCredential)?;
         let request = self.data_request(&self.url(API_URL), &session.header)?;
-        let (body, _) = super::request_inspected(PROVIDER_ID, &self.client, request, |response| {
-            if is_vercel_challenge(response) {
-                return Err(ProviderError::Local(
-                    "T3 Chat asked for a browser check".to_owned(),
-                ));
-            }
-            Ok(())
-        })
-        .await?;
+        let body = self.send_inspected(request).await?;
         parse(&body, Timestamp::now())
     }
 
-    async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
-        let Ok(request) = self.data_request(API_URL, header) else {
-            return crate::browser::auth::Validation::Unreachable;
-        };
-        match super::validate(&self.client, request).await {
-            Ok(()) => crate::browser::auth::Validation::Ready,
-            Err(ProviderError::Credential { status: 401 | 403 }) => {
-                crate::browser::auth::Validation::Rejected
+    /// [`super::request_inspected`] on the emulating stack: the same `Retry-After` read,
+    /// the same challenge-before-status rule, the same `http::check`, the same
+    /// raw-response log and empty-body refusal — against `wreq` types, because the
+    /// request must wear a browser's fingerprint and `request_inspected` speaks
+    /// `reqwest`.
+    async fn send_inspected(&self, request: wreq::Request) -> Result<String, ProviderError> {
+        let url = request.url().as_str().to_owned();
+        let sent = crate::debug::enabled().then(|| crate::debug::Sent::get(&url));
+        let note = |answer| {
+            if let Some(sent) = &sent {
+                crate::debug::record(crate::debug::Exchange {
+                    provider: PROVIDER_ID,
+                    sent: *sent,
+                    answer,
+                });
             }
-            Err(_) => crate::browser::auth::Validation::Unreachable,
+        };
+
+        let response = match self.client.execute(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                let error = ProviderError::Emulated(format!("request failed: {error}"));
+                note(crate::debug::Answer::Failed {
+                    error: &error.to_string(),
+                });
+                return Err(error);
+            }
+        };
+
+        let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        if is_vercel_challenge(&response) {
+            note(crate::debug::Answer::Refused { status });
+            return Err(ProviderError::Challenged(
+                "T3 Chat asked for a browser check".to_owned(),
+            ));
+        }
+        if let Err(error) = http::check(wire_status(status), retry_after.as_deref()) {
+            note(crate::debug::Answer::Refused { status });
+            return Err(error);
+        }
+
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                let error = ProviderError::Emulated(format!("request failed: {error}"));
+                note(crate::debug::Answer::Failed {
+                    error: &error.to_string(),
+                });
+                return Err(error);
+            }
+        };
+        // Before the emptiness check, as in `request_inspected`: "the provider answered
+        // nothing" is one of the things a person reads the raw-response log to confirm.
+        note(crate::debug::Answer::Body {
+            status,
+            body: &body,
+        });
+        if body.trim().is_empty() {
+            return Err(ProviderError::malformed(
+                "the provider answered an empty body",
+            ));
+        }
+        Ok(body)
+    }
+
+    async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
+        use crate::browser::auth::Validation;
+        let Ok(request) = self.data_request(&self.url(API_URL), header) else {
+            return Validation::Unreachable;
+        };
+        let Ok(response) = self.client.execute(request).await else {
+            return Validation::Unreachable;
+        };
+        if is_vercel_challenge(&response) {
+            return Validation::Challenged;
+        }
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok());
+        match http::check(wire_status(response.status().as_u16()), retry_after) {
+            Ok(()) => Validation::Ready,
+            Err(ProviderError::Credential { status: 401 | 403 }) => Validation::Rejected,
+            Err(_) => Validation::Unreachable,
         }
     }
 
@@ -198,13 +306,29 @@ fn cookie_query() -> browser::Query {
 }
 
 /// Whether the response is Vercel's browser challenge, which arrives stamped as a 429.
-fn is_vercel_challenge(response: &reqwest::Response) -> bool {
-    response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+fn is_vercel_challenge(response: &wreq::Response) -> bool {
+    response.status().as_u16() == 429
         && response
             .headers()
             .get("x-vercel-mitigated")
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.eq_ignore_ascii_case("challenge"))
+}
+
+/// The fingerprint family the emulating client wears: the chosen session's own browser
+/// family, so the handshake, the headers and the cookies all name one browser. Zen is a
+/// Firefox build underneath; an unrecognised name reads as Chrome, the most common shape.
+fn emulation_for(browser: &str) -> Emulation {
+    match browser {
+        "firefox" | "zen" => Emulation::Firefox139,
+        _ => Emulation::Chrome137,
+    }
+}
+
+/// `http::check` speaks `reqwest`'s status type; a status off the wire is the same u16 on
+/// either stack. The fallback only satisfies the type — the wire never sends it here.
+fn wire_status(status: u16) -> reqwest::StatusCode {
+    reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::BAD_GATEWAY)
 }
 
 /// The subscription fields the meters need.
@@ -370,7 +494,7 @@ fn instant(raw: Option<f64>) -> Option<Timestamp> {
 
 #[cfg(test)]
 mod tests {
-    use super::{T3Chat, is_vercel_challenge, parse};
+    use super::{T3Chat, emulation_for, is_vercel_challenge, parse};
     use crate::browser::SafeStorage;
     use crate::providers::{Provider, ProviderError};
     use crate::secrets::SecretError;
@@ -610,8 +734,28 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(ProviderError::Local(sentence)) if sentence == "T3 Chat asked for a browser check"
+            Err(ProviderError::Challenged(sentence)) if sentence == "T3 Chat asked for a browser check"
         ));
+    }
+
+    #[test]
+    fn a_vercel_challenge_during_proof_is_reported_as_challenged() {
+        let home = gecko_home();
+        let (base_url, _requests, server) = chained_server(vec![(
+            "GET /api/trpc/getCustomerData?batch=1&input=",
+            429,
+            "x-vercel-mitigated: challenge\r\n",
+            "checkpoint",
+        )]);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let validation =
+            runtime.block_on(provider(&home, &base_url).validate_header("session=t3-value"));
+        server.join().expect("server exits");
+
+        assert_eq!(validation, crate::browser::auth::Validation::Challenged);
     }
 
     #[test]
@@ -662,11 +806,7 @@ mod tests {
                 .build()
                 .expect("runtime");
             let response = runtime
-                .block_on(
-                    reqwest::Client::new()
-                        .get(format!("{base_url}/probe"))
-                        .send(),
-                )
+                .block_on(wreq::Client::new().get(format!("{base_url}/probe")).send())
                 .expect("answers");
             server.join().expect("server exits");
             is_vercel_challenge(&response)
@@ -676,5 +816,16 @@ mod tests {
         assert!(!answered(429, "x-vercel-mitigated: rate-limit\r\n"));
         assert!(!answered(429, ""));
         assert!(!answered(500, "x-vercel-mitigated: challenge\r\n"));
+    }
+
+    #[test]
+    fn the_emulated_fingerprint_follows_the_selected_browser_family() {
+        use wreq_util::Emulation;
+
+        assert!(matches!(emulation_for("chrome"), Emulation::Chrome137));
+        assert!(matches!(emulation_for("chromium"), Emulation::Chrome137));
+        assert!(matches!(emulation_for("firefox"), Emulation::Firefox139));
+        // Zen is a Firefox build underneath; its cookies arrive on a Firefox handshake.
+        assert!(matches!(emulation_for("zen"), Emulation::Firefox139));
     }
 }

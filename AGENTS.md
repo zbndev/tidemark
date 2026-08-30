@@ -98,8 +98,9 @@ shellcheck scripts/*.sh data/restart-user-daemon \
   data/packaging/deb/postinst data/packaging/rpm/post-install.sh
 ```
 
-Build prerequisites: `libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config` (Fedora:
-`gtk4-devel libadwaita-devel sqlite-devel pkgconf-pkg-config`). There are **no** `build.rs`
+Build prerequisites: `libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake` (Fedora:
+`gtk4-devel libadwaita-devel sqlite-devel pkgconf-pkg-config cmake`; `cmake` builds the
+BoringSSL behind T3 Chat's emulating client). There are **no** `build.rs`
 files, no Blueprint, no gresource — nothing to pre-compile.
 
 Run-by-hand only (no workflow triggers them): `scripts/test-release.sh` and
@@ -133,7 +134,9 @@ human work. Tag push starts the release workflow, so the script runs no tests.
 - **Credentials:** never log a `Credential`. Keyring-locked is a state, not a crash. Third-party
   CLI credential files are field-merged atomically into their canonical vendor path only
   (ADR-0001) — never created, reformatted, or written to discovered copies.
-- **Networking:** identify every request as `Tidemark/<version>`; never impersonate a browser.
+- **Networking:** identify every request as `Tidemark/<version>`. Browser-transport emulation
+  is reserved for an edge that fingerprints clients — T3 Chat rides `wreq` (see
+  `CONTEXT.md` § Networking); embedding web (webview, JS engine) is forbidden outright.
   One proxy configuration for every client and subprocess; never proxy loopback.
 - **Presentation:** never invent history points, quota lengths, reset times, or hide windows.
   70% / 90% are the shared card and notification thresholds. Order is the `providers` array —

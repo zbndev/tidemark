@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config \
+            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake \
             dbus-daemon desktop-file-utils appstream shellcheck
 
       - name: The tag must agree with Cargo.toml
@@ -60,7 +60,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config dpkg-dev
+            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake dpkg-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-deb --locked
       - run: cargo build --release --locked --workspace
@@ -92,7 +92,7 @@ jobs:
     steps:
       - name: Bootstrap the container
         run: |
-          dnf install -y git gcc gtk4-devel libadwaita-devel sqlite-devel \
+          dnf install -y git gcc cmake gtk4-devel libadwaita-devel sqlite-devel \
             pkgconf-pkg-config rpm-build
       - uses: actions/checkout@v5
       - name: Install rustup
