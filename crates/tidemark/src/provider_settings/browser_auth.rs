@@ -20,11 +20,17 @@ use super::model;
 
 /// Whether activating this candidate may ask the daemon to select it.
 ///
-/// Only a proven source is a real offer. Missing and rejected ones are insensitive —
-/// choosing them could only record a failure — and so are locked-keyring and inconclusive
-/// verdicts, which are answers about *checking* rather than about the credential.
+/// A proven source is a real offer, and a challenged one is nearly that: its jar already
+/// holds a live session, and it is the edge refusing the proof rather than the provider
+/// refusing the credential — the choice starts working when the challenge lifts. Missing
+/// and rejected ones are insensitive — choosing them could only record a failure — and so
+/// are locked-keyring and inconclusive verdicts, which are answers about *checking* rather
+/// than about the credential.
 pub(super) fn candidate_selectable(state: AuthCandidateState) -> bool {
-    matches!(state, AuthCandidateState::Ready)
+    matches!(
+        state,
+        AuthCandidateState::Ready | AuthCandidateState::Challenged
+    )
 }
 
 /// Whether a source's children deserve rows of their own.
@@ -51,6 +57,7 @@ pub(super) fn state_word(state: Option<AuthCandidateState>) -> &'static str {
         Some(AuthCandidateState::Missing) => "Not found",
         Some(AuthCandidateState::Rejected) => "Rejected",
         Some(AuthCandidateState::WaitingForKeyring) => "Keyring locked",
+        Some(AuthCandidateState::Challenged) => "Browser check",
         Some(AuthCandidateState::Unreachable) | None => "Inconclusive",
     }
 }
@@ -243,11 +250,28 @@ impl Half {
     }
 
     /// Marks the one row the account's published selection names, inside its own mode.
+    ///
+    /// The claim names a profile leaf, while the rows stop at the browser whenever its
+    /// profiles are not drawn — the row that carries the claim is the longest row id the
+    /// claim is or lives under.
     fn apply_selection(&self, selection: Option<&AuthSelection>) {
         let claimed =
             selection.and_then(|selection| model::selected_candidate(selection, &self.mode_value));
-        for row in self.rows.borrow().iter() {
-            row.in_use.set_visible(claimed == Some(row.id.as_str()));
+        let rows = self.rows.borrow();
+        let marked = claimed.and_then(|claimed| {
+            rows.iter()
+                .filter(|row| {
+                    claimed == row.id
+                        || claimed
+                            .strip_prefix(row.id.as_str())
+                            .is_some_and(|rest| rest.starts_with('/'))
+                })
+                .max_by_key(|row| row.id.len())
+                .map(|row| row.id.clone())
+        });
+        for row in rows.iter() {
+            row.in_use
+                .set_visible(marked.as_deref() == Some(row.id.as_str()));
         }
     }
 }
@@ -410,6 +434,12 @@ impl BrowserAuth {
         for half in &self.halves {
             half.apply_report(report, &self.on_choose);
         }
+        // Rebuilt rows start unmarked: repaint the claim the daemon last published rather
+        // than leaving it to the next unrelated status publication.
+        let selection = self.selection.borrow().clone();
+        for half in &self.halves {
+            half.apply_selection(selection.as_ref());
+        }
     }
 
     /// Snaps the pill and the halves onto the published mode while nobody has navigated.
@@ -466,10 +496,13 @@ mod tests {
     use std::rc::Rc;
 
     use adw::prelude::*;
-    use tidemark_types::{AuthCandidate, AuthCandidateState, AuthMode};
+    use tidemark_types::{
+        AuthCandidate, AuthCandidateState, AuthMode, AuthSelection, AuthSelector,
+    };
 
     use super::{
-        CandidateRow, Half, candidate_selectable, shows_profile_children, state_classes, state_word,
+        BrowserAuth, CandidateRow, Half, candidate_selectable, shows_profile_children,
+        state_classes, state_word,
     };
 
     fn candidate(id: &str, state: AuthCandidateState) -> AuthCandidate {
@@ -483,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_proven_working_candidate_is_selectable() {
+    fn a_proven_candidate_is_selectable() {
         assert!(candidate_selectable(AuthCandidateState::Ready));
     }
 
@@ -496,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_auth_widgets_keep_source_rows_separate_from_the_tabs() {
+    fn browser_auth_widgets_keep_rows_separate_and_marks_across_rebuilds() {
         if !widgets() {
             eprintln!("skipped: no display is available");
             return;
@@ -522,6 +555,51 @@ mod tests {
         assert!(half.group.title().is_empty());
         assert!(half.group.header_suffix().is_none());
         assert_eq!(half.group.margin_top(), 12);
+
+        // Inspection rebuilds every row; the In-use mark must not wait for the next
+        // unrelated status publication to come back.
+        let selector = AuthSelector {
+            option: "auth-source".into(),
+            modes: vec![AuthMode {
+                value: "browser".into(),
+                title: "Browser".into(),
+            }],
+        };
+        let selection = AuthSelection {
+            mode: "browser".into(),
+            candidate: Some("firefox".into()),
+        };
+        let auth = BrowserAuth::new(&selector, Some(&selection), Rc::new(|_| {}));
+        let report = || {
+            vec![AuthCandidate {
+                children: vec![candidate("firefox", AuthCandidateState::Ready)],
+                ..candidate("browser", AuthCandidateState::Ready)
+            }]
+        };
+
+        auth.apply_report(report());
+        auth.apply_report(report());
+
+        let marks = |auth: &BrowserAuth| -> Vec<bool> {
+            auth.halves[0]
+                .rows
+                .borrow()
+                .iter()
+                .map(|row| row.in_use.is_visible())
+                .collect()
+        };
+        assert_eq!(marks(&auth), [true]);
+
+        // The claim names a profile leaf while the rows stop at the browser: the browser
+        // row carries it.
+        let leaf = AuthSelection {
+            mode: "browser".into(),
+            candidate: Some("firefox/Default".into()),
+        };
+        let auth = BrowserAuth::new(&selector, Some(&leaf), Rc::new(|_| {}));
+        auth.apply_report(report());
+        auth.apply_report(report());
+        assert_eq!(marks(&auth), [true]);
     }
 
     #[test]
@@ -569,6 +647,21 @@ mod tests {
         // that a source a newer daemon doubts is usable.
         assert_eq!(state_word(None), "Inconclusive");
         assert_eq!(state_classes(None), &["dim-label"]);
+    }
+
+    #[test]
+    fn a_challenged_candidate_is_selectable_with_neutral_words() {
+        // The jar already holds a live session; it is the edge refusing the proof, not the
+        // provider refusing the credential.
+        assert!(candidate_selectable(AuthCandidateState::Challenged));
+        assert_eq!(
+            state_word(Some(AuthCandidateState::Challenged)),
+            "Browser check"
+        );
+        assert_eq!(
+            state_classes(Some(AuthCandidateState::Challenged)),
+            &["dim-label"]
+        );
     }
 
     #[test]
