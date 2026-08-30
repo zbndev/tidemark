@@ -177,7 +177,7 @@ docker build --network host -q -t tidemark-build-ubuntu - >/dev/null <<'DOCKERFI
 FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive PATH=/root/.cargo/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential curl ca-certificates pkg-config dpkg-dev \
+        build-essential cmake curl ca-certificates pkg-config dpkg-dev \
         libgtk-4-dev libadwaita-1-dev libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
@@ -196,7 +196,7 @@ DOCKERFILE
 docker build --network host -q -t tidemark-build-fedora - >/dev/null <<'DOCKERFILE'
 FROM fedora:44
 ENV PATH=/root/.cargo/bin:$PATH
-RUN dnf install -y gcc curl git pkgconf-pkg-config rpm-build \
+RUN dnf install -y gcc cmake curl git pkgconf-pkg-config rpm-build \
         gtk4-devel libadwaita-devel sqlite-devel && dnf clean all
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 RUN cargo install cargo-generate-rpm --locked

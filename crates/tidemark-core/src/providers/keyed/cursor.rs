@@ -449,6 +449,7 @@ fn validation_state(validation: crate::browser::auth::Validation) -> AuthCandida
         crate::browser::auth::Validation::Ready => AuthCandidateState::Ready,
         crate::browser::auth::Validation::Rejected => AuthCandidateState::Rejected,
         crate::browser::auth::Validation::Unreachable => AuthCandidateState::Unreachable,
+        crate::browser::auth::Validation::Challenged => AuthCandidateState::Challenged,
     }
 }
 
@@ -465,6 +466,12 @@ fn candidate_state(candidates: &[AuthCandidate]) -> AuthCandidateState {
         .any(|state| state == AuthCandidateState::WaitingForKeyring)
     {
         return AuthCandidateState::WaitingForKeyring;
+    }
+    if states
+        .clone()
+        .any(|state| state == AuthCandidateState::Challenged)
+    {
+        return AuthCandidateState::Challenged;
     }
     if states
         .clone()

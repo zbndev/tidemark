@@ -342,9 +342,18 @@ distribution-wide LTO off; `PKGBUILD` does it with `options=(!lto)`.
 
 Every request sets `User-Agent: Tidemark/<version>`. This is not cosmetic:
 `platform.claude.com` sits behind Cloudflare and answers an unset agent with
-`403 browser_signature_banned`. Identify honestly by product name — never impersonate a
-browser. We authenticate with real credentials to documented endpoints; there is no reason
-to look like anything other than what we are.
+`403 browser_signature_banned`. Identify honestly by product name. We authenticate with
+real credentials to documented endpoints; outside the one exception below there is no
+reason to look like anything other than what we are.
+
+**The one exception: T3 Chat.** Vercel fronts `t3.chat` with a challenge that gates on
+the client's TLS and HTTP/2 fingerprints rather than on cookies or headers — the honest
+client is challenged no matter what it says, and a real browser is let through with no
+session at all. That provider alone rides `wreq` (BoringSSL), emulating the Chrome or
+Firefox fingerprint of the chosen session's browser family while carrying that session's
+own cookies. The impersonation is transport-level only. The prohibition that actually
+matters — and holds without exception — is on embedding web: no webview, no JS engine,
+no bundled browser ever runs inside this process.
 
 **One proxy, set once, applied everywhere.** `[proxy]` in `config.toml` names a mode
 (`off`, `http`, `https`, `socks5`), a host and a port; `tidemark-core`'s `providers::http`

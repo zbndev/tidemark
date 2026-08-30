@@ -274,6 +274,9 @@ pub enum AuthCandidateState {
     WaitingForKeyring,
     /// The daemon could not reach the provider to determine whether the source works.
     Unreachable,
+    /// The provider's edge answered the proof with a browser challenge instead of a
+    /// verdict, so whether the source works could not be determined.
+    Challenged,
 }
 
 impl AuthCandidateState {
@@ -285,6 +288,7 @@ impl AuthCandidateState {
             Self::Rejected => "rejected",
             Self::WaitingForKeyring => "waiting-for-keyring",
             Self::Unreachable => "unreachable",
+            Self::Challenged => "challenged",
         }
     }
 
@@ -297,6 +301,7 @@ impl AuthCandidateState {
             Self::Rejected,
             Self::WaitingForKeyring,
             Self::Unreachable,
+            Self::Challenged,
         ]
         .into_iter()
         .find(|candidate| candidate.as_wire() == value)

@@ -246,8 +246,9 @@ fn merge_sources(
 
 fn source_rank(state: Option<AuthCandidateState>) -> u8 {
     match state {
-        Some(AuthCandidateState::Ready) => 5,
-        Some(AuthCandidateState::WaitingForKeyring) => 4,
+        Some(AuthCandidateState::Ready) => 6,
+        Some(AuthCandidateState::WaitingForKeyring) => 5,
+        Some(AuthCandidateState::Challenged) => 4,
         Some(AuthCandidateState::Unreachable) => 3,
         Some(AuthCandidateState::Rejected) => 2,
         Some(AuthCandidateState::Missing) | None => 1,

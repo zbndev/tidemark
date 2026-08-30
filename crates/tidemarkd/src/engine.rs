@@ -593,7 +593,7 @@ impl Engine {
             return Err(format!("account {provider}/{account} is not configured"));
         };
         let sources = self.inspect_auth_sources(provider, account).await?;
-        let Some(selection) = ready_auth_selection(&sources, &selection) else {
+        let Some(selection) = resolvable_auth_selection(&sources, &selection) else {
             return Err("the selected authentication source is not ready".into());
         };
 
@@ -1321,11 +1321,14 @@ pub fn stored_kind(credential: CredentialKind) -> Option<Kind> {
     }
 }
 
-/// The exact ready source an inspected choice names.
+/// The exact usable source an inspected choice names.
 ///
-/// A browser parent is a one-click shorthand only. The persisted choice is its first ready
-/// profile in inspection order, so a later poll cannot re-scan and choose a different account.
-fn ready_auth_selection(
+/// A browser parent is a one-click shorthand only. The persisted choice is its first usable
+/// profile in inspection order, so a later poll cannot re-scan and choose a different
+/// account. Usable is a proven source or a challenged one: an edge challenge refuses the
+/// proof rather than the session, so a challenged choice starts working the moment the edge
+/// lets the client through.
+fn resolvable_auth_selection(
     sources: &[AuthCandidate],
     selection: &AuthSelection,
 ) -> Option<AuthSelection> {
@@ -1333,10 +1336,10 @@ fn ready_auth_selection(
         .iter()
         .find(|candidate| candidate.id == selection.mode)?;
     match selection.candidate.as_deref() {
-        None if mode.state() == Some(AuthCandidateState::Ready) => Some(selection.clone()),
+        None if selectable_state(mode.state()) => Some(selection.clone()),
         None => None,
         Some(candidate) => {
-            ready_descendant(&mode.children, candidate).map(|candidate| AuthSelection {
+            selectable_descendant(&mode.children, candidate).map(|candidate| AuthSelection {
                 mode: selection.mode.clone(),
                 candidate: Some(candidate.id.clone()),
             })
@@ -1344,30 +1347,39 @@ fn ready_auth_selection(
     }
 }
 
-/// Finds a selected ready candidate and resolves parent shortcuts to their first ready leaf.
-fn ready_descendant<'a>(
+/// Finds a selected usable candidate and resolves parent shortcuts to their first usable leaf.
+fn selectable_descendant<'a>(
     candidates: &'a [AuthCandidate],
     selected: &str,
 ) -> Option<&'a AuthCandidate> {
     candidates.iter().find_map(|candidate| {
-        if candidate.id == selected && candidate.state() == Some(AuthCandidateState::Ready) {
-            first_ready_leaf(candidate)
+        if candidate.id == selected && selectable_state(candidate.state()) {
+            first_selectable_leaf(candidate)
         } else {
-            ready_descendant(&candidate.children, selected)
+            selectable_descendant(&candidate.children, selected)
         }
     })
 }
 
-/// The first proven leaf in the daemon's stable discovery order.
-fn first_ready_leaf(candidate: &AuthCandidate) -> Option<&AuthCandidate> {
-    if candidate.state() != Some(AuthCandidateState::Ready) {
+/// The first usable leaf in the daemon's stable discovery order.
+fn first_selectable_leaf(candidate: &AuthCandidate) -> Option<&AuthCandidate> {
+    if !selectable_state(candidate.state()) {
         return None;
     }
     candidate
         .children
         .iter()
-        .find_map(first_ready_leaf)
+        .find_map(first_selectable_leaf)
         .or(Some(candidate))
+}
+
+/// Whether an inspected candidate may be persisted: proven, or blocked only by an edge
+/// challenge the provider never saw.
+fn selectable_state(state: Option<AuthCandidateState>) -> bool {
+    matches!(
+        state,
+        Some(AuthCandidateState::Ready | AuthCandidateState::Challenged)
+    )
 }
 
 /// What asking the keyring for a credential produced.
@@ -1390,7 +1402,9 @@ fn state_for(error: &ProviderError) -> ProviderState {
         ProviderError::Client(_)
         | ProviderError::Transport(_)
         | ProviderError::Http { .. }
-        | ProviderError::Local(_) => ProviderState::Unreachable,
+        | ProviderError::Local(_)
+        | ProviderError::Emulated(_)
+        | ProviderError::Challenged(_) => ProviderState::Unreachable,
     }
 }
 
@@ -1454,7 +1468,7 @@ mod tests {
         assert_eq!(report[0].id, "browser");
         assert_eq!(report[0].children[0].id, "firefox");
         assert_eq!(
-            ready_auth_selection(
+            resolvable_auth_selection(
                 &report,
                 &AuthSelection {
                     mode: "browser".into(),
@@ -1465,6 +1479,67 @@ mod tests {
                 mode: "browser".into(),
                 candidate: Some("firefox/Default".into()),
             })
+        );
+    }
+
+    #[test]
+    fn a_challenged_browser_choice_is_persisted_as_its_challenged_profile() {
+        // An edge challenge refuses the proof, not the session: the recorded profile
+        // starts working the moment the edge lets polls through.
+        let report = browser_mode_report(
+            "t3chat",
+            vec![AuthCandidate {
+                id: "firefox".into(),
+                title: "Firefox".into(),
+                subtitle: None,
+                state: "challenged".into(),
+                children: vec![AuthCandidate {
+                    id: "firefox/Default".into(),
+                    title: "Default".into(),
+                    subtitle: None,
+                    state: "challenged".into(),
+                    children: Vec::new(),
+                }],
+            }],
+        );
+
+        assert_eq!(
+            resolvable_auth_selection(
+                &report,
+                &AuthSelection {
+                    mode: "browser".into(),
+                    candidate: Some("firefox".into()),
+                },
+            ),
+            Some(AuthSelection {
+                mode: "browser".into(),
+                candidate: Some("firefox/Default".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn an_unanswered_browser_choice_is_still_refused() {
+        let report = browser_mode_report(
+            "t3chat",
+            vec![AuthCandidate {
+                id: "firefox".into(),
+                title: "Firefox".into(),
+                subtitle: None,
+                state: "unreachable".into(),
+                children: Vec::new(),
+            }],
+        );
+
+        assert_eq!(
+            resolvable_auth_selection(
+                &report,
+                &AuthSelection {
+                    mode: "browser".into(),
+                    candidate: Some("firefox".into()),
+                },
+            ),
+            None
         );
     }
 

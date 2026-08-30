@@ -301,9 +301,18 @@ pub enum ProviderError {
         /// The status.
         status: u16,
     },
+    /// The provider's edge answered with a browser challenge this client does not perform.
+    /// The string is the whole message: the refusal is the edge's, not this machine's.
+    #[error("{0}")]
+    Challenged(String),
     /// A local prerequisite such as a credential file could not be accessed safely.
     #[error("local provider state is unavailable: {0}")]
     Local(String),
+    /// The browser-emulating transport a provider's edge demands failed. The string is
+    /// the whole message: [`ProviderError::Transport`] it cannot be, because that variant
+    /// carries a `reqwest` error and this stack is not `reqwest`.
+    #[error("{0}")]
+    Emulated(String),
     /// The response arrived but does not mean what we expect it to mean.
     #[error("unparseable response: {0}")]
     Malformed(String),

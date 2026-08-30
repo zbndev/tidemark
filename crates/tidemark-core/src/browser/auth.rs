@@ -32,6 +32,8 @@ pub enum Validation {
     Rejected,
     /// The proof request could not say whether the source works.
     Unreachable,
+    /// An edge browser challenge answered instead of the provider.
+    Challenged,
 }
 
 /// A selected store's cookie header, kept entirely inside core.
@@ -202,6 +204,7 @@ where
                         Validation::Ready => AuthCandidateState::Ready,
                         Validation::Rejected => AuthCandidateState::Rejected,
                         Validation::Unreachable => AuthCandidateState::Unreachable,
+                        Validation::Challenged => AuthCandidateState::Challenged,
                     }
                 }
             }
@@ -253,6 +256,12 @@ fn aggregate_state(children: &[AuthCandidate]) -> AuthCandidateState {
         .any(|state| state == AuthCandidateState::WaitingForKeyring)
     {
         return AuthCandidateState::WaitingForKeyring;
+    }
+    if states
+        .clone()
+        .any(|state| state == AuthCandidateState::Challenged)
+    {
+        return AuthCandidateState::Challenged;
     }
     if states
         .clone()

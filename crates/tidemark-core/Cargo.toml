@@ -40,3 +40,11 @@ time = { version = "0.3.47", features = ["formatting", "parsing"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "fs", "sync"] }
 toml_edit = { version = "0.25.13", default-features = false, features = ["parse", "display"] }
 tracing = "0.1.44"
+# wreq: the browser-emulating HTTP stack T3 Chat's Vercel edge demands — it gates on the
+# client's TLS/HTTP2 fingerprint, and no honest rustls ClientHello passes (see
+# `providers/keyed/t3chat.rs`). Pinned below 0.16, which raises the toolchain above this
+# workspace's MSRV. `socks`/`system-proxy`: mirror the reqwest feature set so the one
+# proxy policy holds on both stacks; the compression features because the Chrome preset
+# announces them in `accept-encoding`.
+wreq = { version = "~0.15.3", default-features = false, features = ["webpki-roots", "socks", "charset", "gzip", "brotli", "zstd", "deflate"] }
+wreq-util = "~0.1.0"

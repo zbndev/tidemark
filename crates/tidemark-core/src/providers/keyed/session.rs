@@ -281,6 +281,12 @@ fn aggregate_state(candidates: &[AuthCandidate]) -> AuthCandidateState {
     }
     if states
         .clone()
+        .any(|state| state == AuthCandidateState::Challenged)
+    {
+        return AuthCandidateState::Challenged;
+    }
+    if states
+        .clone()
         .any(|state| state == AuthCandidateState::Unreachable)
     {
         return AuthCandidateState::Unreachable;

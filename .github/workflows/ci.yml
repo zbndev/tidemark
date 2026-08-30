@@ -37,7 +37,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config \
+            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake \
             dbus-daemon desktop-file-utils appstream shellcheck
 
       - name: Confirm the toolkit meets the floor
