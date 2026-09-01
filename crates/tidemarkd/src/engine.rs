@@ -96,8 +96,7 @@ pub enum Command {
         /// Completion sent after persistence and in-memory mutation finish.
         reply: oneshot::Sender<Result<(), String>>,
     },
-    // Constructed by the D-Bus service when Task 6 exposes this operation.
-    #[allow(dead_code)]
+    /// Add one account to a configured provider and report the persisted topology result.
     AddAccount {
         /// Stable provider slug.
         provider: String,
@@ -113,8 +112,10 @@ pub enum Command {
         provider: String,
         /// Stable account name.
         account: String,
-        /// Completion sent after persistence and in-memory mutation finish.
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Completion with every surviving `(provider, account)` pair once persistence
+        /// and in-memory mutation finish. The reply carries the topology because the
+        /// caller's mirror of it is updated asynchronously and must not be guessed at.
+        reply: oneshot::Sender<Result<Vec<(String, String)>, String>>,
     },
     /// Validate and persist one provider setting in the same queue as topology writes.
     SetOption {
@@ -169,8 +170,7 @@ pub enum Command {
         /// Completion sent after persistence and in-memory state agree.
         reply: oneshot::Sender<Result<(), String>>,
     },
-    // Constructed by the D-Bus service when Task 6 exposes this operation.
-    #[allow(dead_code)]
+    /// Reorder one provider's accounts, in the same queue as topology writes.
     SetAccountOrder {
         /// Stable provider slug.
         provider: String,
@@ -244,10 +244,28 @@ pub struct Account {
     due: Instant,
 }
 
+/// Whether a string can serve as an account id in `config.toml`, the Secret Service and
+/// the history: lowercase, non-empty, and not starting or ending with a hyphen.
+/// Shared by the engine and the D-Bus service so a call rejected here is rejected for the
+/// same reason there.
+pub(crate) fn valid_account_slug(account: &str) -> bool {
+    !account.is_empty()
+        && !account.starts_with('-')
+        && !account.ends_with('-')
+        && account
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 /// Everything about an account that is fixed at registration, kept together so both
 /// constructors fill it the same way.
-fn describe(status: &mut ProviderStatus, kind: CredentialKind) {
+fn describe(status: &mut ProviderStatus, kind: CredentialKind, account: &AccountId) {
     status.credential = Some(kind.as_wire().to_owned());
+    // The label is the account's own name until a rename says otherwise. The default
+    // account *is* the provider as far as a client is concerned, and stays unlabelled —
+    // the wire contract keeps the key absent rather than empty.
+    status.account_label =
+        (account.as_str() != AccountId::default().as_str()).then(|| account.to_string());
 }
 
 impl std::fmt::Debug for Account {
@@ -268,7 +286,7 @@ impl Account {
     /// An account whose client is built from a stored key the first time it is polled.
     pub fn new(provider: ProviderId, account: AccountId, factory: Factory) -> Self {
         let mut status = ProviderStatus::pending(&provider, &account);
-        describe(&mut status, CredentialKind::Key);
+        describe(&mut status, CredentialKind::Key, &account);
         Self {
             status,
             provider,
@@ -294,7 +312,7 @@ impl Account {
             client.source().unwrap_or_default(),
         );
         let mut status = ProviderStatus::pending(&provider, &account);
-        describe(&mut status, CredentialKind::External);
+        describe(&mut status, CredentialKind::External, &account);
         Self {
             status,
             provider,
@@ -319,7 +337,7 @@ impl Account {
     /// the rest of them.
     pub fn keyless(provider: ProviderId, account: AccountId, rebuild: Rebuild) -> Self {
         let mut status = ProviderStatus::pending(&provider, &account);
-        describe(&mut status, CredentialKind::None);
+        describe(&mut status, CredentialKind::None, &account);
         Self {
             status,
             provider,
@@ -511,13 +529,7 @@ impl Engine {
     }
     /// Adds one account to a configured provider without restarting the loop.
     pub async fn add_account(&mut self, provider: &str, account: &str) -> Result<(), String> {
-        if account.is_empty()
-            || account.starts_with('-')
-            || account.ends_with('-')
-            || !account
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        {
+        if !valid_account_slug(account) {
             return Err(format!("account {account:?} is not a valid lowercase slug"));
         }
 
@@ -609,8 +621,12 @@ impl Engine {
     }
 
     /// Removes an exact account from future polling, promoting the first survivor when the
-    /// provider still has accounts left.
-    pub async fn remove_provider(&mut self, provider: &str, account: &str) -> Result<(), String> {
+    /// provider still has accounts left. The reply carries the surviving topology.
+    pub async fn remove_provider(
+        &mut self,
+        provider: &str,
+        account: &str,
+    ) -> Result<Vec<(String, String)>, String> {
         let Some(index) = self.accounts.iter().position(|configured| {
             configured.provider.as_str() == provider && configured.account.as_str() == account
         }) else {
@@ -673,6 +689,33 @@ impl Engine {
                 .map_err(|error| error.to_string())?;
         }
 
+        // The removal is durable, so the removed account's credentials can be cleared.
+        // A promotion has already moved the survivor's own kind into the `default` slot;
+        // the kinds the survivor does not use belonged to the removed account alone, and
+        // they sit under ids that are gone (`old`) or have changed hands (`default`).
+        // A keyring failure here is logged rather than returned: the topology has already
+        // been persisted, and a caller told the removal failed would be wrong about that.
+        if let Some(old) = promote_from.as_ref() {
+            let provider_id = ProviderId::new(provider);
+            for kind in [Kind::Key, Kind::Token] {
+                if Some(kind) == promoted_kind {
+                    continue;
+                }
+                for id in [old.as_str(), AccountId::default().as_str()] {
+                    if let Err(error) = self
+                        .secrets
+                        .delete(kind, &provider_id, &AccountId::new(id))
+                        .await
+                    {
+                        tracing::warn!(
+                            %error, provider, account = id,
+                            "could not clear a credential the promoted account does not use"
+                        );
+                    }
+                }
+            }
+        }
+
         let removed = self.accounts.remove(index);
         if promote_from.is_some() {
             let promoted_index = self
@@ -717,7 +760,16 @@ impl Engine {
                 })
                 .await;
         }
-        Ok(())
+        Ok(self
+            .accounts
+            .iter()
+            .map(|account| {
+                (
+                    account.provider.as_str().to_owned(),
+                    account.account.as_str().to_owned(),
+                )
+            })
+            .collect())
     }
 
     /// Puts one provider's configured accounts in the order the user selected.
@@ -1988,6 +2040,31 @@ mod tests {
                 secret.to_owned(),
             );
         }
+
+        /// Everything held, as `(kind, provider, account, secret)`, sorted for exact
+        /// comparison.
+        fn held(&self) -> Vec<(String, String, String, String)> {
+            let mut entries: Vec<_> = self
+                .0
+                .lock()
+                .expect("no test panics here")
+                .iter()
+                .map(|((kind, provider, account), secret)| {
+                    (
+                        match kind {
+                            Kind::Key => "key",
+                            Kind::Token => "token",
+                        }
+                        .to_owned(),
+                        provider.clone(),
+                        account.clone(),
+                        secret.clone(),
+                    )
+                })
+                .collect();
+            entries.sort();
+            entries
+        }
     }
 
     impl Secrets for StoredSecrets {
@@ -2466,6 +2543,102 @@ mod tests {
             !saw_removed,
             "the promoted account absorbs default; no Removed publication is needed"
         );
+    }
+
+    #[tokio::test]
+    async fn an_extra_account_publishes_its_slug_as_its_label() {
+        let mut harness = Harness::configured("account-label", &["kimi"]).await;
+        assert_eq!(
+            harness.engine.accounts()[0].status.account_label,
+            None,
+            "the default account is the provider itself and stays unlabelled"
+        );
+
+        harness
+            .engine
+            .add_account("kimi", "work")
+            .await
+            .expect("account added");
+
+        assert_eq!(
+            harness.engine.accounts()[1].status.account_label.as_deref(),
+            Some("work")
+        );
+        assert!(
+            matches!(
+                harness.updates.recv().await.expect("announced"),
+                Publication::Changed(status) if status.account_label.as_deref() == Some("work")
+            ),
+            "the label rides the publication, not only the engine's private state"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promotion_moves_the_survivors_credential_and_clears_the_rest() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-promote-cleanup-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let mut config = Config::at(config_path.clone()).expect("empty config parses");
+        config.add_provider("kimi").expect("provider configured");
+        config
+            .set_accounts("kimi", &["default".into(), "work".into()])
+            .expect("accounts configured");
+
+        let secrets = Arc::new(StoredSecrets::default());
+        secrets.insert(Kind::Key, "kimi", "default", "default-key");
+        secrets.insert(Kind::Key, "kimi", "work", "work-key");
+        secrets.insert(Kind::Token, "kimi", "default", "stale-token");
+        secrets.insert(Kind::Token, "kimi", "work", "stale-token");
+        let secrets_dyn: Arc<dyn Secrets> = secrets.clone();
+        let accounts = crate::registry::accounts(&secrets_dyn, &config).expect("accounts built");
+        let (tx, rx) = mpsc::channel(64);
+        let notices = Arc::new(Recorder::default());
+        let mut harness = Harness {
+            engine: Engine::new(
+                accounts,
+                History::in_memory().expect("an in-memory database opens"),
+                secrets_dyn,
+                tx,
+                config_path.clone(),
+                scheduler::RefreshMode::Auto,
+                Arc::clone(&notices) as Arc<dyn Notifier>,
+            ),
+            updates: rx,
+            config_path: config_path.clone(),
+            notices,
+        };
+
+        let topology = harness
+            .engine
+            .remove_provider("kimi", "default")
+            .await
+            .expect("default removed");
+
+        assert_eq!(
+            topology,
+            vec![("kimi".to_owned(), "default".to_owned())],
+            "the reply carries the surviving topology, not just success"
+        );
+        assert_eq!(
+            harness.engine.accounts()[0].status.account_label,
+            None,
+            "the survivor takes the default identity and its unlabelled status with it"
+        );
+        assert_eq!(
+            secrets.held(),
+            vec![(
+                "key".to_owned(),
+                "kimi".to_owned(),
+                "default".to_owned(),
+                "work-key".to_owned()
+            )],
+            "the survivor's key moved into the default slot, and every credential of the \
+             removed account and the old id — including kinds the survivor does not use — \
+             is gone"
+        );
+        let _ = std::fs::remove_file(config_path);
     }
 
     #[tokio::test]
