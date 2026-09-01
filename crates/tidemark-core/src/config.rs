@@ -664,6 +664,36 @@ impl Config {
         self.write()
     }
 
+    /// Sets one provider's ordered account list and writes the file.
+    pub fn set_accounts(&mut self, provider: &str, accounts: &[String]) -> Result<(), ConfigError> {
+        self.normalize_providers(None)?;
+        let providers = self
+            .document
+            .entry(PROVIDER_TABLE)
+            .or_insert_with(|| Item::Table(implicit_table()));
+        let providers = providers
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: PROVIDER_TABLE.to_owned(),
+            })?;
+        let table = providers
+            .entry(provider)
+            .or_insert_with(|| Item::Table(Table::new()));
+        let table = table
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: format!("{PROVIDER_TABLE}.{provider}"),
+            })?;
+        let mut array = Array::new();
+        for account in accounts {
+            array.push(Value::from(account.as_str()));
+        }
+        table.insert(ACCOUNTS_KEY, Item::Value(array.into()));
+        self.write()
+    }
+
     /// Stores one daemon-validated browser-cookie source in one staged config write.
     ///
     /// Browser candidates travel over D-Bus as opaque `browser` or `browser/profile` paths.
@@ -1103,6 +1133,27 @@ mod tests {
         assert_eq!(
             config.accounts("claude").unwrap(),
             vec!["default".to_string(), "work".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_accounts_list_can_be_written_and_read_back_in_order() {
+        let path = scratch("accounts-write");
+        let _ = std::fs::remove_file(&path);
+        let mut config = Config::at(path.clone()).expect("empty");
+        let accounts = ["default".to_owned(), "work".to_owned()];
+
+        config
+            .set_accounts("zai", &accounts)
+            .expect("accounts written");
+
+        let reread = Config::at(path.clone()).expect("parses");
+        assert_eq!(reread.accounts("zai").expect("accounts readable"), accounts);
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert!(
+            text.contains("[provider.zai]\naccounts = [\"default\", \"work\"]"),
+            "{text}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
