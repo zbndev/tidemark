@@ -77,3 +77,12 @@ jobs:
         run: |
           shellcheck scripts/*.sh data/restart-user-daemon \
             data/packaging/deb/postinst data/packaging/rpm/post-install.sh
+
+  nix:
+    name: Nix flake
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build and exercise the flake in Docker
+        run: scripts/test-nix-flake.sh
