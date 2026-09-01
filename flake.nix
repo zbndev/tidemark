@@ -4,7 +4,7 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
-    { nixpkgs, ... }:
+    { self, nixpkgs, ... }:
     let
       systems = [
         "x86_64-linux"
@@ -48,6 +48,31 @@
             type = "app";
             program = "${package}/bin/tidemarkd";
           };
+        }
+      );
+
+      nixosModules.default = import ./nix/module.nix { inherit self; };
+
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          evaluated = nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              self.nixosModules.default
+              { services.tidemark.enable = true; }
+            ];
+          };
+          service = evaluated.config.systemd.user.services.tidemarkd;
+        in
+        assert service.wantedBy == [ ];
+        assert service.serviceConfig.Type == "dbus";
+        assert service.serviceConfig.BusName == "io.github.zbndev.Tidemark.Daemon";
+        assert
+          service.serviceConfig.ExecStart == "${evaluated.config.services.tidemark.package}/bin/tidemarkd";
+        {
+          nixos-module = pkgs.runCommandNoCC "tidemark-nixos-module-evaluation" { } "touch $out";
         }
       );
 
