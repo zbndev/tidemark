@@ -226,6 +226,7 @@ pub struct Keyed {
     client: reqwest::Client,
     credential: Credential,
     url: String,
+    account: AccountId,
 }
 
 impl Keyed {
@@ -236,6 +237,7 @@ impl Keyed {
     /// what is missing instead of the `Unreachable` a malformed URL would produce on
     /// every poll.
     pub fn new(
+        account: AccountId,
         spec: &'static Spec,
         credential: Credential,
         options: &Options,
@@ -257,6 +259,7 @@ impl Keyed {
             client: http::client()?,
             credential,
             url: (spec.endpoint)(options),
+            account,
         })
     }
 
@@ -530,7 +533,7 @@ impl Provider for Keyed {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -684,7 +687,13 @@ mod tests {
 
     #[test]
     fn a_bearer_key_goes_in_the_authorization_header() {
-        let keyed = Keyed::new(&BEARER, Credential::new("sk-1"), &options(&[])).expect("builds");
+        let keyed = Keyed::new(
+            AccountId::default(),
+            &BEARER,
+            Credential::new("sk-1"),
+            &options(&[]),
+        )
+        .expect("builds");
         let request = keyed.build_request().expect("builds");
         assert_eq!(
             request
@@ -702,7 +711,13 @@ mod tests {
 
     #[test]
     fn a_header_key_goes_in_the_header_the_spec_names() {
-        let keyed = Keyed::new(&HEADER, Credential::new("sk-2"), &options(&[])).expect("builds");
+        let keyed = Keyed::new(
+            AccountId::default(),
+            &HEADER,
+            Credential::new("sk-2"),
+            &options(&[]),
+        )
+        .expect("builds");
         let request = keyed.build_request().expect("builds");
         assert_eq!(request.headers().get("x-api-key").expect("present"), "sk-2");
         assert!(
@@ -716,7 +731,13 @@ mod tests {
 
     #[test]
     fn a_query_key_goes_in_the_query_string_and_is_escaped() {
-        let keyed = Keyed::new(&QUERY, Credential::new("a b&c"), &options(&[])).expect("builds");
+        let keyed = Keyed::new(
+            AccountId::default(),
+            &QUERY,
+            Credential::new("a b&c"),
+            &options(&[]),
+        )
+        .expect("builds");
         let request = keyed.build_request().expect("builds");
         assert_eq!(request.url().query_pairs().count(), 1);
         assert_eq!(
@@ -732,7 +753,13 @@ mod tests {
 
     #[test]
     fn a_posting_spec_sends_its_body_and_content_type() {
-        let keyed = Keyed::new(&POSTING, Credential::new("sk-3"), &options(&[])).expect("builds");
+        let keyed = Keyed::new(
+            AccountId::default(),
+            &POSTING,
+            Credential::new("sk-3"),
+            &options(&[]),
+        )
+        .expect("builds");
         let request = keyed.build_request().expect("builds");
         assert_eq!(request.method(), reqwest::Method::POST);
         assert_eq!(
@@ -752,8 +779,15 @@ mod tests {
 
     #[test]
     fn the_endpoint_reads_the_accounts_options() {
-        let global = Keyed::new(&REGIONAL, Credential::new("sk-4"), &options(&[])).expect("builds");
+        let global = Keyed::new(
+            AccountId::default(),
+            &REGIONAL,
+            Credential::new("sk-4"),
+            &options(&[]),
+        )
+        .expect("builds");
         let cn = Keyed::new(
+            AccountId::default(),
             &REGIONAL,
             Credential::new("sk-4"),
             &options(&[("region", "cn")]),
@@ -770,8 +804,13 @@ mod tests {
         // mechanism's own guard: without it a future spec with no default host would say
         // "Unreachable: relative URL without a base" on every poll, with nothing pointing
         // at the settings field that fixes it.
-        let error = Keyed::new(&SELF_HOSTED, Credential::new("sk-6"), &options(&[]))
-            .expect_err("the required option is unset");
+        let error = Keyed::new(
+            AccountId::default(),
+            &SELF_HOSTED,
+            Credential::new("sk-6"),
+            &options(&[]),
+        )
+        .expect_err("the required option is unset");
         assert!(
             matches!(error, ProviderError::Local(ref message)
                 if message == "Base URL is not set for this account"),
@@ -779,6 +818,7 @@ mod tests {
         );
 
         let blank = Keyed::new(
+            AccountId::default(),
             &SELF_HOSTED,
             Credential::new("sk-6"),
             &options(&[("base_url", "  ")]),
@@ -790,6 +830,7 @@ mod tests {
         );
 
         let set = Keyed::new(
+            AccountId::default(),
             &SELF_HOSTED,
             Credential::new("sk-6"),
             &options(&[("base_url", "https://self.example.invalid/")]),
@@ -837,7 +878,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_blank_credential_is_refused_before_a_request_is_spent() {
-        let keyed = Keyed::new(&BEARER, Credential::new("   "), &options(&[])).expect("builds");
+        let keyed = Keyed::new(
+            AccountId::default(),
+            &BEARER,
+            Credential::new("   "),
+            &options(&[]),
+        )
+        .expect("builds");
         assert!(matches!(
             keyed.fetch().await,
             Err(ProviderError::Credential { status: 401 })
@@ -862,6 +909,7 @@ mod tests {
             options: &[],
         };
         let keyed = Keyed::new(
+            AccountId::default(),
             &QUERY_LEAK,
             Credential::new("sk-query-secret"),
             &options(&[]),
@@ -877,15 +925,26 @@ mod tests {
 
     #[test]
     fn the_client_reports_the_specs_identity() {
-        let keyed = Keyed::new(&BEARER, Credential::new("sk-5"), &options(&[])).expect("builds");
+        let keyed = Keyed::new(
+            AccountId::default(),
+            &BEARER,
+            Credential::new("sk-5"),
+            &options(&[]),
+        )
+        .expect("builds");
         assert_eq!(keyed.id(), ProviderId::new("test"));
         assert_eq!(keyed.account(), AccountId::default());
     }
 
     #[test]
     fn a_keyed_client_never_prints_its_credential() {
-        let keyed =
-            Keyed::new(&BEARER, Credential::new("sk-super-secret"), &options(&[])).expect("builds");
+        let keyed = Keyed::new(
+            AccountId::default(),
+            &BEARER,
+            Credential::new("sk-super-secret"),
+            &options(&[]),
+        )
+        .expect("builds");
         let rendered = format!("{keyed:?}");
         assert!(!rendered.contains("super-secret"), "{rendered}");
     }

@@ -136,6 +136,8 @@ pub struct Claude {
     own: Option<Arc<dyn Secrets>>,
     /// Which of the two credentials this account reads — see the module docs.
     source: Source,
+    /// The configured account whose Tidemark login this client reads.
+    account: AccountId,
     usage_url: String,
     refresh_url: String,
     profile_url: String,
@@ -155,7 +157,11 @@ pub fn cli_credentials_path() -> Option<PathBuf> {
 
 impl Claude {
     /// Builds the canonical Claude Code account at `~/.claude/.credentials.json`.
-    pub fn new(own: Option<Arc<dyn Secrets>>, source: Source) -> Result<Self, ProviderError> {
+    pub fn new(
+        account: AccountId,
+        own: Option<Arc<dyn Secrets>>,
+        source: Source,
+    ) -> Result<Self, ProviderError> {
         let path = cli_credentials_path().ok_or_else(|| {
             ProviderError::Local("HOME does not name an absolute directory".into())
         })?;
@@ -168,6 +174,7 @@ impl Claude {
         )?;
         claude.own = own;
         claude.source = source;
+        claude.account = account;
         Ok(claude)
     }
 
@@ -182,6 +189,7 @@ impl Claude {
             credentials,
             own: None,
             source: Source::Auto,
+            account: AccountId::default(),
             usage_url,
             refresh_url,
             profile_url,
@@ -291,7 +299,7 @@ impl Claude {
                     .get(
                         secrets::Kind::Token,
                         &ProviderId::new(PROVIDER_ID),
-                        &AccountId::default(),
+                        &self.account,
                     )
                     .await
                     .map_err(ProviderError::from_secret_error)?;
@@ -303,9 +311,8 @@ impl Claude {
             Source::Auto => {
                 if let Some(own) = &self.own {
                     let provider = ProviderId::new(PROVIDER_ID);
-                    let account = AccountId::default();
                     let stored = own
-                        .get(secrets::Kind::Token, &provider, &account)
+                        .get(secrets::Kind::Token, &provider, &self.account)
                         .await
                         .map_err(ProviderError::from_secret_error)?;
                     if let Some(stored) = stored {
@@ -382,7 +389,7 @@ impl Claude {
         own.set(
             secrets::Kind::Token,
             &ProviderId::new(PROVIDER_ID),
-            &AccountId::default(),
+            &self.account,
             &Credential::new(document.to_string()),
         )
         .await
@@ -495,7 +502,7 @@ impl Provider for Claude {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {

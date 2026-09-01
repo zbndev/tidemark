@@ -351,6 +351,10 @@ impl Account {
     pub fn provider(&self) -> &ProviderId {
         &self.provider
     }
+    #[cfg_attr(not(test), expect(dead_code, reason = "read only by registry tests"))]
+    pub fn account(&self) -> &AccountId {
+        &self.account
+    }
 
     /// The settings as a plain map, which is what a [`Factory`] is handed.
     fn option_values(&self) -> BTreeMap<String, String> {
@@ -440,8 +444,9 @@ impl Engine {
             return Ok(());
         }
 
-        let Some(mut account) = crate::registry::account(provider, &self.secrets, &config)
-            .map_err(|error| error.to_string())?
+        let Some(mut account) =
+            crate::registry::account(provider, &AccountId::default(), &self.secrets, &config)
+                .map_err(|error| error.to_string())?
         else {
             return Err(format!(
                 "provider {provider} is not supported by this build"

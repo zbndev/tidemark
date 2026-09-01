@@ -266,22 +266,23 @@ fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderD
 /// Builds one configured account, or returns `None` for a slug this build does not support.
 pub fn account(
     provider: &str,
+    account: &AccountId,
     secrets: &Arc<dyn Secrets>,
     config: &Config,
 ) -> Result<Option<Account>, ProviderError> {
     let account = match provider {
-        antigravity::PROVIDER_ID => Some(antigravity_account(secrets, config)?),
-        claude::PROVIDER_ID => Some(claude_account(secrets, config)?),
-        codex::PROVIDER_ID => Some(codex_account(secrets, config)?),
+        antigravity::PROVIDER_ID => Some(antigravity_account(account, secrets, config)?),
+        claude::PROVIDER_ID => Some(claude_account(account, secrets, config)?),
+        codex::PROVIDER_ID => Some(codex_account(account, secrets, config)?),
         other => keyed::CATALOG
             .iter()
             .find(|spec| spec.id == other)
-            .map(|spec| keyed_account(spec))
+            .map(|spec| keyed_account(spec, account))
             .or_else(|| {
                 HAND_WRITTEN
                     .iter()
                     .find(|spec| spec.id == other)
-                    .map(|spec| hand_written_account(spec))
+                    .map(|spec| hand_written_account(spec, account))
             }),
     };
     Ok(account.map(|account| {
@@ -383,9 +384,19 @@ pub fn accounts(
         .map_err(|error| ProviderError::Local(error.to_string()))?;
     let mut accounts = Vec::with_capacity(providers.len());
     for provider in providers {
-        match account(&provider, secrets, config)? {
-            Some(account) => accounts.push(account),
-            None => tracing::warn!(provider, "configured provider is unsupported by this build"),
+        for account_id in config
+            .accounts(&provider)
+            .map_err(|error| ProviderError::Local(error.to_string()))?
+        {
+            let account_id = AccountId::new(account_id);
+            match account(&provider, &account_id, secrets, config)? {
+                Some(account) => accounts.push(account),
+                None => tracing::warn!(
+                    provider,
+                    account = %account_id,
+                    "configured provider is unsupported by this build"
+                ),
+            }
         }
     }
     Ok(accounts)
@@ -501,6 +512,15 @@ fn source_value(provider: &str, config: &Config) -> Source {
     Source::from_value(config.option(provider, AUTH_SOURCE))
 }
 
+/// Extra configured accounts have no vendor CLI file, so they always use Tidemark's login.
+fn source_for_account(provider: &str, account: &AccountId, config: &Config) -> Source {
+    if account.as_str() == "default" {
+        source_value(provider, config)
+    } else {
+        Source::OAuth
+    }
+}
+
 /// Whether the local login a provider can read instead of a Tidemark login exists on this
 /// machine — `None` for a provider that has no such login at all.
 ///
@@ -585,18 +605,27 @@ pub async fn login_document(
 }
 
 fn antigravity_account(
+    account: &AccountId,
     secrets: &Arc<dyn Secrets>,
     config: &Config,
 ) -> Result<Account, ProviderError> {
+    let account_id = account.clone();
     Ok(Account::with_client(Arc::new(antigravity::Antigravity::new(
+        account_id.clone(),
         Some(Arc::clone(secrets)),
-        source_value(antigravity::PROVIDER_ID, config),
+        source_for_account(antigravity::PROVIDER_ID, account, config),
     )?))
     .with_rebuild({
         let secrets = Arc::clone(secrets);
+        let account = account_id;
         Box::new(move |options| {
-            let source = Source::from_value(options.get(AUTH_SOURCE).map(String::as_str));
+            let source = if account.as_str() == "default" {
+                Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
+            } else {
+                Source::OAuth
+            };
             Ok(Arc::new(antigravity::Antigravity::new(
+                account.clone(),
                 Some(Arc::clone(&secrets)),
                 source,
             )?) as Arc<dyn Provider>)
@@ -606,54 +635,84 @@ fn antigravity_account(
     .with_hint("Sign in with Google through Tidemark, or read a signed-in agy session."))
 }
 
-fn claude_account(secrets: &Arc<dyn Secrets>, config: &Config) -> Result<Account, ProviderError> {
+fn claude_account(
+    account: &AccountId,
+    secrets: &Arc<dyn Secrets>,
+    config: &Config,
+) -> Result<Account, ProviderError> {
+    let account_id = account.clone();
     Ok(Account::with_client(Arc::new(claude::Claude::new(
+        account_id.clone(),
         Some(Arc::clone(secrets)),
-        source_value(claude::PROVIDER_ID, config),
+        source_for_account(claude::PROVIDER_ID, account, config),
     )?))
     .with_rebuild({
         let secrets = Arc::clone(secrets);
+        let account = account_id;
         Box::new(move |options| {
-            let source = Source::from_value(options.get(AUTH_SOURCE).map(String::as_str));
-            Ok(
-                Arc::new(claude::Claude::new(Some(Arc::clone(&secrets)), source)?)
-                    as Arc<dyn Provider>,
-            )
+            let source = if account.as_str() == "default" {
+                Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
+            } else {
+                Source::OAuth
+            };
+            Ok(Arc::new(claude::Claude::new(
+                account.clone(),
+                Some(Arc::clone(&secrets)),
+                source,
+            )?) as Arc<dyn Provider>)
         })
     })
     .with_credential(CredentialKind::OAuth)
     .with_hint("Sign in through Tidemark, or read Claude Code's own login."))
 }
 
-fn codex_account(secrets: &Arc<dyn Secrets>, config: &Config) -> Result<Account, ProviderError> {
+fn codex_account(
+    account: &AccountId,
+    secrets: &Arc<dyn Secrets>,
+    config: &Config,
+) -> Result<Account, ProviderError> {
+    let account_id = account.clone();
     Ok(Account::with_client(Arc::new(codex::Codex::new(
+        account_id.clone(),
         Some(Arc::clone(secrets)),
-        source_value(codex::PROVIDER_ID, config),
+        source_for_account(codex::PROVIDER_ID, account, config),
     )?))
     .with_rebuild({
         let secrets = Arc::clone(secrets);
+        let account = account_id;
         Box::new(move |options| {
-            let source = Source::from_value(options.get(AUTH_SOURCE).map(String::as_str));
-            Ok(
-                Arc::new(codex::Codex::new(Some(Arc::clone(&secrets)), source)?)
-                    as Arc<dyn Provider>,
-            )
+            let source = if account.as_str() == "default" {
+                Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
+            } else {
+                Source::OAuth
+            };
+            Ok(Arc::new(codex::Codex::new(
+                account.clone(),
+                Some(Arc::clone(&secrets)),
+                source,
+            )?) as Arc<dyn Provider>)
         })
     })
     .with_credential(CredentialKind::OAuth)
-    .with_hint("Sign in through Tidemark, or read the Codex CLI's own login."))
+    .with_hint("Sign in with Tidemark, or read the Codex CLI's own login."))
 }
 
 /// Every key-authenticated account is built the same way: the engine hands over the stored
 /// key and the account's settings, and the spec says what to do with them.
-fn keyed_account(spec: &'static keyed::Spec) -> Account {
+fn keyed_account(spec: &'static keyed::Spec, account: &AccountId) -> Account {
+    let account_id = account.clone();
     Account::new(
         ProviderId::new(spec.id),
-        AccountId::default(),
+        account_id.clone(),
         Box::new(move |credential, options| {
             // The URL is resolved at build time, which is why storing a key or changing a
             // setting drops the client: either may change which host this account talks to.
-            Ok(Arc::new(keyed::Keyed::new(spec, credential, options)?) as Arc<dyn Provider>)
+            Ok(Arc::new(keyed::Keyed::new(
+                account_id.clone(),
+                spec,
+                credential,
+                options,
+            )?) as Arc<dyn Provider>)
         }),
     )
     .with_credential(CredentialKind::Key)
@@ -664,7 +723,7 @@ fn keyed_account(spec: &'static keyed::Spec) -> Account {
 /// the engine hands over the stored key and the account's settings, and the provider's own
 /// builder says what to do with them. It, too, resolves its URLs at build time and refuses
 /// a required option that is unset, naming it.
-fn hand_written_account(spec: &'static keyed::HandSpec) -> Account {
+fn hand_written_account(spec: &'static keyed::HandSpec, account: &AccountId) -> Account {
     if matches!(
         spec.credential,
         CredentialKind::None | CredentialKind::External
@@ -675,7 +734,7 @@ fn hand_written_account(spec: &'static keyed::HandSpec) -> Account {
         // there is genuinely nothing to say about where a nonexistent secret comes from.
         let account = Account::keyless(
             ProviderId::new(spec.id),
-            AccountId::default(),
+            account.clone(),
             Box::new(move |options| (spec.build)(Credential::new(String::new()), options)),
         )
         .with_credential(spec.credential);
@@ -686,7 +745,7 @@ fn hand_written_account(spec: &'static keyed::HandSpec) -> Account {
     }
     Account::new(
         ProviderId::new(spec.id),
-        AccountId::default(),
+        account.clone(),
         Box::new(move |credential, options| (spec.build)(credential, options)),
     )
     .with_credential(spec.credential)
@@ -769,6 +828,45 @@ mod tests {
         ));
         std::fs::write(&path, contents).expect("seeds config");
         path
+    }
+
+    #[test]
+    fn a_configured_provider_builds_one_account_per_account_id() {
+        let path = scratch_config(
+            "zai-accounts",
+            "providers = [\"zai\"]\n\n[provider.zai]\naccounts = [\"default\", \"work\"]\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let accounts = accounts(&secrets(), &config).expect("accounts build");
+
+        assert_eq!(
+            accounts
+                .iter()
+                .map(|account| account.account().as_str().to_owned())
+                .collect::<Vec<_>>(),
+            ["default", "work"]
+        );
+        assert!(
+            accounts
+                .iter()
+                .all(|account| account.provider().as_str() == "zai")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_claude_account_reports_its_constructed_account_id() {
+        let config = empty_config();
+        let account = account(
+            claude::PROVIDER_ID,
+            &AccountId::new("work"),
+            &secrets(),
+            &config,
+        )
+        .expect("builds")
+        .expect("Claude account builds");
+
+        assert_eq!(account.account().as_str(), "work");
     }
 
     #[test]
@@ -856,9 +954,14 @@ mod tests {
             "providers = [\"cursor\"]\n\n[provider.cursor]\nauth-source = \"browser\"\nauth-browser = \"zen\"\nauth-profile = \"work\"\n",
         );
         let config = Config::at(path.clone()).expect("config reads");
-        let account = account(cursor::PROVIDER_ID, &secrets(), &config)
-            .expect("builds")
-            .expect("Cursor account builds");
+        let account = account(
+            cursor::PROVIDER_ID,
+            &AccountId::default(),
+            &secrets(),
+            &config,
+        )
+        .expect("builds")
+        .expect("Cursor account builds");
         assert_eq!(
             account.status().auth_selection,
             Some(tidemark_types::AuthSelection {
@@ -893,9 +996,14 @@ mod tests {
             "providers = [\"qoder\"]\n\n[provider.qoder]\nauth-source = \"browser\"\nauth-browser = \"firefox\"\nauth-profile = \"Default\"\n",
         );
         let config = Config::at(path.clone()).expect("config reads");
-        let account = account(qoder::PROVIDER_ID, &secrets(), &config)
-            .expect("builds")
-            .expect("Qoder account builds");
+        let account = account(
+            qoder::PROVIDER_ID,
+            &AccountId::default(),
+            &secrets(),
+            &config,
+        )
+        .expect("builds")
+        .expect("Qoder account builds");
         assert_eq!(
             account.status().auth_selection,
             Some(tidemark_types::AuthSelection {
@@ -932,9 +1040,14 @@ mod tests {
             "providers = [\"t3chat\"]\n\n[provider.t3chat]\nauth-source = \"browser\"\nauth-browser = \"firefox\"\nauth-profile = \"Default\"\n",
         );
         let config = Config::at(path.clone()).expect("config reads");
-        let account = account(t3chat::PROVIDER_ID, &secrets(), &config)
-            .expect("builds")
-            .expect("T3 Chat account builds");
+        let account = account(
+            t3chat::PROVIDER_ID,
+            &AccountId::default(),
+            &secrets(),
+            &config,
+        )
+        .expect("builds")
+        .expect("T3 Chat account builds");
         assert_eq!(
             account.status().auth_selection,
             Some(tidemark_types::AuthSelection {
@@ -1011,9 +1124,14 @@ mod tests {
             "providers = [\"zoommate\"]\n\n[provider.zoommate]\nauth-source = \"browser\"\nauth-browser = \"firefox\"\nauth-profile = \"Default\"\n",
         );
         let config = Config::at(path.clone()).expect("config reads");
-        let account = account(zoommate::PROVIDER_ID, &secrets(), &config)
-            .expect("builds")
-            .expect("ZoomMate account builds");
+        let account = account(
+            zoommate::PROVIDER_ID,
+            &AccountId::default(),
+            &secrets(),
+            &config,
+        )
+        .expect("builds")
+        .expect("ZoomMate account builds");
         assert_eq!(
             account.status().auth_selection,
             Some(tidemark_types::AuthSelection {
@@ -1066,7 +1184,7 @@ mod tests {
             claude::PROVIDER_ID,
             codex::PROVIDER_ID,
         ] {
-            let account = account(slug, &secrets(), &config)
+            let account = account(slug, &AccountId::default(), &secrets(), &config)
                 .expect("no error")
                 .expect("an OAuth provider builds an account");
             assert!(
@@ -1223,7 +1341,7 @@ mod tests {
         // `Account::new` would ask the keyring for a key that was never stored and report
         // `NoCredential` forever, so a keyless account is built without a factory at all —
         // and without a hint, there being nowhere to send anyone for a credential.
-        let account = hand_written_account(&KEYLESS_SPEC);
+        let account = hand_written_account(&KEYLESS_SPEC, &AccountId::default());
         assert_eq!(
             account.status().credential.as_deref(),
             Some(CredentialKind::None.as_wire())
@@ -1375,7 +1493,7 @@ mod tests {
             assert_eq!(entry.credential_hint, spec.credential_hint);
             assert_eq!(entry.options.len(), spec.options.len());
             assert!(
-                account(spec.id, &secrets(), &config)
+                account(spec.id, &AccountId::default(), &secrets(), &config)
                     .expect("no error")
                     .is_some(),
                 "{} must build an account",
@@ -1431,16 +1549,22 @@ mod tests {
 
     #[test]
     fn a_keyed_spec_builds_a_configured_account() {
-        let built = account("zai", &secrets(), &empty_config()).expect("no error");
+        let built =
+            account("zai", &AccountId::default(), &secrets(), &empty_config()).expect("no error");
         assert!(built.is_some(), "a slug in keyed::CATALOG must build");
     }
 
     #[test]
     fn a_slug_no_build_supports_is_still_not_an_account() {
         assert!(
-            account("nonesuch", &secrets(), &empty_config())
-                .expect("no error")
-                .is_none(),
+            account(
+                "nonesuch",
+                &AccountId::default(),
+                &secrets(),
+                &empty_config()
+            )
+            .expect("no error")
+            .is_none(),
             "an unknown slug is warned about, not turned into an account"
         );
     }

@@ -155,13 +155,19 @@ pub struct Codex {
     own: Option<Arc<dyn Secrets>>,
     /// Which of the two credentials this account reads — see the module docs.
     source: Source,
+    /// The configured account whose Tidemark login this client reads.
+    account: AccountId,
     usage_url: String,
     refresh_url: String,
 }
 
 impl Codex {
     /// Builds the canonical Codex account at `$CODEX_HOME/auth.json`, or `~/.codex`.
-    pub fn new(own: Option<Arc<dyn Secrets>>, source: Source) -> Result<Self, ProviderError> {
+    pub fn new(
+        account: AccountId,
+        own: Option<Arc<dyn Secrets>>,
+        source: Source,
+    ) -> Result<Self, ProviderError> {
         let path = cli_credentials_path().ok_or_else(|| {
             ProviderError::Local("HOME does not name an absolute directory".into())
         })?;
@@ -172,6 +178,7 @@ impl Codex {
         )?;
         codex.own = own;
         codex.source = source;
+        codex.account = account;
         Ok(codex)
     }
 
@@ -185,6 +192,7 @@ impl Codex {
             credentials,
             own: None,
             source: Source::Auto,
+            account: AccountId::default(),
             usage_url,
             refresh_url,
         })
@@ -303,7 +311,7 @@ impl Codex {
             .get(
                 secrets::Kind::Token,
                 &ProviderId::new(PROVIDER_ID),
-                &AccountId::default(),
+                &self.account,
             )
             .await
             .map_err(ProviderError::from_secret_error)?;
@@ -351,7 +359,7 @@ impl Codex {
         own.set(
             secrets::Kind::Token,
             &ProviderId::new(PROVIDER_ID),
-            &AccountId::default(),
+            &self.account,
             &Credential::new(document.to_string()),
         )
         .await
@@ -451,7 +459,7 @@ impl Provider for Codex {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {

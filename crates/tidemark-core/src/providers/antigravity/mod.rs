@@ -123,11 +123,17 @@ pub struct Antigravity {
     token_endpoint: String,
     local: Box<dyn LocalQuota>,
     source: Source,
+    /// The configured account whose Tidemark login this client reads.
+    account: AccountId,
 }
 
 impl Antigravity {
     /// Builds the provider. The local source starts no process until it is selected.
-    pub fn new(own: Option<Arc<dyn Secrets>>, source: Source) -> Result<Self, ProviderError> {
+    pub fn new(
+        account: AccountId,
+        own: Option<Arc<dyn Secrets>>,
+        source: Source,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
             client: http::client()?,
             own,
@@ -135,6 +141,7 @@ impl Antigravity {
             token_endpoint: oauth::TOKEN_URL.to_owned(),
             local: Box::new(AgyQuota::new()?),
             source,
+            account,
         })
     }
 
@@ -153,6 +160,7 @@ impl Antigravity {
             token_endpoint,
             local,
             source,
+            account: AccountId::default(),
         })
     }
 
@@ -205,7 +213,7 @@ impl Antigravity {
             .get(
                 secrets::Kind::Token,
                 &ProviderId::new(PROVIDER_ID),
-                &AccountId::default(),
+                &self.account,
             )
             .await
             .map_err(ProviderError::from_secret_error)?;
@@ -298,7 +306,7 @@ impl Antigravity {
             .compare_and_set(
                 secrets::Kind::Token,
                 &ProviderId::new(PROVIDER_ID),
-                &AccountId::default(),
+                &self.account,
                 &credentials.source,
                 &replacement,
             )
@@ -315,7 +323,7 @@ impl Antigravity {
             .get(
                 secrets::Kind::Token,
                 &ProviderId::new(PROVIDER_ID),
-                &AccountId::default(),
+                &self.account,
             )
             .await
             .map_err(ProviderError::from_secret_error)?
@@ -426,7 +434,7 @@ impl Provider for Antigravity {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
