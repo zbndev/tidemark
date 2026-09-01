@@ -28,6 +28,8 @@ use crate::paths;
 /// Table every provider's own settings live under: `[provider.zai]`.
 const PROVIDER_TABLE: &str = "provider";
 const PROVIDERS_KEY: &str = "providers";
+/// The account ids configured for a provider.
+const ACCOUNTS_KEY: &str = "accounts";
 /// The shared storage keys used by browser-cookie authentication providers.
 const AUTH_SOURCE_KEY: &str = "auth-source";
 const AUTH_BROWSER_KEY: &str = "auth-browser";
@@ -104,6 +106,16 @@ pub enum ConfigError {
         /// The file.
         path: PathBuf,
         /// Why the provider list is invalid.
+        reason: String,
+    },
+    /// A provider's account list is not an array of strings.
+    #[error("{path}: [{PROVIDER_TABLE}.{provider}] {ACCOUNTS_KEY} {reason}")]
+    InvalidAccounts {
+        /// The file.
+        path: PathBuf,
+        /// Whose list it is.
+        provider: String,
+        /// Why the account list is invalid.
         reason: String,
     },
     /// A provider's notification opt-in list is not an array of window keys.
@@ -480,6 +492,38 @@ impl Config {
             }
         }
         Ok(providers)
+    }
+
+    /// Returns a provider's configured accounts in file order.
+    ///
+    /// A provider without an account list uses the single default account. A present account
+    /// list with the wrong shape is refused rather than silently choosing a different account.
+    pub fn accounts(&self, provider: &str) -> Result<Vec<String>, ConfigError> {
+        let Some(item) = self
+            .document
+            .get(PROVIDER_TABLE)
+            .and_then(|table| table.get(provider))
+            .and_then(|table| table.get(ACCOUNTS_KEY))
+        else {
+            return Ok(vec!["default".to_owned()]);
+        };
+        let array = item
+            .as_array()
+            .ok_or_else(|| ConfigError::InvalidAccounts {
+                path: self.path.clone(),
+                provider: provider.to_owned(),
+                reason: "must be an array of strings".to_owned(),
+            })?;
+        let mut accounts = Vec::new();
+        for entry in array.iter() {
+            let account = entry.as_str().ok_or_else(|| ConfigError::InvalidAccounts {
+                path: self.path.clone(),
+                provider: provider.to_owned(),
+                reason: "every accounts entry must be a string".to_owned(),
+            })?;
+            accounts.push(account.to_owned());
+        }
+        Ok(accounts)
     }
 
     /// Adds a provider to the configured set and normalizes any existing duplicates.
@@ -1037,6 +1081,42 @@ mod tests {
     fn a_first_run_has_no_configured_providers() {
         let config = Config::at(scratch("providers-absent")).expect("missing is valid");
         assert_eq!(config.providers().expect("readable"), Vec::<String>::new());
+    }
+    #[test]
+    fn a_provider_without_an_accounts_key_has_its_default_account() {
+        let path = scratch("accounts-absent");
+        std::fs::write(&path, "providers = [\"zai\"]\n").expect("seed");
+        let config = Config::at(path.clone()).expect("parses");
+        assert_eq!(config.accounts("zai").unwrap(), vec!["default".to_string()]);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn accounts_come_back_in_file_order() {
+        let path = scratch("accounts-order");
+        std::fs::write(
+            &path,
+            "[provider.claude]\naccounts = [\"default\", \"work\"]\n",
+        )
+        .expect("seed");
+        let config = Config::at(path.clone()).expect("parses");
+        assert_eq!(
+            config.accounts("claude").unwrap(),
+            vec!["default".to_string(), "work".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_non_array_accounts_key_is_refused() {
+        let path = scratch("accounts-invalid");
+        std::fs::write(&path, "[provider.zai]\naccounts = \"work\"\n").expect("seed");
+        let config = Config::at(path.clone()).expect("parses");
+        assert!(matches!(
+            config.accounts("zai"),
+            Err(ConfigError::InvalidAccounts { .. })
+        ));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
