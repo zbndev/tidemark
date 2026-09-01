@@ -33,6 +33,7 @@
 | `nix/module.nix` | NixOS options, D-Bus registration, daemon-only user unit. |
 | `scripts/test-nix-flake.sh` | Docker acceptance test for flake output and D-Bus runtime. |
 | `.github/workflows/ci.yml` | Independent Nix Docker job. |
+| `.github/workflows/update-nix-flake.yml` | Weekly, reviewable refresh of the pinned nixpkgs lock input. |
 | `README.md`, `CONTEXT.md` | User installation and normative packaging boundary. |
 
 ## Task 1: Create the package and flake outputs
@@ -262,18 +263,17 @@ git add scripts/test-nix-flake.sh
 git commit -m "test(packaging): exercise the Nix flake in Docker"
 ```
 
-## Task 4: CI, documentation, and final gate
+## Task 4: CI and reviewable weekly input refresh
 
 **Files:**
 
 - Modify: `.github/workflows/ci.yml`
-- Modify: `README.md`
-- Modify: `CONTEXT.md`
+- Create: `.github/workflows/update-nix-flake.yml`
 
 **Interfaces:**
 
-- Consumes: the public outputs, module, and Docker command from prior tasks.
-- Produces: continuous flake validation and copy-pasteable standalone Nix/NixOS setup.
+- Consumes: the Docker command and root `flake.lock` from prior tasks.
+- Produces: continuous flake validation and a weekly review PR for the lock file.
 
 - [ ] **Step 1: Add a dedicated CI job**
 
@@ -292,7 +292,74 @@ Append this sibling of `checks` in `.github/workflows/ci.yml`:
 
 Do not install Nix onto the runner or merge this work into the native Rust/toolkit job.
 
-- [ ] **Step 2: Add README instructions**
+- [ ] **Step 2: Add the weekly lock-refresh workflow**
+
+Create `.github/workflows/update-nix-flake.yml` with a manual trigger and
+`schedule: - cron: "0 0 * * 0"`, plus only `contents: write` and `pull-requests: write`
+permissions. Its `ubuntu-26.04` job must:
+
+```yaml
+- uses: actions/checkout@v5
+
+- name: Update the pinned nixpkgs input
+  run: |
+    docker run --rm --network host --entrypoint sh \
+      -v "$GITHUB_WORKSPACE":/src \
+      -w /src \
+      nixos/nix:2.35.2 -eu -c '
+        export NIX_CONFIG="experimental-features = nix-command flakes"
+        nix flake update
+      '
+    sudo chown "$(id -u):$(id -g)" flake.lock
+
+- name: Build and exercise the updated flake
+  run: scripts/test-nix-flake.sh
+
+- name: Create or update the review PR
+  uses: peter-evans/create-pull-request@v7
+  with:
+    token: ${{ secrets.GITHUB_TOKEN }}
+    branch: chore/nix-flake-lock
+    delete-branch: true
+    commit-message: "chore(nix): update flake lock"
+    title: "chore(nix): update flake lock"
+    body: |
+      Weekly nixpkgs lock refresh, built and exercised by `scripts/test-nix-flake.sh`.
+```
+
+The update mount is writable only because `nix flake update` must replace `flake.lock`; the
+next Docker invocation is the read-only QA mount from Task 3. The `chown` is necessary because
+the Nix image writes as container root. Do not copy Caelestia's direct-to-main behavior: an
+update can alter Rust, GTK, libadwaita, systemd, and transitive provider build inputs, so this
+workflow must create a reviewable PR rather than merge or push to `main`.
+
+- [ ] **Step 3: Validate and commit the CI workflows**
+
+```sh
+shellcheck scripts/*.sh
+sed -n '/^  nix:/,$p' .github/workflows/ci.yml
+sed -n '1,220p' .github/workflows/update-nix-flake.yml
+scripts/test-nix-flake.sh
+git add .github/workflows/ci.yml .github/workflows/update-nix-flake.yml
+git commit -m "ci: refresh the Nix flake lock weekly"
+```
+
+Expected: the refresh job has one scheduled and one manual trigger, runs Docker QA before PR
+creation, and does not mutate `main`.
+
+## Task 5: Documentation and final gate
+
+**Files:**
+
+- Modify: `README.md`
+- Modify: `CONTEXT.md`
+
+**Interfaces:**
+
+- Consumes: the public outputs, module, Docker command, and weekly lock PR behavior from prior tasks.
+- Produces: copy-pasteable standalone Nix/NixOS setup and maintainer expectations for lock refreshes.
+
+- [ ] **Step 1: Add README instructions**
 
 After source-building, add `## Nix` with `nix profile install github:zbndev/tidemark` and
 `nix run github:zbndev/tidemark`. Include a NixOS flake-input fragment importing
@@ -300,13 +367,14 @@ After source-building, add `## Nix` with `nix profile install github:zbndev/tide
 `nix run github:zbndev/tidemark#tidemarkd` is diagnostic-only and the module does **not**
 autostart the GUI. Do not claim an external nixpkgs package or a separate Nix repository.
 
-- [ ] **Step 3: Amend the normative packaging record**
+- [ ] **Step 2: Amend the normative packaging record**
 
 Add one concise `CONTEXT.md` packaging paragraph: the repo-local flake exports the Nix package
-and `nixosModules.default`; enabling it registers only the D-Bus-activated user daemon. DEB,
-RPM, and local `PKGBUILD` retain their distinct installation and upgrade behavior.
+and `nixosModules.default`; enabling it registers only the D-Bus-activated user daemon. State
+that the scheduled workflow proposes `flake.lock` updates through a reviewed PR. DEB, RPM, and
+local `PKGBUILD` retain their distinct installation and upgrade behavior.
 
-- [ ] **Step 4: Run the complete relevant gate and commit**
+- [ ] **Step 3: Run the complete relevant gate and commit**
 
 ```sh
 cargo fmt --check && \
@@ -319,7 +387,7 @@ shellcheck scripts/*.sh data/restart-user-daemon \
   data/packaging/deb/postinst data/packaging/rpm/post-install.sh && \
 scripts/test-nix-flake.sh
 
-git add .github/workflows/ci.yml README.md CONTEXT.md
+git add README.md CONTEXT.md
 git commit -m "docs: describe Nix and NixOS installation"
 git status --short
 git log --oneline main..HEAD

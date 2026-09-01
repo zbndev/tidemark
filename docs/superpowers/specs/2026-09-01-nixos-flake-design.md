@@ -87,6 +87,14 @@ package-qualified executable. This tests module integration without booting or c
 NixOS. The Docker script becomes a separate CI job on `ubuntu-26.04` and remains the local
 maintainer command.
 
+A second GitHub Actions workflow runs weekly at Sunday 00:00 UTC and on manual dispatch. It
+uses the same pinned Nix Docker image, updates the sole `nixpkgs` input with `nix flake update`,
+restores ownership of the changed lock file to the runner, then runs
+`scripts/test-nix-flake.sh`. On success it creates or updates a PR from
+`chore/nix-flake-lock`; it never commits an upstream compiler, toolkit, or NixOS change directly
+to `main`. The workflow has narrowly declared `contents: write` and `pull-requests: write`
+permissions. A merge still triggers ordinary CI on `main`.
+
 ## Documentation
 
 The README presents `nix profile install github:zbndev/tidemark`, `nix run`, and a NixOS
