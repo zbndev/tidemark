@@ -738,7 +738,19 @@ impl Engine {
         }
         self.probe_credentials(Some(provider)).await;
 
-        if promote_from.is_some() {
+        if let Some(old) = promote_from.as_ref() {
+            // The survivor's old id stops existing the moment it takes over `default`,
+            // and its published entry must leave with it — first, and never as a
+            // `Removed` for `default` itself: `upsert` and `remove` share the
+            // (provider, account) key, and the pairs here differ, so this retirement
+            // cannot collide with the survivor's fresh entry that follows it.
+            let _ = self
+                .updates
+                .send(Publication::Removed {
+                    provider: provider.to_owned(),
+                    account: old.clone(),
+                })
+                .await;
             let promoted = self
                 .accounts
                 .iter()
@@ -750,8 +762,7 @@ impl Engine {
                 .status
                 .clone();
             let _ = self.updates.send(Publication::Changed(promoted)).await;
-        }
-        if promote_from.is_none() {
+        } else {
             let _ = self
                 .updates
                 .send(Publication::Removed {
@@ -2541,7 +2552,70 @@ mod tests {
         assert!(saw_changed, "the promoted account must be republished");
         assert!(
             !saw_removed,
-            "the promoted account absorbs default; no Removed publication is needed"
+            "the promoted account absorbs default; no Removed for `default` is published — \
+             the survivor's old id gets one instead"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promotion_retires_the_published_entry_of_the_survivors_old_id() {
+        let mut harness = Harness::configured("promote-ghost", &["kimi"]).await;
+        harness
+            .engine
+            .add_account("kimi", "work")
+            .await
+            .expect("account added");
+        harness.published();
+
+        // The published state a client already holds: both accounts of the provider.
+        let published = crate::service::Published::default();
+        for account in [0, 1] {
+            published
+                .upsert(harness.engine.accounts()[account].status.clone())
+                .await;
+        }
+
+        harness
+            .engine
+            .remove_provider("kimi", "default")
+            .await
+            .expect("default removed");
+
+        // The publisher applies these mechanically; driving the same shapes through the
+        // real `Published` is the set a `GetStatus` client ends up with.
+        let mut sequence = Vec::new();
+        while let Ok(publication) = harness.updates.try_recv() {
+            match publication {
+                Publication::Changed(status) => {
+                    sequence.push(("changed", status.account.clone()));
+                    published.upsert(status).await;
+                }
+                Publication::Removed { provider, account } => {
+                    sequence.push(("removed", account.clone()));
+                    published.remove(&provider, &account).await;
+                }
+                Publication::Reordered(_) => panic!("a promotion does not reorder"),
+            }
+        }
+        assert_eq!(
+            sequence,
+            vec![
+                ("removed", "work".to_owned()),
+                ("changed", "default".to_owned())
+            ],
+            "the survivor's old id is retired first — the ids differ, so that Removed \
+             cannot collide with the Changed that follows it"
+        );
+        let identities: Vec<(String, String)> = published
+            .all()
+            .await
+            .into_iter()
+            .map(|status| (status.provider, status.account))
+            .collect();
+        assert_eq!(
+            identities,
+            vec![("kimi".to_owned(), "default".to_owned())],
+            "GetStatus serves exactly the identities that exist; the old id is not a ghost"
         );
     }
 

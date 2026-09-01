@@ -599,10 +599,24 @@ impl Daemon {
         }
 
         // The engine's answer is the topology; the published mirror of it is updated by a
-        // separate task and can lag this reply, so it must not be guessed at. Rebuilding
-        // the whole set keeps a promotion's renames — the survivor's new id and the death
-        // of its old one — from desynchronizing the validation every call depends on.
-        *self.configured.write().await = topology.into_iter().collect();
+        // separate task and can lag this reply, so it must not be guessed at. Only this
+        // provider's pairs are taken from it, under one guard: the reply is a snapshot
+        // of every provider taken when the engine handled the removal, and an add for a
+        // different provider that completes while this method is still in its keyring
+        // cleanup would be wiped out by a whole-set replacement. Rebuilding the whole
+        // provider's set at once keeps a promotion's renames — the survivor's new id and
+        // the death of its old one — from desynchronizing the validation every call
+        // depends on.
+        {
+            let mut configured = self.configured.write().await;
+            configured.retain(|(held, _)| held != provider);
+            configured.extend(
+                topology
+                    .iter()
+                    .filter(|(held, _)| held == provider)
+                    .cloned(),
+            );
+        }
 
         match cleanup {
             Some(error) => Err(error),
@@ -1609,6 +1623,22 @@ mod tests {
         }]
     }
 
+    /// A catalog of keyed providers, for tests that need more than one provider.
+    fn catalog_with(providers: &[&str]) -> Vec<ProviderDefinition> {
+        providers
+            .iter()
+            .map(|provider| ProviderDefinition {
+                provider: (*provider).into(),
+                title: (*provider).into(),
+                credential: "key".into(),
+                credential_hint: format!("{provider} dashboard → API keys."),
+                external: None,
+                browser_auth: None,
+                options: Vec::new(),
+            })
+            .collect()
+    }
+
     /// A daemon over a fixed set of accounts, with the channel its commands land on.
     async fn daemon_over(
         accounts: Vec<ProviderStatus>,
@@ -2353,6 +2383,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_removal_does_not_wipe_a_concurrent_add_for_another_provider() {
+        let (secrets, mut cleanup_gate) = GatedDeleteSecrets::new();
+        let published = Published::default();
+        published.upsert(key_account("zai")).await;
+        published.upsert(key_account("kimi")).await;
+        let (commands, mut queue) = mpsc::channel(8);
+        let daemon = Arc::new(Daemon::new(
+            published,
+            PublishedUpdate::default(),
+            catalog_with(&["zai", "kimi"]),
+            vec![
+                ("zai".into(), "default".into()),
+                ("kimi".into(), "default".into()),
+            ],
+            commands,
+            secrets,
+        ));
+        let responder = tokio::spawn(async move {
+            // The removal's answer is a snapshot taken before the concurrent add: kimi
+            // still has only its default account in it.
+            let Command::RemoveProvider {
+                provider, reply, ..
+            } = queue.recv().await.expect("removal reaches engine")
+            else {
+                panic!("unexpected command");
+            };
+            assert_eq!(provider, "zai");
+            reply
+                .send(Ok(vec![("kimi".into(), "default".into())]))
+                .expect("caller waits");
+            let Command::AddAccount {
+                provider,
+                account,
+                reply,
+            } = queue.recv().await.expect("add reaches engine")
+            else {
+                panic!("unexpected command");
+            };
+            assert_eq!((provider.as_str(), account.as_str()), ("kimi", "work"));
+            reply.send(Ok(())).expect("caller waits");
+            queue
+        });
+        let removing = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.remove_provider("zai", "default").await }
+        });
+
+        // Hold the removal inside its post-success keyring cleanup — two Secret Service
+        // round trips, not a microsecond — while another provider's add completes.
+        let release = cleanup_gate
+            .recv()
+            .await
+            .expect("the removal reached its cleanup window");
+        daemon
+            .add_account("kimi", "work")
+            .await
+            .expect("a different provider's add is not blocked");
+        release.send(()).expect("the removal finishes its cleanup");
+        removing
+            .await
+            .expect("removal task did not panic")
+            .expect("removed");
+        responder.await.expect("responder finished");
+
+        daemon
+            .account("kimi", "work")
+            .await
+            .expect("the concurrent add survives the removal's reconciliation");
+        assert!(matches!(
+            daemon.account("zai", "default").await,
+            Err(fdo::Error::InvalidArgs(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn stale_refresh_cannot_undo_the_real_sign_out_mutation() {
         const PROVIDER: &str = "antigravity";
         let (daemon, secrets, mut commands) = daemon_over(vec![oauth_account(PROVIDER)]).await;
@@ -2497,6 +2602,77 @@ mod tests {
             _account: &'a AccountId,
         ) -> tidemark_core::providers::BoxFuture<'a, Result<(), SecretError>> {
             Box::pin(async { Err(SecretError::Locked) })
+        }
+    }
+
+    /// A keyring whose first delete parks until the test releases it, so a removal can
+    /// be held deterministically inside its post-success cleanup window.
+    #[derive(Debug)]
+    struct GatedDeleteSecrets {
+        handoff: mpsc::UnboundedSender<oneshot::Sender<()>>,
+        gated: std::sync::atomic::AtomicBool,
+    }
+
+    impl GatedDeleteSecrets {
+        fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<oneshot::Sender<()>>) {
+            let (handoff, entered) = mpsc::unbounded_channel();
+            (
+                Arc::new(Self {
+                    handoff,
+                    gated: std::sync::atomic::AtomicBool::new(false),
+                }),
+                entered,
+            )
+        }
+    }
+
+    impl Secrets for GatedDeleteSecrets {
+        fn get<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<Option<Credential>, SecretError>>
+        {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            _secret: &'a Credential,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<(), SecretError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn compare_and_set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            _expected: &'a Credential,
+            _replacement: &'a Credential,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<bool, SecretError>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<(), SecretError>> {
+            if self.gated.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Box::pin(async { Ok(()) });
+            }
+            let (release, released) = oneshot::channel();
+            let _ = self.handoff.send(release);
+            Box::pin(async {
+                released.await.expect("the test releases the first delete");
+                Ok(())
+            })
         }
     }
 
