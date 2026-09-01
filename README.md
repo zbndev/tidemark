@@ -135,6 +135,46 @@ provider itself — it only shows what the daemon publishes on D-Bus, which also
 daemon usable from `busctl` or a Waybar module. See [`CONTEXT.md`](CONTEXT.md) for the
 architecture and the design record.
 
+## Nix
+
+Install Tidemark directly from this repository:
+
+```bash
+nix profile install github:zbndev/tidemark
+```
+
+Or run the window without installing it:
+
+```bash
+nix run github:zbndev/tidemark
+```
+
+For NixOS, add Tidemark as a flake input, import its module, and enable the service:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    tidemark.url = "github:zbndev/tidemark";
+  };
+
+  outputs = { nixpkgs, tidemark, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        tidemark.nixosModules.default
+        { services.tidemark.enable = true; }
+      ];
+    };
+  };
+}
+```
+
+The module installs Tidemark and registers its D-Bus-activated user daemon. It does not
+start the GTK window at login. `nix run github:zbndev/tidemark#tidemarkd` is available for
+diagnostics, but normal use should let D-Bus activate the daemon when the window or another
+client asks for it.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).

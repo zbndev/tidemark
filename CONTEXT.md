@@ -615,6 +615,11 @@ history that does not exist yet.
 so a build with no provider marks stays a supported configuration: a card without one is a
 state the interface already has.
 
+The repository-local flake exports the Nix package and `nixosModules.default`. Enabling the
+module registers only the D-Bus-activated user daemon; it does not autostart the GTK client.
+The scheduled workflow proposes `flake.lock` updates through a reviewed pull request. DEB,
+RPM, and the local `PKGBUILD` retain their distinct installation and upgrade behavior.
+
 The GTK 4.22 / libadwaita 1.9 floor above is GNOME 50, which became the default in exactly
 two places: **Fedora 44** and **Ubuntu 26.04 LTS**. So the `rpm` targets Fedora 44+ and the
 `deb` targets Ubuntu 26.04+. Nothing older qualifies — Debian's trixie is at GTK 4.18 — and
