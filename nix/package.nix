@@ -45,9 +45,13 @@ rustPlatform.buildRustPackage (finalAttrs: {
     install -Dm755 target/*/release/tidemarkd -t "$out/bin"
     install -Dm644 data/applications/io.github.zbndev.Tidemark.desktop -t "$out/share/applications"
     install -Dm644 data/metainfo/io.github.zbndev.Tidemark.metainfo.xml -t "$out/share/metainfo"
-    cp -r data/icons/hicolor "$out/share/icons"
+    install -d "$out/share/icons"
+    cp -r data/icons/hicolor "$out/share/icons/"
     install -Dm644 data/dbus-1/services/io.github.zbndev.Tidemark.Daemon.service -t "$out/share/dbus-1/services"
+    install -Dm644 data/tidemarkd.service -t "$out/lib/systemd/user"
     substituteInPlace "$out/share/dbus-1/services/io.github.zbndev.Tidemark.Daemon.service" \
+      --replace-fail /usr/bin/tidemarkd "$out/bin/tidemarkd"
+    substituteInPlace "$out/lib/systemd/user/tidemarkd.service" \
       --replace-fail /usr/bin/tidemarkd "$out/bin/tidemarkd"
   '';
 
