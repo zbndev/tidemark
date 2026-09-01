@@ -1,0 +1,41 @@
+name: Update Nix flake lock
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 0"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Update the pinned nixpkgs input
+        run: |
+          docker run --rm --network host --entrypoint sh \
+            -v "$GITHUB_WORKSPACE":/src \
+            -w /src \
+            nixos/nix:2.35.2 -eu -c '
+              export NIX_CONFIG="experimental-features = nix-command flakes"
+              nix flake update
+            '
+          sudo chown "$(id -u):$(id -g)" flake.lock
+
+      - name: Build and exercise the updated flake
+        run: scripts/test-nix-flake.sh
+
+      - name: Create or update the review PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: chore/nix-flake-lock
+          delete-branch: true
+          commit-message: "chore(nix): update flake lock"
+          title: "chore(nix): update flake lock"
+          body: |
+            Weekly nixpkgs lock refresh, built and exercised by `scripts/test-nix-flake.sh`.
