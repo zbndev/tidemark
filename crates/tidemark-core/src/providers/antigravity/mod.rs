@@ -436,6 +436,9 @@ impl Provider for Antigravity {
     fn account(&self) -> AccountId {
         self.account.clone()
     }
+    fn source(&self) -> Option<Source> {
+        Some(self.source)
+    }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
         Box::pin(self.fetch_inner())

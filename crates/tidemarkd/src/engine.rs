@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tidemark_core::config::Config;
 use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::providers::keyed::session;
-use tidemark_core::providers::{Credential, Provider, ProviderError};
+use tidemark_core::providers::{Credential, Provider, ProviderError, Source};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
 use tidemark_types::{
@@ -209,6 +209,7 @@ pub struct Account {
     factory: Option<Factory>,
     rebuild: Option<Rebuild>,
     client: Option<Arc<dyn Provider>>,
+    source: Source,
     status: ProviderStatus,
     failures: u32,
     retry_after: Option<Duration>,
@@ -244,6 +245,7 @@ impl Account {
             status,
             provider,
             account,
+            source: Source::Auto,
             factory: Some(factory),
             rebuild: None,
             client: None,
@@ -258,13 +260,18 @@ impl Account {
     /// This is the shape for providers that own credential discovery themselves, such as
     /// Claude's CLI file and Antigravity's future `agy` session.
     pub fn with_client(client: Arc<dyn Provider>) -> Self {
-        let (provider, account) = (client.id(), client.account());
+        let (provider, account, source) = (
+            client.id(),
+            client.account(),
+            client.source().unwrap_or_default(),
+        );
         let mut status = ProviderStatus::pending(&provider, &account);
         describe(&mut status, CredentialKind::External);
         Self {
             status,
             provider,
             account,
+            source,
             factory: None,
             rebuild: None,
             client: Some(client),
@@ -289,6 +296,7 @@ impl Account {
             status,
             provider,
             account,
+            source: Source::Auto,
             factory: None,
             rebuild: Some(rebuild),
             client: None,
@@ -304,6 +312,11 @@ impl Account {
     /// rebuilt from its stored key whenever the engine drops it.
     pub fn with_rebuild(mut self, rebuild: Rebuild) -> Self {
         self.rebuild = Some(rebuild);
+        self
+    }
+    /// Records the source selected for this account's next poll.
+    pub(crate) fn with_source(mut self, source: Source) -> Self {
+        self.source = source;
         self
     }
 
@@ -552,6 +565,9 @@ impl Engine {
             .set_option(provider, name, value)
             .map_err(|error| error.to_string())?;
         self.accounts[index].status.options = crate::registry::options(provider, &config);
+        let account_id = self.accounts[index].account.clone();
+        self.accounts[index].source =
+            crate::registry::source_for_account(provider, &account_id, &config);
         if self.accounts[index].rebuildable() {
             self.accounts[index].client = None;
         }
@@ -1188,7 +1204,8 @@ impl Engine {
             }
             let provider = account.provider.as_str().to_owned();
             account.status.external_present = crate::registry::external_present(&provider);
-            account.status.auth_source = crate::registry::auth_source(&provider, &account.status);
+            account.status.auth_source =
+                crate::registry::auth_source(&provider, account.source, &account.status);
         }
     }
 
@@ -1216,6 +1233,11 @@ impl Engine {
                 account.status.options =
                     crate::registry::options(account.provider.as_str(), config);
                 account.status.notify = crate::registry::notify(account.provider.as_str(), config);
+                account.source = crate::registry::source_for_account(
+                    account.provider.as_str(),
+                    &account.account,
+                    config,
+                );
             }
             if account.rebuildable() {
                 account.client = None;
@@ -1247,6 +1269,7 @@ impl Engine {
                 continue;
             }
             let provider = account.provider.clone();
+            let source = account.source;
             let kind = account.status.credential_kind().and_then(stored_kind);
             let held = match kind {
                 Some(kind) => {
@@ -1267,8 +1290,11 @@ impl Engine {
             self.accounts[index].status.has_credential = held;
             self.accounts[index].status.external_present =
                 crate::registry::external_present(provider.as_str());
-            self.accounts[index].status.auth_source =
-                crate::registry::auth_source(provider.as_str(), &self.accounts[index].status);
+            self.accounts[index].status.auth_source = crate::registry::auth_source(
+                provider.as_str(),
+                source,
+                &self.accounts[index].status,
+            );
         }
     }
 

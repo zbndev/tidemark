@@ -513,7 +513,7 @@ fn source_value(provider: &str, config: &Config) -> Source {
 }
 
 /// Extra configured accounts have no vendor CLI file, so they always use Tidemark's login.
-fn source_for_account(provider: &str, account: &AccountId, config: &Config) -> Source {
+pub(crate) fn source_for_account(provider: &str, account: &AccountId, config: &Config) -> Source {
     if account.as_str() == "default" {
         source_value(provider, config)
     } else {
@@ -543,24 +543,15 @@ pub fn external_present(provider: &str) -> Option<bool> {
     }
 }
 
-/// Which credential the next poll will use, resolving an unset setting the way the
-/// provider itself resolves [`Source::Auto`]. `None` for a provider with one credential.
+/// Which credential the next poll will use, from the source selected for this account.
 ///
-/// The stored value is read off the published options rather than the file: the engine
-/// has already refreshed them, and re-reading `config.toml` here could disagree with them
-/// for the length of a reload. The `Auto` branches mirror the clients' own control flow
-/// rather than approximating it: Claude and Codex reach the vendor file only when the
-/// Secret Service answered that nothing is stored — a held token wins, and a locked
-/// keyring errors out before the file is ever opened — while Antigravity tries the local
-/// server first whenever `agy` is installed.
-pub fn auth_source(provider: &str, status: &ProviderStatus) -> Option<String> {
+/// The account carries the constructor's resolved source. `Source::Auto` still follows the
+/// provider's historical runtime rule using the probe answers, while explicit `Cli` and
+/// `OAuth` sources are authoritative — especially for non-default accounts, which never
+/// have a vendor CLI file.
+pub fn auth_source(provider: &str, source: Source, status: &ProviderStatus) -> Option<String> {
     oauth_entry(provider)?;
-    let stored = status
-        .options
-        .iter()
-        .find(|option| option.name == AUTH_SOURCE)
-        .map(|option| option.value.as_str());
-    let resolved = match Source::from_value(stored) {
+    let resolved = match source {
         Source::OAuth => OAUTH_SOURCE,
         Source::Cli => CLI_SOURCE,
         Source::Auto => match provider {
@@ -609,12 +600,14 @@ fn antigravity_account(
     secrets: &Arc<dyn Secrets>,
     config: &Config,
 ) -> Result<Account, ProviderError> {
+    let source = source_for_account(antigravity::PROVIDER_ID, account, config);
     let account_id = account.clone();
     Ok(Account::with_client(Arc::new(antigravity::Antigravity::new(
         account_id.clone(),
         Some(Arc::clone(secrets)),
-        source_for_account(antigravity::PROVIDER_ID, account, config),
+        source,
     )?))
+    .with_source(source)
     .with_rebuild({
         let secrets = Arc::clone(secrets);
         let account = account_id;
@@ -640,12 +633,14 @@ fn claude_account(
     secrets: &Arc<dyn Secrets>,
     config: &Config,
 ) -> Result<Account, ProviderError> {
+    let source = source_for_account(claude::PROVIDER_ID, account, config);
     let account_id = account.clone();
     Ok(Account::with_client(Arc::new(claude::Claude::new(
         account_id.clone(),
         Some(Arc::clone(secrets)),
-        source_for_account(claude::PROVIDER_ID, account, config),
+        source,
     )?))
+    .with_source(source)
     .with_rebuild({
         let secrets = Arc::clone(secrets);
         let account = account_id;
@@ -671,12 +666,14 @@ fn codex_account(
     secrets: &Arc<dyn Secrets>,
     config: &Config,
 ) -> Result<Account, ProviderError> {
+    let source = source_for_account(codex::PROVIDER_ID, account, config);
     let account_id = account.clone();
     Ok(Account::with_client(Arc::new(codex::Codex::new(
         account_id.clone(),
         Some(Arc::clone(secrets)),
-        source_for_account(codex::PROVIDER_ID, account, config),
+        source,
     )?))
+    .with_source(source)
     .with_rebuild({
         let secrets = Arc::clone(secrets);
         let account = account_id;
@@ -694,7 +691,7 @@ fn codex_account(
         })
     })
     .with_credential(CredentialKind::OAuth)
-    .with_hint("Sign in with Tidemark, or read the Codex CLI's own login."))
+    .with_hint("Sign in through Tidemark, or read the Codex CLI's own login."))
 }
 
 /// Every key-authenticated account is built the same way: the engine hands over the stored
@@ -867,6 +864,20 @@ mod tests {
         .expect("Claude account builds");
 
         assert_eq!(account.account().as_str(), "work");
+    }
+
+    #[test]
+    fn an_extra_account_forces_oauth_even_when_cli_is_configured() {
+        let path = scratch_config(
+            "claude-extra-source",
+            "providers = [\"claude\"]\n\n[provider.claude]\nsource = \"cli\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        assert_eq!(
+            source_for_account(claude::PROVIDER_ID, &AccountId::new("work"), &config),
+            Source::OAuth
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1209,6 +1220,25 @@ mod tests {
         status
     }
 
+    fn auth_source_from_status(provider: &str, status: &ProviderStatus) -> Option<String> {
+        let source = status
+            .options
+            .iter()
+            .find(|option| option.name == AUTH_SOURCE)
+            .map(|option| option.value.as_str());
+        auth_source(provider, Source::from_value(source), status)
+    }
+
+    #[test]
+    fn an_explicit_oauth_source_overrides_probe_answers() {
+        let mut status = probed_status(claude::PROVIDER_ID, Some(CLI_SOURCE));
+        status.has_credential = Some(false);
+        assert_eq!(
+            auth_source(claude::PROVIDER_ID, Source::OAuth, &status).as_deref(),
+            Some(OAUTH_SOURCE)
+        );
+    }
+
     #[test]
     fn claude_says_which_credential_the_next_poll_will_use() {
         for stored in [OAUTH_SOURCE, CLI_SOURCE] {
@@ -1216,7 +1246,7 @@ mod tests {
             let mut status = probed_status(claude::PROVIDER_ID, Some(stored));
             status.has_credential = Some(false);
             assert_eq!(
-                auth_source(claude::PROVIDER_ID, &status).as_deref(),
+                auth_source_from_status(claude::PROVIDER_ID, &status).as_deref(),
                 Some(stored)
             );
         }
@@ -1228,7 +1258,7 @@ mod tests {
             let mut status = probed_status(claude::PROVIDER_ID, None);
             status.has_credential = has_credential;
             assert_eq!(
-                auth_source(claude::PROVIDER_ID, &status).as_deref(),
+                auth_source_from_status(claude::PROVIDER_ID, &status).as_deref(),
                 Some(expected),
                 "auto reaches the vendor file only on Ok(None), not on a locked keyring"
             );
@@ -1241,7 +1271,7 @@ mod tests {
             let mut status = probed_status(codex::PROVIDER_ID, Some(stored));
             status.has_credential = Some(false);
             assert_eq!(
-                auth_source(codex::PROVIDER_ID, &status).as_deref(),
+                auth_source_from_status(codex::PROVIDER_ID, &status).as_deref(),
                 Some(stored)
             );
         }
@@ -1253,7 +1283,7 @@ mod tests {
             let mut status = probed_status(codex::PROVIDER_ID, None);
             status.has_credential = has_credential;
             assert_eq!(
-                auth_source(codex::PROVIDER_ID, &status).as_deref(),
+                auth_source_from_status(codex::PROVIDER_ID, &status).as_deref(),
                 Some(expected),
                 "auto reaches the vendor file only on Ok(None), not on a locked keyring"
             );
@@ -1266,7 +1296,7 @@ mod tests {
             let mut status = probed_status(antigravity::PROVIDER_ID, Some(stored));
             status.external_present = Some(true);
             assert_eq!(
-                auth_source(antigravity::PROVIDER_ID, &status).as_deref(),
+                auth_source_from_status(antigravity::PROVIDER_ID, &status).as_deref(),
                 Some(stored)
             );
         }
@@ -1278,7 +1308,7 @@ mod tests {
             let mut status = probed_status(antigravity::PROVIDER_ID, None);
             status.external_present = external_present;
             assert_eq!(
-                auth_source(antigravity::PROVIDER_ID, &status).as_deref(),
+                auth_source_from_status(antigravity::PROVIDER_ID, &status).as_deref(),
                 Some(expected),
                 "auto tries the local server first whenever agy is installed"
             );
@@ -1288,7 +1318,7 @@ mod tests {
     #[test]
     fn a_provider_with_one_credential_says_nothing_about_a_source() {
         assert_eq!(
-            auth_source("zai", &probed_status("zai", None)),
+            auth_source_from_status("zai", &probed_status("zai", None)),
             None,
             "there is no second credential for the next poll to use"
         );

@@ -50,9 +50,14 @@ pub trait Provider: fmt::Debug + Send + Sync {
     /// The stable slug this provider's history is filed under.
     fn id(&self) -> ProviderId;
 
-    /// Which set of credentials this instance speaks for. v1 has one per provider.
+    /// Which set of credentials this instance speaks for, when it has more than one.
     fn account(&self) -> AccountId {
         AccountId::default()
+    }
+
+    /// The source selected for this account, when the provider owns source selection.
+    fn source(&self) -> Option<Source> {
+        None
     }
 
     /// Fetch current quota.
