@@ -575,6 +575,9 @@ pub struct ProviderStatus {
     pub provider: String,
     /// Account slug.
     pub account: String,
+    /// A human-readable label for this account. Absent for the default account and when
+    /// speaking to an older daemon.
+    pub account_label: Option<String>,
     /// A [`ProviderState`] as a string.
     pub state: String,
     /// Human-readable detail for a state that is not `ok`. Absent when there is nothing
@@ -635,6 +638,7 @@ impl ProviderStatus {
         Self {
             provider: provider.to_string(),
             account: account.to_string(),
+            account_label: None,
             state: ProviderState::Pending.as_wire().to_owned(),
             message: None,
             captured_at: None,
@@ -902,6 +906,45 @@ mod tests {
         let (decoded, _): (ProviderStatus, _) =
             encode(&original).deserialize().expect("decodes again");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn a_status_with_an_account_label_survives_the_bus() {
+        let mut original = status();
+        original.account_label = Some("Work".into());
+        let (decoded, _): (ProviderStatus, _) =
+            encode(&original).deserialize().expect("decodes again");
+        assert_eq!(decoded.account_label, original.account_label);
+    }
+
+    #[test]
+    fn a_status_without_an_account_label_has_no_label_key() {
+        let original = status();
+        assert_eq!(original.account_label, None);
+        let (dict, _): (HashMap<String, OwnedValue>, _) = encode(&original)
+            .deserialize()
+            .expect("decodes as a dictionary");
+        assert!(
+            !dict.contains_key("account_label"),
+            "an absent account label must stay absent: {:?}",
+            dict.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn an_older_status_without_an_account_label_decodes_to_none() {
+        let mut current = status();
+        current.account_label = Some("Work".into());
+        let encoded = encode(&current);
+        let (mut old_dict, _): (HashMap<String, OwnedValue>, _) =
+            encoded.deserialize().expect("decodes as a dictionary");
+        assert!(old_dict.remove("account_label").is_some());
+        let old_encoded =
+            to_bytes(Context::new_dbus(LE, 0), &old_dict).expect("the old dictionary encodes");
+        let (decoded, _): (ProviderStatus, _) = old_encoded
+            .deserialize()
+            .expect("decodes without the new key");
+        assert_eq!(decoded.account_label, None);
     }
 
     #[test]
