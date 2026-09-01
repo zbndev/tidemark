@@ -63,12 +63,17 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(OpenCode::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(OpenCode::new_for_account(account, options)?))
 }
 
 /// One OpenCode account, authenticated by one explicitly chosen browser profile.
 pub struct OpenCode {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -79,7 +84,12 @@ pub struct OpenCode {
 
 impl OpenCode {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -96,6 +106,7 @@ impl OpenCode {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -192,7 +203,9 @@ impl OpenCode {
         // A null answer is a workspace without a subscription: the POST spelling answers
         // those with a 500, so it is not worth trying.
         if !is_null_payload(&text) {
-            if let Some(snapshot) = parse_subscription(&text, now) {
+            if let Some(snapshot) =
+                parse_subscription_for_account(&text, now, &self.tidemark_account)
+            {
                 return Ok(snapshot);
             }
             // The GET spelling sometimes answers a shell; the POST carries the data.
@@ -203,7 +216,8 @@ impl OpenCode {
                 return Err(ProviderError::Credential { status: 401 });
             }
             if !is_null_payload(&fallback)
-                && let Some(snapshot) = parse_subscription(&fallback, now)
+                && let Some(snapshot) =
+                    parse_subscription_for_account(&fallback, now, &self.tidemark_account)
             {
                 return Ok(snapshot);
             }
@@ -235,7 +249,11 @@ impl OpenCode {
             // honest reading.
             return Ok(None);
         }
-        Ok(Some(payg_snapshot(billing, now)))
+        Ok(Some(payg_snapshot_for_account(
+            billing,
+            now,
+            &self.tidemark_account,
+        )))
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
@@ -306,7 +324,7 @@ impl Provider for OpenCode {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -516,7 +534,16 @@ fn seeded_number(text: &str, label: &str, field: &str) -> Option<f64> {
 /// The subscription answer as a snapshot: JSON first — the same shapes and rules the
 /// Zen reader already pins — then the seeded script's numbers. `None` when neither
 /// dialect carries the two windows.
+#[cfg(test)]
 fn parse_subscription(text: &str, now: Timestamp) -> Option<Snapshot> {
+    parse_subscription_for_account(text, now, &AccountId::default())
+}
+
+fn parse_subscription_for_account(
+    text: &str,
+    now: Timestamp,
+    account_id: &AccountId,
+) -> Option<Snapshot> {
     if let Ok(mut snapshot) = super::opencodego::parse(text, now) {
         snapshot.provider = ProviderId::new(PROVIDER_ID);
         return Some(snapshot);
@@ -539,7 +566,7 @@ fn parse_subscription(text: &str, now: Timestamp) -> Option<Snapshot> {
     ];
     Some(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows,
         details: Vec::new(),
@@ -660,7 +687,11 @@ fn field_value<'a>(text: &'a str, field: &str) -> Option<&'a str> {
 
 /// The pay-as-you-go month as a snapshot: a window when a limit is configured, and the
 /// balance rows the payload carries.
-fn payg_snapshot(billing: Billing, captured_at: Timestamp) -> Snapshot {
+fn payg_snapshot_for_account(
+    billing: Billing,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     let mut windows = Vec::new();
     if let Some(limit) = billing.monthly_limit.filter(|limit| *limit > 0.0) {
         windows.push(window(
@@ -688,7 +719,7 @@ fn payg_snapshot(billing: Billing, captured_at: Timestamp) -> Snapshot {
     }
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details: vec![DetailSection {

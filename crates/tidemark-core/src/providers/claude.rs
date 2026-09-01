@@ -237,7 +237,7 @@ impl Claude {
             response,
         )
         .await?;
-        let mut snapshot = parse(&body, Timestamp::now())?;
+        let mut snapshot = parse_for_account(&body, Timestamp::now(), &self.account)?;
         // Asked after the reading, never before it: the plan is one line on the card and
         // the windows are the point of the poll, so nothing about the plan may delay or
         // fail one.
@@ -540,6 +540,14 @@ impl Provider for Claude {
 
 /// Turns a usage response into a snapshot.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let envelope: Envelope = serde_json::from_str(body).map_err(|error| {
         ProviderError::malformed(format!("not a Claude usage response: {error}"))
     })?;
@@ -565,7 +573,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account.clone(),
         captured_at,
         windows,
         details,

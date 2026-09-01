@@ -80,7 +80,7 @@ const REFRESH_MARGIN_MS: i64 = 5 * 60 * 1_000;
 
 trait LocalQuota: std::fmt::Debug + Send + Sync {
     fn available(&self) -> bool;
-    fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>>;
+    fn fetch(&self, account: &AccountId) -> BoxFuture<'_, Result<Snapshot, ProviderError>>;
 }
 
 #[derive(Debug)]
@@ -99,11 +99,12 @@ impl LocalQuota for AgyQuota {
         agy::is_available()
     }
 
-    fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+    fn fetch(&self, account: &AccountId) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+        let account = account.clone();
         Box::pin(async move {
             let ready = self.agy.ready().await?;
             let quota = self.agy.rpc(ready.port, agy::QUOTA_SUMMARY_PATH).await?;
-            parse(&quota, &ready.status_body, Timestamp::now())
+            parse_for_account(&quota, &ready.status_body, Timestamp::now(), &account)
         })
     }
 }
@@ -183,7 +184,7 @@ impl Antigravity {
     /// running" is not news to a user whose account also has a login.
     async fn fetch_auto(&self) -> Result<Snapshot, ProviderError> {
         let local = if self.local.available() {
-            match self.local.fetch().await {
+            match self.local.fetch(&self.account).await {
                 Ok(snapshot) => return Ok(snapshot),
                 Err(error) => Some(error),
             }
@@ -199,7 +200,7 @@ impl Antigravity {
     /// The local server, or the reason there is nothing to read.
     async fn fetch_local(&self) -> Result<Snapshot, ProviderError> {
         if self.local.available() {
-            self.local.fetch().await
+            self.local.fetch(&self.account).await
         } else {
             Err(ProviderError::NoCredential)
         }
@@ -341,11 +342,12 @@ impl Antigravity {
         &self,
         credentials: &OwnedCredentials,
     ) -> Result<Snapshot, ProviderError> {
-        direct::fetch(
+        direct::fetch_for_account(
             &self.client,
             &self.direct_endpoint,
             credentials.access_token.expose(),
             credentials.project_id.as_deref(),
+            &self.account,
         )
         .await
     }
@@ -470,6 +472,15 @@ pub fn logged_in(body: &str) -> Result<(), String> {
 /// inverted fraction, the two pools of one length, the cadence that is sometimes declared
 /// and sometimes only implied by an id — is reachable from a test without a running server.
 pub fn parse(quota: &str, status: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(quota, status, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    quota: &str,
+    status: &str,
+    captured_at: Timestamp,
+    account: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let envelope: QuotaEnvelope = serde_json::from_str(quota)
         .map_err(|error| format!("not a quota summary: {error}"))
         .map_err(ProviderError::malformed)?;
@@ -517,7 +528,7 @@ pub fn parse(quota: &str, status: &str, captured_at: Timestamp) -> Result<Snapsh
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account.clone(),
         captured_at,
         windows,
         details: details(status, models),
@@ -1024,7 +1035,7 @@ mod tests {
             self.available
         }
 
-        fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+        fn fetch(&self, _account: &AccountId) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let result = self
                 .result

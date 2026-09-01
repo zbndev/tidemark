@@ -84,12 +84,17 @@ pub static SPEC: HandSpec = HandSpec {
 
 /// Builds a pollable client from the stored key. Nothing to resolve: the profile host
 /// is fixed and the regional hosts come from the response.
-fn build(credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(IBMBob::new(credential)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    _options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(IBMBob::new_for_account(account, credential)?))
 }
 
 /// One IBM Bob account: the key, and the profile host it unlocks.
 pub struct IBMBob {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
 }
@@ -97,7 +102,15 @@ pub struct IBMBob {
 impl IBMBob {
     /// Builds a client.
     pub fn new(credential: Credential) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
         })
@@ -190,7 +203,7 @@ impl IBMBob {
                 "the IBM Bob profile carried no teams for this key",
             ));
         }
-        Ok(snapshot(&teams, now))
+        Ok(snapshot_for_account(&teams, now, &self.tidemark_account))
     }
 }
 
@@ -210,7 +223,7 @@ impl Provider for IBMBob {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -480,7 +493,12 @@ fn non_empty(value: Option<&Value>) -> Option<String> {
 /// every team states a limit, as the source sums it. A balance has no length to key
 /// on: the wire states no budget duration. The reset is the soonest of the instances'
 /// refresh times.
+#[cfg(test)]
 fn snapshot(teams: &[TeamUsage], now: Timestamp) -> Snapshot {
+    snapshot_for_account(teams, now, &AccountId::default())
+}
+
+fn snapshot_for_account(teams: &[TeamUsage], now: Timestamp, account_id: &AccountId) -> Snapshot {
     let used: f64 = teams.iter().map(|team| team.used_bobcoins).sum();
     let limits: Vec<f64> = teams
         .iter()
@@ -530,7 +548,7 @@ fn snapshot(teams: &[TeamUsage], now: Timestamp) -> Snapshot {
         .collect();
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows,
         details: vec![DetailSection {
@@ -959,7 +977,14 @@ mod tests {
         assert_eq!(SPEC.id, PROVIDER_ID);
         assert_eq!(SPEC.title, "IBM Bob");
         assert!(SPEC.options.is_empty(), "one host, nothing to choose");
-        assert!(build(Credential::new("fixture-key"), &Options::new()).is_ok());
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("fixture-key"),
+                &Options::new()
+            )
+            .is_ok()
+        );
     }
 
     /// The ladder's pure half: pairs the profile's instances with their team budgets

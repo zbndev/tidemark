@@ -171,8 +171,8 @@ pub struct Spec {
     pub auth: Auth,
     /// Headers beyond auth and the shared user agent.
     pub headers: &'static [(&'static str, &'static str)],
-    /// Turns a response body into a snapshot. Pure by construction.
-    pub parse: fn(&str, Timestamp) -> Result<Snapshot, ProviderError>,
+    /// Turns a response body into a snapshot for the account being polled.
+    pub parse: fn(&str, Timestamp, &AccountId) -> Result<Snapshot, ProviderError>,
     /// One sentence saying which page the key is on.
     pub credential_hint: &'static str,
     /// What the user may choose.
@@ -182,7 +182,7 @@ pub struct Spec {
 /// Builds a pollable client from the stored key and the account's settings: what a
 /// [`HandSpec`] hands the registry so the daemon can construct the provider the same way
 /// it constructs a [`Keyed`].
-pub type Builder = fn(Credential, &Options) -> Result<Arc<dyn Provider>, ProviderError>;
+pub type Builder = fn(AccountId, Credential, &Options) -> Result<Arc<dyn Provider>, ProviderError>;
 
 /// Everything a hand-written key-authenticated provider publishes about itself: the parts
 /// of a [`Spec`] that are not about one request, and how to build a pollable client from
@@ -297,7 +297,7 @@ impl Keyed {
             return Err(ProviderError::Credential { status: 401 });
         }
         let body = request(self.spec.id, &self.client, self.build_request()?).await?;
-        (self.spec.parse)(&body, Timestamp::now())
+        (self.spec.parse)(&body, Timestamp::now(), &self.account)
     }
 }
 
@@ -590,7 +590,11 @@ mod tests {
         }
     }
 
-    fn parse_ok(_body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    fn parse_ok(
+        _body: &str,
+        captured_at: Timestamp,
+        _account: &AccountId,
+    ) -> Result<Snapshot, ProviderError> {
         Ok(snapshot_of("test", captured_at))
     }
 

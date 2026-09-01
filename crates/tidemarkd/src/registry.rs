@@ -610,8 +610,7 @@ fn antigravity_account(
     .with_source(source)
     .with_rebuild({
         let secrets = Arc::clone(secrets);
-        let account = account_id;
-        Box::new(move |options| {
+        Box::new(move |account, options| {
             let source = if account.as_str() == "default" {
                 Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
             } else {
@@ -643,8 +642,7 @@ fn claude_account(
     .with_source(source)
     .with_rebuild({
         let secrets = Arc::clone(secrets);
-        let account = account_id;
-        Box::new(move |options| {
+        Box::new(move |account, options| {
             let source = if account.as_str() == "default" {
                 Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
             } else {
@@ -676,8 +674,7 @@ fn codex_account(
     .with_source(source)
     .with_rebuild({
         let secrets = Arc::clone(secrets);
-        let account = account_id;
-        Box::new(move |options| {
+        Box::new(move |account, options| {
             let source = if account.as_str() == "default" {
                 Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
             } else {
@@ -701,11 +698,11 @@ fn keyed_account(spec: &'static keyed::Spec, account: &AccountId) -> Account {
     Account::new(
         ProviderId::new(spec.id),
         account_id.clone(),
-        Box::new(move |credential, options| {
+        Box::new(move |account, credential, options| {
             // The URL is resolved at build time, which is why storing a key or changing a
             // setting drops the client: either may change which host this account talks to.
             Ok(Arc::new(keyed::Keyed::new(
-                account_id.clone(),
+                account.clone(),
                 spec,
                 credential,
                 options,
@@ -732,7 +729,9 @@ fn hand_written_account(spec: &'static keyed::HandSpec, account: &AccountId) -> 
         let account = Account::keyless(
             ProviderId::new(spec.id),
             account.clone(),
-            Box::new(move |options| (spec.build)(Credential::new(String::new()), options)),
+            Box::new(move |account_id, options| {
+                (spec.build)(account_id.clone(), Credential::new(String::new()), options)
+            }),
         )
         .with_credential(spec.credential);
         if spec.credential_hint.is_empty() {
@@ -743,7 +742,9 @@ fn hand_written_account(spec: &'static keyed::HandSpec, account: &AccountId) -> 
     Account::new(
         ProviderId::new(spec.id),
         account.clone(),
-        Box::new(move |credential, options| (spec.build)(credential, options)),
+        Box::new(move |account_id, credential, options| {
+            (spec.build)(account_id.clone(), credential, options)
+        }),
     )
     .with_credential(spec.credential)
     .with_hint(spec.credential_hint)
@@ -1332,7 +1333,7 @@ mod tests {
         credential: CredentialKind::None,
         credential_hint: "",
         options: &[],
-        build: |_, _| Err(ProviderError::Local("not built in a test".into())),
+        build: |_, _, _| Err(ProviderError::Local("not built in a test".into())),
     };
 
     static KEY_SPEC: keyed::HandSpec = keyed::HandSpec {
@@ -1341,7 +1342,7 @@ mod tests {
         credential: CredentialKind::Key,
         credential_hint: "Test console \u{2192} API keys.",
         options: &[],
-        build: |_, _| Err(ProviderError::Local("not built in a test".into())),
+        build: |_, _, _| Err(ProviderError::Local("not built in a test".into())),
     };
 
     #[test]

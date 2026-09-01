@@ -864,6 +864,22 @@ pub fn snapshot(
     organization: Option<&str>,
     captured_at: Timestamp,
 ) -> Snapshot {
+    snapshot_for_account(
+        reading,
+        profile,
+        organization,
+        captured_at,
+        &AccountId::default(),
+    )
+}
+
+fn snapshot_for_account(
+    reading: &Reading,
+    profile: Option<&Profile>,
+    organization: Option<&str>,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     let mut windows = Vec::new();
 
     let total = reading
@@ -965,7 +981,7 @@ pub fn snapshot(
 
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details: if rows.is_empty() {
@@ -1025,12 +1041,19 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Kilo::new(credential, options)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Kilo::new_for_account(
+        account, credential, options,
+    )?))
 }
 
 /// One Kilo account: the key, and the organization it is scoped to if any.
 pub struct Kilo {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
     organization: Option<String>,
@@ -1039,7 +1062,16 @@ pub struct Kilo {
 impl Kilo {
     /// Builds a client.
     pub fn new(credential: Credential, options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential, options)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
             organization: options
@@ -1097,11 +1129,12 @@ impl Kilo {
         let reading =
             parse_batch(&super::request(PROVIDER_ID, &self.client, self.batch_request()?).await?)?;
         let profile = self.profile().await;
-        Ok(snapshot(
+        Ok(snapshot_for_account(
             &reading,
             profile.as_ref(),
             self.organization.as_deref(),
             Timestamp::now(),
+            &self.tidemark_account,
         ))
     }
 }
@@ -1123,7 +1156,7 @@ impl Provider for Kilo {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {

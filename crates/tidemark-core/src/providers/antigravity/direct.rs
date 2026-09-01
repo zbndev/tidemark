@@ -19,11 +19,30 @@ const DAY_SECONDS: u64 = 86_400;
 const WEEK_SECONDS: u64 = 7 * DAY_SECONDS;
 
 /// Fetches direct quota using the OAuth access token and the discovered project, if any.
+/// Fetches direct quota using the default account identity.
 pub async fn fetch(
     client: &reqwest::Client,
     endpoint: &str,
     access_token: &str,
     project_id: Option<&str>,
+) -> Result<Snapshot, ProviderError> {
+    fetch_for_account(
+        client,
+        endpoint,
+        access_token,
+        project_id,
+        &AccountId::default(),
+    )
+    .await
+}
+
+/// Fetches direct quota using the OAuth access token and the discovered project, if any.
+pub async fn fetch_for_account(
+    client: &reqwest::Client,
+    endpoint: &str,
+    access_token: &str,
+    project_id: Option<&str>,
+    account: &AccountId,
 ) -> Result<Snapshot, ProviderError> {
     let url = format!(
         "{}/v1internal:fetchAvailableModels",
@@ -53,11 +72,19 @@ pub async fn fetch(
         response,
     )
     .await?;
-    parse(&body, Timestamp::now())
+    parse_for_account(&body, Timestamp::now(), account)
 }
 
 /// Turns a direct `fetchAvailableModels` response into one window per shared counter.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let response: AvailableModels = serde_json::from_str(body).map_err(|error| {
         ProviderError::malformed(format!("not a direct Antigravity quota response: {error}"))
     })?;
@@ -144,7 +171,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account.clone(),
         captured_at,
         windows,
         details: Vec::new(),

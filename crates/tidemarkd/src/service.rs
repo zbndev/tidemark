@@ -85,19 +85,21 @@ impl Published {
         Some(statuses.remove(index))
     }
 
-    /// Puts the accounts in this provider order.
+    /// Puts the accounts in the complete provider and account order.
     ///
     /// Applied to the shared vector rather than left to the next `GetStatus` to sort,
     /// because there is nothing for a client to sort by: the order is the user's and this
-    /// is where it is kept. An account whose provider the order does not name keeps its
-    /// place at the end — the sort is stable — so a sequence that has raced a removal
-    /// leaves the survivors alone instead of shuffling them.
-    pub async fn reorder(&self, providers: &[String]) {
+    /// is where it is kept. An account pair the order does not name keeps its place at the
+    /// end — the sort is stable — so a sequence that has raced a removal leaves survivors
+    /// alone instead of shuffling them.
+    pub async fn reorder(&self, accounts: &[(String, String)]) {
         self.0.write().await.sort_by_key(|status| {
-            providers
+            accounts
                 .iter()
-                .position(|slug| *slug == status.provider)
-                .unwrap_or(providers.len())
+                .position(|(provider, account)| {
+                    provider == &status.provider && account == &status.account
+                })
+                .unwrap_or(accounts.len())
         });
     }
 
@@ -1343,9 +1345,12 @@ mod tests {
         published.upsert(status("zai")).await;
         published.upsert(status("kimi")).await;
         published.upsert(status("claude")).await;
-
         published
-            .reorder(&["claude".into(), "zai".into(), "kimi".into()])
+            .reorder(&[
+                ("claude".into(), "default".into()),
+                ("zai".into(), "default".into()),
+                ("kimi".into(), "default".into()),
+            ])
             .await;
 
         let providers: Vec<String> = published
@@ -1358,13 +1363,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_published_order_follows_account_order_after_reordering() {
+        let published = Published::default();
+        let default = status("zai");
+        let mut work = status("zai");
+        work.account = "work".into();
+        published.upsert(default.clone()).await;
+        published.upsert(work.clone()).await;
+        published.upsert(status("kimi")).await;
+
+        published
+            .reorder(&[
+                ("zai".into(), "work".into()),
+                ("zai".into(), "default".into()),
+                ("kimi".into(), "default".into()),
+            ])
+            .await;
+
+        let accounts: Vec<(String, String)> = published
+            .all()
+            .await
+            .into_iter()
+            .map(|status| (status.provider, status.account))
+            .collect();
+        assert_eq!(
+            accounts,
+            [
+                ("zai".into(), "work".into()),
+                ("zai".into(), "default".into()),
+                ("kimi".into(), "default".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn a_reorder_leaves_an_account_it_does_not_name_at_the_end() {
         let published = Published::default();
         published.upsert(status("zai")).await;
         published.upsert(status("kimi")).await;
         published.upsert(status("claude")).await;
-
-        published.reorder(&["claude".into()]).await;
+        published
+            .reorder(&[("claude".into(), "default".into())])
+            .await;
 
         let providers: Vec<String> = published
             .all()

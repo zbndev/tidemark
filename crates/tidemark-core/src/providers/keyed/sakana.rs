@@ -45,13 +45,18 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Sakana::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Sakana::new_for_account(account, options)?))
 }
 
 /// One Sakana account, authenticated by one explicitly chosen browser profile. The gate
 /// is the whole jar: the console's session cookie has no name worth pinning.
 pub struct Sakana {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -62,7 +67,12 @@ pub struct Sakana {
 
 impl Sakana {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -79,6 +89,7 @@ impl Sakana {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -151,7 +162,12 @@ impl Sakana {
         )
         .await
         .ok();
-        parse(&body, payg.as_deref(), Timestamp::now())
+        parse_for_account(
+            &body,
+            payg.as_deref(),
+            Timestamp::now(),
+            &self.tidemark_account,
+        )
     }
 
     async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
@@ -204,7 +220,7 @@ impl Provider for Sakana {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -272,6 +288,15 @@ pub fn parse(
     payg_html: Option<&str>,
     captured_at: Timestamp,
 ) -> Result<Snapshot, ProviderError> {
+    parse_for_account(html, payg_html, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    html: &str,
+    payg_html: Option<&str>,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let billing = parse_billing(html)?;
     let payg = payg_html.and_then(parse_payg);
 
@@ -316,7 +341,7 @@ pub fn parse(
     }
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details,

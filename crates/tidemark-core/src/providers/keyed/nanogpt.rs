@@ -62,18 +62,31 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(NanoGpt::new(credential)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    _options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(NanoGpt::new_for_account(account, credential)?))
 }
 
 pub struct NanoGpt {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
 }
 
 impl NanoGpt {
     pub fn new(credential: Credential) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
         })
@@ -107,7 +120,12 @@ impl NanoGpt {
             super::request(PROVIDER_ID, &self.client, subscription_request),
             super::request(PROVIDER_ID, &self.client, balance_request),
         );
-        parse(&subscription?, &balance?, Timestamp::now())
+        parse_for_account(
+            &subscription?,
+            &balance?,
+            Timestamp::now(),
+            &self.tidemark_account,
+        )
     }
 }
 
@@ -125,7 +143,7 @@ impl Provider for NanoGpt {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -288,10 +306,25 @@ fn window(
     })
 }
 
+#[cfg(test)]
 fn parse(
     subscription_body: &str,
     balance_body: &str,
     captured_at: Timestamp,
+) -> Result<Snapshot, ProviderError> {
+    parse_for_account(
+        subscription_body,
+        balance_body,
+        captured_at,
+        &AccountId::default(),
+    )
+}
+
+fn parse_for_account(
+    subscription_body: &str,
+    balance_body: &str,
+    captured_at: Timestamp,
+    account_id: &AccountId,
 ) -> Result<Snapshot, ProviderError> {
     let usage: serde_json::Map<String, serde_json::Value> = serde_json::from_str(subscription_body)
         .map_err(|e| ProviderError::malformed(format!("unreadable subscription usage: {e}")))?;
@@ -357,7 +390,7 @@ fn parse(
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details: vec![DetailSection {
@@ -384,7 +417,7 @@ fn parse(
 mod tests {
     use super::{NanoGpt, Options, SPEC, parse};
     use crate::providers::Credential;
-    use tidemark_types::{CredentialKind, DetailSection, Timestamp};
+    use tidemark_types::{AccountId, CredentialKind, DetailSection, Timestamp};
 
     /// A recorded `GET /api/subscription/v1/usage` response. This is the shape the live API
     /// actually returns: one object per metered pool, named for its period, with the pools
@@ -624,8 +657,12 @@ mod tests {
         assert_eq!(SPEC.credential, CredentialKind::Key);
         assert!(SPEC.options.is_empty());
 
-        let provider =
-            (SPEC.build)(Credential::new("not-a-real-key"), &Options::new()).expect("builds");
+        let provider = (SPEC.build)(
+            AccountId::default(),
+            Credential::new("not-a-real-key"),
+            &Options::new(),
+        )
+        .expect("builds");
         assert_eq!(provider.id().as_str(), "nanogpt");
     }
 

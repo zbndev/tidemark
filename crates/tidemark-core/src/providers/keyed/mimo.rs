@@ -53,12 +53,17 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(MiMo::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(MiMo::new_for_account(account, options)?))
 }
 
 /// One MiMo account, authenticated by one explicitly chosen browser profile.
 pub struct MiMo {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -69,7 +74,12 @@ pub struct MiMo {
 
 impl MiMo {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -86,6 +96,7 @@ impl MiMo {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -151,11 +162,12 @@ impl MiMo {
                 self.api_request(&self.url(PLAN_USAGE_URL), &session.header)?,
             ),
         );
-        parse(
+        parse_for_account(
             &balance?,
             detail.ok().as_deref(),
             usage.ok().as_deref(),
             Timestamp::now(),
+            &self.tidemark_account,
         )
     }
 
@@ -207,7 +219,7 @@ impl Provider for MiMo {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -315,6 +327,22 @@ pub fn parse(
     plan_usage_body: Option<&str>,
     captured_at: Timestamp,
 ) -> Result<Snapshot, ProviderError> {
+    parse_for_account(
+        balance_body,
+        plan_detail_body,
+        plan_usage_body,
+        captured_at,
+        &AccountId::default(),
+    )
+}
+
+fn parse_for_account(
+    balance_body: &str,
+    plan_detail_body: Option<&str>,
+    plan_usage_body: Option<&str>,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let balance = parse_balance(balance_body)?;
     let detail = plan_detail_body.and_then(parse_plan_detail);
     let usage = plan_usage_body.and_then(parse_plan_usage);
@@ -359,7 +387,7 @@ pub fn parse(
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details,

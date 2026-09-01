@@ -39,12 +39,17 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Manus::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Manus::new_for_account(account, options)?))
 }
 
 /// One Manus account, authenticated by one explicitly chosen browser profile.
 pub struct Manus {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -55,7 +60,12 @@ pub struct Manus {
 
 impl Manus {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -72,6 +82,7 @@ impl Manus {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -126,7 +137,7 @@ impl Manus {
             self.request(&self.credits_url(), &session.session_value)?,
         )
         .await?;
-        parse(&body, Timestamp::now())
+        parse_for_account(&body, Timestamp::now(), &self.tidemark_account)
     }
 
     async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
@@ -178,7 +189,7 @@ impl Provider for Manus {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -215,6 +226,14 @@ struct Credits {
 
 /// Turns Manus's credit inventory into the stated monthly credit pool.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let root: Value = serde_json::from_str(body)
         .map_err(|error| ProviderError::malformed(format!("not Manus credits: {error}")))?;
     let object = root
@@ -304,7 +323,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details: vec![DetailSection {

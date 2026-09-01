@@ -55,12 +55,17 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Ollama::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Ollama::new_for_account(account, options)?))
 }
 
 /// One Ollama account, authenticated by one explicitly chosen browser profile.
 pub struct Ollama {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -71,7 +76,12 @@ pub struct Ollama {
 
 impl Ollama {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -88,6 +98,7 @@ impl Ollama {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -152,7 +163,7 @@ impl Ollama {
         if is_signin_redirect(&landed_on, &self.site_host()) {
             return Err(ProviderError::Credential { status: 401 });
         }
-        parse(&body, Timestamp::now())
+        parse_for_account(&body, Timestamp::now(), &self.tidemark_account)
     }
 
     async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
@@ -205,7 +216,7 @@ impl Provider for Ollama {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -240,6 +251,14 @@ fn is_signin_redirect(url: &reqwest::Url, site_host: &str) -> bool {
 /// The page's meters as a snapshot: the session (or hourly) window, the weekly window,
 /// and the plan and account rows the page happens to carry.
 pub fn parse(html: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(html, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    html: &str,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     if looks_signed_out(html) {
         // The page the site serves a signed-out visitor: the session is gone, not broken.
         return Err(ProviderError::Credential { status: 401 });
@@ -276,7 +295,7 @@ pub fn parse(html: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
     }
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details,

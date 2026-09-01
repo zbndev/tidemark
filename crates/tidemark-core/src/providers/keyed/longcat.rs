@@ -46,12 +46,17 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(LongCat::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(LongCat::new_for_account(account, options)?))
 }
 
 /// One LongCat account, authenticated by one explicitly chosen browser profile.
 pub struct LongCat {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -62,7 +67,12 @@ pub struct LongCat {
 
 impl LongCat {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -79,6 +89,7 @@ impl LongCat {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -197,12 +208,13 @@ impl LongCat {
         .ok()
         .and_then(|body| data_object(&body, "pending fuel").ok());
 
-        parse(
+        parse_for_account(
             Some(&account),
             packs.as_ref(),
             usage.as_ref(),
             fuel.as_ref(),
             Timestamp::now(),
+            &self.tidemark_account,
         )
     }
 
@@ -254,7 +266,7 @@ impl Provider for LongCat {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -410,6 +422,24 @@ pub fn parse(
     pending_fuel: Option<&Map<String, Value>>,
     captured_at: Timestamp,
 ) -> Result<Snapshot, ProviderError> {
+    parse_for_account(
+        account,
+        token_pack_summary,
+        token_usage,
+        pending_fuel,
+        captured_at,
+        &AccountId::default(),
+    )
+}
+
+fn parse_for_account(
+    account: Option<&Map<String, Value>>,
+    token_pack_summary: Option<&Map<String, Value>>,
+    token_usage: Option<&Map<String, Value>>,
+    pending_fuel: Option<&Map<String, Value>>,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     // A quota the wire recognises but does not fully describe — an active lot without its
     // consumption, a usage without its used or remaining tokens — fails the fetch rather
     // than drawing zero, because "nothing spent" and "nothing said" are different answers.
@@ -526,7 +556,7 @@ pub fn parse(
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details,

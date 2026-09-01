@@ -172,8 +172,12 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Cursor::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Cursor::new_for_account(account, options)?))
 }
 
 /// The one local Cursor session a provider instance may read.
@@ -213,6 +217,7 @@ impl Source {
 }
 
 pub struct Cursor {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -223,7 +228,12 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -241,6 +251,7 @@ impl Cursor {
         storage: Arc<dyn SafeStorage>,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -434,12 +445,13 @@ impl Cursor {
             None => None,
         };
 
-        parse(
+        parse_for_account(
             &summary,
             identity.as_deref(),
             legacy.as_deref(),
             sand.as_deref(),
             Timestamp::now(),
+            &self.tidemark_account,
         )
     }
 }
@@ -591,7 +603,7 @@ impl Provider for Cursor {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -763,12 +775,31 @@ fn money(used: f64, limit: Option<f64>) -> String {
     }
 }
 
+#[cfg(test)]
 fn parse(
     summary_body: &str,
     identity_body: Option<&str>,
     legacy_body: Option<&str>,
     sand_body: Option<&str>,
     captured_at: Timestamp,
+) -> Result<Snapshot, ProviderError> {
+    parse_for_account(
+        summary_body,
+        identity_body,
+        legacy_body,
+        sand_body,
+        captured_at,
+        &AccountId::default(),
+    )
+}
+
+fn parse_for_account(
+    summary_body: &str,
+    identity_body: Option<&str>,
+    legacy_body: Option<&str>,
+    sand_body: Option<&str>,
+    captured_at: Timestamp,
+    account_id: &AccountId,
 ) -> Result<Snapshot, ProviderError> {
     let summary: Summary = serde_json::from_str(summary_body)
         .map_err(|e| ProviderError::malformed(format!("unreadable usage summary: {e}")))?;
@@ -1003,7 +1034,7 @@ fn parse(
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details,
@@ -1014,7 +1045,7 @@ fn parse(
 mod tests {
     use super::{Cursor, Options, SPEC, parse};
     use crate::providers::{Credential, Provider, ProviderError};
-    use tidemark_types::{AuthCandidateState, CredentialKind, DetailSection, Timestamp};
+    use tidemark_types::{AccountId, AuthCandidateState, CredentialKind, DetailSection, Timestamp};
 
     /// A live Pro account's `GET /api/usage-summary`, as CodexBar's own regression test
     /// records it: fractional lane percentages that are percentages, not fractions.
@@ -1382,8 +1413,12 @@ mod tests {
             ["auth-source", "auth-browser", "auth-profile"]
         );
 
-        let provider =
-            (SPEC.build)(Credential::new(String::new()), &Options::new()).expect("builds");
+        let provider = (SPEC.build)(
+            AccountId::default(),
+            Credential::new(String::new()),
+            &Options::new(),
+        )
+        .expect("builds");
         assert_eq!(provider.id().as_str(), "cursor");
     }
 

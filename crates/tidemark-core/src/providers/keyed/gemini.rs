@@ -77,12 +77,17 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Gemini::new()?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    _options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Gemini::new_for_account(account)?))
 }
 
 /// One Gemini CLI login on this machine.
 pub struct Gemini {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credentials: CredentialFile,
     /// The home the credentials and the CLI's settings live under, when `$HOME` says.
@@ -98,6 +103,10 @@ pub struct Gemini {
 impl Gemini {
     /// Builds the canonical account at `~/.gemini/oauth_creds.json`.
     pub fn new() -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default())
+    }
+
+    fn new_for_account(account_id: AccountId) -> Result<Self, ProviderError> {
         let path = cli_credentials_path().ok_or_else(|| {
             ProviderError::Local("HOME does not name an absolute directory".into())
         })?;
@@ -107,6 +116,7 @@ impl Gemini {
             std::env::var("GEMINI_OAUTH_CLIENT_SECRET").ok(),
         );
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: super::http::client()?,
             credentials: CredentialFile::new(path.clone(), path),
             home,
@@ -123,6 +133,7 @@ impl Gemini {
         let base = base.trim_end_matches('/').to_owned();
         let credentials = home.join(".gemini/oauth_creds.json");
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: super::http::client()?,
             credentials: CredentialFile::new(credentials.clone(), credentials),
             home: Some(home.to_path_buf()),
@@ -242,7 +253,8 @@ impl Gemini {
             Ok(())
         })
         .await?;
-        let mut snapshot = parse_quota(&body, Timestamp::now())?;
+        let mut snapshot =
+            parse_quota_for_account(&body, Timestamp::now(), &self.tidemark_account)?;
 
         if let Some(email) = email {
             snapshot.details.push(DetailSection {
@@ -370,7 +382,7 @@ impl Provider for Gemini {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -454,6 +466,14 @@ impl Tier {
 /// Turns a quota response into a snapshot: one window per tier, drawn at the lowest
 /// fraction any of the tier's models reported.
 pub fn parse_quota(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_quota_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_quota_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let response: QuotaResponse = serde_json::from_str(body).map_err(|error| {
         ProviderError::malformed(format!("not a Gemini quota response: {error}"))
     })?;
@@ -514,7 +534,7 @@ pub fn parse_quota(body: &str, captured_at: Timestamp) -> Result<Snapshot, Provi
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details: Vec::new(),

@@ -49,11 +49,11 @@ pub enum Publication {
         /// Stable account name.
         account: String,
     },
-    /// Put the published accounts in this provider order.
+    /// Put the published accounts in their complete provider and account order.
     ///
     /// A sequence rather than a status, because that is what changed: the readings are
     /// exactly as they were, and a client redrawing a grid needs the positions.
-    Reordered(Vec<String>),
+    Reordered(Vec<(String, String)>),
 }
 
 /// One application-wide preference mutation.
@@ -209,7 +209,11 @@ pub enum Command {
 /// A closure rather than a trait because that is all it is: the five providers are
 /// constructed five different ways, and only the daemon knows which one it is holding.
 pub type Factory = Box<
-    dyn Fn(Credential, &BTreeMap<String, String>) -> Result<Arc<dyn Provider>, ProviderError>
+    dyn Fn(
+            &AccountId,
+            Credential,
+            &BTreeMap<String, String>,
+        ) -> Result<Arc<dyn Provider>, ProviderError>
         + Send
         + Sync,
 >;
@@ -221,7 +225,9 @@ pub type Factory = Box<
 /// settings — and a setting that never reached the built client would take effect only on
 /// the next daemon restart.
 pub type Rebuild = Box<
-    dyn Fn(&BTreeMap<String, String>) -> Result<Arc<dyn Provider>, ProviderError> + Send + Sync,
+    dyn Fn(&AccountId, &BTreeMap<String, String>) -> Result<Arc<dyn Provider>, ProviderError>
+        + Send
+        + Sync,
 >;
 
 /// One account the daemon watches.
@@ -702,13 +708,15 @@ impl Engine {
                 .clone();
             let _ = self.updates.send(Publication::Changed(promoted)).await;
         }
-        let _ = self
-            .updates
-            .send(Publication::Removed {
-                provider: removed.provider.as_str().to_owned(),
-                account: removed.account.as_str().to_owned(),
-            })
-            .await;
+        if promote_from.is_none() {
+            let _ = self
+                .updates
+                .send(Publication::Removed {
+                    provider: removed.provider.as_str().to_owned(),
+                    account: removed.account.as_str().to_owned(),
+                })
+                .await;
+        }
         Ok(())
     }
 
@@ -770,8 +778,18 @@ impl Engine {
         let insertion = insertion.expect("the provider was checked before reordering");
         retained.splice(insertion..insertion, provider_accounts);
         self.accounts = retained;
+        let order = self
+            .accounts
+            .iter()
+            .map(|account| {
+                (
+                    account.provider.as_str().to_owned(),
+                    account.account.as_str().to_owned(),
+                )
+            })
+            .collect();
 
-        let _ = self.updates.send(Publication::Reordered(providers)).await;
+        let _ = self.updates.send(Publication::Reordered(order)).await;
         Ok(())
     }
 
@@ -799,10 +817,17 @@ impl Engine {
                 // the grid does with one anyway.
                 .unwrap_or(providers.len())
         });
-        let _ = self
-            .updates
-            .send(Publication::Reordered(providers.to_vec()))
-            .await;
+        let order = self
+            .accounts
+            .iter()
+            .map(|account| {
+                (
+                    account.provider.as_str().to_owned(),
+                    account.account.as_str().to_owned(),
+                )
+            })
+            .collect();
+        let _ = self.updates.send(Publication::Reordered(order)).await;
         Ok(())
     }
 
@@ -1174,8 +1199,9 @@ impl Engine {
         if let Some(rebuild) = self.accounts[index].rebuild.as_ref() {
             // Owns its credential discovery: there is no stored key to read, so the
             // settings are the whole of what the replacement is built from.
+            let account = self.accounts[index].account.clone();
             let options = self.accounts[index].option_values();
-            match rebuild(&options) {
+            match rebuild(&account, &options) {
                 Ok(client) => self.accounts[index].client = Some(client),
                 Err(error) => {
                     self.accounts[index].failures = self.accounts[index].failures.saturating_add(1);
@@ -1209,7 +1235,7 @@ impl Engine {
                     .factory
                     .as_ref()
                     .expect("checked just above");
-                match factory(credential, &options) {
+                match factory(&account, credential, &options) {
                     Ok(client) => {
                         tracing::debug!(provider = %provider, "credential loaded");
                         Loaded::Client(client)
@@ -1243,7 +1269,6 @@ impl Engine {
             }
         }
     }
-
     /// Files one fetch result and publishes the account.
     async fn apply(&mut self, index: usize, result: Result<Snapshot, ProviderError>) {
         match result {
@@ -2330,7 +2355,13 @@ mod tests {
         let config = Config::at(harness.config_path.clone()).expect("parses");
         assert_eq!(config.providers().expect("readable"), order);
         let publication = harness.updates.recv().await.expect("announced");
-        assert!(matches!(publication, Publication::Reordered(published) if published == order));
+        let published = match &publication {
+            Publication::Reordered(entries) => {
+                entries.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>()
+            }
+            _ => panic!("expected Reordered, got {publication:?}"),
+        };
+        assert_eq!(published, order);
     }
     #[tokio::test]
     async fn an_account_addition_persists_and_publishes_pending_status() {
@@ -2431,7 +2462,10 @@ mod tests {
             }
         }
         assert!(saw_changed, "the promoted account must be republished");
-        assert!(saw_removed, "the removed default must leave the topology");
+        assert!(
+            !saw_removed,
+            "the promoted account absorbs default; no Removed publication is needed"
+        );
     }
 
     #[tokio::test]
@@ -2489,7 +2523,12 @@ mod tests {
         );
         assert!(matches!(
             harness.updates.recv().await,
-            Some(Publication::Reordered(providers)) if providers == ["kimi"]
+            Some(Publication::Reordered(accounts))
+                if accounts == vec![
+                    ("kimi".into(), "default".into()),
+                    ("kimi".into(), "personal".into()),
+                    ("kimi".into(), "work".into()),
+                ]
         ));
     }
     #[tokio::test]
@@ -2684,7 +2723,7 @@ mod tests {
         let account = Account::keyless(
             ProviderId::new("cursor"),
             AccountId::default(),
-            Box::new(move |_| {
+            Box::new(move |_, _| {
                 Ok(Arc::new(AuthFake {
                     sources: source_copy.clone(),
                 }) as Arc<dyn Provider>)
@@ -2893,7 +2932,7 @@ mod tests {
         let account = Account::new(
             ProviderId::new("zai"),
             AccountId::default(),
-            Box::new(move |_credential, options| {
+            Box::new(move |_, _credential, options| {
                 recorder
                     .lock()
                     .expect("no test panics holding this")
@@ -3082,7 +3121,9 @@ mod tests {
             vec![Account::new(
                 ProviderId::new("fake"),
                 AccountId::default(),
-                Box::new(|_, _| Ok(Fake::new(vec![Ok(snapshot(1.0, 3600))]) as Arc<dyn Provider>)),
+                Box::new(|_, _, _| {
+                    Ok(Fake::new(vec![Ok(snapshot(1.0, 3600))]) as Arc<dyn Provider>)
+                }),
             )],
             Arc::new(Keyring(|| Err(SecretError::Locked))),
         );
@@ -3108,7 +3149,7 @@ mod tests {
             vec![Account::new(
                 ProviderId::new("fake"),
                 AccountId::default(),
-                Box::new(|_, _| Ok(Fake::new(vec![]) as Arc<dyn Provider>)),
+                Box::new(|_, _, _| Ok(Fake::new(vec![]) as Arc<dyn Provider>)),
             )],
             Arc::new(Keyring(|| Ok(None))),
         );
@@ -3125,7 +3166,7 @@ mod tests {
             vec![Account::new(
                 ProviderId::new("fake"),
                 AccountId::default(),
-                Box::new(|_, _| {
+                Box::new(|_, _, _| {
                     Ok(Fake::new(vec![
                         Err(ProviderError::Credential { status: 401 }),
                         Ok(snapshot(3.0, 3600)),
@@ -3545,7 +3586,7 @@ mod tests {
         let mut harness = harness_with_config(
             vec![
                 Account::with_client(Fake::new(vec![Ok(reading(0, 42.0, 3600))])).with_rebuild(
-                    Box::new(|_| {
+                    Box::new(|_, _| {
                         Ok(Fake::new(vec![Ok(reading(0, 42.0, 3600))]) as Arc<dyn Provider>)
                     }),
                 ),

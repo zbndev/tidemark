@@ -235,8 +235,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             tracing::warn!(%error, "could not announce a removal");
                         }
                     }
-                    Publication::Reordered(providers) => {
-                        published.reorder(&providers).await;
+                    Publication::Reordered(accounts) => {
+                        published.reorder(&accounts).await;
+                        let mut providers = Vec::new();
+                        for (provider, _) in &accounts {
+                            if !providers.iter().any(|known| known == provider) {
+                                providers.push(provider.clone());
+                            }
+                        }
                         if let Err(error) = Daemon::order_changed(&emitter, providers).await {
                             tracing::warn!(%error, "could not announce a reorder");
                         }

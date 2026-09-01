@@ -67,12 +67,17 @@ pub static SPEC: HandSpec = HandSpec {
 };
 
 /// Builds a pollable client from the stored key. DeepInfra has nothing to configure.
-fn build(credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(DeepInfra::new(credential)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    _options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(DeepInfra::new_for_account(account, credential)?))
 }
 
 /// One DeepInfra account: the key, and the two payment endpoints it unlocks.
 pub struct DeepInfra {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
 }
@@ -81,7 +86,15 @@ impl DeepInfra {
     /// Builds a client. One host, so the URLs are constants and there is nothing to
     /// resolve at build time.
     pub fn new(credential: Credential) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
         })
@@ -139,7 +152,7 @@ impl Provider for DeepInfra {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -573,7 +586,14 @@ mod tests {
         assert_eq!(SPEC.id, PROVIDER_ID);
         assert_eq!(SPEC.title, "DeepInfra");
         assert!(SPEC.options.is_empty(), "DeepInfra has nothing to choose");
-        assert!(build(Credential::new("fixture-token"), &Options::new()).is_ok());
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("fixture-token"),
+                &Options::new()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

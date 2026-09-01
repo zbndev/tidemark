@@ -82,13 +82,20 @@ pub static SPEC: HandSpec = HandSpec {
 /// Builds a pollable client from the stored key and the account's settings. The
 /// account id is read and validated here, so a missing or invalid one is named on the
 /// card rather than reaching the wire as a malformed URL.
-fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Fireworks::new(credential, options)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Fireworks::new_for_account(
+        account, credential, options,
+    )?))
 }
 
 /// One Fireworks account: the key, and the billing summary it unlocks when the account
 /// id says whose.
 pub struct Fireworks {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
     account: String,
@@ -98,6 +105,14 @@ impl Fireworks {
     /// Builds a client. The account id is part of the path, so it is resolved once,
     /// here, against the source's slug alphabet.
     pub fn new(credential: Credential, options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential, options)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         let account = required(options, ACCOUNT, "Account ID")?;
         if !account
             .bytes()
@@ -108,6 +123,7 @@ impl Fireworks {
             )));
         }
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
             account,
@@ -133,7 +149,11 @@ impl Fireworks {
         }
         let now = Timestamp::now();
         let body = super::request(PROVIDER_ID, &self.client, self.summary_request(now)?).await?;
-        Ok(snapshot(parse_summary(&body)?.as_ref(), now))
+        Ok(snapshot_for_account(
+            parse_summary(&body)?.as_ref(),
+            now,
+            &self.tidemark_account,
+        ))
     }
 }
 
@@ -154,7 +174,7 @@ impl Provider for Fireworks {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -284,7 +304,12 @@ fn parse_summary(body: &str) -> Result<Option<Spend>, ProviderError> {
 /// No window, ever: Fireworks is prepaid with no quota to draw a bar against, and the
 /// shape for that is details only — the card renders empty when nothing is rated,
 /// which is accepted.
+#[cfg(test)]
 fn snapshot(spend: Option<&Spend>, now: Timestamp) -> Snapshot {
+    snapshot_for_account(spend, now, &AccountId::default())
+}
+
+fn snapshot_for_account(spend: Option<&Spend>, now: Timestamp, account_id: &AccountId) -> Snapshot {
     let details = spend
         .map(|spend| {
             vec![DetailSection {
@@ -298,7 +323,7 @@ fn snapshot(spend: Option<&Spend>, now: Timestamp) -> Snapshot {
         .unwrap_or_default();
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows: Vec::new(),
         details,
@@ -507,10 +532,22 @@ mod tests {
         assert_eq!(SPEC.options.len(), 1);
         assert!(SPEC.options[0].required);
         assert!(
-            build(Credential::new("fw-key"), &options("x0mh0x")).is_ok(),
+            build(
+                AccountId::default(),
+                Credential::new("fw-key"),
+                &options("x0mh0x")
+            )
+            .is_ok(),
             "a slug and a key build a client"
         );
-        assert!(build(Credential::new("fw-key"), &Options::new()).is_err());
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("fw-key"),
+                &Options::new()
+            )
+            .is_err()
+        );
     }
 
     #[test]

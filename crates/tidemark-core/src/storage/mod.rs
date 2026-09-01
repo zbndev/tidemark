@@ -28,6 +28,14 @@ pub enum StorageError {
     /// The database itself refused.
     #[error("history database: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// Rekeying would overwrite rows already owned by the destination account.
+    #[error("history account rekey destination is not empty: {provider}/{account}")]
+    AccountRekeyCollision {
+        /// Provider whose account rows would collide.
+        provider: String,
+        /// Destination account id containing existing rows.
+        account: String,
+    },
     /// The directory holding the database could not be created.
     #[error("could not create {}: {source}", .path.display())]
     Directory {
@@ -443,6 +451,40 @@ impl History {
         };
         self.points(provider, account, window, segment)
     }
+    /// Checks that moving rows to `new` cannot overwrite another account's history.
+    ///
+    /// History has no merge semantics: a destination with any row is rejected so a
+    /// promotion cannot silently discard windows, points, or notifications.
+    pub fn can_rekey_account(
+        &self,
+        provider: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<(), StorageError> {
+        if old == new {
+            return Ok(());
+        }
+        for table in ["window_state", "segment", "point", "notice"] {
+            let occupied: i64 = self.connection.query_row(
+                &format!(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM {table}
+                        WHERE provider = ?1 AND account = ?2
+                    )"
+                ),
+                params![provider, new],
+                |row| row.get(0),
+            )?;
+            if occupied != 0 {
+                return Err(StorageError::AccountRekeyCollision {
+                    provider: provider.to_owned(),
+                    account: new.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Moves every stored row for one provider/account pair to another account id.
     ///
     /// Account promotion and account rename must not leave history split across two ids.
@@ -454,6 +496,7 @@ impl History {
         old: &str,
         new: &str,
     ) -> Result<(), StorageError> {
+        self.can_rekey_account(provider, old, new)?;
         let transaction = self.connection.transaction()?;
         for table in ["window_state", "segment", "point", "notice"] {
             transaction.execute(
@@ -961,6 +1004,51 @@ mod tests {
             history
                 .notice_sent("test", "work", &key(), 1, "threshold-70")
                 .expect("new notice read")
+        );
+    }
+
+    #[test]
+    fn a_rekey_rejects_a_nonempty_destination_without_merging_rows() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 42.0, Some(5 * HOUR)))
+            .expect("ingested old account");
+        let mut destination = snapshot(POLL, 7.0, Some(5 * HOUR));
+        destination.account = AccountId::new("work");
+        history
+            .ingest(&destination)
+            .expect("ingested destination account");
+
+        assert!(matches!(
+            history.rekey_account("test", "default", "work"),
+            Err(StorageError::AccountRekeyCollision { provider, account })
+                if provider == "test" && account == "work"
+        ));
+        assert_eq!(
+            history
+                .current_segment("test", "default", &key())
+                .expect("old state read"),
+            Some(1)
+        );
+        assert_eq!(
+            history
+                .current_segment("test", "work", &key())
+                .expect("destination state read"),
+            Some(1)
+        );
+        assert_eq!(
+            history
+                .points("test", "default", &key(), 1)
+                .expect("old points read")
+                .len(),
+            1
+        );
+        assert_eq!(
+            history
+                .points("test", "work", &key(), 1)
+                .expect("destination points read")
+                .len(),
+            1
         );
     }
 

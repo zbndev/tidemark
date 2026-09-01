@@ -48,12 +48,17 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Augment::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Augment::new_for_account(account, options)?))
 }
 
 /// One Augment account, authenticated by one explicitly chosen browser profile.
 pub struct Augment {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -64,7 +69,12 @@ pub struct Augment {
 
 impl Augment {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -81,6 +91,7 @@ impl Augment {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -141,7 +152,12 @@ impl Augment {
                 self.request(&self.subscription_url(), &session.header)?,
             ),
         );
-        parse(&credits?, subscription.ok().as_deref(), Timestamp::now())
+        parse_for_account(
+            &credits?,
+            subscription.ok().as_deref(),
+            Timestamp::now(),
+            &self.tidemark_account,
+        )
     }
 
     async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
@@ -184,7 +200,7 @@ impl Provider for Augment {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -226,6 +242,20 @@ pub fn parse(
     credits_body: &str,
     subscription_body: Option<&str>,
     captured_at: Timestamp,
+) -> Result<Snapshot, ProviderError> {
+    parse_for_account(
+        credits_body,
+        subscription_body,
+        captured_at,
+        &AccountId::default(),
+    )
+}
+
+fn parse_for_account(
+    credits_body: &str,
+    subscription_body: Option<&str>,
+    captured_at: Timestamp,
+    account_id: &AccountId,
 ) -> Result<Snapshot, ProviderError> {
     let credits: Credits = serde_json::from_str(credits_body)
         .map_err(|error| ProviderError::malformed(format!("not Augment credits: {error}")))?;
@@ -317,7 +347,7 @@ pub fn parse(
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details,

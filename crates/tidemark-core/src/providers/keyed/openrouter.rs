@@ -86,12 +86,19 @@ pub static SPEC: HandSpec = HandSpec {
 
 /// Builds a pollable client from the stored key and the account's settings. The URLs
 /// are resolved here, so a changed base URL takes effect on the next build.
-fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(OpenRouter::new(credential, options)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(OpenRouter::new_for_account(
+        account, credential, options,
+    )?))
 }
 
 /// One OpenRouter account: the key, and the two endpoints it unlocks.
 pub struct OpenRouter {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
     credits_url: String,
@@ -102,8 +109,17 @@ impl OpenRouter {
     /// Builds a client. The base URL is resolved once, here, because a setting that
     /// changed the host would otherwise take effect only on the next daemon restart.
     pub fn new(credential: Credential, options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential, options)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         let base = base_url(options, BASE_URL, DEFAULT_BASE_URL)?;
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
             credits_url: format!("{base}/credits"),
@@ -149,7 +165,12 @@ impl OpenRouter {
             &super::request(PROVIDER_ID, &self.client, self.credits_request()?).await?,
         )?;
         let key = self.key_state().await;
-        Ok(snapshot(&credits, &key, now))
+        Ok(snapshot_for_account(
+            &credits,
+            &key,
+            now,
+            &self.tidemark_account,
+        ))
     }
 
     /// The optional `/key` request. It never fails the fetch: a failure — transport,
@@ -188,7 +209,7 @@ impl Provider for OpenRouter {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -393,7 +414,17 @@ fn used_for_quota(data: &KeyData, limit: f64) -> Option<Option<f64>> {
 }
 
 /// Assembles the snapshot. Pure, so every recorded key body is reachable from a test.
+#[cfg(test)]
 fn snapshot(credits: &Credits, key: &KeyState, captured_at: Timestamp) -> Snapshot {
+    snapshot_for_account(credits, key, captured_at, &AccountId::default())
+}
+
+fn snapshot_for_account(
+    credits: &Credits,
+    key: &KeyState,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     let budget = match key {
         KeyState::Data(data) => Budget::of(data),
         KeyState::Degraded(_) => None,
@@ -406,7 +437,7 @@ fn snapshot(credits: &Credits, key: &KeyState, captured_at: Timestamp) -> Snapsh
     }
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details: vec![credits_details(credits), key_details(key, budget.as_ref())],
@@ -813,7 +844,14 @@ mod tests {
         assert_eq!(SPEC.id, PROVIDER_ID);
         assert_eq!(SPEC.title, "OpenRouter");
         assert_eq!(SPEC.options.len(), 1);
-        assert!(build(Credential::new("sk-or"), &Options::new()).is_ok());
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("sk-or"),
+                &Options::new()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

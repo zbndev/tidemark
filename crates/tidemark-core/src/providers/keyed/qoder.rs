@@ -36,12 +36,17 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Qoder::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Qoder::new_for_account(account, options)?))
 }
 
 /// One Qoder account, authenticated by one explicitly chosen browser profile.
 pub struct Qoder {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -52,7 +57,12 @@ pub struct Qoder {
 
 impl Qoder {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -70,6 +80,7 @@ impl Qoder {
         china: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -149,7 +160,7 @@ impl Qoder {
             Err(ProviderError::NoCredential) => self.fetch_china().await?,
             Err(error) => return Err(error),
         };
-        parse(&body, Timestamp::now())
+        parse_for_account(&body, Timestamp::now(), &self.tidemark_account)
     }
 
     async fn fetch_china(&self) -> Result<String, ProviderError> {
@@ -277,7 +288,7 @@ impl Provider for Qoder {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -295,6 +306,14 @@ fn cookie_query() -> browser::Query {
 
 /// Turns Qoder's recorded dashboard response into distinct total and shared credit pools.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let root: Value = serde_json::from_str(body)
         .map_err(|error| ProviderError::malformed(format!("not Qoder usage: {error}")))?;
     let object = root
@@ -311,7 +330,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
     }
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details: Vec::new(),

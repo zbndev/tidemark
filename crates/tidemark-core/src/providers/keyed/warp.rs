@@ -165,6 +165,14 @@ struct Bonus {
 
 /// Turns a response body into a snapshot. Pure: every trap above is reachable from a test.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+pub fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let root: Value = serde_json::from_str(body)
         .map_err(|e| ProviderError::malformed(format!("not the expected envelope: {e}")))?;
     let Some(json) = root.as_object() else {
@@ -277,7 +285,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account.clone(),
         captured_at,
         windows,
         details: Vec::new(),
@@ -401,7 +409,7 @@ pub static SPEC: Spec = Spec {
         // Pinned: CodexBar sends the running OS version, and no recorded body pins one.
         ("x-warp-os-version", "14.0"),
     ],
-    parse,
+    parse: parse_for_account,
     credential_hint: "Warp settings → API key (docs.warp.dev/reference/cli/api-keys).",
     options: &[],
 };

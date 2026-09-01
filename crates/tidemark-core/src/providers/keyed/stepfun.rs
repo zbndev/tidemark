@@ -61,8 +61,15 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(StepFun::new(credential.expose())?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    _options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(StepFun::new_for_account(
+        account,
+        credential.expose(),
+    )?))
 }
 
 /// The token a pasted value holds: trimmed, and a pasted cookie header reduced to its
@@ -99,6 +106,7 @@ fn device_id(token: &str) -> Option<String> {
 
 /// One Oasis-Token, bound to the device the token's own payload names.
 pub struct StepFun {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     /// The platform host, kept as a field so a test can point it at a loopback.
     base: String,
@@ -107,17 +115,21 @@ pub struct StepFun {
 }
 
 impl StepFun {
-    /// Builds the account against the real platform.
+    /// Builds the default account against the real platform.
     pub fn new(raw: &str) -> Result<Self, ProviderError> {
-        Self::with_base(BASE, raw)
+        Self::new_for_account(AccountId::default(), raw)
+    }
+
+    fn new_for_account(account_id: AccountId, raw: &str) -> Result<Self, ProviderError> {
+        Self::with_base(account_id, BASE, raw)
     }
 
     #[cfg(test)]
     fn for_test(base: &str, raw: &str) -> Result<Self, ProviderError> {
-        Self::with_base(base, raw)
+        Self::with_base(AccountId::default(), base, raw)
     }
 
-    fn with_base(base: &str, raw: &str) -> Result<Self, ProviderError> {
+    fn with_base(account_id: AccountId, base: &str, raw: &str) -> Result<Self, ProviderError> {
         let token = normalize_token(raw);
         if token.is_empty() {
             return Err(ProviderError::Local(
@@ -134,6 +146,7 @@ impl StepFun {
             ));
         };
         Ok(Self {
+            tidemark_account: account_id,
             client: super::http::client()?,
             base: base.trim_end_matches('/').to_owned(),
             token,
@@ -185,7 +198,7 @@ impl StepFun {
 
         Ok(Snapshot {
             provider: ProviderId::new(PROVIDER_ID),
-            account: AccountId::default(),
+            account: self.tidemark_account.clone(),
             captured_at: Timestamp::now(),
             windows,
             details,
@@ -207,7 +220,7 @@ impl Provider for StepFun {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -759,19 +772,28 @@ mod tests {
 
     #[test]
     fn a_token_whose_jwt_names_a_device_builds_and_one_without_is_refused() {
-        let error = (SPEC.build)(Credential::new("not a jwt at all"), &Options::new())
-            .expect_err("no device claim to bind");
+        let error = (SPEC.build)(
+            AccountId::default(),
+            Credential::new("not a jwt at all"),
+            &Options::new(),
+        )
+        .expect_err("no device claim to bind");
         assert!(
             matches!(error, ProviderError::Local(ref message) if message.contains("device_id")),
             "{error:?}"
         );
 
-        let error = (SPEC.build)(Credential::new("   "), &Options::new())
-            .expect_err("an empty paste is not a token");
+        let error = (SPEC.build)(
+            AccountId::default(),
+            Credential::new("   "),
+            &Options::new(),
+        )
+        .expect_err("an empty paste is not a token");
         assert!(matches!(error, ProviderError::Local(_)), "{error:?}");
 
         assert!(
             (SPEC.build)(
+                AccountId::default(),
                 Credential::new(jwt_with_device("device-7")),
                 &Options::new()
             )

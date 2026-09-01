@@ -72,12 +72,17 @@ pub static SPEC: HandSpec = HandSpec {
 };
 
 /// Builds a pollable client from the stored key. ai& has nothing to configure.
-fn build(credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(AiAnd::new(credential)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    _options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(AiAnd::new_for_account(account, credential)?))
 }
 
 /// One ai& account: the key, and the paged request log it unlocks.
 pub struct AiAnd {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
 }
@@ -86,7 +91,15 @@ impl AiAnd {
     /// Builds a client. One host, so the URL is a constant and there is nothing to
     /// resolve at build time.
     pub fn new(credential: Credential) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
         })
@@ -123,7 +136,12 @@ impl AiAnd {
         let now = Timestamp::now();
         let (rows, complete) = self.pages().await?;
         let spend = summarise(&rows)?;
-        Ok(snapshot(spend.as_ref(), complete, now))
+        Ok(snapshot_for_account(
+            spend.as_ref(),
+            complete,
+            now,
+            &self.tidemark_account,
+        ))
     }
 
     /// Walks the pages, keeping every row that lands. Transport, status and shape
@@ -174,7 +192,7 @@ impl Provider for AiAnd {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -318,7 +336,17 @@ fn decimal_nanos(raw: &str) -> Option<i128> {
 /// No window, ever: ai& is prepaid with no quota to draw a bar against, and the shape
 /// for that is details only — the card renders empty when nothing priced landed, which
 /// is accepted.
+#[cfg(test)]
 fn snapshot(spend: Option<&Spend>, complete: bool, now: Timestamp) -> Snapshot {
+    snapshot_for_account(spend, complete, now, &AccountId::default())
+}
+
+fn snapshot_for_account(
+    spend: Option<&Spend>,
+    complete: bool,
+    now: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     let rows = match spend {
         Some(spend) => vec![DetailRow {
             label: if complete {
@@ -346,7 +374,7 @@ fn snapshot(spend: Option<&Spend>, complete: bool, now: Timestamp) -> Snapshot {
     };
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows: Vec::new(),
         details,
@@ -616,7 +644,14 @@ mod tests {
         assert_eq!(SPEC.id, PROVIDER_ID);
         assert_eq!(SPEC.title, "ai&");
         assert!(SPEC.options.is_empty(), "ai& has nothing to choose");
-        assert!(build(Credential::new("fixture-key"), &Options::new()).is_ok());
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("fixture-key"),
+                &Options::new()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

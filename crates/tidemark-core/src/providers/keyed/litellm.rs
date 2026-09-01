@@ -90,13 +90,20 @@ pub static SPEC: HandSpec = HandSpec {
 /// Builds a pollable client from the stored key and the account's settings. The base
 /// URL is required — LiteLLM has no default host — and resolved here, so a changed one
 /// takes effect on the next build.
-fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(LiteLLM::new(credential, options)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(LiteLLM::new_for_account(
+        account, credential, options,
+    )?))
 }
 
 /// One LiteLLM deployment: the key, and the management root its two endpoints hang
 /// from.
 pub struct LiteLLM {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
     management: String,
@@ -106,11 +113,20 @@ impl LiteLLM {
     /// Builds a client. The `/v1` trimming happens once, here, so every request of a
     /// fetch agrees on the root.
     pub fn new(credential: Credential, options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential, options)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         let raw = required(options, BASE_URL, "Base URL")?;
         // `required` proved a value exists; the shared reader then enforces the
         // HTTPS-or-loopback rule on it.
         let base = base_url(&Options::from([(BASE_URL.to_owned(), raw)]), BASE_URL, "")?;
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
             management: management_root(&base),
@@ -182,7 +198,12 @@ impl LiteLLM {
                 "the LiteLLM key info did not include a user_id or team_id",
             ));
         };
-        Ok(snapshot(&reading, &key, now))
+        Ok(snapshot_for_account(
+            &reading,
+            &key,
+            now,
+            &self.tidemark_account,
+        ))
     }
 }
 
@@ -203,7 +224,7 @@ impl Provider for LiteLLM {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -392,7 +413,17 @@ fn parse_team_info(body: &str, key: &KeyInfo) -> Result<TeamBudget, ProviderErro
 /// survives either way. The personal window keys `personal` — it states no duration, so
 /// there is no length to key on — and a team window keys on its `budget_duration` when
 /// that is whole days, else `team`.
+#[cfg(test)]
 fn snapshot(reading: &Reading, key: &KeyInfo, now: Timestamp) -> Snapshot {
+    snapshot_for_account(reading, key, now, &AccountId::default())
+}
+
+fn snapshot_for_account(
+    reading: &Reading,
+    key: &KeyInfo,
+    now: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     let mut windows = Vec::new();
     let mut rows = Vec::new();
     match reading {
@@ -443,7 +474,7 @@ fn snapshot(reading: &Reading, key: &KeyInfo, now: Timestamp) -> Snapshot {
     }
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows,
         details,
@@ -1109,19 +1140,24 @@ mod tests {
     fn the_base_url_is_required_and_enforced() {
         // The procedure's fourth test: the option resolves, and a missing one names
         // itself rather than producing a malformed URL.
-        let error = build(Credential::new("sk-test"), &Options::new())
-            .expect_err("the required option is unset");
+        let error = build(
+            AccountId::default(),
+            Credential::new("sk-test"),
+            &Options::new(),
+        )
+        .expect_err("the required option is unset");
         assert!(
             matches!(error, ProviderError::Local(ref message)
                 if message == "Base URL is not set for this account"),
             "{error}"
         );
         let remote = options("http://litellm.lan:4000");
-        let error = build(Credential::new("sk-test"), &remote)
+        let error = build(AccountId::default(), Credential::new("sk-test"), &remote)
             .expect_err("a key over plain HTTP to a remote host is refused");
         assert!(matches!(error, ProviderError::Local(_)), "{error}");
         assert!(
             build(
+                AccountId::default(),
                 Credential::new("sk-test"),
                 &options("http://127.0.0.1:4000")
             )

@@ -111,6 +111,14 @@ fn dollars(amount: f64) -> String {
 
 /// Turns a response body into a snapshot. Pure: every trap above is reachable from a test.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+pub fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let envelope: Envelope = serde_json::from_str(body)
         .map_err(|e| ProviderError::malformed(format!("not the expected envelope: {e}")))?;
 
@@ -160,7 +168,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account.clone(),
         captured_at,
         // No limit was reported, so there is no share to draw. See the module doc.
         windows: Vec::new(),
@@ -182,7 +190,7 @@ pub static SPEC: Spec = Spec {
     method: Method::Get,
     auth: Auth::Bearer,
     headers: &[("Accept", "application/json")],
-    parse,
+    parse: parse_for_account,
     credential_hint: "Moonshot console → API keys, on whichever region your account is on.",
     options: &[OptionSchema {
         name: REGION,

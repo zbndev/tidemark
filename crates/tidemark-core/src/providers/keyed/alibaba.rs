@@ -89,14 +89,21 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
+fn build(
+    account: AccountId,
+    credential: Credential,
+    _options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
     if credential.expose().trim().is_empty() {
         return Err(ProviderError::Local(
             "an empty key is not a DashScope API key; paste one from the Model Studio console"
                 .into(),
         ));
     }
-    Ok(Arc::new(Alibaba::new(credential.expose())?))
+    Ok(Arc::new(Alibaba::new_for_account(
+        account,
+        credential.expose(),
+    )?))
 }
 
 /// One of the two gateways the same RPC lives on, with everything about the request the
@@ -156,6 +163,7 @@ impl Region {
 
 /// One DashScope key against the Coding Plan RPC.
 pub struct Alibaba {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     key: String,
     /// The two gateways, kept as fields so a test can point each at a loopback.
@@ -166,7 +174,12 @@ pub struct Alibaba {
 impl Alibaba {
     /// Builds the account against the real gateways.
     pub fn new(key: &str) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), key)
+    }
+
+    fn new_for_account(account_id: AccountId, key: &str) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: super::http::client()?,
             key: key.trim().to_owned(),
             intl_base: INTL_BASE.to_owned(),
@@ -177,6 +190,7 @@ impl Alibaba {
     #[cfg(test)]
     fn for_test(intl_base: &str, cn_base: &str, key: &str) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: super::http::client()?,
             key: key.to_owned(),
             intl_base: intl_base.trim_end_matches('/').to_owned(),
@@ -228,7 +242,7 @@ impl Alibaba {
         let body = super::request(PROVIDER_ID, &self.client, request)
             .await
             .map_err(Attempt::Exchange)?;
-        parse_quota(&body, Timestamp::now())
+        parse_quota_for_account(&body, Timestamp::now(), &self.tidemark_account)
     }
 }
 
@@ -246,7 +260,7 @@ impl Provider for Alibaba {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -321,7 +335,16 @@ fn region_shaped(error: &ProviderError) -> bool {
 ///
 /// Pure — the body and the clock decide everything — so every recorded envelope is
 /// reachable from a test.
+#[cfg(test)]
 fn parse_quota(body: &str, now: Timestamp) -> Result<Snapshot, Attempt> {
+    parse_quota_for_account(body, now, &AccountId::default())
+}
+
+fn parse_quota_for_account(
+    body: &str,
+    now: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, Attempt> {
     let document: Value = serde_json::from_str(body).map_err(|error| {
         Attempt::Malformed(format!("not an Alibaba Coding Plan response: {error}"))
     })?;
@@ -445,7 +468,7 @@ fn parse_quota(body: &str, now: Timestamp) -> Result<Snapshot, Attempt> {
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows,
         details,
@@ -1126,15 +1149,24 @@ mod tests {
 
     #[test]
     fn an_empty_key_is_refused_at_build() {
-        let error = (SPEC.build)(Credential::new("   "), &Options::new())
-            .expect_err("an empty key is not a credential");
+        let error = (SPEC.build)(
+            AccountId::default(),
+            Credential::new("   "),
+            &Options::new(),
+        )
+        .expect_err("an empty key is not a credential");
         assert!(
             matches!(error, ProviderError::Local(ref message) if message.contains("key")),
             "{error:?}"
         );
 
         assert!(
-            (SPEC.build)(Credential::new("cpk-live"), &Options::new()).is_ok(),
+            (SPEC.build)(
+                AccountId::default(),
+                Credential::new("cpk-live"),
+                &Options::new()
+            )
+            .is_ok(),
             "a pasted key builds"
         );
     }

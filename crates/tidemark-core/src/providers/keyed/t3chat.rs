@@ -54,13 +54,18 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(T3Chat::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(T3Chat::new_for_account(account, options)?))
 }
 
 /// One T3 Chat account, authenticated by one explicitly chosen browser profile. The gate
 /// is the whole jar: the site's session cookie has no name worth pinning.
 pub struct T3Chat {
+    tidemark_account: AccountId,
     client: wreq::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -71,11 +76,16 @@ pub struct T3Chat {
 
 impl T3Chat {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         let selection = session::selection(options);
         let browser = selection
             .as_ref()
             .map_or("chrome", |selection| selection.browser.as_str());
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: Self::browser_client(browser)?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -92,6 +102,7 @@ impl T3Chat {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: Self::browser_client("firefox")?,
             home: Some(home.to_path_buf()),
             storage,
@@ -167,7 +178,7 @@ impl T3Chat {
         .ok_or(ProviderError::NoCredential)?;
         let request = self.data_request(&self.url(API_URL), &session.header)?;
         let body = self.send_inspected(request).await?;
-        parse(&body, Timestamp::now())
+        parse_for_account(&body, Timestamp::now(), &self.tidemark_account)
     }
 
     /// [`super::request_inspected`] on the emulating stack: the same `Retry-After` read,
@@ -289,7 +300,7 @@ impl Provider for T3Chat {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -367,6 +378,14 @@ struct CustomerData {
 /// and the plan row. A meter the response did not state stays away rather than reading
 /// zero; a response that states none of them is not an answer.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     for line in body.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -374,7 +393,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
         let Some(customer) = find_customer_data(&value) else {
             continue;
         };
-        return snapshot(customer, captured_at);
+        return snapshot_for_account(customer, captured_at, account_id);
     }
     Err(ProviderError::malformed(
         "the T3 Chat response named no customer data",
@@ -400,9 +419,10 @@ fn find_customer_data(value: &serde_json::Value) -> Option<&serde_json::Value> {
     }
 }
 
-fn snapshot(
+fn snapshot_for_account(
     customer: &serde_json::Value,
     captured_at: Timestamp,
+    account_id: &AccountId,
 ) -> Result<Snapshot, ProviderError> {
     let data: CustomerData = serde_json::from_value(customer.clone()).map_err(|error| {
         ProviderError::malformed(format!("the T3 Chat customer data did not decode: {error}"))
@@ -468,7 +488,7 @@ fn snapshot(
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details,
