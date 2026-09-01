@@ -96,6 +96,17 @@ pub enum Command {
         /// Completion sent after persistence and in-memory mutation finish.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    // Constructed by the D-Bus service when Task 6 exposes this operation.
+    #[allow(dead_code)]
+    AddAccount {
+        /// Stable provider slug.
+        provider: String,
+        /// Lowercase account slug, unique within the provider.
+        account: String,
+        /// Completion sent after persistence and in-memory mutation finish.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+
     /// Remove one exact provider/account pair and report the persisted topology result.
     RemoveProvider {
         /// Stable provider slug.
@@ -158,6 +169,17 @@ pub enum Command {
         /// Completion sent after persistence and in-memory state agree.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    // Constructed by the D-Bus service when Task 6 exposes this operation.
+    #[allow(dead_code)]
+    SetAccountOrder {
+        /// Stable provider slug.
+        provider: String,
+        /// Every configured account id, in the order the user selected.
+        accounts: Vec<String>,
+        /// Completion sent after persistence and in-memory state agree.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+
     /// Reads the stored points in one account window's open segment.
     CurrentSegment {
         /// Stable provider slug.
@@ -481,8 +503,107 @@ impl Engine {
         let _ = self.updates.send(Publication::Changed(status)).await;
         Ok(())
     }
+    /// Adds one account to a configured provider without restarting the loop.
+    pub async fn add_account(&mut self, provider: &str, account: &str) -> Result<(), String> {
+        if account.is_empty()
+            || account.starts_with('-')
+            || account.ends_with('-')
+            || !account
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(format!("account {account:?} is not a valid lowercase slug"));
+        }
 
-    /// Removes an exact account from future polling without touching its history.
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        if !config
+            .providers()
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|configured| configured == provider)
+        {
+            return Err(format!("provider {provider} is not configured"));
+        }
+        let mut accounts = config
+            .accounts(provider)
+            .map_err(|error| error.to_string())?;
+        if accounts.iter().any(|configured| configured == account)
+            || self.accounts.iter().any(|configured| {
+                configured.provider.as_str() == provider && configured.account.as_str() == account
+            })
+        {
+            return Err(format!(
+                "account {provider}/{account} is already configured"
+            ));
+        }
+
+        let Some(mut new_account) =
+            crate::registry::account(provider, &AccountId::new(account), &self.secrets, &config)
+                .map_err(|error| error.to_string())?
+        else {
+            return Err(format!(
+                "provider {provider} is not supported by this build"
+            ));
+        };
+        if matches!(
+            new_account.status.credential_kind(),
+            Some(CredentialKind::External | CredentialKind::None)
+        ) {
+            return Err(format!(
+                "provider {provider} does not support multiple accounts"
+            ));
+        }
+
+        accounts.push(account.to_owned());
+        config
+            .set_accounts(provider, &accounts)
+            .map_err(|error| error.to_string())?;
+
+        new_account.due = Instant::now();
+        let insert_at = self
+            .accounts
+            .iter()
+            .rposition(|configured| configured.provider.as_str() == provider)
+            .map(|index| index + 1)
+            .unwrap_or(self.accounts.len());
+        self.accounts.insert(insert_at, new_account);
+        self.probe_credentials(Some(provider)).await;
+        let status = self.accounts[insert_at].status.clone();
+        let _ = self.updates.send(Publication::Changed(status)).await;
+        Ok(())
+    }
+
+    /// Copies one stored credential to a promoted account id, deleting the old slot only after
+    /// the replacement has been accepted.
+    async fn rekey_secret(
+        secrets: Arc<dyn Secrets>,
+        kind: Kind,
+        provider: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<(), String> {
+        let provider_id = ProviderId::new(provider);
+        let old_id = AccountId::new(old);
+        let new_id = AccountId::new(new);
+        let Some(secret) = secrets
+            .get(kind, &provider_id, &old_id)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(());
+        };
+        secrets
+            .set(kind, &provider_id, &new_id, &secret)
+            .await
+            .map_err(|error| error.to_string())?;
+        secrets
+            .delete(kind, &provider_id, &old_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Removes an exact account from future polling, promoting the first survivor when the
+    /// provider still has accounts left.
     pub async fn remove_provider(&mut self, provider: &str, account: &str) -> Result<(), String> {
         let Some(index) = self.accounts.iter().position(|configured| {
             configured.provider.as_str() == provider && configured.account.as_str() == account
@@ -491,11 +612,96 @@ impl Engine {
         };
 
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
-        config
-            .remove_provider(provider)
+        let configured_accounts = config
+            .accounts(provider)
             .map_err(|error| error.to_string())?;
+        if !configured_accounts
+            .iter()
+            .any(|configured| configured == account)
+        {
+            return Err(format!("account {provider}/{account} is not configured"));
+        }
+
+        let promote_from = if account == "default" && configured_accounts.len() > 1 {
+            let mut survivors = configured_accounts.clone();
+            let removed = survivors
+                .iter()
+                .position(|configured| configured == account)
+                .expect("the configured account was just found");
+            survivors.remove(removed);
+            Some(survivors.remove(0))
+        } else {
+            None
+        };
+        let promoted_kind = promote_from.as_ref().and_then(|old| {
+            self.accounts
+                .iter()
+                .find(|configured| {
+                    configured.provider.as_str() == provider && configured.account.as_str() == old
+                })
+                .and_then(|account| account.status.credential_kind())
+                .and_then(stored_kind)
+        });
+        if let Some(old) = promote_from.as_ref() {
+            if !self.accounts.iter().any(|configured| {
+                configured.provider.as_str() == provider && configured.account.as_str() == old
+            }) {
+                return Err(format!("account {provider}/{old} is not configured"));
+            }
+            if let Some(kind) = promoted_kind {
+                Self::rekey_secret(Arc::clone(&self.secrets), kind, provider, old, "default")
+                    .await?;
+            }
+            self.history
+                .rekey_account(provider, old, "default")
+                .map_err(|error| error.to_string())?;
+        }
+
+        if configured_accounts.len() > 1 {
+            config
+                .remove_account(provider, account)
+                .map_err(|error| error.to_string())?;
+        } else {
+            config
+                .remove_provider(provider)
+                .map_err(|error| error.to_string())?;
+        }
 
         let removed = self.accounts.remove(index);
+        if promote_from.is_some() {
+            let promoted_index = self
+                .accounts
+                .iter()
+                .position(|configured| {
+                    configured.provider.as_str() == provider
+                        && configured.account.as_str() == promote_from.as_deref().unwrap_or("")
+                })
+                .expect("the promoted account was checked before migration");
+            let promoted = &mut self.accounts[promoted_index];
+            promoted.account = AccountId::default();
+            promoted.status.account = AccountId::default().to_string();
+            promoted.status.account_label = None;
+            promoted.source =
+                crate::registry::source_for_account(provider, &promoted.account, &config);
+            if promoted.rebuildable() {
+                promoted.client = None;
+            }
+        }
+        self.probe_credentials(Some(provider)).await;
+
+        if promote_from.is_some() {
+            let promoted = self
+                .accounts
+                .iter()
+                .find(|configured| {
+                    configured.provider.as_str() == provider
+                        && configured.account == AccountId::default()
+                })
+                .expect("the promoted account was just renamed")
+                .status
+                .clone();
+            let _ = self.updates.send(Publication::Changed(promoted)).await;
+        }
         let _ = self
             .updates
             .send(Publication::Removed {
@@ -503,6 +709,69 @@ impl Engine {
                 account: removed.account.as_str().to_owned(),
             })
             .await;
+        Ok(())
+    }
+
+    /// Puts one provider's configured accounts in the order the user selected.
+    pub async fn set_account_order(
+        &mut self,
+        provider: &str,
+        accounts: &[String],
+    ) -> Result<(), String> {
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        let providers = config.providers().map_err(|error| error.to_string())?;
+        if !providers.iter().any(|configured| configured == provider) {
+            return Err(format!("provider {provider} is not configured"));
+        }
+        let configured = config
+            .accounts(provider)
+            .map_err(|error| error.to_string())?;
+        if accounts.first().map(String::as_str) != Some("default") {
+            return Err("the default account must be first".to_owned());
+        }
+        let mut wanted = accounts.to_vec();
+        wanted.sort_unstable();
+        let mut expected = configured.clone();
+        expected.sort_unstable();
+        if wanted != expected {
+            return Err(format!(
+                "the account order for {provider} must name every account exactly once"
+            ));
+        }
+        if !self
+            .accounts
+            .iter()
+            .any(|configured| configured.provider.as_str() == provider)
+        {
+            return Err(format!("provider {provider} is not running"));
+        }
+
+        config
+            .set_accounts(provider, accounts)
+            .map_err(|error| error.to_string())?;
+
+        let mut retained = Vec::with_capacity(self.accounts.len());
+        let mut provider_accounts = Vec::new();
+        let mut insertion = None;
+        for account in self.accounts.drain(..) {
+            if account.provider.as_str() == provider {
+                insertion.get_or_insert(retained.len());
+                provider_accounts.push(account);
+            } else {
+                retained.push(account);
+            }
+        }
+        provider_accounts.sort_by_key(|account| {
+            accounts
+                .iter()
+                .position(|id| id == account.account.as_str())
+                .unwrap_or(accounts.len())
+        });
+        let insertion = insertion.expect("the provider was checked before reordering");
+        retained.splice(insertion..insertion, provider_accounts);
+        self.accounts = retained;
+
+        let _ = self.updates.send(Publication::Reordered(providers)).await;
         Ok(())
     }
 
@@ -801,6 +1070,11 @@ impl Engine {
                         let result = self.add_provider(&provider).await;
                         let _ = reply.send(result);
                     }
+                    Some(Command::AddAccount { provider, account, reply }) => {
+                        let result = self.add_account(&provider, &account).await;
+                        let _ = reply.send(result);
+                    }
+
                     Some(Command::RemoveProvider { provider, account, reply }) => {
                         let result = self.remove_provider(&provider, &account).await;
                         let _ = reply.send(result);
@@ -817,6 +1091,11 @@ impl Engine {
                         let result = self.select_auth_source(&provider, &account, selection).await;
                         let _ = reply.send(result);
                     }
+                    Some(Command::SetAccountOrder { provider, accounts, reply }) => {
+                        let result = self.set_account_order(&provider, &accounts).await;
+                        let _ = reply.send(result);
+                    }
+
                     Some(Command::SetWindowNotify { provider, account, window, enabled, reply }) => {
                         let result = self
                             .set_window_notify(&provider, &account, &window, enabled)
@@ -1463,6 +1742,7 @@ fn worst_used(windows: &[WindowStatus]) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::notify::{Notice, Notifier, NotifyError};
+    use std::collections::HashMap;
     use std::sync::Mutex;
     use tidemark_core::providers::BoxFuture;
     use tidemark_types::{AuthCandidate, AuthSelection, Window, WindowKey, WindowLength};
@@ -1670,6 +1950,78 @@ mod tests {
             _provider: &'a ProviderId,
             _account: &'a AccountId,
         ) -> BoxFuture<'a, Result<(), SecretError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    #[derive(Debug, Default)]
+    struct StoredSecrets(Mutex<HashMap<(Kind, String, String), String>>);
+
+    impl StoredSecrets {
+        fn insert(&self, kind: Kind, provider: &str, account: &str, secret: &str) {
+            self.0.lock().expect("no test panics here").insert(
+                (kind, provider.to_owned(), account.to_owned()),
+                secret.to_owned(),
+            );
+        }
+    }
+
+    impl Secrets for StoredSecrets {
+        fn get<'a>(
+            &'a self,
+            kind: Kind,
+            provider: &'a ProviderId,
+            account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<Option<Credential>, SecretError>> {
+            let found = self
+                .0
+                .lock()
+                .expect("no test panics here")
+                .get(&(kind, provider.to_string(), account.to_string()))
+                .cloned()
+                .map(Credential::new);
+            Box::pin(async move { Ok(found) })
+        }
+
+        fn set<'a>(
+            &'a self,
+            kind: Kind,
+            provider: &'a ProviderId,
+            account: &'a AccountId,
+            secret: &'a Credential,
+        ) -> BoxFuture<'a, Result<(), SecretError>> {
+            let value = (
+                (kind, provider.to_string(), account.to_string()),
+                secret.expose().to_owned(),
+            );
+            self.0
+                .lock()
+                .expect("no test panics here")
+                .insert(value.0, value.1);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn compare_and_set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            _expected: &'a Credential,
+            _replacement: &'a Credential,
+        ) -> BoxFuture<'a, Result<bool, SecretError>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            kind: Kind,
+            provider: &'a ProviderId,
+            account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<(), SecretError>> {
+            self.0.lock().expect("no test panics here").remove(&(
+                kind,
+                provider.to_string(),
+                account.to_string(),
+            ));
             Box::pin(async { Ok(()) })
         }
     }
@@ -1979,6 +2331,249 @@ mod tests {
         assert_eq!(config.providers().expect("readable"), order);
         let publication = harness.updates.recv().await.expect("announced");
         assert!(matches!(publication, Publication::Reordered(published) if published == order));
+    }
+    #[tokio::test]
+    async fn an_account_addition_persists_and_publishes_pending_status() {
+        let mut harness = Harness::configured("runtime-add-account", &["kimi"]).await;
+
+        harness
+            .engine
+            .add_account("kimi", "work")
+            .await
+            .expect("account added");
+
+        assert_eq!(
+            harness
+                .engine
+                .accounts()
+                .iter()
+                .map(|account| account.account().as_str())
+                .collect::<Vec<_>>(),
+            ["default", "work"]
+        );
+        let publication = harness.updates.recv().await.expect("announced");
+        assert!(matches!(
+            publication,
+            Publication::Changed(status)
+                if status.provider == "kimi"
+                    && status.account == "work"
+                    && status.state == ProviderState::Pending.as_wire()
+        ));
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(
+            config.accounts("kimi").expect("accounts readable"),
+            ["default", "work"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_default_removal_promotes_the_first_survivor_and_rekeys_history() {
+        let mut harness = Harness::configured("runtime-promote-account", &["kimi"]).await;
+        harness
+            .engine
+            .add_account("kimi", "work")
+            .await
+            .expect("account added");
+        harness.published();
+
+        let mut reading = snapshot(50.0, 3600);
+        reading.provider = ProviderId::new("kimi");
+        reading.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&reading)
+            .expect("history written");
+
+        harness
+            .engine
+            .remove_provider("kimi", "default")
+            .await
+            .expect("default removed");
+
+        assert_eq!(harness.engine.accounts().len(), 1);
+        assert_eq!(harness.engine.accounts()[0].account().as_str(), "default");
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "work", &reading.windows[0].key)
+                .expect("old history read"),
+            None
+        );
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "default", &reading.windows[0].key)
+                .expect("promoted history read"),
+            Some(1)
+        );
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(
+            config.accounts("kimi").expect("accounts readable"),
+            ["default"]
+        );
+
+        let mut saw_changed = false;
+        let mut saw_removed = false;
+        while let Ok(publication) = harness.updates.try_recv() {
+            match publication {
+                Publication::Changed(status) if status.provider == "kimi" => {
+                    saw_changed = status.account == "default";
+                }
+                Publication::Removed { provider, account }
+                    if provider == "kimi" && account == "default" =>
+                {
+                    saw_removed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_changed, "the promoted account must be republished");
+        assert!(saw_removed, "the removed default must leave the topology");
+    }
+
+    #[tokio::test]
+    async fn the_account_order_requires_a_default_first_permutation_and_persists_it() {
+        let mut harness = Harness::configured("runtime-account-order", &["kimi"]).await;
+        harness
+            .engine
+            .add_account("kimi", "work")
+            .await
+            .expect("work added");
+        harness
+            .engine
+            .add_account("kimi", "personal")
+            .await
+            .expect("personal added");
+        harness.published();
+
+        assert!(
+            harness
+                .engine
+                .set_account_order("kimi", &["default".into(), "missing".into()])
+                .await
+                .is_err(),
+            "an order that is not a permutation must be refused"
+        );
+        assert_eq!(
+            Config::at(harness.config_path.clone())
+                .expect("parses")
+                .accounts("kimi")
+                .expect("accounts readable"),
+            ["default", "work", "personal"]
+        );
+
+        let order = vec!["default".into(), "personal".into(), "work".into()];
+        harness
+            .engine
+            .set_account_order("kimi", &order)
+            .await
+            .expect("order persisted");
+        assert_eq!(
+            harness
+                .engine
+                .accounts()
+                .iter()
+                .map(|account| account.account().as_str())
+                .collect::<Vec<_>>(),
+            ["default", "personal", "work"]
+        );
+        assert_eq!(
+            Config::at(harness.config_path.clone())
+                .expect("parses")
+                .accounts("kimi")
+                .expect("accounts readable"),
+            order
+        );
+        assert!(matches!(
+            harness.updates.recv().await,
+            Some(Publication::Reordered(providers)) if providers == ["kimi"]
+        ));
+    }
+    #[tokio::test]
+    async fn a_promoted_account_keeps_its_secret_and_history_after_reload() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-promote-reload-{}.toml",
+            std::process::id()
+        ));
+        let history_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-promote-reload-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let _ = std::fs::remove_file(&history_path);
+        let mut config = Config::at(config_path.clone()).expect("empty config parses");
+        config.add_provider("kimi").expect("provider configured");
+        config
+            .set_accounts("kimi", &["default".into(), "work".into()])
+            .expect("accounts configured");
+
+        let secrets = Arc::new(StoredSecrets::default());
+        secrets.insert(Kind::Key, "kimi", "work", "work-secret");
+        let secrets_dyn: Arc<dyn Secrets> = secrets.clone();
+        let accounts = crate::registry::accounts(&secrets_dyn, &config).expect("accounts built");
+        let (tx, rx) = mpsc::channel(64);
+        let notices = Arc::new(Recorder::default());
+        let mut harness = Harness {
+            engine: Engine::new(
+                accounts,
+                History::open(history_path.clone()).expect("history opened"),
+                secrets_dyn.clone(),
+                tx,
+                config_path.clone(),
+                scheduler::RefreshMode::Auto,
+                Arc::clone(&notices) as Arc<dyn Notifier>,
+            ),
+            updates: rx,
+            config_path: config_path.clone(),
+            notices,
+        };
+
+        let mut reading = snapshot(50.0, 3600);
+        reading.provider = ProviderId::new("kimi");
+        reading.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&reading)
+            .expect("history written");
+        harness
+            .engine
+            .remove_provider("kimi", "default")
+            .await
+            .expect("default removed");
+
+        let promoted_secret = secrets_dyn
+            .get(Kind::Key, &ProviderId::new("kimi"), &AccountId::default())
+            .await
+            .expect("promoted secret read")
+            .expect("promoted secret present");
+        assert_eq!(promoted_secret.expose(), "work-secret");
+        assert!(
+            secrets_dyn
+                .get(Kind::Key, &ProviderId::new("kimi"), &AccountId::new("work"),)
+                .await
+                .expect("old secret read")
+                .is_none()
+        );
+
+        let reloaded_config = Config::at(config_path.clone()).expect("config reloaded");
+        let reloaded_accounts =
+            crate::registry::accounts(&secrets_dyn, &reloaded_config).expect("accounts reloaded");
+        assert_eq!(reloaded_accounts.len(), 1);
+        assert_eq!(reloaded_accounts[0].account().as_str(), "default");
+        let reloaded_history = History::open(history_path.clone()).expect("history reloaded");
+        assert_eq!(
+            reloaded_history
+                .current_segment("kimi", "default", &reading.windows[0].key)
+                .expect("promoted history read"),
+            Some(1)
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_file(history_path);
     }
 
     #[tokio::test]

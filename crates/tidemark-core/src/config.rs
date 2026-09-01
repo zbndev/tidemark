@@ -629,6 +629,26 @@ impl Config {
         }
         Ok(configured)
     }
+    /// Removes one account from a provider's ordered account list.
+    ///
+    /// Removing the default promotes the first survivor to the default id so that the
+    /// configured list always has one canonical first account. Removing the final account
+    /// removes the provider and its settings through [`Self::remove_provider`].
+    pub fn remove_account(&mut self, provider: &str, account: &str) -> Result<bool, ConfigError> {
+        let mut accounts = self.accounts(provider)?;
+        let Some(index) = accounts.iter().position(|configured| configured == account) else {
+            return Ok(false);
+        };
+        accounts.remove(index);
+        if accounts.is_empty() {
+            return self.remove_provider(provider);
+        }
+        if account == "default" {
+            accounts[0] = "default".to_owned();
+        }
+        self.set_accounts(provider, &accounts)?;
+        Ok(true)
+    }
 
     /// Sets one provider setting and writes the file.
     ///
@@ -1429,6 +1449,56 @@ mod tests {
         assert!(text.contains("# owned by the user"));
         assert!(text.contains("[unrelated]"));
         assert!(!text.contains("[provider.claude]"));
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn account_removals_preserve_default_promote_survivors_and_drop_provider() {
+        let path = scratch("account-mutations");
+        std::fs::write(
+            &path,
+            "providers = [\"claude\"]\n\
+             [provider.claude]\n\
+             accounts = [\"default\", \"work\"]\n",
+        )
+        .expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        assert!(config.remove_account("claude", "work").expect("removed"));
+        assert_eq!(
+            Config::at(path.clone())
+                .expect("reloaded")
+                .accounts("claude")
+                .expect("accounts read"),
+            ["default"]
+        );
+
+        config
+            .set_accounts("claude", &["default".into(), "work".into()])
+            .expect("second account added");
+        assert!(
+            config
+                .remove_account("claude", "default")
+                .expect("promoted")
+        );
+        assert_eq!(
+            Config::at(path.clone())
+                .expect("reloaded")
+                .accounts("claude")
+                .expect("accounts read"),
+            ["default"]
+        );
+
+        assert!(config.remove_account("claude", "default").expect("dropped"));
+        let reread = Config::at(path.clone()).expect("reloaded");
+        assert!(reread.providers().expect("providers read").is_empty());
+        assert_eq!(
+            reread
+                .accounts("claude")
+                .expect("missing provider defaults"),
+            ["default"]
+        );
+        let text = std::fs::read_to_string(path.clone()).expect("read back");
+        assert!(!text.contains("[provider.claude]"), "{text}");
         let _ = std::fs::remove_file(path);
     }
 

@@ -443,6 +443,30 @@ impl History {
         };
         self.points(provider, account, window, segment)
     }
+    /// Moves every stored row for one provider/account pair to another account id.
+    ///
+    /// Account promotion and account rename must not leave history split across two ids.
+    /// The updates run in one transaction so a failure in any table leaves all four tables
+    /// unchanged.
+    pub fn rekey_account(
+        &mut self,
+        provider: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<(), StorageError> {
+        let transaction = self.connection.transaction()?;
+        for table in ["window_state", "segment", "point", "notice"] {
+            transaction.execute(
+                &format!(
+                    "UPDATE {table} SET account = ?1
+                     WHERE provider = ?2 AND account = ?3"
+                ),
+                params![new, provider, old],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
 
     /// Total points stored, across everything. Diagnostics and tests.
     pub fn point_count(&self) -> Result<i64, StorageError> {
@@ -887,6 +911,105 @@ mod tests {
                 .current_segment("test", "two", &key())
                 .expect("looked up"),
             Some(1)
+        );
+    }
+    #[test]
+    fn rekeying_moves_all_history_rows_to_the_new_account() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 42.0, Some(5 * HOUR)))
+            .expect("ingested");
+        history
+            .record_notice("test", "default", &key(), 1, "threshold-70", at(0))
+            .expect("recorded");
+
+        history
+            .rekey_account("test", "default", "work")
+            .expect("rekeyed");
+
+        assert_eq!(
+            history
+                .current_segment("test", "default", &key())
+                .expect("old state read"),
+            None
+        );
+        assert_eq!(
+            history
+                .current_segment("test", "work", &key())
+                .expect("new state read"),
+            Some(1)
+        );
+        assert!(
+            history
+                .points("test", "default", &key(), 1)
+                .expect("old points read")
+                .is_empty()
+        );
+        assert_eq!(
+            history
+                .points("test", "work", &key(), 1)
+                .expect("new points read")
+                .len(),
+            1
+        );
+        assert!(
+            !history
+                .notice_sent("test", "default", &key(), 1, "threshold-70")
+                .expect("old notice read")
+        );
+        assert!(
+            history
+                .notice_sent("test", "work", &key(), 1, "threshold-70")
+                .expect("new notice read")
+        );
+    }
+
+    #[test]
+    fn a_failed_rekey_keeps_rows_under_the_old_account() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 42.0, Some(5 * HOUR)))
+            .expect("ingested");
+        history
+            .record_notice("test", "default", &key(), 1, "threshold-70", at(0))
+            .expect("recorded");
+        history
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER pinned_segment BEFORE UPDATE OF account ON segment
+                 WHEN NEW.account = 'work'
+                 BEGIN SELECT RAISE(FAIL, 'segments are pinned'); END;",
+            )
+            .expect("trigger installed");
+
+        assert!(
+            history.rekey_account("test", "default", "work").is_err(),
+            "a pinned segment refuses the rekey"
+        );
+
+        assert_eq!(
+            history
+                .current_segment("test", "default", &key())
+                .expect("old state read"),
+            Some(1)
+        );
+        assert!(
+            history
+                .current_segment("test", "work", &key())
+                .expect("new state read")
+                .is_none()
+        );
+        assert_eq!(
+            history
+                .points("test", "default", &key(), 1)
+                .expect("old points read")
+                .len(),
+            1
+        );
+        assert!(
+            history
+                .notice_sent("test", "default", &key(), 1, "threshold-70")
+                .expect("old notice read")
         );
     }
 
