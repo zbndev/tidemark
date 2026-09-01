@@ -14,12 +14,18 @@
   dbus,
   hicolor-icon-theme,
 }:
+let
+  manifest = builtins.fromTOML (builtins.readFile ../Cargo.toml);
+in
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "tidemark";
-  version = "0.2.1";
+  version = manifest.workspace.package.version;
   src = ../.;
   cargoLock.lockFile = ../Cargo.lock;
-  cargoBuildFlags = [ "--workspace" "--bins" ];
+  cargoBuildFlags = [
+    "--workspace"
+    "--bins"
+  ];
   doCheck = false;
   dontCargoInstall = true;
 
@@ -37,7 +43,13 @@ rustPlatform.buildRustPackage (finalAttrs: {
     wrapGAppsHook4
     makeWrapper
   ];
-  buildInputs = [ gtk4 libadwaita sqlite dbus hicolor-icon-theme ];
+  buildInputs = [
+    gtk4
+    libadwaita
+    sqlite
+    dbus
+    hicolor-icon-theme
+  ];
   LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
 
   postInstall = ''
