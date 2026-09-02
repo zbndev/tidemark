@@ -1,0 +1,65 @@
+# The flake build, exercised only by the changes that can break it.
+#
+# Everything here compiles the same crates with the same channel the main CI already
+# builds on every pull request, in a Docker container with a fresh Nix store each time —
+# north of ten minutes for an ordinary Rust diff that cannot fail it differently. So this
+# workflow does not run on those: it runs when the packaging, the manifests, the
+# toolchain, or the assets the derivation copies have changed. The weekly lock refresh in
+# `update-nix-flake.yml` runs the same script on every bump and keeps the flake exercised
+# regardless.
+#
+# Everything that can break the build and nothing else:
+# - `flake.*`, `nix/**` — the packaging itself
+# - `Cargo.toml`, `Cargo.lock` — a new dependency changes what the build fetches and may
+#   need a nixpkgs buildInput the expression does not have yet
+# - `rust-toolchain.toml` — the channel the expression builds with
+# - `data/**` — files the derivation installs (desktop, metainfo, icons, D-Bus service)
+# - `scripts/test-nix-flake.sh`, this file — the check and its own triggers
+name: Nix flake
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'data/**'
+      - 'scripts/test-nix-flake.sh'
+      - '.github/workflows/nix.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'data/**'
+      - 'scripts/test-nix-flake.sh'
+      - '.github/workflows/nix.yml'
+
+# Read-only is all this workflow ever does; declaring it keeps the repository's default
+# permissions from silently applying.
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nix:
+    name: Nix flake
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build and exercise the flake in Docker
+        run: scripts/test-nix-flake.sh
