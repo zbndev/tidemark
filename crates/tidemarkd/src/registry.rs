@@ -28,7 +28,7 @@ use tidemark_core::providers::keyed::{
     self, abacus, aiand, alibaba, augment, codebuff, commandcode, cursor, deepgram, deepinfra,
     factory, fireworks, gemini, grok, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo,
     mistral, nanogpt, notion, ollama, openai_api, opencode, openrouter, perplexity, poe, qoder,
-    sakana, stepfun, sub2api, t3chat, wayfinder, xai, zoommate,
+    sakana, stepfun, sub2api, t3chat, wayfinder, xai, zai, zoommate,
 };
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
@@ -127,7 +127,8 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
 /// through a usage history, StepFun asks a rate-limit RPC and then a plan-status one,
 /// deriving the device id its cookie pair needs from the token's own JWT payload at
 /// build time, xAI reads a prepaid balance and a spend
-/// history — and those whose single request hangs from a required base URL with no
+/// history, and Z.ai follows its quota meters with the wallet
+/// the same key reads, gating its MCP window on the money there is left — and those whose single request hangs from a required base URL with no
 /// default host, where the shared reader's refusal of a bad value must happen at
 /// build time rather than inside an endpoint closure: LLM Proxy and sub2api — and
 /// Wayfinder, a router on this machine that answers without a credential at all and reads
@@ -176,6 +177,7 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &t3chat::SPEC,
     &wayfinder::SPEC,
     &xai::SPEC,
+    &zai::SPEC,
     &zoommate::SPEC,
 ];
 
@@ -1477,15 +1479,21 @@ mod tests {
         let config = Config::at(path.clone()).expect("parses");
         assert_eq!(options(zai::PROVIDER_ID, &config)[0].value, "bigmodel-cn");
 
-        // A published option shows what is on disk verbatim; the spec's own `endpoint`
-        // is what keeps an unrecognised value from reaching the wrong host, so an
-        // unrecognised value on disk is not silently rewritten here.
+        // A published option shows what is on disk verbatim; the provider's own URL
+        // resolution is what keeps an unrecognised value from reaching the wrong host, so
+        // an unrecognised value on disk is not silently rewritten here.
         std::fs::write(&path, "[provider.zai]\nregion = \"mars\"\n").expect("seed");
         let config = Config::at(path.clone()).expect("parses");
         assert_eq!(options(zai::PROVIDER_ID, &config)[0].value, "mars");
+        let wrong_host = zai::Zai::new(
+            Credential::new("key"),
+            &BTreeMap::from([("region".to_owned(), "mars".to_owned())]),
+        )
+        .expect("builds");
+        let no_region = zai::Zai::new(Credential::new("key"), &BTreeMap::new()).expect("builds");
         assert_eq!(
-            (zai::SPEC.endpoint)(&BTreeMap::from([("region".to_owned(), "mars".to_owned())])),
-            (zai::SPEC.endpoint)(&BTreeMap::new()),
+            (wrong_host.quota_url(), wrong_host.balance_url()),
+            (no_region.quota_url(), no_region.balance_url()),
             "a typo in a hand-edited file costs the wrong host at request time, not a dead card"
         );
         let _ = std::fs::remove_file(&path);

@@ -564,7 +564,6 @@ pub static CATALOG: &[&Spec] = &[
     &synthetic::SPEC,
     &venice::SPEC,
     &warp::SPEC,
-    &zai::SPEC,
     &zenmux::SPEC,
 ];
 
