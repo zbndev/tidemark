@@ -2,6 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+- [x] **Implementation complete** — 2026-09-02, `443b2ad feat(ui): support multi-account providers`.
+  The user performed the visual QA. The shared group backdrop from Task 10 was deliberately
+  removed following user feedback, so it is not part of the shipped implementation. The
+  unchecked execution steps below are retained as the original historical plan.
+
 **Goal:** Let one provider carry several credentialled accounts (a work and a personal Claude, two Z.ai keys), created, named, shown, ordered and removed from the UI.
 
 **Architecture:** The daemon's plumbing is already per-account (`AccountId` flows through
