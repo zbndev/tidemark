@@ -313,6 +313,15 @@ fn account_row(
         .margin_start(24)
         .use_markup(false)
         .build();
+    // A dimmed corner tying the row to the provider above it — the margin alone read as
+    // a stray indent rather than as nesting. Pango falls back to a font that draws the
+    // glyph when the interface font has none of its own.
+    let corner = gtk::Label::builder()
+        .label("⌞")
+        .valign(gtk::Align::Center)
+        .css_classes(["dim-label"])
+        .build();
+    row.add_prefix(&corner);
     row.add_prefix(&image);
 
     let edit = gtk::Button::builder()
@@ -403,6 +412,12 @@ fn update_account_row(
         status,
         is_waiting(&status.provider, &status.account),
     ));
+    // The same editability rule the provider's own row applies. For every provider that
+    // can hold a second account it is true by construction (its credential is key or
+    // oauth), but a missing definition draws no pen here either, exactly as above.
+    let editable = definition.is_some_and(opens_detail_after_add);
+    row.edit.set_visible(editable);
+    row.edit.set_sensitive(editable);
     mark::set(&row.image, &status.provider);
 }
 
@@ -552,7 +567,7 @@ impl Picker {
 mod tests {
     use tidemark_types::{AccountId, ProviderId, ProviderStatus};
 
-    use super::{ProviderGroup, group};
+    use super::{ProviderGroup, group, structure};
 
     fn status(provider: &str, account: &str) -> ProviderStatus {
         ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))
@@ -602,6 +617,29 @@ mod tests {
         assert_eq!(
             keys(&groups),
             vec![("kimi", vec!["team", "default", "work"])]
+        );
+    }
+
+    #[test]
+    fn a_group_draws_one_provider_key_then_one_key_per_account_beyond_the_first() {
+        // The shape key apply() diffs held rows against: None is the provider's own row,
+        // and each account after the first is Some(...) in configured order. A provider
+        // with one account contributes its single None key and nothing else.
+        let groups = group(&[
+            status("kimi", "default"),
+            status("kimi", "work"),
+            status("kimi", "team"),
+            status("zai", "default"),
+        ]);
+
+        assert_eq!(
+            structure(&groups),
+            [
+                ("kimi", None),
+                ("kimi", Some("work")),
+                ("kimi", Some("team")),
+                ("zai", None),
+            ]
         );
     }
 
