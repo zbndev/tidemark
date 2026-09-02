@@ -105,6 +105,27 @@ pub(crate) const STYLE: &str = "
     font-weight: bold;
 }
 
+/* A notification-style account counter: it overlays the card corner and is deliberately
+   outside the title row, whose provider, plan and state labels can all grow independently. */
+.quota-account-toggle {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+    font-size: 0.75em;
+    font-weight: bold;
+    transform: translate(10px, -10px);
+    transition: transform 150ms ease-out;
+    box-shadow: 0 1px 3px 0 alpha(black, 0.3);
+}
+
+/* The badge lives in the slot, outside the card surface, so it repeats the card's hover
+   lift rather than looking detached from the surface it labels. */
+.quota-grid > .quota-slot:hover:not(.dragging) > .quota-account-toggle {
+    transform: translate(10px, -12px);
+}
+
 /* The plan is the same pill without a tone: it says what the account is, not what is wrong
    with it. `alpha(currentColor, …)` is what makes one rule serve both styles — the
    foreground is dark on a light card and light on a dark one, so the pill comes out a step

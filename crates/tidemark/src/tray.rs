@@ -108,8 +108,9 @@ pub fn needs_attention(statuses: &[ProviderStatus]) -> bool {
 }
 
 /// The provider's name, with the account after it only when it is needed to tell two rows
-/// apart. One account per provider is the ordinary case and `Claude (default)` would be a
-/// word of noise on every line of the menu.
+/// apart — preferring the account's label, falling back to its id. One account per provider
+/// is the ordinary case and `Claude (default)` would be a word of noise on every line of the
+/// menu.
 fn label(all: &[ProviderStatus], status: &ProviderStatus, titles: &model::Titles) -> String {
     let name = model::name(titles, &status.provider);
     let shared = all
@@ -118,7 +119,8 @@ fn label(all: &[ProviderStatus], status: &ProviderStatus, titles: &model::Titles
         .count()
         > 1;
     if shared {
-        format!("{name} ({})", status.account)
+        let account = status.account_label.as_deref().unwrap_or(&status.account);
+        format!("{name} ({account})")
     } else {
         name
     }
@@ -449,6 +451,29 @@ mod tests {
             "the grid's order is the user's, and the panel does not have an opinion"
         );
         assert_eq!(rows[1].line(), "Z.ai — 90%");
+    }
+
+    #[test]
+    fn a_shared_provider_says_which_account_each_row_is() {
+        let statuses = [
+            reading("claude", "default", vec![window(18_000, 10.0)]),
+            reading("claude", "work", vec![window(18_000, 20.0)]),
+        ];
+        let rows = entries(&statuses, &model::Titles::new());
+        assert_eq!(rows[0].line(), "Claude (default) — 10%");
+        assert_eq!(rows[1].line(), "Claude (work) — 20%");
+    }
+
+    #[test]
+    fn a_shared_provider_prefers_the_account_label_to_its_id() {
+        let mut second = reading("claude", "work", vec![window(18_000, 20.0)]);
+        second.account_label = Some("Work Laptop".to_string());
+        let statuses = [
+            reading("claude", "default", vec![window(18_000, 10.0)]),
+            second,
+        ];
+        let rows = entries(&statuses, &model::Titles::new());
+        assert_eq!(rows[1].line(), "Claude (Work Laptop) — 20%");
     }
 
     #[test]

@@ -241,6 +241,15 @@ fn integer(value: f64) -> String {
 
 /// The rows the totals make, in the plugin's own order and wording.
 pub fn snapshot(projects: &[Project], totals: &Totals, captured_at: Timestamp) -> Snapshot {
+    snapshot_for_account(projects, totals, captured_at, &AccountId::default())
+}
+
+fn snapshot_for_account(
+    projects: &[Project],
+    totals: &Totals,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     let mut rows = vec![DetailRow {
         label: "Requests".to_owned(),
         value: integer(totals.requests),
@@ -291,7 +300,7 @@ pub fn snapshot(projects: &[Project], totals: &Totals, captured_at: Timestamp) -
 
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         // Deepgram meters; nothing here is out of anything. See the module doc.
         windows: Vec::new(),
@@ -381,12 +390,19 @@ pub static SPEC: HandSpec = HandSpec {
 /// Builds a pollable client from the stored key and the account's settings. The base URL is
 /// resolved here so a value the shared reader refuses is a [`ProviderError::Local`] naming
 /// the setting, rather than a panic mid-fetch.
-fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Deepgram::new(credential, options)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Deepgram::new_for_account(
+        account, credential, options,
+    )?))
 }
 
 /// One Deepgram account: the key, the host, and the project it is pinned to if any.
 pub struct Deepgram {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
     base: String,
@@ -397,12 +413,21 @@ impl Deepgram {
     /// Builds a client. The URL is resolved once, here, because a setting that changed the
     /// host would otherwise take effect only on the next daemon restart.
     pub fn new(credential: Credential, options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential, options)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         let base = base_url(options, BASE_URL, DEFAULT_BASE_URL)?;
         let project = options
             .get(PROJECT_ID)
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
             base,
@@ -457,7 +482,12 @@ impl Deepgram {
             let body = self.get(&breakdown_url(&self.base, &project.id)).await?;
             parse_breakdown(&body, &mut totals)?;
         }
-        Ok(snapshot(&projects, &totals, Timestamp::now()))
+        Ok(snapshot_for_account(
+            &projects,
+            &totals,
+            Timestamp::now(),
+            &self.tidemark_account,
+        ))
     }
 }
 
@@ -479,7 +509,7 @@ impl Provider for Deepgram {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {

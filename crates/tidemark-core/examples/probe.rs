@@ -14,7 +14,7 @@
 use std::io::Read;
 use tidemark_core::providers::keyed::Options;
 use tidemark_core::providers::{Credential, Provider, keyed, zai};
-use tidemark_types::{Snapshot, Timestamp, Window};
+use tidemark_types::{AccountId, Snapshot, Timestamp, Window};
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -43,7 +43,12 @@ async fn main() -> std::process::ExitCode {
     let options: Options = [(zai::REGION.to_owned(), region.as_value().to_owned())]
         .into_iter()
         .collect();
-    let provider = match keyed::Keyed::new(&zai::SPEC, Credential::new(key.trim()), &options) {
+    let provider = match keyed::Keyed::new(
+        AccountId::default(),
+        &zai::SPEC,
+        Credential::new(key.trim()),
+        &options,
+    ) {
         Ok(provider) => provider,
         Err(e) => {
             eprintln!("{e}");

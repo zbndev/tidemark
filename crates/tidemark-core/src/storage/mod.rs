@@ -28,6 +28,14 @@ pub enum StorageError {
     /// The database itself refused.
     #[error("history database: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// Rekeying would overwrite rows already owned by the destination account.
+    #[error("history account rekey destination is not empty: {provider}/{account}")]
+    AccountRekeyCollision {
+        /// Provider whose account rows would collide.
+        provider: String,
+        /// Destination account id containing existing rows.
+        account: String,
+    },
     /// The directory holding the database could not be created.
     #[error("could not create {}: {source}", .path.display())]
     Directory {
@@ -442,6 +450,111 @@ impl History {
             return Ok(Vec::new());
         };
         self.points(provider, account, window, segment)
+    }
+    /// Checks that moving rows to `new` cannot overwrite another account's history.
+    ///
+    /// History has no merge semantics: a destination with any row is rejected so a
+    /// promotion cannot silently discard windows, points, or notifications.
+    pub fn can_rekey_account(
+        &self,
+        provider: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<(), StorageError> {
+        if old == new {
+            return Ok(());
+        }
+        for table in ["window_state", "segment", "point", "notice"] {
+            let occupied: i64 = self.connection.query_row(
+                &format!(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM {table}
+                        WHERE provider = ?1 AND account = ?2
+                    )"
+                ),
+                params![provider, new],
+                |row| row.get(0),
+            )?;
+            if occupied != 0 {
+                return Err(StorageError::AccountRekeyCollision {
+                    provider: provider.to_owned(),
+                    account: new.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves every stored row for one provider/account pair to another account id,
+    /// refusing when the destination already holds anything.
+    ///
+    /// History has no merge semantics and this is the caller that must not clobber: a
+    /// destination with any row is rejected up front by [`Self::can_rekey_account`] so a
+    /// move cannot silently discard windows, points, or notifications. The updates run
+    /// in one transaction so a failure in any table leaves all four tables unchanged.
+    /// Account rename and promotion do not land here: their destination ids are
+    /// unconfigured or retired by construction, so they use
+    /// [`Self::rekey_account_discarding_destination`] instead.
+    pub fn rekey_account(
+        &mut self,
+        provider: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<(), StorageError> {
+        self.can_rekey_account(provider, old, new)?;
+        Self::move_account_rows(self.connection.transaction()?, provider, old, new, false)
+    }
+
+    /// Moves every stored row for one provider/account pair to another account id,
+    /// discarding whatever the destination still holds in the same transaction.
+    ///
+    /// The destination of an account rename or a promotion was validated unconfigured, or
+    /// is the id of an account the very same flow removes, so any row already under it
+    /// belongs to an id nothing will answer for: keeping it would attribute a
+    /// predecessor's usage to the account that inherits the id, which is the cross-account
+    /// pollution this storage exists to prevent. Clearing and moving in one transaction
+    /// leaves either all of the old id's rows in place and the destination cleared, or
+    /// neither.
+    pub fn rekey_account_discarding_destination(
+        &mut self,
+        provider: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<(), StorageError> {
+        if old == new {
+            // Clearing the destination would clear the source with it; there is no move
+            // to make.
+            return Ok(());
+        }
+        Self::move_account_rows(self.connection.transaction()?, provider, old, new, true)
+    }
+
+    /// The statements behind both rekey variants, run inside one transaction so the
+    /// destination clearing and the move commit or roll back together.
+    fn move_account_rows(
+        transaction: rusqlite::Transaction<'_>,
+        provider: &str,
+        old: &str,
+        new: &str,
+        clear_destination: bool,
+    ) -> Result<(), StorageError> {
+        for table in ["window_state", "segment", "point", "notice"] {
+            if clear_destination {
+                transaction.execute(
+                    &format!("DELETE FROM {table} WHERE provider = ?1 AND account = ?2"),
+                    params![provider, new],
+                )?;
+            }
+            transaction.execute(
+                &format!(
+                    "UPDATE {table} SET account = ?1
+                     WHERE provider = ?2 AND account = ?3"
+                ),
+                params![new, provider, old],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Total points stored, across everything. Diagnostics and tests.
@@ -887,6 +1000,257 @@ mod tests {
                 .current_segment("test", "two", &key())
                 .expect("looked up"),
             Some(1)
+        );
+    }
+    #[test]
+    fn rekeying_moves_all_history_rows_to_the_new_account() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 42.0, Some(5 * HOUR)))
+            .expect("ingested");
+        history
+            .record_notice("test", "default", &key(), 1, "threshold-70", at(0))
+            .expect("recorded");
+
+        history
+            .rekey_account("test", "default", "work")
+            .expect("rekeyed");
+
+        assert_eq!(
+            history
+                .current_segment("test", "default", &key())
+                .expect("old state read"),
+            None
+        );
+        assert_eq!(
+            history
+                .current_segment("test", "work", &key())
+                .expect("new state read"),
+            Some(1)
+        );
+        assert!(
+            history
+                .points("test", "default", &key(), 1)
+                .expect("old points read")
+                .is_empty()
+        );
+        assert_eq!(
+            history
+                .points("test", "work", &key(), 1)
+                .expect("new points read")
+                .len(),
+            1
+        );
+        assert!(
+            !history
+                .notice_sent("test", "default", &key(), 1, "threshold-70")
+                .expect("old notice read")
+        );
+        assert!(
+            history
+                .notice_sent("test", "work", &key(), 1, "threshold-70")
+                .expect("new notice read")
+        );
+    }
+
+    #[test]
+    fn a_rekey_rejects_a_nonempty_destination_without_merging_rows() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 42.0, Some(5 * HOUR)))
+            .expect("ingested old account");
+        let mut destination = snapshot(POLL, 7.0, Some(5 * HOUR));
+        destination.account = AccountId::new("work");
+        history
+            .ingest(&destination)
+            .expect("ingested destination account");
+
+        assert!(matches!(
+            history.rekey_account("test", "default", "work"),
+            Err(StorageError::AccountRekeyCollision { provider, account })
+                if provider == "test" && account == "work"
+        ));
+        assert_eq!(
+            history
+                .current_segment("test", "default", &key())
+                .expect("old state read"),
+            Some(1)
+        );
+        assert_eq!(
+            history
+                .current_segment("test", "work", &key())
+                .expect("destination state read"),
+            Some(1)
+        );
+        assert_eq!(
+            history
+                .points("test", "default", &key(), 1)
+                .expect("old points read")
+                .len(),
+            1
+        );
+        assert_eq!(
+            history
+                .points("test", "work", &key(), 1)
+                .expect("destination points read")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_discarding_rekey_clears_the_stale_destination_rows_and_moves_its_own_in() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 42.0, Some(5 * HOUR)))
+            .expect("ingested the migrating account");
+        let mut stale = snapshot(POLL, 7.0, Some(5 * HOUR));
+        stale.account = AccountId::new("work");
+        history
+            .ingest(&stale)
+            .expect("ingested the stale destination");
+
+        history
+            .rekey_account_discarding_destination("test", "default", "work")
+            .expect("rekeyed");
+
+        assert_eq!(
+            history
+                .current_segment("test", "default", &key())
+                .expect("old state read"),
+            None
+        );
+        assert_eq!(
+            history
+                .current_segment("test", "work", &key())
+                .expect("new state read"),
+            Some(1)
+        );
+        let points = history
+            .points("test", "work", &key(), 1)
+            .expect("new points read");
+        assert_eq!(points.len(), 1);
+        assert_eq!(
+            points[0].used_percent, 42.0,
+            "the account that inherited the id owns the rows under it, not the id's \n             predecessor"
+        );
+    }
+
+    #[test]
+    fn a_discarding_rekey_of_an_id_onto_itself_keeps_every_row() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 42.0, Some(5 * HOUR)))
+            .expect("ingested");
+
+        history
+            .rekey_account_discarding_destination("test", "default", "default")
+            .expect("rekeyed");
+
+        assert_eq!(
+            history
+                .current_segment("test", "default", &key())
+                .expect("state read"),
+            Some(1)
+        );
+        assert_eq!(
+            history
+                .points("test", "default", &key(), 1)
+                .expect("points read")
+                .len(),
+            1,
+            "clearing the destination of a no-op move must not clear the source with it"
+        );
+    }
+
+    #[test]
+    fn a_failed_discarding_rekey_leaves_the_destination_rows_in_place() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 42.0, Some(5 * HOUR)))
+            .expect("ingested the migrating account");
+        let mut stale = snapshot(POLL, 7.0, Some(5 * HOUR));
+        stale.account = AccountId::new("work");
+        history
+            .ingest(&stale)
+            .expect("ingested the stale destination");
+        history
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER pinned_segment BEFORE UPDATE OF account ON segment
+                 WHEN NEW.account = 'work'
+                 BEGIN SELECT RAISE(FAIL, 'segments are pinned'); END;",
+            )
+            .expect("trigger installed");
+
+        assert!(
+            history
+                .rekey_account_discarding_destination("test", "default", "work")
+                .is_err(),
+            "a pinned segment refuses the rekey"
+        );
+        assert_eq!(
+            history
+                .current_segment("test", "work", &key())
+                .expect("destination state read"),
+            Some(1)
+        );
+        assert_eq!(
+            history
+                .points("test", "work", &key(), 1)
+                .expect("destination points read")
+                .len(),
+            1,
+            "the stale rows come back with the transaction that failed to move the rest"
+        );
+    }
+
+    #[test]
+    fn a_failed_rekey_keeps_rows_under_the_old_account() {
+        let mut history = history();
+        history
+            .ingest(&snapshot(0, 42.0, Some(5 * HOUR)))
+            .expect("ingested");
+        history
+            .record_notice("test", "default", &key(), 1, "threshold-70", at(0))
+            .expect("recorded");
+        history
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER pinned_segment BEFORE UPDATE OF account ON segment
+                 WHEN NEW.account = 'work'
+                 BEGIN SELECT RAISE(FAIL, 'segments are pinned'); END;",
+            )
+            .expect("trigger installed");
+
+        assert!(
+            history.rekey_account("test", "default", "work").is_err(),
+            "a pinned segment refuses the rekey"
+        );
+
+        assert_eq!(
+            history
+                .current_segment("test", "default", &key())
+                .expect("old state read"),
+            Some(1)
+        );
+        assert!(
+            history
+                .current_segment("test", "work", &key())
+                .expect("new state read")
+                .is_none()
+        );
+        assert_eq!(
+            history
+                .points("test", "default", &key(), 1)
+                .expect("old points read")
+                .len(),
+            1
+        );
+        assert!(
+            history
+                .notice_sent("test", "default", &key(), 1, "threshold-70")
+                .expect("old notice read")
         );
     }
 

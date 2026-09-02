@@ -110,12 +110,17 @@ pub static SPEC: HandSpec = HandSpec {
 /// Builds a pollable client from the account's settings. The credential is blank and
 /// unused; the gateway URL is resolved here so a value the shared reader refuses is a
 /// [`ProviderError::Local`] naming the setting rather than a malformed request later.
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Wayfinder::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Wayfinder::new_for_account(account, options)?))
 }
 
 /// One Wayfinder account, which is one gateway.
 pub struct Wayfinder {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     base: String,
 }
@@ -124,7 +129,12 @@ impl Wayfinder {
     /// Builds a client. The URL is resolved once, here, because a setting that changed the
     /// gateway would otherwise take effect only on the next daemon restart.
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: client()?,
             base: base_url(options, BASE_URL, DEFAULT_BASE_URL)?,
         })
@@ -152,7 +162,13 @@ impl Wayfinder {
         let health: Health = parse(&self.get(&health_url(&self.base)).await?, "/healthz")?;
         let models: Models = parse(&self.get(&models_url(&self.base)).await?, "/router/models")?;
         let savings: Savings = parse(&self.get(&savings_url(&self.base)).await?, "/v1/savings")?;
-        Ok(snapshot(&health, &models, &savings, Timestamp::now()))
+        Ok(snapshot_for_account(
+            &health,
+            &models,
+            &savings,
+            Timestamp::now(),
+            &self.tidemark_account,
+        ))
     }
 }
 
@@ -174,7 +190,7 @@ impl Provider for Wayfinder {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -380,11 +396,22 @@ fn saved_summary(savings: &Savings) -> Option<String> {
 }
 
 /// The card.
+#[cfg(test)]
 fn snapshot(
     health: &Health,
     models: &Models,
     savings: &Savings,
     captured_at: Timestamp,
+) -> Snapshot {
+    snapshot_for_account(health, models, savings, captured_at, &AccountId::default())
+}
+
+fn snapshot_for_account(
+    health: &Health,
+    models: &Models,
+    savings: &Savings,
+    captured_at: Timestamp,
+    account_id: &AccountId,
 ) -> Snapshot {
     let mut rows = vec![DetailRow {
         label: "Gateway".to_owned(),
@@ -405,7 +432,7 @@ fn snapshot(
 
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         // A gateway has no quota. See the module doc.
         windows: Vec::new(),
@@ -790,6 +817,13 @@ mod tests {
         assert_eq!(SPEC.options[0].name, BASE_URL);
         // The blank credential the registry hands the builder is ignored, which is the
         // whole of what a keyless provider means.
-        assert!((SPEC.build)(Credential::new(String::new()), &options(&[])).is_ok());
+        assert!(
+            (SPEC.build)(
+                AccountId::default(),
+                Credential::new(String::new()),
+                &options(&[])
+            )
+            .is_ok()
+        );
     }
 }

@@ -130,12 +130,14 @@ pub fn document_from_login(
 /// One Claude Code account.
 pub struct Claude {
     client: reqwest::Client,
-    credentials: CredentialFile,
+    credentials: Option<CredentialFile>,
     /// Where a login performed from Tidemark is kept, when the caller has somewhere to
     /// keep one. `None` in tests that only exercise the CLI file.
     own: Option<Arc<dyn Secrets>>,
     /// Which of the two credentials this account reads — see the module docs.
     source: Source,
+    /// The configured account whose Tidemark login this client reads.
+    account: AccountId,
     usage_url: String,
     refresh_url: String,
     profile_url: String,
@@ -144,7 +146,7 @@ pub struct Claude {
     plan: OnceLock<String>,
 }
 
-/// The canonical Claude Code credential file, or `None` when `HOME` is unusable.
+/// The canonical Claude Code credential file used when a client reads the vendor login.
 ///
 /// Free-standing rather than a method so that a caller can ask whether the CLI's login
 /// exists on this machine without building the provider.
@@ -153,26 +155,53 @@ pub fn cli_credentials_path() -> Option<PathBuf> {
     Some(Path::new(&home).join(".claude/.credentials.json"))
 }
 
+fn credentials_for(
+    account: &AccountId,
+    source: Source,
+) -> Result<Option<CredentialFile>, ProviderError> {
+    if account.as_str() != "default" && source == Source::OAuth {
+        return Ok(None);
+    }
+    let path = cli_credentials_path()
+        .ok_or_else(|| ProviderError::Local("HOME does not name an absolute directory".into()))?;
+    let write_lock = path.with_file_name(".storage-write.lock");
+    Ok(Some(
+        CredentialFile::new(path.clone(), path).coordinated_by(write_lock),
+    ))
+}
+
 impl Claude {
-    /// Builds the canonical Claude Code account at `~/.claude/.credentials.json`.
-    pub fn new(own: Option<Arc<dyn Secrets>>, source: Source) -> Result<Self, ProviderError> {
-        let path = cli_credentials_path().ok_or_else(|| {
-            ProviderError::Local("HOME does not name an absolute directory".into())
-        })?;
-        let write_lock = path.with_file_name(".storage-write.lock");
-        let mut claude = Self::with_endpoints(
-            CredentialFile::new(path.clone(), path).coordinated_by(write_lock),
+    /// Builds the canonical Claude Code account when this account uses its vendor login.
+    pub fn new(
+        account: AccountId,
+        own: Option<Arc<dyn Secrets>>,
+        source: Source,
+    ) -> Result<Self, ProviderError> {
+        let credentials = credentials_for(&account, source)?;
+        let mut claude = Self::with_credentials(
+            credentials,
             USAGE_URL.to_owned(),
             REFRESH_URL.to_owned(),
             PROFILE_URL.to_owned(),
         )?;
         claude.own = own;
         claude.source = source;
+        claude.account = account;
         Ok(claude)
     }
 
+    #[cfg(test)]
     fn with_endpoints(
         credentials: CredentialFile,
+        usage_url: String,
+        refresh_url: String,
+        profile_url: String,
+    ) -> Result<Self, ProviderError> {
+        Self::with_credentials(Some(credentials), usage_url, refresh_url, profile_url)
+    }
+
+    fn with_credentials(
+        credentials: Option<CredentialFile>,
         usage_url: String,
         refresh_url: String,
         profile_url: String,
@@ -182,6 +211,7 @@ impl Claude {
             credentials,
             own: None,
             source: Source::Auto,
+            account: AccountId::default(),
             usage_url,
             refresh_url,
             profile_url,
@@ -207,7 +237,7 @@ impl Claude {
             response,
         )
         .await?;
-        let mut snapshot = parse(&body, Timestamp::now())?;
+        let mut snapshot = parse_for_account(&body, Timestamp::now(), &self.account)?;
         // Asked after the reading, never before it: the plan is one line on the card and
         // the windows are the point of the poll, so nothing about the plan may delay or
         // fail one.
@@ -291,7 +321,7 @@ impl Claude {
                     .get(
                         secrets::Kind::Token,
                         &ProviderId::new(PROVIDER_ID),
-                        &AccountId::default(),
+                        &self.account,
                     )
                     .await
                     .map_err(ProviderError::from_secret_error)?;
@@ -303,9 +333,8 @@ impl Claude {
             Source::Auto => {
                 if let Some(own) = &self.own {
                     let provider = ProviderId::new(PROVIDER_ID);
-                    let account = AccountId::default();
                     let stored = own
-                        .get(secrets::Kind::Token, &provider, &account)
+                        .get(secrets::Kind::Token, &provider, &self.account)
                         .await
                         .map_err(ProviderError::from_secret_error)?;
                     if let Some(stored) = stored {
@@ -319,7 +348,10 @@ impl Claude {
 
     /// The CLI's file, refreshed in place if the token in it is spent.
     async fn cli_file_credential(&self) -> Result<(Credential, Option<String>), ProviderError> {
-        let locked = self.credentials.lock().map_err(map_file_error)?;
+        let credentials = self.credentials.as_ref().ok_or_else(|| {
+            ProviderError::Local("Claude CLI credentials are unavailable for this account".into())
+        })?;
+        let locked = credentials.lock().map_err(map_file_error)?;
         let document = locked.read_json().map_err(map_file_error)?;
         let mut credentials = ClaudeCredentials::from_document(&document)?;
         let now_ms = now_millis();
@@ -382,7 +414,7 @@ impl Claude {
         own.set(
             secrets::Kind::Token,
             &ProviderId::new(PROVIDER_ID),
-            &AccountId::default(),
+            &self.account,
             &Credential::new(document.to_string()),
         )
         .await
@@ -495,7 +527,10 @@ impl Provider for Claude {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.account.clone()
+    }
+    fn source(&self) -> Option<Source> {
+        Some(self.source)
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -505,6 +540,14 @@ impl Provider for Claude {
 
 /// Turns a usage response into a snapshot.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let envelope: Envelope = serde_json::from_str(body).map_err(|error| {
         ProviderError::malformed(format!("not a Claude usage response: {error}"))
     })?;
@@ -530,7 +573,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account.clone(),
         captured_at,
         windows,
         details,
@@ -913,6 +956,15 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    #[test]
+    fn an_extra_oauth_account_skips_the_cli_credentials_path() {
+        let account = AccountId::new("work");
+        assert!(
+            credentials_for(&account, Source::OAuth)
+                .expect("OAuth-only accounts do not need a CLI path")
+                .is_none()
+        );
+    }
     struct TestCredentials {
         dir: PathBuf,
         path: PathBuf,

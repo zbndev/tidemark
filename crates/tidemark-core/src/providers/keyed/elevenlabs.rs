@@ -143,6 +143,14 @@ fn display_tier(tier: Option<&str>, status: Option<&str>) -> Option<String> {
 
 /// Turns a response body into a snapshot. Pure: every trap above is reachable from a test.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+pub fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let subscription: Subscription = serde_json::from_str(body)
         .map_err(|e| ProviderError::malformed(format!("not the expected envelope: {e}")))?;
 
@@ -193,7 +201,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account.clone(),
         captured_at,
         windows,
         details,
@@ -208,7 +216,7 @@ pub static SPEC: Spec = Spec {
     method: Method::Get,
     auth: Auth::Header("xi-api-key"),
     headers: &[("Accept", "application/json")],
-    parse,
+    parse: parse_for_account,
     credential_hint: "ElevenLabs profile → API Keys.",
     options: &[],
 };

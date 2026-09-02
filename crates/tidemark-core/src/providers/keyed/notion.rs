@@ -85,12 +85,17 @@ static OPTIONS: &[OptionSchema] = &[
     },
 ];
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Notion::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Notion::new_for_account(account, options)?))
 }
 
 /// One Notion account, authenticated by one explicitly chosen browser profile.
 pub struct Notion {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -102,7 +107,12 @@ pub struct Notion {
 
 impl Notion {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -125,6 +135,7 @@ impl Notion {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -194,11 +205,12 @@ impl Notion {
             self.request(&self.status_url(), &session.header, body)?,
         )
         .await?;
-        parse(
+        parse_for_account(
             &spaces,
             &status,
             self.workspace.as_deref(),
             Timestamp::now(),
+            &self.tidemark_account,
         )
     }
 
@@ -242,7 +254,7 @@ impl Provider for Notion {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -306,6 +318,22 @@ pub fn parse(
     status_body: &str,
     preferred: Option<&str>,
     captured_at: Timestamp,
+) -> Result<Snapshot, ProviderError> {
+    parse_for_account(
+        spaces_body,
+        status_body,
+        preferred,
+        captured_at,
+        &AccountId::default(),
+    )
+}
+
+fn parse_for_account(
+    spaces_body: &str,
+    status_body: &str,
+    preferred: Option<&str>,
+    captured_at: Timestamp,
+    account_id: &AccountId,
 ) -> Result<Snapshot, ProviderError> {
     let account = parse_spaces(spaces_body)?;
     let workspace = resolve_workspace(&account, preferred)?;
@@ -427,7 +455,7 @@ pub fn parse(
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details,

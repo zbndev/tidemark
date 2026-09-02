@@ -251,6 +251,14 @@ fn day_of(at: Timestamp) -> String {
 
 /// Turns a response body into a snapshot. Pure: every trap above is reachable from a test.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let data: Envelope = serde_json::from_str(body)
         .map_err(|e| ProviderError::malformed(format!("not the expected envelope: {e}")))?;
 
@@ -473,7 +481,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details,
@@ -513,12 +521,19 @@ pub static SPEC: HandSpec = HandSpec {
 /// URL is required — sub2api has no default host — and resolved here, so a changed one
 /// takes effect on the next build and a value the shared reader refuses is a
 /// [`ProviderError::Local`] naming the setting, not a panic mid-fetch.
-fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Sub2Api::new(credential, options)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Sub2Api::new_for_account(
+        account, credential, options,
+    )?))
 }
 
 /// One sub2api deployment: the key, and the `/v1/usage` URL it is polled at.
 pub struct Sub2Api {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
     url: String,
@@ -528,12 +543,21 @@ impl Sub2Api {
     /// Builds a client. The URL is resolved once, here, because a setting that changed
     /// the host would otherwise take effect only on the next daemon restart.
     pub fn new(credential: Credential, options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential, options)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         // `required` proved a value exists and `base_url` the HTTPS-or-loopback rule on
         // it, the same two checks a catalogued spec's build makes; both name the setting
         // when they refuse.
         let raw = required(options, BASE_URL, "Base URL")?;
         let base = base_url(&Options::from([(BASE_URL.to_owned(), raw)]), BASE_URL, "")?;
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
             url: usage_url(&base),
@@ -561,7 +585,7 @@ impl Sub2Api {
             return Err(ProviderError::Credential { status: 401 });
         }
         let body = super::request(PROVIDER_ID, &self.client, self.usage_request()?).await?;
-        parse(&body, Timestamp::now())
+        parse_for_account(&body, Timestamp::now(), &self.tidemark_account)
     }
 }
 
@@ -582,7 +606,7 @@ impl Provider for Sub2Api {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -1084,7 +1108,11 @@ mod tests {
         // state. The daemon's factory calls this same `build`, so proving it here is
         // proving the daemon cannot panic on these inputs.
         for bad in ["http://remote.host", "myproxy.example.com"] {
-            let Err(error) = build(Credential::new("sk-test"), &options(bad)) else {
+            let Err(error) = build(
+                AccountId::default(),
+                Credential::new("sk-test"),
+                &options(bad),
+            ) else {
                 panic!("{bad} must refuse the build, not panic");
             };
             assert!(
@@ -1103,7 +1131,11 @@ mod tests {
     fn an_unset_base_url_names_itself_rather_than_malforming_the_url() {
         // Without this refusal the user would see "Unreachable: relative URL without a
         // base" on every poll, with nothing pointing at the settings field that fixes it.
-        let Err(error) = build(Credential::new("sk-test"), &Options::new()) else {
+        let Err(error) = build(
+            AccountId::default(),
+            Credential::new("sk-test"),
+            &Options::new(),
+        ) else {
             panic!("the required option is unset, so the build must refuse")
         };
         assert!(
@@ -1111,7 +1143,11 @@ mod tests {
                 if message == "Base URL is not set for this account"),
             "{error}"
         );
-        let Err(blank) = build(Credential::new("sk-test"), &options("  ")) else {
+        let Err(blank) = build(
+            AccountId::default(),
+            Credential::new("sk-test"),
+            &options("  "),
+        ) else {
             panic!("a blank value is an unset value, so the build must refuse")
         };
         assert!(

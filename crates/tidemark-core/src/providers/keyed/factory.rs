@@ -129,12 +129,17 @@ pub static SPEC: HandSpec = HandSpec {
 
 /// Builds a pollable client from the stored key. Factory exposes no settings: one
 /// host, one ladder.
-fn build(credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Factory::new(credential)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    _options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Factory::new_for_account(account, credential)?))
 }
 
 /// One Factory account: the key, against the one host the ladder lives on.
 pub struct Factory {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
 }
@@ -142,7 +147,15 @@ pub struct Factory {
 impl Factory {
     /// Builds a client.
     pub fn new(credential: Credential) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
         })
@@ -216,7 +229,12 @@ impl Factory {
             .clone()
             .or_else(|| jwt_subject(self.credential.expose()));
         if let Some(reading) = self.limits().await {
-            return Ok(rate_limits_snapshot(&auth, &reading, now));
+            return Ok(rate_limits_snapshot_for_account(
+                &auth,
+                &reading,
+                now,
+                &self.tidemark_account,
+            ));
         }
         let body = super::request(
             PROVIDER_ID,
@@ -225,7 +243,12 @@ impl Factory {
         )
         .await?;
         let usage = parse_usage(&body)?;
-        Ok(classic_snapshot(&auth, &usage, now))
+        Ok(classic_snapshot_for_account(
+            &auth,
+            &usage,
+            now,
+            &self.tidemark_account,
+        ))
     }
 }
 
@@ -245,7 +268,7 @@ impl Provider for Factory {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -607,7 +630,17 @@ fn normalized(value: Option<&str>) -> Option<String> {
 /// the core pool's three when it reports any usage data — plus the plan and the
 /// extra usage balance. Pure, so every recorded billing body is reachable from a
 /// test.
+#[cfg(test)]
 fn rate_limits_snapshot(auth: &Auth, reading: &BillingReading, now: Timestamp) -> Snapshot {
+    rate_limits_snapshot_for_account(auth, reading, now, &AccountId::default())
+}
+
+fn rate_limits_snapshot_for_account(
+    auth: &Auth,
+    reading: &BillingReading,
+    now: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     let mut windows = vec![
         billing_window(
             WindowKey::for_length(length(FIVE_HOURS)),
@@ -669,7 +702,7 @@ fn rate_limits_snapshot(auth: &Auth, reading: &BillingReading, now: Timestamp) -
     });
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows,
         details,
@@ -697,7 +730,17 @@ fn billing_window(
 
 /// The billing-period card: two windows — standard and premium — each tokens used
 /// against a stated allowance, reset at the period's end. Pure.
+#[cfg(test)]
 fn classic_snapshot(auth: &Auth, usage: &Usage, now: Timestamp) -> Snapshot {
+    classic_snapshot_for_account(auth, usage, now, &AccountId::default())
+}
+
+fn classic_snapshot_for_account(
+    auth: &Auth,
+    usage: &Usage,
+    now: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     let windows = vec![
         pool_window("standard", "Standard", &usage.standard, usage.period_end),
         pool_window("premium", "Premium", &usage.premium, usage.period_end),
@@ -718,7 +761,7 @@ fn classic_snapshot(auth: &Auth, usage: &Usage, now: Timestamp) -> Snapshot {
     }
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows,
         details,
@@ -1387,7 +1430,14 @@ mod tests {
         assert_eq!(SPEC.id, PROVIDER_ID);
         assert_eq!(SPEC.title, "Factory");
         assert!(SPEC.options.is_empty());
-        assert!(build(Credential::new("fk-test-key"), &Options::new()).is_ok());
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("fk-test-key"),
+                &Options::new()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

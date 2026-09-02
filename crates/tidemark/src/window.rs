@@ -12,6 +12,7 @@
 //! changes.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
@@ -22,7 +23,7 @@ use tidemark_types::{
 
 use crate::about;
 use crate::bus::{self, DaemonProxy, Update};
-use crate::card::Card;
+use crate::card::{Card, CardExpansion};
 use crate::detail::DetailDialog;
 use crate::grid::CardGrid;
 use crate::model;
@@ -93,9 +94,11 @@ pub struct MainWindow {
     release: gtk::Button,
     providers: gtk::Button,
     preferences_action: gio::SimpleAction,
-    /// The cards in the order they are on screen. The one order this process has: the tray
-    /// menu and the settings list are both drawn from it, and it is what a drag permutes.
+    /// Every account card, ordered by provider and then account. Collapsed account cards stay
+    /// here for the tray and provider settings even while the grid omits them.
     cards: RefCell<Vec<Rc<Card>>>,
+    /// Provider groups expanded in this window. It deliberately resets on the next launch.
+    expanded: RefCell<BTreeSet<String>>,
     definitions: RefCell<Vec<ProviderDefinition>>,
     daemon: RefCell<Option<DaemonProxy<'static>>>,
     /// What the daemon last said its version was, for the About dialog's troubleshooting
@@ -224,6 +227,7 @@ impl MainWindow {
                 release_check_available: false,
             }),
             minimize_on_close: Cell::new(true),
+            expanded: RefCell::new(BTreeSet::new()),
             provider_settings: DialogSlot::default(),
             preferences_dialog: DialogSlot::default(),
             detail_dialog: DialogSlot::default(),
@@ -354,6 +358,7 @@ impl MainWindow {
             // Connected, and there is genuinely nothing to draw. Distinguished from a
             // missing daemon on purpose: one of them is fixed by configuring an account
             // and the other by starting a service.
+            self.expanded.borrow_mut().clear();
             self.show_message(
                 "view-grid-symbolic",
                 "Welcome to Tidemark",
@@ -366,26 +371,51 @@ impl MainWindow {
             return;
         }
 
-        let now = Timestamp::now();
-        let cards: Vec<Rc<Card>> = statuses
-            .iter()
-            .map(|status| self.make_card(status, now))
-            .collect();
+        self.expanded
+            .borrow_mut()
+            .retain(|provider| statuses.iter().any(|status| status.provider == *provider));
 
-        self.grid.clear();
-        *self.cards.borrow_mut() = cards.clone();
-        for card in &cards {
-            // Appended in the sequence the daemon published, which is the sequence the user
-            // arranged: there is nothing left to sort afterwards.
-            self.grid.append(card.widget());
+        let now = Timestamp::now();
+        let mut cards = Vec::new();
+        for group in model::provider_groups(&statuses) {
+            let provider = &group[0].provider;
+            let provider_name = model::name(&self.titles(), provider);
+            let expanded = self.expanded.borrow().contains(provider);
+            let extra_accounts = group.len() - 1;
+            for (index, status) in group.iter().enumerate() {
+                let title = if index == 0 {
+                    provider_name.clone()
+                } else {
+                    status
+                        .account_label
+                        .clone()
+                        .unwrap_or_else(|| status.account.clone())
+                };
+                let expansion = (index == 0 && extra_accounts > 0).then(|| {
+                    let weak = Rc::downgrade(self);
+                    let provider = provider.clone();
+                    CardExpansion {
+                        extra_accounts,
+                        expanded,
+                        on_toggled: Rc::new(move |expanded| {
+                            if let Some(main) = weak.upgrade() {
+                                main.set_group_expanded(&provider, expanded);
+                            }
+                        }),
+                    }
+                });
+                cards.push(self.make_card(status, now, title, expansion));
+            }
         }
+        *self.cards.borrow_mut() = cards;
+        self.redraw_cards();
         self.stack.set_visible_child_name(PAGE_GRID);
         self.update_provider_settings();
         self.update_detail_from_statuses(&statuses);
     }
 
     /// Removes one account's card after the daemon confirms it is no longer configured.
-    fn show_removed(&self, provider: &str, account: &str) {
+    fn show_removed(self: &Rc<Self>, provider: &str, account: &str) {
         if let Some(dialog) = self.detail_dialog.get()
             && dialog.matches(provider, account)
         {
@@ -397,16 +427,8 @@ impl MainWindow {
             return;
         };
 
-        let card = self.cards.borrow_mut().remove(index);
-        self.grid.remove(card.widget());
-        if self.cards.borrow().is_empty() {
-            self.show_message(
-                "view-grid-symbolic",
-                "Welcome to Tidemark",
-                "Add a provider to start tracking your quota.",
-            );
-        }
-        self.update_provider_settings();
+        self.cards.borrow_mut().remove(index);
+        self.show_all(self.statuses());
     }
 
     /// Applies one account's update, adding a card for an account seen for the first time.
@@ -420,12 +442,15 @@ impl MainWindow {
         match existing {
             Some(index) => {
                 let card = Rc::clone(&self.cards.borrow()[index]);
+                card.set_title(&self.card_title(&status, status.account == "default"));
                 card.apply(&status, now);
             }
             None => {
-                let card = self.make_card(&status, now);
-                self.cards.borrow_mut().push(Rc::clone(&card));
-                self.grid.append(card.widget());
+                self.expanded.borrow_mut().insert(status.provider.clone());
+                let mut statuses = self.statuses();
+                statuses.push(status);
+                self.show_all(statuses);
+                return;
             }
         }
         self.stack.set_visible_child_name(PAGE_GRID);
@@ -453,19 +478,78 @@ impl MainWindow {
         }
     }
 
+    /// Replaces the visible subset of account cards without affecting the tray's full list.
+    fn redraw_cards(&self) {
+        self.grid.replace(
+            self.visible_cards()
+                .into_iter()
+                .map(|card| card.widget().clone())
+                .collect(),
+        );
+    }
+
+    /// The cards the grid currently owns: main cards always, extra cards only when expanded.
+    fn visible_cards(&self) -> Vec<Rc<Card>> {
+        let cards = self.cards.borrow();
+        let mut visible = Vec::new();
+        let mut first = 0;
+        while first < cards.len() {
+            let provider = cards[first].status().provider;
+            let expanded = self.expanded.borrow().contains(&provider);
+            let mut next = first + 1;
+            while next < cards.len() && cards[next].status().provider == provider {
+                next += 1;
+            }
+            visible.push(Rc::clone(&cards[first]));
+            if expanded {
+                visible.extend(cards[first + 1..next].iter().cloned());
+            }
+            first = next;
+        }
+        visible
+    }
+
+    /// Stores an in-memory expansion choice and redraws just the grid representation.
+    fn set_group_expanded(&self, provider: &str, expanded: bool) {
+        if expanded {
+            self.expanded.borrow_mut().insert(provider.into());
+        } else {
+            self.expanded.borrow_mut().remove(provider);
+        }
+        self.redraw_cards();
+    }
+
+    /// The title a card shows: provider title for the main account, account label otherwise.
+    fn card_title(&self, status: &ProviderStatus, main: bool) -> String {
+        if main {
+            model::name(&self.titles(), &status.provider)
+        } else {
+            status
+                .account_label
+                .clone()
+                .unwrap_or_else(|| status.account.clone())
+        }
+    }
+
     /// Builds a card whose activation is owned by this window, not by the card itself.
-    fn make_card(self: &Rc<Self>, status: &ProviderStatus, now: Timestamp) -> Rc<Card> {
+    fn make_card(
+        self: &Rc<Self>,
+        status: &ProviderStatus,
+        now: Timestamp,
+        title: String,
+        expansion: Option<CardExpansion>,
+    ) -> Rc<Card> {
         let weak = Rc::downgrade(self);
-        let provider_name = model::name(&self.titles(), &status.provider);
         Rc::new(Card::new(
             status,
             now,
-            provider_name,
+            title,
             Rc::new(move |provider, account| {
                 if let Some(main) = weak.upgrade() {
                     main.open_detail(&provider, &account);
                 }
             }),
+            expansion,
         ))
     }
 
@@ -628,53 +712,58 @@ impl MainWindow {
             let Some(main) = weak.upgrade() else {
                 return;
             };
-            {
-                let mut cards = main.cards.borrow_mut();
-                if from >= cards.len() || to >= cards.len() {
-                    return;
-                }
-                let moved = cards.remove(from);
-                cards.insert(to, moved);
-            }
-            main.update_provider_settings();
-            main.update_tray();
-
-            let Some(proxy) = main.daemon.borrow().clone() else {
+            let statuses = main.statuses();
+            let visible: Vec<ProviderStatus> = main
+                .visible_cards()
+                .iter()
+                .map(|card| card.status())
+                .collect();
+            let Some(reorder) = model::card_reorder(&statuses, &visible, from, to) else {
+                main.redraw_cards();
                 return;
             };
-            let order: Vec<String> = main
-                .cards
-                .borrow()
-                .iter()
-                .map(|card| card.status().provider)
-                .collect();
-            let weak = Rc::downgrade(&main);
-            glib::spawn_future_local(async move {
-                if let Err(error) = proxy.set_order(&order).await {
-                    tracing::warn!(%error, "the daemon refused the new card order");
-                    let Some(main) = weak.upgrade() else {
-                        return;
-                    };
-                    match proxy.get_status().await {
-                        Ok(statuses) => main.show_order(
-                            &statuses
-                                .iter()
-                                .map(|status| status.provider.clone())
-                                .collect::<Vec<String>>(),
-                        ),
-                        Err(error) => {
-                            tracing::warn!(%error, "and did not say what the order actually is")
+            let Some(proxy) = main.daemon.borrow().clone() else {
+                main.redraw_cards();
+                return;
+            };
+            match reorder {
+                model::CardReorder::Providers(order) => {
+                    main.show_order(&order);
+                    let weak = Rc::downgrade(&main);
+                    glib::spawn_future_local(async move {
+                        if let Err(error) = proxy.set_order(&order).await {
+                            tracing::warn!(%error, "the daemon refused the new provider order");
+                            MainWindow::restore_order_after_refusal(weak, proxy).await;
                         }
-                    }
+                    });
                 }
-            });
+                model::CardReorder::Accounts { provider, accounts } => {
+                    main.show_account_order(&provider, &accounts);
+                    let weak = Rc::downgrade(&main);
+                    glib::spawn_future_local(async move {
+                        if let Err(error) = proxy.set_account_order(&provider, accounts).await {
+                            tracing::warn!(%error, "the daemon refused the new account order");
+                            MainWindow::restore_order_after_refusal(weak, proxy).await;
+                        }
+                    });
+                }
+            }
         });
     }
 
+    /// Restores the full daemon order after an optimistic drag was rejected.
+    async fn restore_order_after_refusal(weak: Weak<Self>, proxy: DaemonProxy<'static>) {
+        match proxy.get_status().await {
+            Ok(statuses) => {
+                if let Some(main) = weak.upgrade() {
+                    main.show_all(statuses);
+                }
+            }
+            Err(error) => tracing::warn!(%error, "and did not say what the order actually is"),
+        }
+    }
+
     /// Puts the cards in the order the daemon published.
-    ///
-    /// Ordering by provider slug, because that is the identity `config.toml` has: two
-    /// accounts of one provider — which v1 does not create — keep their relative places.
     fn show_order(&self, providers: &[String]) {
         let slugs: Vec<String> = self
             .cards
@@ -695,13 +784,34 @@ impl MainWindow {
                 }
             }
         }
-        let order: Vec<gtk::Widget> = self
-            .cards
-            .borrow()
+        self.redraw_cards();
+        self.update_provider_settings();
+        self.update_tray();
+    }
+
+    /// Reorders one provider's contiguous account group without moving any other provider.
+    fn show_account_order(&self, provider: &str, accounts: &[String]) {
+        let mut cards = self.cards.borrow_mut();
+        let Some(first) = cards
             .iter()
-            .map(|card| card.widget().clone())
-            .collect();
-        self.grid.set_order(&order);
+            .position(|card| card.status().provider == provider)
+        else {
+            return;
+        };
+        let last = cards[first..]
+            .iter()
+            .position(|card| card.status().provider != provider)
+            .map_or(cards.len(), |offset| first + offset);
+        let mut group: Vec<Rc<Card>> = cards.drain(first..last).collect();
+        group.sort_by_key(|card| {
+            accounts
+                .iter()
+                .position(|account| *account == card.status().account)
+                .unwrap_or(accounts.len())
+        });
+        cards.splice(first..first, group);
+        drop(cards);
+        self.redraw_cards();
         self.update_provider_settings();
         self.update_tray();
     }

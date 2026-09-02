@@ -149,34 +149,57 @@ const TOKEN_SUBTREE: &str = "tokens";
 #[derive(Debug)]
 pub struct Codex {
     client: reqwest::Client,
-    credentials: CredentialFile,
+    credentials: Option<CredentialFile>,
     /// Where a login performed from Tidemark is kept, when the caller has somewhere to
     /// keep one.
     own: Option<Arc<dyn Secrets>>,
     /// Which of the two credentials this account reads — see the module docs.
     source: Source,
+    /// The configured account whose Tidemark login this client reads.
+    account: AccountId,
     usage_url: String,
     refresh_url: String,
 }
 
+fn credentials_for(
+    account: &AccountId,
+    source: Source,
+) -> Result<Option<CredentialFile>, ProviderError> {
+    if account.as_str() != "default" && source == Source::OAuth {
+        return Ok(None);
+    }
+    let path = cli_credentials_path()
+        .ok_or_else(|| ProviderError::Local("HOME does not name an absolute directory".into()))?;
+    Ok(Some(CredentialFile::new(path.clone(), path)))
+}
+
 impl Codex {
-    /// Builds the canonical Codex account at `$CODEX_HOME/auth.json`, or `~/.codex`.
-    pub fn new(own: Option<Arc<dyn Secrets>>, source: Source) -> Result<Self, ProviderError> {
-        let path = cli_credentials_path().ok_or_else(|| {
-            ProviderError::Local("HOME does not name an absolute directory".into())
-        })?;
-        let mut codex = Self::with_endpoints(
-            CredentialFile::new(path.clone(), path),
-            USAGE_URL.to_owned(),
-            REFRESH_URL.to_owned(),
-        )?;
+    /// Builds the canonical Codex account when this account uses its vendor login.
+    pub fn new(
+        account: AccountId,
+        own: Option<Arc<dyn Secrets>>,
+        source: Source,
+    ) -> Result<Self, ProviderError> {
+        let credentials = credentials_for(&account, source)?;
+        let mut codex =
+            Self::with_credentials(credentials, USAGE_URL.to_owned(), REFRESH_URL.to_owned())?;
         codex.own = own;
         codex.source = source;
+        codex.account = account;
         Ok(codex)
     }
 
+    #[cfg(test)]
     fn with_endpoints(
         credentials: CredentialFile,
+        usage_url: String,
+        refresh_url: String,
+    ) -> Result<Self, ProviderError> {
+        Self::with_credentials(Some(credentials), usage_url, refresh_url)
+    }
+
+    fn with_credentials(
+        credentials: Option<CredentialFile>,
         usage_url: String,
         refresh_url: String,
     ) -> Result<Self, ProviderError> {
@@ -185,6 +208,7 @@ impl Codex {
             credentials,
             own: None,
             source: Source::Auto,
+            account: AccountId::default(),
             usage_url,
             refresh_url,
         })
@@ -232,7 +256,7 @@ impl Codex {
                 response,
             )
             .await?;
-            return parse(&body, Timestamp::now());
+            return parse_for_account(&body, Timestamp::now(), &self.account);
         }
     }
 
@@ -285,7 +309,10 @@ impl Codex {
         now: i64,
         force: bool,
     ) -> Result<CodexCredentials, ProviderError> {
-        let locked = self.credentials.lock().map_err(map_file_error)?;
+        let credentials = self.credentials.as_ref().ok_or_else(|| {
+            ProviderError::Local("Codex CLI credentials are unavailable for this account".into())
+        })?;
+        let locked = credentials.lock().map_err(map_file_error)?;
         let document = locked.read_json().map_err(map_file_error)?;
         let credentials = CodexCredentials::from_document(&document)?;
         if force || credentials.is_expired_at(now) {
@@ -303,7 +330,7 @@ impl Codex {
             .get(
                 secrets::Kind::Token,
                 &ProviderId::new(PROVIDER_ID),
-                &AccountId::default(),
+                &self.account,
             )
             .await
             .map_err(ProviderError::from_secret_error)?;
@@ -351,7 +378,7 @@ impl Codex {
         own.set(
             secrets::Kind::Token,
             &ProviderId::new(PROVIDER_ID),
-            &AccountId::default(),
+            &self.account,
             &Credential::new(document.to_string()),
         )
         .await
@@ -451,7 +478,10 @@ impl Provider for Codex {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.account.clone()
+    }
+    fn source(&self) -> Option<Source> {
+        Some(self.source)
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -475,6 +505,14 @@ pub fn cli_credentials_path() -> Option<PathBuf> {
 
 /// Turns a usage response into a snapshot.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let envelope: Envelope = serde_json::from_str(body).map_err(|error| {
         ProviderError::malformed(format!("not a Codex usage response: {error}"))
     })?;
@@ -545,7 +583,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderErr
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account.clone(),
         captured_at,
         windows,
         details: details(&envelope),
@@ -954,6 +992,16 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn an_extra_oauth_account_skips_the_cli_credentials_path() {
+        let account = AccountId::new("work");
+        assert!(
+            credentials_for(&account, Source::OAuth)
+                .expect("OAuth-only accounts do not need a CLI path")
+                .is_none()
+        );
+    }
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 

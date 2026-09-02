@@ -36,12 +36,17 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(ZoomMate::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(ZoomMate::new_for_account(account, options)?))
 }
 
 /// One ZoomMate account, authenticated by its chosen browser profile.
 pub struct ZoomMate {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -54,7 +59,12 @@ pub struct ZoomMate {
 
 impl ZoomMate {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -73,6 +83,7 @@ impl ZoomMate {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -182,7 +193,7 @@ impl ZoomMate {
             &login.nak,
         )?;
         let body = super::request(PROVIDER_ID, &self.client, request).await?;
-        let mut snapshot = parse(&body, Timestamp::now())?;
+        let mut snapshot = parse_for_account(&body, Timestamp::now(), &self.tidemark_account)?;
         if let Some(email) = login.email {
             snapshot.details.push(DetailSection {
                 title: "Account".to_owned(),
@@ -242,7 +253,7 @@ impl Provider for ZoomMate {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -323,6 +334,14 @@ fn parse_login(body: &str) -> Result<Login, super::ProviderError> {
 
 /// Turns ZoomMate's reported credit cycle into one quota window.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, super::ProviderError> {
+    parse_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, super::ProviderError> {
     let envelope: CreditsEnvelope = serde_json::from_str(body).map_err(|error| {
         super::ProviderError::malformed(format!("unreadable ZoomMate credits status: {error}"))
     })?;
@@ -359,7 +378,7 @@ pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, super::Prov
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows: vec![Window {
             key: length

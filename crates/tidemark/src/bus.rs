@@ -50,6 +50,12 @@ pub trait Daemon {
     /// Removes one configured account.
     fn remove_provider(&self, provider: &str, account: &str) -> zbus::Result<()>;
 
+    /// Adds one more account to a provider the config already has.
+    fn add_account(&self, provider: &str, account: &str) -> zbus::Result<()>;
+
+    /// Renames one configured account, carrying its credential and history to the new id.
+    fn rename_account(&self, provider: &str, account: &str, new: &str) -> zbus::Result<()>;
+
     /// Every account the daemon watches.
     fn get_status(&self) -> zbus::Result<Vec<ProviderStatus>>;
 
@@ -135,6 +141,9 @@ pub trait Daemon {
 
     /// Puts the configured providers in the order the user arranged the cards in.
     fn set_order(&self, providers: &[String]) -> zbus::Result<()>;
+
+    /// Puts one provider's accounts in the order the user arranged them in.
+    fn set_account_order(&self, provider: &str, accounts: Vec<String>) -> zbus::Result<()>;
 
     /// What the daemon on the other end is.
     #[zbus(property(emits_changed_signal = "false"))]

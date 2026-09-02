@@ -69,12 +69,17 @@ pub static SPEC: HandSpec = HandSpec {
 };
 
 /// Builds a pollable client from the stored key. Poe has nothing to configure.
-fn build(credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Poe::new(credential)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    _options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Poe::new_for_account(account, credential)?))
 }
 
 /// One Poe account: the key, and the two endpoints it unlocks.
 pub struct Poe {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
 }
@@ -83,7 +88,15 @@ impl Poe {
     /// Builds a client. Poe has one host, so the URLs are constants and there is nothing
     /// to resolve at build time.
     pub fn new(credential: Credential) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
         })
@@ -120,7 +133,12 @@ impl Poe {
         let body = super::request(PROVIDER_ID, &self.client, self.balance_request()?).await?;
         let balance = parse_balance(&body)?;
         let history = self.history(now).await;
-        Ok(snapshot(balance, &history, now))
+        Ok(snapshot_for_account(
+            balance,
+            &history,
+            now,
+            &self.tidemark_account,
+        ))
     }
 
     /// Walks the history pages, keeping what lands inside the cutoff. Any failure —
@@ -185,7 +203,7 @@ impl Provider for Poe {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -394,10 +412,20 @@ fn epoch(value: f64) -> Option<Timestamp> {
 ///
 /// No window, ever: a points balance has no limit to draw a bar against, and the task's
 /// shape for that is details only — the card renders empty, which is accepted.
+#[cfg(test)]
 fn snapshot(balance: Option<f64>, history: &History, now: Timestamp) -> Snapshot {
+    snapshot_for_account(balance, history, now, &AccountId::default())
+}
+
+fn snapshot_for_account(
+    balance: Option<f64>,
+    history: &History,
+    now: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows: Vec::new(),
         details: points_details(balance, history, now),
@@ -808,7 +836,14 @@ mod tests {
         assert_eq!(SPEC.id, PROVIDER_ID);
         assert_eq!(SPEC.title, "Poe");
         assert!(SPEC.options.is_empty(), "Poe has nothing to choose");
-        assert!(build(Credential::new("poe-key"), &Options::new()).is_ok());
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("poe-key"),
+                &Options::new()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

@@ -78,13 +78,20 @@ pub static SPEC: HandSpec = HandSpec {
 /// Builds a pollable client from the stored key and the account's settings. The team ID
 /// is read and validated here, so a missing or invalid one is named on the card rather
 /// than reaching the wire as a malformed URL.
-fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Xai::new(credential, options)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Xai::new_for_account(
+        account, credential, options,
+    )?))
 }
 
 /// One xAI account: the management key, the team it bills, and the two endpoints that
 /// come from both.
 pub struct Xai {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
     balance_url: String,
@@ -94,6 +101,14 @@ pub struct Xai {
 impl Xai {
     /// Builds a client. The team ID is part of both paths, so it is resolved once, here.
     pub fn new(credential: Credential, options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential, options)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         let team = required(options, TEAM, "Team ID")?;
         if team.contains('/') || team == "." || team == ".." {
             return Err(ProviderError::Local(format!(
@@ -102,6 +117,7 @@ impl Xai {
         }
         let root = format!("{BASE_URL}/{}", encode_team(&team));
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
             balance_url: format!("{root}/prepaid/balance"),
@@ -161,7 +177,12 @@ impl Xai {
             }
             Err(_) => History::Unavailable,
         };
-        Ok(snapshot(balance, history, now))
+        Ok(snapshot_for_account(
+            balance,
+            history,
+            now,
+            &self.tidemark_account,
+        ))
     }
 
     async fn history(&self, now: Timestamp) -> Result<History, ProviderError> {
@@ -187,7 +208,7 @@ impl Provider for Xai {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -357,10 +378,20 @@ fn encode_team(team: &str) -> String {
 /// No window, ever: prepaid credits have no limit to draw a bar against, and the shape
 /// for that is details only — the card renders the rows and nothing else, which is
 /// accepted.
+#[cfg(test)]
 fn snapshot(balance: f64, history: History, captured_at: Timestamp) -> Snapshot {
+    snapshot_for_account(balance, history, captured_at, &AccountId::default())
+}
+
+fn snapshot_for_account(
+    balance: f64,
+    history: History,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows: Vec::new(),
         details: vec![billing_details(balance, &history)],
@@ -710,8 +741,22 @@ mod tests {
         );
         assert_eq!(SPEC.options.len(), 1);
         assert!(SPEC.options[0].required);
-        assert!(build(Credential::new("key"), &options("team-1234")).is_ok());
-        assert!(build(Credential::new("key"), &Options::new()).is_err());
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("key"),
+                &options("team-1234")
+            )
+            .is_ok()
+        );
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("key"),
+                &Options::new()
+            )
+            .is_err()
+        );
     }
 
     #[test]

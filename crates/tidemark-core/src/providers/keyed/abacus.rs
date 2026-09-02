@@ -60,12 +60,17 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(_credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Abacus::new(options)?))
+fn build(
+    account: AccountId,
+    _credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Abacus::new_for_account(account, options)?))
 }
 
 /// One Abacus account, authenticated by one explicitly chosen browser profile.
 pub struct Abacus {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
@@ -76,7 +81,12 @@ pub struct Abacus {
 
 impl Abacus {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), options)
+    }
+
+    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             home: std::env::var_os("HOME").map(PathBuf::from),
             storage: Arc::new(Keyring),
@@ -93,6 +103,7 @@ impl Abacus {
         base_url: &str,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
             storage,
@@ -164,7 +175,12 @@ impl Abacus {
                 self.billing_request(&self.billing_url(), &session.header)?,
             ),
         );
-        parse(&points?, billing.ok().as_deref(), Timestamp::now())
+        parse_for_account(
+            &points?,
+            billing.ok().as_deref(),
+            Timestamp::now(),
+            &self.tidemark_account,
+        )
     }
 
     async fn validate_header(&self, header: &str) -> crate::browser::auth::Validation {
@@ -215,7 +231,7 @@ impl Provider for Abacus {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -266,6 +282,20 @@ pub fn parse(
     billing_info: Option<&str>,
     captured_at: Timestamp,
 ) -> Result<Snapshot, ProviderError> {
+    parse_for_account(
+        compute_points,
+        billing_info,
+        captured_at,
+        &AccountId::default(),
+    )
+}
+
+fn parse_for_account(
+    compute_points: &str,
+    billing_info: Option<&str>,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
     let points = envelope(compute_points, "compute points")?;
     let total = number(&points, "totalComputePoints")?;
     let left = number(&points, "computePointsLeft")?;
@@ -315,7 +345,7 @@ pub fn parse(
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details,

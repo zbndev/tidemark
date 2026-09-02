@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tidemark_core::config::Config;
 use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::providers::keyed::session;
-use tidemark_core::providers::{Credential, Provider, ProviderError};
+use tidemark_core::providers::{Credential, Provider, ProviderError, Source};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
 use tidemark_types::{
@@ -49,11 +49,11 @@ pub enum Publication {
         /// Stable account name.
         account: String,
     },
-    /// Put the published accounts in this provider order.
+    /// Put the published accounts in their complete provider and account order.
     ///
     /// A sequence rather than a status, because that is what changed: the readings are
     /// exactly as they were, and a client redrawing a grid needs the positions.
-    Reordered(Vec<String>),
+    Reordered(Vec<(String, String)>),
 }
 
 /// One application-wide preference mutation.
@@ -96,14 +96,40 @@ pub enum Command {
         /// Completion sent after persistence and in-memory mutation finish.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Add one account to a configured provider and report the persisted topology result.
+    AddAccount {
+        /// Stable provider slug.
+        provider: String,
+        /// Lowercase account slug, unique within the provider.
+        account: String,
+        /// Completion sent after persistence and in-memory mutation finish.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+
     /// Remove one exact provider/account pair and report the persisted topology result.
     RemoveProvider {
         /// Stable provider slug.
         provider: String,
         /// Stable account name.
         account: String,
-        /// Completion sent after persistence and in-memory mutation finish.
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Completion with every surviving `(provider, account)` pair once persistence
+        /// and in-memory mutation finish. The reply carries the topology because the
+        /// caller's mirror of it is updated asynchronously and must not be guessed at.
+        reply: oneshot::Sender<Result<Vec<(String, String)>, String>>,
+    },
+    /// Rename one configured account, migrating the credential and history keyed by its
+    /// id, and report the persisted topology result.
+    RenameAccount {
+        /// Stable provider slug.
+        provider: String,
+        /// The configured account id being renamed.
+        account: String,
+        /// The new account id, unique within the provider.
+        new: String,
+        /// Completion with every surviving `(provider, account)` pair once persistence
+        /// and in-memory mutation finish. The reply carries the topology because the
+        /// caller's mirror of it is updated asynchronously and must not be guessed at.
+        reply: oneshot::Sender<Result<Vec<(String, String)>, String>>,
     },
     /// Validate and persist one provider setting in the same queue as topology writes.
     SetOption {
@@ -158,6 +184,16 @@ pub enum Command {
         /// Completion sent after persistence and in-memory state agree.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Reorder one provider's accounts, in the same queue as topology writes.
+    SetAccountOrder {
+        /// Stable provider slug.
+        provider: String,
+        /// Every configured account id, in the order the user selected.
+        accounts: Vec<String>,
+        /// Completion sent after persistence and in-memory state agree.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+
     /// Reads the stored points in one account window's open segment.
     CurrentSegment {
         /// Stable provider slug.
@@ -187,7 +223,11 @@ pub enum Command {
 /// A closure rather than a trait because that is all it is: the five providers are
 /// constructed five different ways, and only the daemon knows which one it is holding.
 pub type Factory = Box<
-    dyn Fn(Credential, &BTreeMap<String, String>) -> Result<Arc<dyn Provider>, ProviderError>
+    dyn Fn(
+            &AccountId,
+            Credential,
+            &BTreeMap<String, String>,
+        ) -> Result<Arc<dyn Provider>, ProviderError>
         + Send
         + Sync,
 >;
@@ -199,7 +239,9 @@ pub type Factory = Box<
 /// settings — and a setting that never reached the built client would take effect only on
 /// the next daemon restart.
 pub type Rebuild = Box<
-    dyn Fn(&BTreeMap<String, String>) -> Result<Arc<dyn Provider>, ProviderError> + Send + Sync,
+    dyn Fn(&AccountId, &BTreeMap<String, String>) -> Result<Arc<dyn Provider>, ProviderError>
+        + Send
+        + Sync,
 >;
 
 /// One account the daemon watches.
@@ -209,16 +251,31 @@ pub struct Account {
     factory: Option<Factory>,
     rebuild: Option<Rebuild>,
     client: Option<Arc<dyn Provider>>,
+    source: Source,
     status: ProviderStatus,
     failures: u32,
     retry_after: Option<Duration>,
     due: Instant,
 }
 
+/// Whether a string can serve as an account id in `config.toml`, the Secret Service and
+/// the history. The rule itself lives in `tidemark-types`, where the client typing a new
+/// account's name reads it too; this is the daemon-side spelling of it, shared by the
+/// engine and the D-Bus service so a call rejected here is rejected for the same reason
+/// there.
+pub(crate) fn valid_account_slug(account: &str) -> bool {
+    tidemark_types::valid_account_slug(account)
+}
+
 /// Everything about an account that is fixed at registration, kept together so both
 /// constructors fill it the same way.
-fn describe(status: &mut ProviderStatus, kind: CredentialKind) {
+fn describe(status: &mut ProviderStatus, kind: CredentialKind, account: &AccountId) {
     status.credential = Some(kind.as_wire().to_owned());
+    // The label is the account's own name until a rename says otherwise. The default
+    // account *is* the provider as far as a client is concerned, and stays unlabelled —
+    // the wire contract keeps the key absent rather than empty.
+    status.account_label =
+        (account.as_str() != AccountId::default().as_str()).then(|| account.to_string());
 }
 
 impl std::fmt::Debug for Account {
@@ -239,11 +296,12 @@ impl Account {
     /// An account whose client is built from a stored key the first time it is polled.
     pub fn new(provider: ProviderId, account: AccountId, factory: Factory) -> Self {
         let mut status = ProviderStatus::pending(&provider, &account);
-        describe(&mut status, CredentialKind::Key);
+        describe(&mut status, CredentialKind::Key, &account);
         Self {
             status,
             provider,
             account,
+            source: Source::Auto,
             factory: Some(factory),
             rebuild: None,
             client: None,
@@ -258,13 +316,18 @@ impl Account {
     /// This is the shape for providers that own credential discovery themselves, such as
     /// Claude's CLI file and Antigravity's future `agy` session.
     pub fn with_client(client: Arc<dyn Provider>) -> Self {
-        let (provider, account) = (client.id(), client.account());
+        let (provider, account, source) = (
+            client.id(),
+            client.account(),
+            client.source().unwrap_or_default(),
+        );
         let mut status = ProviderStatus::pending(&provider, &account);
-        describe(&mut status, CredentialKind::External);
+        describe(&mut status, CredentialKind::External, &account);
         Self {
             status,
             provider,
             account,
+            source,
             factory: None,
             rebuild: None,
             client: Some(client),
@@ -284,11 +347,12 @@ impl Account {
     /// the rest of them.
     pub fn keyless(provider: ProviderId, account: AccountId, rebuild: Rebuild) -> Self {
         let mut status = ProviderStatus::pending(&provider, &account);
-        describe(&mut status, CredentialKind::None);
+        describe(&mut status, CredentialKind::None, &account);
         Self {
             status,
             provider,
             account,
+            source: Source::Auto,
             factory: None,
             rebuild: Some(rebuild),
             client: None,
@@ -304,6 +368,11 @@ impl Account {
     /// rebuilt from its stored key whenever the engine drops it.
     pub fn with_rebuild(mut self, rebuild: Rebuild) -> Self {
         self.rebuild = Some(rebuild);
+        self
+    }
+    /// Records the source selected for this account's next poll.
+    pub(crate) fn with_source(mut self, source: Source) -> Self {
+        self.source = source;
         self
     }
 
@@ -351,6 +420,10 @@ impl Account {
     pub fn provider(&self) -> &ProviderId {
         &self.provider
     }
+    #[cfg_attr(not(test), expect(dead_code, reason = "read only by registry tests"))]
+    pub fn account(&self) -> &AccountId {
+        &self.account
+    }
 
     /// The settings as a plain map, which is what a [`Factory`] is handed.
     fn option_values(&self) -> BTreeMap<String, String> {
@@ -374,6 +447,26 @@ impl Account {
     fn state(&self) -> ProviderState {
         self.status.state().unwrap_or(ProviderState::Pending)
     }
+}
+
+/// One not-yet-durable identity migration, and what it takes to refuse it.
+///
+/// Held from the moment the credential and history move until the config write that
+/// makes the new id permanent. That write is the durability point: everything before
+/// it must be reversible, because a failure there leaves the file naming the old id.
+/// Carries a [`Credential`] it may have to put back; its `Debug` is redacted, so the
+/// derived one prints no secret.
+#[derive(Debug)]
+struct MigrationUndo {
+    provider: String,
+    old: String,
+    new: String,
+    kind: Option<Kind>,
+    /// What the destination slot held before the migrating credential replaced it,
+    /// which a promotion's `default` can tell. A destination that held nothing keeps
+    /// the copy: under an id nothing reads yet, it is a harmless orphan the next
+    /// attempt overwrites.
+    replaced: Option<Credential>,
 }
 
 /// The poll loop.
@@ -440,8 +533,9 @@ impl Engine {
             return Ok(());
         }
 
-        let Some(mut account) = crate::registry::account(provider, &self.secrets, &config)
-            .map_err(|error| error.to_string())?
+        let Some(mut account) =
+            crate::registry::account(provider, &AccountId::default(), &self.secrets, &config)
+                .map_err(|error| error.to_string())?
         else {
             return Err(format!(
                 "provider {provider} is not supported by this build"
@@ -463,9 +557,197 @@ impl Engine {
         let _ = self.updates.send(Publication::Changed(status)).await;
         Ok(())
     }
+    /// Adds one account to a configured provider without restarting the loop.
+    pub async fn add_account(&mut self, provider: &str, account: &str) -> Result<(), String> {
+        if !valid_account_slug(account) {
+            return Err(format!("account {account:?} is not a valid lowercase slug"));
+        }
 
-    /// Removes an exact account from future polling without touching its history.
-    pub async fn remove_provider(&mut self, provider: &str, account: &str) -> Result<(), String> {
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        if !config
+            .providers()
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|configured| configured == provider)
+        {
+            return Err(format!("provider {provider} is not configured"));
+        }
+        let mut accounts = config
+            .accounts(provider)
+            .map_err(|error| error.to_string())?;
+        if accounts.iter().any(|configured| configured == account)
+            || self.accounts.iter().any(|configured| {
+                configured.provider.as_str() == provider && configured.account.as_str() == account
+            })
+        {
+            return Err(format!(
+                "account {provider}/{account} is already configured"
+            ));
+        }
+
+        let Some(mut new_account) =
+            crate::registry::account(provider, &AccountId::new(account), &self.secrets, &config)
+                .map_err(|error| error.to_string())?
+        else {
+            return Err(format!(
+                "provider {provider} is not supported by this build"
+            ));
+        };
+        if matches!(
+            new_account.status.credential_kind(),
+            Some(CredentialKind::External | CredentialKind::None)
+        ) {
+            return Err(format!(
+                "provider {provider} does not support multiple accounts"
+            ));
+        }
+
+        accounts.push(account.to_owned());
+        config
+            .set_accounts(provider, &accounts)
+            .map_err(|error| error.to_string())?;
+
+        new_account.due = Instant::now();
+        let insert_at = self
+            .accounts
+            .iter()
+            .rposition(|configured| configured.provider.as_str() == provider)
+            .map(|index| index + 1)
+            .unwrap_or(self.accounts.len());
+        self.accounts.insert(insert_at, new_account);
+        self.probe_credentials(Some(provider)).await;
+        let status = self.accounts[insert_at].status.clone();
+        let _ = self.updates.send(Publication::Changed(status)).await;
+        Ok(())
+    }
+
+    /// Copies the credential one account uses to its new id and moves its history
+    /// rows there, deleting nothing.
+    ///
+    /// Rename and promotion both run this before they touch the config: the copy
+    /// makes the new id immediately usable once the write lands, and refusing to
+    /// delete the old slots until after it keeps a failed write from leaving a
+    /// configured account without its credential. History rows already under the
+    /// destination are cleared in the same transaction: the destination was
+    /// validated unconfigured, or is the id of an account this same write removes,
+    /// so its rows are a predecessor's and keeping them would attribute them to the
+    /// account that inherits the id.
+    async fn migrate_identity(
+        &mut self,
+        kind: Option<Kind>,
+        provider: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<MigrationUndo, String> {
+        let provider_id = ProviderId::new(provider);
+        let old_id = AccountId::new(old);
+        let new_id = AccountId::new(new);
+        let mut replaced = None;
+        if let Some(kind) = kind
+            && let Some(secret) = self
+                .secrets
+                .get(kind, &provider_id, &old_id)
+                .await
+                .map_err(|error| error.to_string())?
+        {
+            replaced = self
+                .secrets
+                .get(kind, &provider_id, &new_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            self.secrets
+                .set(kind, &provider_id, &new_id, &secret)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        // Nothing held means nothing to copy: the account's credential state moves with
+        // its id, and a later login writes the new slot directly.
+        let undo = MigrationUndo {
+            provider: provider.to_owned(),
+            old: old.to_owned(),
+            new: new.to_owned(),
+            kind,
+            replaced,
+        };
+        if let Err(error) = self
+            .history
+            .rekey_account_discarding_destination(provider, old, new)
+        {
+            // The copy is not durable either until the rekey lands beside it; put
+            // back what it displaced before reporting the failure.
+            Self::restore_destination(&self.secrets, &undo).await;
+            return Err(error.to_string());
+        }
+        Ok(undo)
+    }
+
+    /// Takes a refused migration back, leaving the old id exactly as it was.
+    ///
+    /// Run when the config write fails: the topology still names the old id, so its
+    /// credential and history must still be under it. Failures here are logged rather
+    /// than returned — the caller is already reporting the write that failed, and
+    /// what this can leave behind is an orphan the next attempt converges over.
+    async fn undo_migration(&mut self, undo: MigrationUndo) {
+        Self::restore_destination(&self.secrets, &undo).await;
+        if let Err(error) =
+            self.history
+                .rekey_account_discarding_destination(&undo.provider, &undo.new, &undo.old)
+        {
+            tracing::error!(
+                %error, provider = %undo.provider, account = %undo.old,
+                "could not put a refused migration's history back under its account"
+            );
+        }
+    }
+
+    /// Puts back what a migration's copy displaced, when the migration did not
+    /// become durable. Logged rather than returned: the caller is already reporting
+    /// a failure, and what this leaves behind is a slot under an id nothing reads.
+    async fn restore_destination(secrets: &Arc<dyn Secrets>, undo: &MigrationUndo) {
+        if let (Some(kind), Some(previous)) = (undo.kind, undo.replaced.as_ref())
+            && let Err(error) = secrets
+                .set(
+                    kind,
+                    &ProviderId::new(&undo.provider),
+                    &AccountId::new(&undo.new),
+                    previous,
+                )
+                .await
+        {
+            tracing::warn!(
+                %error, provider = %undo.provider, account = %undo.new,
+                "could not restore the credential a refused migration replaced"
+            );
+        }
+    }
+
+    /// Deletes both credential kinds under one account id, logging rather than
+    /// failing.
+    ///
+    /// By the time this runs, the migration that orphaned the id is durable, and an
+    /// error returned here would tell the caller the rename or promotion failed when
+    /// the file says it did not.
+    async fn forget_secret_slots(secrets: &Arc<dyn Secrets>, provider: &str, account: &str) {
+        for kind in [Kind::Key, Kind::Token] {
+            if let Err(error) = secrets
+                .delete(kind, &ProviderId::new(provider), &AccountId::new(account))
+                .await
+            {
+                tracing::warn!(
+                    %error, provider, account,
+                    "could not clear the credential slots of a migrated-away id"
+                );
+            }
+        }
+    }
+
+    /// Removes an exact account from future polling, promoting the first survivor when the
+    /// provider still has accounts left. The reply carries the surviving topology.
+    pub async fn remove_provider(
+        &mut self,
+        provider: &str,
+        account: &str,
+    ) -> Result<Vec<(String, String)>, String> {
         let Some(index) = self.accounts.iter().position(|configured| {
             configured.provider.as_str() == provider && configured.account.as_str() == account
         }) else {
@@ -473,18 +755,330 @@ impl Engine {
         };
 
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
-        config
-            .remove_provider(provider)
+        let configured_accounts = config
+            .accounts(provider)
             .map_err(|error| error.to_string())?;
+        if !configured_accounts
+            .iter()
+            .any(|configured| configured == account)
+        {
+            return Err(format!("account {provider}/{account} is not configured"));
+        }
+
+        let promote_from = if account == "default" && configured_accounts.len() > 1 {
+            let mut survivors = configured_accounts.clone();
+            let removed = survivors
+                .iter()
+                .position(|configured| configured == account)
+                .expect("the configured account was just found");
+            survivors.remove(removed);
+            Some(survivors.remove(0))
+        } else {
+            None
+        };
+        let promoted_kind = promote_from.as_ref().and_then(|old| {
+            self.accounts
+                .iter()
+                .find(|configured| {
+                    configured.provider.as_str() == provider && configured.account.as_str() == old
+                })
+                .and_then(|account| account.status.credential_kind())
+                .and_then(stored_kind)
+        });
+        let mut undo = None;
+        if let Some(old) = promote_from.as_ref() {
+            if !self.accounts.iter().any(|configured| {
+                configured.provider.as_str() == provider && configured.account.as_str() == old
+            }) {
+                return Err(format!("account {provider}/{old} is not configured"));
+            }
+            undo = Some(
+                self.migrate_identity(promoted_kind, provider, old, "default")
+                    .await?,
+            );
+        }
+
+        // The durability point: everything before it is reversible, everything after it
+        // is cleanup of ids the file no longer names.
+        let persisted = if configured_accounts.len() > 1 {
+            config.remove_account(provider, account)
+        } else {
+            config.remove_provider(provider)
+        };
+        if let Err(error) = persisted {
+            if let Some(undo) = undo {
+                self.undo_migration(undo).await;
+            }
+            return Err(error.to_string());
+        }
+
+        // The removal is durable, so the ids it retired can be cleared. A promotion
+        // has already copied the survivor's own kind into the `default` slot; the kinds
+        // the survivor does not use belonged to the removed account alone, under an id
+        // that has changed hands. A keyring failure here is logged rather than returned:
+        // the topology has already been persisted, and a caller told the removal failed
+        // would be wrong about that.
+        if let Some(old) = promote_from.as_ref() {
+            Self::forget_secret_slots(&self.secrets, provider, old).await;
+            let provider_id = ProviderId::new(provider);
+            for kind in [Kind::Key, Kind::Token] {
+                if Some(kind) == promoted_kind {
+                    continue;
+                }
+                if let Err(error) = self
+                    .secrets
+                    .delete(kind, &provider_id, &AccountId::default())
+                    .await
+                {
+                    tracing::warn!(
+                        %error, provider, account = AccountId::default().as_str(),
+                        "could not clear a credential the promoted account does not use"
+                    );
+                }
+            }
+        }
 
         let removed = self.accounts.remove(index);
+        if promote_from.is_some() {
+            let promoted_index = self
+                .accounts
+                .iter()
+                .position(|configured| {
+                    configured.provider.as_str() == provider
+                        && configured.account.as_str() == promote_from.as_deref().unwrap_or("")
+                })
+                .expect("the promoted account was checked before migration");
+            let promoted = &mut self.accounts[promoted_index];
+            promoted.account = AccountId::default();
+            promoted.status.account = AccountId::default().to_string();
+            promoted.status.account_label = None;
+            promoted.source =
+                crate::registry::source_for_account(provider, &promoted.account, &config);
+            if promoted.rebuildable() {
+                promoted.client = None;
+            }
+        }
+        self.probe_credentials(Some(provider)).await;
+
+        if let Some(old) = promote_from.as_ref() {
+            // The survivor's old id stops existing the moment it takes over `default`,
+            // and its published entry must leave with it — first, and never as a
+            // `Removed` for `default` itself: `upsert` and `remove` share the
+            // (provider, account) key, and the pairs here differ, so this retirement
+            // cannot collide with the survivor's fresh entry that follows it.
+            let _ = self
+                .updates
+                .send(Publication::Removed {
+                    provider: provider.to_owned(),
+                    account: old.clone(),
+                })
+                .await;
+            let promoted = self
+                .accounts
+                .iter()
+                .find(|configured| {
+                    configured.provider.as_str() == provider
+                        && configured.account == AccountId::default()
+                })
+                .expect("the promoted account was just renamed")
+                .status
+                .clone();
+            let _ = self.updates.send(Publication::Changed(promoted)).await;
+        } else {
+            let _ = self
+                .updates
+                .send(Publication::Removed {
+                    provider: removed.provider.as_str().to_owned(),
+                    account: removed.account.as_str().to_owned(),
+                })
+                .await;
+        }
+        Ok(self
+            .accounts
+            .iter()
+            .map(|account| {
+                (
+                    account.provider.as_str().to_owned(),
+                    account.account.as_str().to_owned(),
+                )
+            })
+            .collect())
+    }
+
+    /// Renames one configured account, migrating the credential and history rows keyed
+    /// by its id. The reply carries the surviving topology.
+    ///
+    /// The id is a storage key in three places — the keyring, the history tables, the
+    /// config's account list — and all three move together or not at all: the credential
+    /// is copied and the history re-keyed before the config write, nothing under the old
+    /// id is deleted until after it, and a write that refuses puts the history back and
+    /// leaves the old id exactly as it was. The `default` account cannot be renamed: it
+    /// is the structural first account of its provider, and the id it would move to is
+    /// refused by uniqueness anyway.
+    pub async fn rename_account(
+        &mut self,
+        provider: &str,
+        account: &str,
+        new: &str,
+    ) -> Result<Vec<(String, String)>, String> {
+        if account == AccountId::default().as_str() {
+            return Err("the default account cannot be renamed".to_owned());
+        }
+        if new == account {
+            return Err(format!("account {provider}/{new} is already named that"));
+        }
+        if !valid_account_slug(new) {
+            return Err(format!("account {new:?} is not a valid lowercase slug"));
+        }
+        let Some(index) = self.accounts.iter().position(|configured| {
+            configured.provider.as_str() == provider && configured.account.as_str() == account
+        }) else {
+            return Err(format!("account {provider}/{account} is not configured"));
+        };
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        let mut accounts = config
+            .accounts(provider)
+            .map_err(|error| error.to_string())?;
+        let Some(position) = accounts.iter().position(|held| held == account) else {
+            return Err(format!("account {provider}/{account} is not configured"));
+        };
+        if accounts.iter().any(|held| held == new)
+            || self
+                .accounts
+                .iter()
+                .any(|held| held.provider.as_str() == provider && held.account.as_str() == new)
+        {
+            return Err(format!("account {provider}/{new} is already configured"));
+        }
+
+        let kind = self.accounts[index]
+            .status
+            .credential_kind()
+            .and_then(stored_kind);
+        let undo = self.migrate_identity(kind, provider, account, new).await?;
+
+        // Position preserved: the new id takes the old one's place in the array, which
+        // is the whole difference between a rename and a remove-then-add.
+        accounts[position] = new.to_owned();
+        if let Err(error) = config.set_accounts(provider, &accounts) {
+            self.undo_migration(undo).await;
+            return Err(error.to_string());
+        }
+
+        // Durable. The old id's slots can go: the used kind was copied, and any other
+        // kind under it belonged to the account alone.
+        Self::forget_secret_slots(&self.secrets, provider, account).await;
+
+        let renamed = &mut self.accounts[index];
+        renamed.account = AccountId::new(new);
+        renamed.status.account = new.to_owned();
+        renamed.status.account_label = Some(new.to_owned());
+        renamed.source = crate::registry::source_for_account(provider, &renamed.account, &config);
+        if renamed.rebuildable() {
+            // The client in hand was built under the old id: a poll it served would read
+            // the deleted slot and file the reading under the dead id, so the next poll
+            // has to build one from the new id.
+            renamed.client = None;
+        }
+        self.probe_credentials(Some(provider)).await;
+
+        // The old id stops existing the moment the file names the new one, and its
+        // published entry must leave with it — first, because the two pairs differ and
+        // so that `Removed` cannot collide with the `Changed` that follows it. Never a
+        // `Reordered`: the position never moved.
         let _ = self
             .updates
             .send(Publication::Removed {
-                provider: removed.provider.as_str().to_owned(),
-                account: removed.account.as_str().to_owned(),
+                provider: provider.to_owned(),
+                account: account.to_owned(),
             })
             .await;
+        let _ = self
+            .updates
+            .send(Publication::Changed(self.accounts[index].status.clone()))
+            .await;
+        Ok(self
+            .accounts
+            .iter()
+            .map(|held| {
+                (
+                    held.provider.as_str().to_owned(),
+                    held.account.as_str().to_owned(),
+                )
+            })
+            .collect())
+    }
+
+    /// Puts one provider's configured accounts in the order the user selected.
+    pub async fn set_account_order(
+        &mut self,
+        provider: &str,
+        accounts: &[String],
+    ) -> Result<(), String> {
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        let providers = config.providers().map_err(|error| error.to_string())?;
+        if !providers.iter().any(|configured| configured == provider) {
+            return Err(format!("provider {provider} is not configured"));
+        }
+        let configured = config
+            .accounts(provider)
+            .map_err(|error| error.to_string())?;
+        if accounts.first().map(String::as_str) != Some("default") {
+            return Err("the default account must be first".to_owned());
+        }
+        let mut wanted = accounts.to_vec();
+        wanted.sort_unstable();
+        let mut expected = configured.clone();
+        expected.sort_unstable();
+        if wanted != expected {
+            return Err(format!(
+                "the account order for {provider} must name every account exactly once"
+            ));
+        }
+        if !self
+            .accounts
+            .iter()
+            .any(|configured| configured.provider.as_str() == provider)
+        {
+            return Err(format!("provider {provider} is not running"));
+        }
+
+        config
+            .set_accounts(provider, accounts)
+            .map_err(|error| error.to_string())?;
+
+        let mut retained = Vec::with_capacity(self.accounts.len());
+        let mut provider_accounts = Vec::new();
+        let mut insertion = None;
+        for account in self.accounts.drain(..) {
+            if account.provider.as_str() == provider {
+                insertion.get_or_insert(retained.len());
+                provider_accounts.push(account);
+            } else {
+                retained.push(account);
+            }
+        }
+        provider_accounts.sort_by_key(|account| {
+            accounts
+                .iter()
+                .position(|id| id == account.account.as_str())
+                .unwrap_or(accounts.len())
+        });
+        let insertion = insertion.expect("the provider was checked before reordering");
+        retained.splice(insertion..insertion, provider_accounts);
+        self.accounts = retained;
+        let order = self
+            .accounts
+            .iter()
+            .map(|account| {
+                (
+                    account.provider.as_str().to_owned(),
+                    account.account.as_str().to_owned(),
+                )
+            })
+            .collect();
+
+        let _ = self.updates.send(Publication::Reordered(order)).await;
         Ok(())
     }
 
@@ -512,10 +1106,17 @@ impl Engine {
                 // the grid does with one anyway.
                 .unwrap_or(providers.len())
         });
-        let _ = self
-            .updates
-            .send(Publication::Reordered(providers.to_vec()))
-            .await;
+        let order = self
+            .accounts
+            .iter()
+            .map(|account| {
+                (
+                    account.provider.as_str().to_owned(),
+                    account.account.as_str().to_owned(),
+                )
+            })
+            .collect();
+        let _ = self.updates.send(Publication::Reordered(order)).await;
         Ok(())
     }
 
@@ -547,6 +1148,9 @@ impl Engine {
             .set_option(provider, name, value)
             .map_err(|error| error.to_string())?;
         self.accounts[index].status.options = crate::registry::options(provider, &config);
+        let account_id = self.accounts[index].account.clone();
+        self.accounts[index].source =
+            crate::registry::source_for_account(provider, &account_id, &config);
         if self.accounts[index].rebuildable() {
             self.accounts[index].client = None;
         }
@@ -780,8 +1384,22 @@ impl Engine {
                         let result = self.add_provider(&provider).await;
                         let _ = reply.send(result);
                     }
+                    Some(Command::AddAccount { provider, account, reply }) => {
+                        let result = self.add_account(&provider, &account).await;
+                        let _ = reply.send(result);
+                    }
+
                     Some(Command::RemoveProvider { provider, account, reply }) => {
                         let result = self.remove_provider(&provider, &account).await;
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::RenameAccount {
+                        provider,
+                        account,
+                        new,
+                        reply,
+                    }) => {
+                        let result = self.rename_account(&provider, &account, &new).await;
                         let _ = reply.send(result);
                     }
                     Some(Command::SetOption { provider, account, name, value, reply }) => {
@@ -796,6 +1414,11 @@ impl Engine {
                         let result = self.select_auth_source(&provider, &account, selection).await;
                         let _ = reply.send(result);
                     }
+                    Some(Command::SetAccountOrder { provider, accounts, reply }) => {
+                        let result = self.set_account_order(&provider, &accounts).await;
+                        let _ = reply.send(result);
+                    }
+
                     Some(Command::SetWindowNotify { provider, account, window, enabled, reply }) => {
                         let result = self
                             .set_window_notify(&provider, &account, &window, enabled)
@@ -874,8 +1497,9 @@ impl Engine {
         if let Some(rebuild) = self.accounts[index].rebuild.as_ref() {
             // Owns its credential discovery: there is no stored key to read, so the
             // settings are the whole of what the replacement is built from.
+            let account = self.accounts[index].account.clone();
             let options = self.accounts[index].option_values();
-            match rebuild(&options) {
+            match rebuild(&account, &options) {
                 Ok(client) => self.accounts[index].client = Some(client),
                 Err(error) => {
                     self.accounts[index].failures = self.accounts[index].failures.saturating_add(1);
@@ -909,7 +1533,7 @@ impl Engine {
                     .factory
                     .as_ref()
                     .expect("checked just above");
-                match factory(credential, &options) {
+                match factory(&account, credential, &options) {
                     Ok(client) => {
                         tracing::debug!(provider = %provider, "credential loaded");
                         Loaded::Client(client)
@@ -943,7 +1567,6 @@ impl Engine {
             }
         }
     }
-
     /// Files one fetch result and publishes the account.
     async fn apply(&mut self, index: usize, result: Result<Snapshot, ProviderError>) {
         match result {
@@ -1183,7 +1806,8 @@ impl Engine {
             }
             let provider = account.provider.as_str().to_owned();
             account.status.external_present = crate::registry::external_present(&provider);
-            account.status.auth_source = crate::registry::auth_source(&provider, &account.status);
+            account.status.auth_source =
+                crate::registry::auth_source(&provider, account.source, &account.status);
         }
     }
 
@@ -1211,6 +1835,11 @@ impl Engine {
                 account.status.options =
                     crate::registry::options(account.provider.as_str(), config);
                 account.status.notify = crate::registry::notify(account.provider.as_str(), config);
+                account.source = crate::registry::source_for_account(
+                    account.provider.as_str(),
+                    &account.account,
+                    config,
+                );
             }
             if account.rebuildable() {
                 account.client = None;
@@ -1242,6 +1871,7 @@ impl Engine {
                 continue;
             }
             let provider = account.provider.clone();
+            let source = account.source;
             let kind = account.status.credential_kind().and_then(stored_kind);
             let held = match kind {
                 Some(kind) => {
@@ -1262,8 +1892,11 @@ impl Engine {
             self.accounts[index].status.has_credential = held;
             self.accounts[index].status.external_present =
                 crate::registry::external_present(provider.as_str());
-            self.accounts[index].status.auth_source =
-                crate::registry::auth_source(provider.as_str(), &self.accounts[index].status);
+            self.accounts[index].status.auth_source = crate::registry::auth_source(
+                provider.as_str(),
+                source,
+                &self.accounts[index].status,
+            );
         }
     }
 
@@ -1432,6 +2065,7 @@ fn worst_used(windows: &[WindowStatus]) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::notify::{Notice, Notifier, NotifyError};
+    use std::collections::HashMap;
     use std::sync::Mutex;
     use tidemark_core::providers::BoxFuture;
     use tidemark_types::{AuthCandidate, AuthSelection, Window, WindowKey, WindowLength};
@@ -1639,6 +2273,115 @@ mod tests {
             _provider: &'a ProviderId,
             _account: &'a AccountId,
         ) -> BoxFuture<'a, Result<(), SecretError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    #[derive(Debug, Default)]
+    struct StoredSecrets {
+        slots: Mutex<HashMap<(Kind, String, String), String>>,
+        fail_deletes: std::sync::atomic::AtomicBool,
+    }
+
+    impl StoredSecrets {
+        fn insert(&self, kind: Kind, provider: &str, account: &str, secret: &str) {
+            self.slots.lock().expect("no test panics here").insert(
+                (kind, provider.to_owned(), account.to_owned()),
+                secret.to_owned(),
+            );
+        }
+
+        /// Makes every delete fail the way a locked keyring would.
+        fn refuse_deletes(&self) {
+            self.fail_deletes
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Everything held, as `(kind, provider, account, secret)`, sorted for exact
+        /// comparison.
+        fn held(&self) -> Vec<(String, String, String, String)> {
+            let mut entries: Vec<_> = self
+                .slots
+                .lock()
+                .expect("no test panics here")
+                .iter()
+                .map(|((kind, provider, account), secret)| {
+                    (
+                        match kind {
+                            Kind::Key => "key",
+                            Kind::Token => "token",
+                        }
+                        .to_owned(),
+                        provider.clone(),
+                        account.clone(),
+                        secret.clone(),
+                    )
+                })
+                .collect();
+            entries.sort();
+            entries
+        }
+    }
+
+    impl Secrets for StoredSecrets {
+        fn get<'a>(
+            &'a self,
+            kind: Kind,
+            provider: &'a ProviderId,
+            account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<Option<Credential>, SecretError>> {
+            let found = self
+                .slots
+                .lock()
+                .expect("no test panics here")
+                .get(&(kind, provider.to_string(), account.to_string()))
+                .cloned()
+                .map(Credential::new);
+            Box::pin(async move { Ok(found) })
+        }
+
+        fn set<'a>(
+            &'a self,
+            kind: Kind,
+            provider: &'a ProviderId,
+            account: &'a AccountId,
+            secret: &'a Credential,
+        ) -> BoxFuture<'a, Result<(), SecretError>> {
+            let value = (
+                (kind, provider.to_string(), account.to_string()),
+                secret.expose().to_owned(),
+            );
+            self.slots
+                .lock()
+                .expect("no test panics here")
+                .insert(value.0, value.1);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn compare_and_set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            _expected: &'a Credential,
+            _replacement: &'a Credential,
+        ) -> BoxFuture<'a, Result<bool, SecretError>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            kind: Kind,
+            provider: &'a ProviderId,
+            account: &'a AccountId,
+        ) -> BoxFuture<'a, Result<(), SecretError>> {
+            if self.fail_deletes.load(std::sync::atomic::Ordering::SeqCst) {
+                return Box::pin(async { Err(SecretError::Locked) });
+            }
+            self.slots.lock().expect("no test panics here").remove(&(
+                kind,
+                provider.to_string(),
+                account.to_string(),
+            ));
             Box::pin(async { Ok(()) })
         }
     }
@@ -1947,7 +2690,1016 @@ mod tests {
         let config = Config::at(harness.config_path.clone()).expect("parses");
         assert_eq!(config.providers().expect("readable"), order);
         let publication = harness.updates.recv().await.expect("announced");
-        assert!(matches!(publication, Publication::Reordered(published) if published == order));
+        let published = match &publication {
+            Publication::Reordered(entries) => {
+                entries.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>()
+            }
+            _ => panic!("expected Reordered, got {publication:?}"),
+        };
+        assert_eq!(published, order);
+    }
+    #[tokio::test]
+    async fn an_account_addition_persists_and_publishes_pending_status() {
+        let mut harness = Harness::configured("runtime-add-account", &["kimi"]).await;
+
+        harness
+            .engine
+            .add_account("kimi", "work")
+            .await
+            .expect("account added");
+
+        assert_eq!(
+            harness
+                .engine
+                .accounts()
+                .iter()
+                .map(|account| account.account().as_str())
+                .collect::<Vec<_>>(),
+            ["default", "work"]
+        );
+        let publication = harness.updates.recv().await.expect("announced");
+        assert!(matches!(
+            publication,
+            Publication::Changed(status)
+                if status.provider == "kimi"
+                    && status.account == "work"
+                    && status.state == ProviderState::Pending.as_wire()
+        ));
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(
+            config.accounts("kimi").expect("accounts readable"),
+            ["default", "work"]
+        );
+    }
+
+    /// A harness over a settings file and a recorded keyring the test fills itself, so a
+    /// migration's durable state can be asserted exactly.
+    fn stored_harness(
+        config_path: std::path::PathBuf,
+        accounts: &[&str],
+    ) -> (Harness, Arc<StoredSecrets>) {
+        let _ = std::fs::remove_file(&config_path);
+        let mut config = Config::at(config_path.clone()).expect("empty config parses");
+        config.add_provider("kimi").expect("provider configured");
+        config
+            .set_accounts(
+                "kimi",
+                &accounts.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            )
+            .expect("accounts configured");
+        let secrets = Arc::new(StoredSecrets::default());
+        let secrets_dyn: Arc<dyn Secrets> = secrets.clone();
+        let accounts = crate::registry::accounts(&secrets_dyn, &config).expect("accounts built");
+        let (tx, rx) = mpsc::channel(64);
+        let notices = Arc::new(Recorder::default());
+        (
+            Harness {
+                engine: Engine::new(
+                    accounts,
+                    History::in_memory().expect("an in-memory database opens"),
+                    secrets_dyn,
+                    tx,
+                    config_path.clone(),
+                    scheduler::RefreshMode::Auto,
+                    Arc::clone(&notices) as Arc<dyn Notifier>,
+                ),
+                updates: rx,
+                config_path,
+                notices,
+            },
+            secrets,
+        )
+    }
+
+    /// A directory that hands a config inside it back its writer when it goes, and
+    /// nothing else — the test that owns the directory removes it.
+    struct ReadOnlyDir(std::path::PathBuf);
+
+    impl ReadOnlyDir {
+        fn refuse_writes(path: &std::path::Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o500))
+                .expect("directory made read-only");
+            Self(path.to_path_buf())
+        }
+    }
+
+    impl Drop for ReadOnlyDir {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_default_removal_promotes_the_first_survivor_and_rekeys_history() {
+        let mut harness = Harness::configured("runtime-promote-account", &["kimi"]).await;
+        harness
+            .engine
+            .add_account("kimi", "work")
+            .await
+            .expect("account added");
+        harness.published();
+
+        let mut reading = snapshot(50.0, 3600);
+        reading.provider = ProviderId::new("kimi");
+        reading.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&reading)
+            .expect("history written");
+
+        harness
+            .engine
+            .remove_provider("kimi", "default")
+            .await
+            .expect("default removed");
+
+        assert_eq!(harness.engine.accounts().len(), 1);
+        assert_eq!(harness.engine.accounts()[0].account().as_str(), "default");
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "work", &reading.windows[0].key)
+                .expect("old history read"),
+            None
+        );
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "default", &reading.windows[0].key)
+                .expect("promoted history read"),
+            Some(1)
+        );
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(
+            config.accounts("kimi").expect("accounts readable"),
+            ["default"]
+        );
+
+        let mut saw_changed = false;
+        let mut saw_removed = false;
+        while let Ok(publication) = harness.updates.try_recv() {
+            match publication {
+                Publication::Changed(status) if status.provider == "kimi" => {
+                    saw_changed = status.account == "default";
+                }
+                Publication::Removed { provider, account }
+                    if provider == "kimi" && account == "default" =>
+                {
+                    saw_removed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_changed, "the promoted account must be republished");
+        assert!(
+            !saw_removed,
+            "the promoted account absorbs default; no Removed for `default` is published — \
+             the survivor's old id gets one instead"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promotion_retires_the_published_entry_of_the_survivors_old_id() {
+        let mut harness = Harness::configured("promote-ghost", &["kimi"]).await;
+        harness
+            .engine
+            .add_account("kimi", "work")
+            .await
+            .expect("account added");
+        harness.published();
+
+        // The published state a client already holds: both accounts of the provider.
+        let published = crate::service::Published::default();
+        for account in [0, 1] {
+            published
+                .upsert(harness.engine.accounts()[account].status.clone())
+                .await;
+        }
+
+        harness
+            .engine
+            .remove_provider("kimi", "default")
+            .await
+            .expect("default removed");
+
+        // The publisher applies these mechanically; driving the same shapes through the
+        // real `Published` is the set a `GetStatus` client ends up with.
+        let mut sequence = Vec::new();
+        while let Ok(publication) = harness.updates.try_recv() {
+            match publication {
+                Publication::Changed(status) => {
+                    sequence.push(("changed", status.account.clone()));
+                    published.upsert(status).await;
+                }
+                Publication::Removed { provider, account } => {
+                    sequence.push(("removed", account.clone()));
+                    published.remove(&provider, &account).await;
+                }
+                Publication::Reordered(_) => panic!("a promotion does not reorder"),
+            }
+        }
+        assert_eq!(
+            sequence,
+            vec![
+                ("removed", "work".to_owned()),
+                ("changed", "default".to_owned())
+            ],
+            "the survivor's old id is retired first — the ids differ, so that Removed \
+             cannot collide with the Changed that follows it"
+        );
+        let identities: Vec<(String, String)> = published
+            .all()
+            .await
+            .into_iter()
+            .map(|status| (status.provider, status.account))
+            .collect();
+        assert_eq!(
+            identities,
+            vec![("kimi".to_owned(), "default".to_owned())],
+            "GetStatus serves exactly the identities that exist; the old id is not a ghost"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_extra_account_publishes_its_slug_as_its_label() {
+        let mut harness = Harness::configured("account-label", &["kimi"]).await;
+        assert_eq!(
+            harness.engine.accounts()[0].status.account_label,
+            None,
+            "the default account is the provider itself and stays unlabelled"
+        );
+
+        harness
+            .engine
+            .add_account("kimi", "work")
+            .await
+            .expect("account added");
+
+        assert_eq!(
+            harness.engine.accounts()[1].status.account_label.as_deref(),
+            Some("work")
+        );
+        assert!(
+            matches!(
+                harness.updates.recv().await.expect("announced"),
+                Publication::Changed(status) if status.account_label.as_deref() == Some("work")
+            ),
+            "the label rides the publication, not only the engine's private state"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promotion_moves_the_survivors_credential_and_clears_the_rest() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-promote-cleanup-{}.toml",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let mut config = Config::at(config_path.clone()).expect("empty config parses");
+        config.add_provider("kimi").expect("provider configured");
+        config
+            .set_accounts("kimi", &["default".into(), "work".into()])
+            .expect("accounts configured");
+
+        let secrets = Arc::new(StoredSecrets::default());
+        secrets.insert(Kind::Key, "kimi", "default", "default-key");
+        secrets.insert(Kind::Key, "kimi", "work", "work-key");
+        secrets.insert(Kind::Token, "kimi", "default", "stale-token");
+        secrets.insert(Kind::Token, "kimi", "work", "stale-token");
+        let secrets_dyn: Arc<dyn Secrets> = secrets.clone();
+        let accounts = crate::registry::accounts(&secrets_dyn, &config).expect("accounts built");
+        let (tx, rx) = mpsc::channel(64);
+        let notices = Arc::new(Recorder::default());
+        let mut harness = Harness {
+            engine: Engine::new(
+                accounts,
+                History::in_memory().expect("an in-memory database opens"),
+                secrets_dyn,
+                tx,
+                config_path.clone(),
+                scheduler::RefreshMode::Auto,
+                Arc::clone(&notices) as Arc<dyn Notifier>,
+            ),
+            updates: rx,
+            config_path: config_path.clone(),
+            notices,
+        };
+
+        let topology = harness
+            .engine
+            .remove_provider("kimi", "default")
+            .await
+            .expect("default removed");
+
+        assert_eq!(
+            topology,
+            vec![("kimi".to_owned(), "default".to_owned())],
+            "the reply carries the surviving topology, not just success"
+        );
+        assert_eq!(
+            harness.engine.accounts()[0].status.account_label,
+            None,
+            "the survivor takes the default identity and its unlabelled status with it"
+        );
+        assert_eq!(
+            secrets.held(),
+            vec![(
+                "key".to_owned(),
+                "kimi".to_owned(),
+                "default".to_owned(),
+                "work-key".to_owned()
+            )],
+            "the survivor's key moved into the default slot, and every credential of the \
+             removed account and the old id — including kinds the survivor does not use — \
+             is gone"
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn a_rename_migrates_the_credential_the_history_and_the_config_position() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-rename-{}.toml",
+            std::process::id()
+        ));
+        let (mut harness, secrets) =
+            stored_harness(config_path.clone(), &["default", "work", "personal"]);
+        secrets.insert(Kind::Key, "kimi", "work", "work-key");
+        secrets.insert(Kind::Token, "kimi", "work", "stale-token");
+
+        let mut reading = snapshot(50.0, 3600);
+        reading.provider = ProviderId::new("kimi");
+        reading.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&reading)
+            .expect("work history written");
+        let mut stale = snapshot(50.0, 3600);
+        stale.provider = ProviderId::new("kimi");
+        stale.account = AccountId::new("team");
+        stale.windows[0].used_percent = 7.0;
+        harness
+            .engine
+            .history
+            .ingest(&stale)
+            .expect("stale destination history written");
+
+        // A client built under the old id would file its next reading under the dead id,
+        // so the rename has to drop one it finds in place.
+        harness.engine.accounts[1].client = Some(Fake::new(Vec::new()));
+
+        let topology = harness
+            .engine
+            .rename_account("kimi", "work", "team")
+            .await
+            .expect("renamed");
+
+        assert_eq!(
+            topology,
+            vec![
+                ("kimi".to_owned(), "default".to_owned()),
+                ("kimi".to_owned(), "team".to_owned()),
+                ("kimi".to_owned(), "personal".to_owned()),
+            ],
+            "the reply carries the surviving topology"
+        );
+        assert_eq!(
+            secrets.held(),
+            vec![(
+                "key".to_owned(),
+                "kimi".to_owned(),
+                "team".to_owned(),
+                "work-key".to_owned()
+            )],
+            "the used kind moved to the new id, and both kinds under the old id are gone"
+        );
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "work", &reading.windows[0].key)
+                .expect("old history read"),
+            None
+        );
+        let points = harness
+            .engine
+            .history
+            .points("kimi", "team", &reading.windows[0].key, 1)
+            .expect("new points read");
+        assert_eq!(points.len(), 1);
+        assert_eq!(
+            points[0].used_percent, 50.0,
+            "the destination's stale rows were cleared, not inherited"
+        );
+        assert_eq!(
+            Config::at(config_path.clone())
+                .expect("parses")
+                .accounts("kimi")
+                .expect("accounts readable"),
+            ["default", "team", "personal"],
+            "the new id takes the old one's place, not the array's end"
+        );
+        let renamed = &harness.engine.accounts()[1];
+        assert_eq!(renamed.account().as_str(), "team");
+        assert_eq!(renamed.status.account_label.as_deref(), Some("team"));
+        assert!(
+            renamed.client.is_none(),
+            "the client built under the old id is dropped so the next poll reads the new slot"
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn a_rename_publishes_the_retired_id_first_and_replaces_it_with_the_new_one() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-rename-publish-{}.toml",
+            std::process::id()
+        ));
+        let (mut harness, _secrets) = stored_harness(config_path.clone(), &["default", "work"]);
+
+        // The published state a client already holds: both accounts of the provider.
+        let published = crate::service::Published::default();
+        for account in [0, 1] {
+            published
+                .upsert(harness.engine.accounts()[account].status.clone())
+                .await;
+        }
+
+        harness
+            .engine
+            .rename_account("kimi", "work", "team")
+            .await
+            .expect("renamed");
+
+        // The publisher applies these mechanically; driving the same shapes through the
+        // real `Published` is the set a `GetStatus` client ends up with.
+        let mut sequence = Vec::new();
+        while let Ok(publication) = harness.updates.try_recv() {
+            match publication {
+                Publication::Changed(status) => {
+                    sequence.push(("changed", status.account.clone()));
+                    published.upsert(status).await;
+                }
+                Publication::Removed { provider, account } => {
+                    sequence.push(("removed", account.clone()));
+                    published.remove(&provider, &account).await;
+                }
+                Publication::Reordered(_) => {
+                    panic!("a rename preserves position and does not reorder")
+                }
+            }
+        }
+        assert_eq!(
+            sequence,
+            vec![
+                ("removed", "work".to_owned()),
+                ("changed", "team".to_owned())
+            ],
+            "the retired id leaves first; the ids differ, so that Removed cannot collide \n             with the Changed that follows it"
+        );
+        let identities: Vec<(String, String)> = published
+            .all()
+            .await
+            .into_iter()
+            .map(|status| (status.provider, status.account))
+            .collect();
+        assert!(
+            identities.contains(&("kimi".to_owned(), "team".to_owned())),
+            "the new id is published"
+        );
+        assert!(
+            !identities.contains(&("kimi".to_owned(), "work".to_owned())),
+            "the old id is not a ghost"
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn a_rename_refuses_an_id_the_config_cannot_take_without_touching_anything() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-rename-refuse-{}.toml",
+            std::process::id()
+        ));
+        let (mut harness, secrets) = stored_harness(config_path.clone(), &["default", "work"]);
+        secrets.insert(Kind::Key, "kimi", "work", "work-key");
+        let mut reading = snapshot(50.0, 3600);
+        reading.provider = ProviderId::new("kimi");
+        reading.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&reading)
+            .expect("history written");
+
+        for (account, new) in [
+            ("default", "team"),
+            ("work", "work"),
+            ("work", "Team"),
+            ("work", "default"),
+            ("missing", "team"),
+        ] {
+            assert!(
+                harness
+                    .engine
+                    .rename_account("kimi", account, new)
+                    .await
+                    .is_err(),
+                "renaming {account} to {new} must be refused"
+            );
+        }
+        assert!(
+            harness
+                .engine
+                .rename_account("zai", "work", "team")
+                .await
+                .is_err(),
+            "a provider that is not configured must be refused"
+        );
+
+        assert_eq!(
+            secrets.held(),
+            vec![(
+                "key".to_owned(),
+                "kimi".to_owned(),
+                "work".to_owned(),
+                "work-key".to_owned()
+            )],
+            "no credential moved"
+        );
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "work", &reading.windows[0].key)
+                .expect("history read"),
+            Some(1),
+            "no history moved"
+        );
+        assert_eq!(
+            Config::at(config_path.clone())
+                .expect("parses")
+                .accounts("kimi")
+                .expect("accounts readable"),
+            ["default", "work"]
+        );
+        assert!(
+            harness.updates.try_recv().is_err(),
+            "a refused rename publishes nothing"
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn a_refused_rename_leaves_the_old_id_fully_usable() {
+        let dir = std::env::temp_dir().join(format!(
+            "tidemark-engine-rename-refused-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("directory created");
+        let config_path = dir.join("config.toml");
+        let (mut harness, secrets) = stored_harness(config_path.clone(), &["default", "work"]);
+        secrets.insert(Kind::Key, "kimi", "work", "work-key");
+        let mut reading = snapshot(50.0, 3600);
+        reading.provider = ProviderId::new("kimi");
+        reading.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&reading)
+            .expect("history written");
+
+        // The config write is the durability point; a directory that cannot be written
+        // to refuses it after the credential copy and the history re-key.
+        let read_only = ReadOnlyDir::refuse_writes(&dir);
+
+        assert!(
+            harness
+                .engine
+                .rename_account("kimi", "work", "team")
+                .await
+                .is_err(),
+            "the config write refuses the rename"
+        );
+
+        assert_eq!(
+            secrets.held(),
+            vec![
+                (
+                    "key".to_owned(),
+                    "kimi".to_owned(),
+                    "team".to_owned(),
+                    "work-key".to_owned()
+                ),
+                (
+                    "key".to_owned(),
+                    "kimi".to_owned(),
+                    "work".to_owned(),
+                    "work-key".to_owned()
+                ),
+            ],
+            "the old slot is intact; the copy under the new id is a harmless orphan"
+        );
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "work", &reading.windows[0].key)
+                .expect("old history read"),
+            Some(1),
+            "the history is back under the old id"
+        );
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "team", &reading.windows[0].key)
+                .expect("new history read"),
+            None
+        );
+        assert_eq!(
+            Config::at(config_path.clone())
+                .expect("parses")
+                .accounts("kimi")
+                .expect("accounts readable"),
+            ["default", "work"]
+        );
+        assert_eq!(
+            harness.engine.accounts()[1].account().as_str(),
+            "work",
+            "the in-memory id never moved"
+        );
+        assert!(
+            harness.updates.try_recv().is_err(),
+            "a refused rename publishes nothing"
+        );
+
+        // The next attempt converges over the orphan the refusal left behind.
+        drop(read_only);
+        harness
+            .engine
+            .rename_account("kimi", "work", "team")
+            .await
+            .expect("the retry overwrites the orphan copy");
+        assert_eq!(
+            secrets.held(),
+            vec![(
+                "key".to_owned(),
+                "kimi".to_owned(),
+                "team".to_owned(),
+                "work-key".to_owned()
+            )]
+        );
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "team", &reading.windows[0].key)
+                .expect("new history read"),
+            Some(1)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_keyring_failure_after_a_durable_rename_is_logged_not_returned() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-rename-keyring-{}.toml",
+            std::process::id()
+        ));
+        let (mut harness, secrets) = stored_harness(config_path.clone(), &["default", "work"]);
+        secrets.insert(Kind::Key, "kimi", "work", "work-key");
+        let mut reading = snapshot(50.0, 3600);
+        reading.provider = ProviderId::new("kimi");
+        reading.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&reading)
+            .expect("history written");
+        secrets.refuse_deletes();
+
+        harness
+            .engine
+            .rename_account("kimi", "work", "team")
+            .await
+            .expect("the rename is durable; the cleanup is not the caller's problem");
+
+        assert_eq!(
+            secrets.held(),
+            vec![
+                (
+                    "key".to_owned(),
+                    "kimi".to_owned(),
+                    "team".to_owned(),
+                    "work-key".to_owned()
+                ),
+                (
+                    "key".to_owned(),
+                    "kimi".to_owned(),
+                    "work".to_owned(),
+                    "work-key".to_owned()
+                ),
+            ],
+            "the copy landed; the refused delete leaves the old slot behind"
+        );
+        assert_eq!(harness.engine.accounts()[1].account().as_str(), "team");
+        assert_eq!(
+            Config::at(config_path.clone())
+                .expect("parses")
+                .accounts("kimi")
+                .expect("accounts readable"),
+            ["default", "team"]
+        );
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "team", &reading.windows[0].key)
+                .expect("new history read"),
+            Some(1)
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn a_promotion_of_a_used_default_discards_its_rows_and_keeps_the_survivors() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-promote-used-default-{}.toml",
+            std::process::id()
+        ));
+        let (mut harness, _secrets) = stored_harness(config_path.clone(), &["default", "work"]);
+        let mut predecessor = snapshot(42.0, 3600);
+        predecessor.provider = ProviderId::new("kimi");
+        harness
+            .engine
+            .history
+            .ingest(&predecessor)
+            .expect("the removed default's history written");
+        let mut survivor = snapshot(7.0, 3600);
+        survivor.provider = ProviderId::new("kimi");
+        survivor.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&survivor)
+            .expect("the survivor's history written");
+
+        let topology = harness
+            .engine
+            .remove_provider("kimi", "default")
+            .await
+            .expect("a used default no longer blocks its own removal");
+
+        assert_eq!(topology, vec![("kimi".to_owned(), "default".to_owned())]);
+        let window = survivor.windows[0].key.clone();
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "work", &window)
+                .expect("old history read"),
+            None
+        );
+        let points = harness
+            .engine
+            .history
+            .points("kimi", "default", &window, 1)
+            .expect("promoted history read");
+        assert_eq!(points.len(), 1);
+        assert_eq!(
+            points[0].used_percent, 7.0,
+            "the survivor inherits the id, not the predecessor's rows"
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[tokio::test]
+    async fn a_refused_promotion_keeps_both_accounts_credentials() {
+        let dir = std::env::temp_dir().join(format!(
+            "tidemark-engine-promote-refused-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("directory created");
+        let config_path = dir.join("config.toml");
+        let (mut harness, secrets) = stored_harness(config_path.clone(), &["default", "work"]);
+        secrets.insert(Kind::Key, "kimi", "default", "default-key");
+        secrets.insert(Kind::Key, "kimi", "work", "work-key");
+        let mut reading = snapshot(50.0, 3600);
+        reading.provider = ProviderId::new("kimi");
+        reading.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&reading)
+            .expect("history written");
+
+        let read_only = ReadOnlyDir::refuse_writes(&dir);
+
+        assert!(
+            harness
+                .engine
+                .remove_provider("kimi", "default")
+                .await
+                .is_err(),
+            "the config write refuses the removal"
+        );
+
+        assert_eq!(
+            secrets.held(),
+            vec![
+                (
+                    "key".to_owned(),
+                    "kimi".to_owned(),
+                    "default".to_owned(),
+                    "default-key".to_owned()
+                ),
+                (
+                    "key".to_owned(),
+                    "kimi".to_owned(),
+                    "work".to_owned(),
+                    "work-key".to_owned()
+                ),
+            ],
+            "nothing was deleted, and the copy that reached the `default` slot was put back"
+        );
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .current_segment("kimi", "work", &reading.windows[0].key)
+                .expect("history read"),
+            Some(1),
+            "the history is back under the survivor's own id"
+        );
+        assert_eq!(
+            Config::at(config_path.clone())
+                .expect("parses")
+                .accounts("kimi")
+                .expect("accounts readable"),
+            ["default", "work"]
+        );
+        assert_eq!(
+            harness.engine.accounts().len(),
+            2,
+            "the in-memory topology never moved"
+        );
+        drop(read_only);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_account_order_requires_a_default_first_permutation_and_persists_it() {
+        let mut harness = Harness::configured("runtime-account-order", &["kimi"]).await;
+        harness
+            .engine
+            .add_account("kimi", "work")
+            .await
+            .expect("work added");
+        harness
+            .engine
+            .add_account("kimi", "personal")
+            .await
+            .expect("personal added");
+        harness.published();
+
+        assert!(
+            harness
+                .engine
+                .set_account_order("kimi", &["default".into(), "missing".into()])
+                .await
+                .is_err(),
+            "an order that is not a permutation must be refused"
+        );
+        assert_eq!(
+            Config::at(harness.config_path.clone())
+                .expect("parses")
+                .accounts("kimi")
+                .expect("accounts readable"),
+            ["default", "work", "personal"]
+        );
+
+        let order = vec!["default".into(), "personal".into(), "work".into()];
+        harness
+            .engine
+            .set_account_order("kimi", &order)
+            .await
+            .expect("order persisted");
+        assert_eq!(
+            harness
+                .engine
+                .accounts()
+                .iter()
+                .map(|account| account.account().as_str())
+                .collect::<Vec<_>>(),
+            ["default", "personal", "work"]
+        );
+        assert_eq!(
+            Config::at(harness.config_path.clone())
+                .expect("parses")
+                .accounts("kimi")
+                .expect("accounts readable"),
+            order
+        );
+        assert!(matches!(
+            harness.updates.recv().await,
+            Some(Publication::Reordered(accounts))
+                if accounts == vec![
+                    ("kimi".into(), "default".into()),
+                    ("kimi".into(), "personal".into()),
+                    ("kimi".into(), "work".into()),
+                ]
+        ));
+    }
+    #[tokio::test]
+    async fn a_promoted_account_keeps_its_secret_and_history_after_reload() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-promote-reload-{}.toml",
+            std::process::id()
+        ));
+        let history_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-promote-reload-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&config_path);
+        let _ = std::fs::remove_file(&history_path);
+        let mut config = Config::at(config_path.clone()).expect("empty config parses");
+        config.add_provider("kimi").expect("provider configured");
+        config
+            .set_accounts("kimi", &["default".into(), "work".into()])
+            .expect("accounts configured");
+
+        let secrets = Arc::new(StoredSecrets::default());
+        secrets.insert(Kind::Key, "kimi", "work", "work-secret");
+        let secrets_dyn: Arc<dyn Secrets> = secrets.clone();
+        let accounts = crate::registry::accounts(&secrets_dyn, &config).expect("accounts built");
+        let (tx, rx) = mpsc::channel(64);
+        let notices = Arc::new(Recorder::default());
+        let mut harness = Harness {
+            engine: Engine::new(
+                accounts,
+                History::open(history_path.clone()).expect("history opened"),
+                secrets_dyn.clone(),
+                tx,
+                config_path.clone(),
+                scheduler::RefreshMode::Auto,
+                Arc::clone(&notices) as Arc<dyn Notifier>,
+            ),
+            updates: rx,
+            config_path: config_path.clone(),
+            notices,
+        };
+
+        let mut reading = snapshot(50.0, 3600);
+        reading.provider = ProviderId::new("kimi");
+        reading.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&reading)
+            .expect("history written");
+        harness
+            .engine
+            .remove_provider("kimi", "default")
+            .await
+            .expect("default removed");
+
+        let promoted_secret = secrets_dyn
+            .get(Kind::Key, &ProviderId::new("kimi"), &AccountId::default())
+            .await
+            .expect("promoted secret read")
+            .expect("promoted secret present");
+        assert_eq!(promoted_secret.expose(), "work-secret");
+        assert!(
+            secrets_dyn
+                .get(Kind::Key, &ProviderId::new("kimi"), &AccountId::new("work"),)
+                .await
+                .expect("old secret read")
+                .is_none()
+        );
+
+        let reloaded_config = Config::at(config_path.clone()).expect("config reloaded");
+        let reloaded_accounts =
+            crate::registry::accounts(&secrets_dyn, &reloaded_config).expect("accounts reloaded");
+        assert_eq!(reloaded_accounts.len(), 1);
+        assert_eq!(reloaded_accounts[0].account().as_str(), "default");
+        let reloaded_history = History::open(history_path.clone()).expect("history reloaded");
+        assert_eq!(
+            reloaded_history
+                .current_segment("kimi", "default", &reading.windows[0].key)
+                .expect("promoted history read"),
+            Some(1)
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_file(history_path);
     }
 
     #[tokio::test]
@@ -2058,7 +3810,7 @@ mod tests {
         let account = Account::keyless(
             ProviderId::new("cursor"),
             AccountId::default(),
-            Box::new(move |_| {
+            Box::new(move |_, _| {
                 Ok(Arc::new(AuthFake {
                     sources: source_copy.clone(),
                 }) as Arc<dyn Provider>)
@@ -2267,7 +4019,7 @@ mod tests {
         let account = Account::new(
             ProviderId::new("zai"),
             AccountId::default(),
-            Box::new(move |_credential, options| {
+            Box::new(move |_, _credential, options| {
                 recorder
                     .lock()
                     .expect("no test panics holding this")
@@ -2456,7 +4208,9 @@ mod tests {
             vec![Account::new(
                 ProviderId::new("fake"),
                 AccountId::default(),
-                Box::new(|_, _| Ok(Fake::new(vec![Ok(snapshot(1.0, 3600))]) as Arc<dyn Provider>)),
+                Box::new(|_, _, _| {
+                    Ok(Fake::new(vec![Ok(snapshot(1.0, 3600))]) as Arc<dyn Provider>)
+                }),
             )],
             Arc::new(Keyring(|| Err(SecretError::Locked))),
         );
@@ -2482,7 +4236,7 @@ mod tests {
             vec![Account::new(
                 ProviderId::new("fake"),
                 AccountId::default(),
-                Box::new(|_, _| Ok(Fake::new(vec![]) as Arc<dyn Provider>)),
+                Box::new(|_, _, _| Ok(Fake::new(vec![]) as Arc<dyn Provider>)),
             )],
             Arc::new(Keyring(|| Ok(None))),
         );
@@ -2499,7 +4253,7 @@ mod tests {
             vec![Account::new(
                 ProviderId::new("fake"),
                 AccountId::default(),
-                Box::new(|_, _| {
+                Box::new(|_, _, _| {
                     Ok(Fake::new(vec![
                         Err(ProviderError::Credential { status: 401 }),
                         Ok(snapshot(3.0, 3600)),
@@ -2919,7 +4673,7 @@ mod tests {
         let mut harness = harness_with_config(
             vec![
                 Account::with_client(Fake::new(vec![Ok(reading(0, 42.0, 3600))])).with_rebuild(
-                    Box::new(|_| {
+                    Box::new(|_, _| {
                         Ok(Fake::new(vec![Ok(reading(0, 42.0, 3600))]) as Arc<dyn Provider>)
                     }),
                 ),

@@ -68,7 +68,11 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
+fn build(
+    account: AccountId,
+    credential: Credential,
+    _options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
     if credential
         .expose()
         .trim()
@@ -80,11 +84,12 @@ fn build(credential: Credential, _options: &Options) -> Result<Arc<dyn Provider>
                 .into(),
         ));
     }
-    Ok(Arc::new(Grok::new()?))
+    Ok(Arc::new(Grok::new_for_account(account)?))
 }
 
 /// One grok CLI login on this machine.
 pub struct Grok {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     login: PathBuf,
     /// The CLI proxy host, kept as a field so a test can point it at a loopback.
@@ -94,10 +99,15 @@ pub struct Grok {
 impl Grok {
     /// Builds the account at the CLI's own login path.
     pub fn new() -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default())
+    }
+
+    fn new_for_account(account_id: AccountId) -> Result<Self, ProviderError> {
         let login = cli_credentials_path().ok_or_else(|| {
             ProviderError::Local("neither GROK_HOME nor HOME names a directory".into())
         })?;
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: super::http::client()?,
             login,
             proxy_base: PROXY_BASE.to_owned(),
@@ -107,6 +117,7 @@ impl Grok {
     #[cfg(test)]
     fn for_test(home: &Path, base: &str) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: AccountId::default(),
             client: super::http::client()?,
             login: credentials_path(home),
             proxy_base: base.trim_end_matches('/').to_owned(),
@@ -155,7 +166,7 @@ impl Grok {
             Ok(())
         })
         .await?;
-        let billing = parse_billing(&body, Timestamp::now())?;
+        let billing = parse_billing_for_account(&body, Timestamp::now(), &self.tidemark_account)?;
 
         // Advisory, as upstream treats it: a refusal here costs the Plan row only.
         let settings_tier = self.settings_tier(token).await;
@@ -217,7 +228,7 @@ impl Provider for Grok {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -301,6 +312,14 @@ pub struct Billing {
 /// the body states it, else the on-demand use against its cap. A body with neither is
 /// malformed — upstream carries it as an unknown, but a card cannot be drawn unnumbered.
 pub fn parse_billing(body: &str, captured_at: Timestamp) -> Result<Billing, ProviderError> {
+    parse_billing_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_billing_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Billing, ProviderError> {
     let response: BillingResponse = serde_json::from_str(body).map_err(|error| {
         ProviderError::malformed(format!("not a Grok billing response: {error}"))
     })?;
@@ -341,7 +360,7 @@ pub fn parse_billing(body: &str, captured_at: Timestamp) -> Result<Billing, Prov
     Ok(Billing {
         snapshot: Snapshot {
             provider: ProviderId::new(PROVIDER_ID),
-            account: AccountId::default(),
+            account: account_id.clone(),
             captured_at,
             windows: vec![Window {
                 key: WindowKey::named("credits"),
@@ -948,8 +967,12 @@ mod tests {
 
     #[test]
     fn a_pasted_xai_key_is_refused_at_build() {
-        let error = (SPEC.build)(Credential::new("xai-abc123"), &Options::new())
-            .expect_err("that key belongs to another provider");
+        let error = (SPEC.build)(
+            AccountId::default(),
+            Credential::new("xai-abc123"),
+            &Options::new(),
+        )
+        .expect_err("that key belongs to another provider");
 
         match error {
             ProviderError::Local(message) => {

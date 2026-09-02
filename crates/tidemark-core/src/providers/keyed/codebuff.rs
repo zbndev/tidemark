@@ -285,6 +285,15 @@ pub fn snapshot(
     subscription: Option<&Subscription>,
     captured_at: Timestamp,
 ) -> Snapshot {
+    snapshot_for_account(usage, subscription, captured_at, &AccountId::default())
+}
+
+fn snapshot_for_account(
+    usage: &Usage,
+    subscription: Option<&Subscription>,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     let mut windows = Vec::new();
 
     // The allowance where it is stated, otherwise arrived at from the other end.
@@ -400,7 +409,7 @@ pub fn snapshot(
 
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at,
         windows,
         details: if rows.is_empty() {
@@ -434,13 +443,18 @@ pub static SPEC: HandSpec = HandSpec {
     build,
 };
 
-fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
+fn build(
+    account: AccountId,
+    credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
     let _ = options;
-    Ok(Arc::new(Codebuff::new(credential)?))
+    Ok(Arc::new(Codebuff::new_for_account(account, credential)?))
 }
 
 /// One Codebuff account: the key, and the two endpoints it is polled at.
 pub struct Codebuff {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
 }
@@ -448,7 +462,15 @@ pub struct Codebuff {
 impl Codebuff {
     /// Builds a client.
     pub fn new(credential: Credential) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
         })
@@ -495,7 +517,12 @@ impl Codebuff {
         let usage =
             parse_usage(&super::request(PROVIDER_ID, &self.client, self.usage_request()?).await?)?;
         let subscription = self.subscription().await;
-        Ok(snapshot(&usage, subscription.as_ref(), Timestamp::now()))
+        Ok(snapshot_for_account(
+            &usage,
+            subscription.as_ref(),
+            Timestamp::now(),
+            &self.tidemark_account,
+        ))
     }
 }
 
@@ -515,7 +542,7 @@ impl Provider for Codebuff {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {

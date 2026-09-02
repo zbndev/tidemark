@@ -28,6 +28,8 @@ use crate::paths;
 /// Table every provider's own settings live under: `[provider.zai]`.
 const PROVIDER_TABLE: &str = "provider";
 const PROVIDERS_KEY: &str = "providers";
+/// The account ids configured for a provider.
+const ACCOUNTS_KEY: &str = "accounts";
 /// The shared storage keys used by browser-cookie authentication providers.
 const AUTH_SOURCE_KEY: &str = "auth-source";
 const AUTH_BROWSER_KEY: &str = "auth-browser";
@@ -104,6 +106,16 @@ pub enum ConfigError {
         /// The file.
         path: PathBuf,
         /// Why the provider list is invalid.
+        reason: String,
+    },
+    /// A provider's account list is not an array of strings.
+    #[error("{path}: [{PROVIDER_TABLE}.{provider}] {ACCOUNTS_KEY} {reason}")]
+    InvalidAccounts {
+        /// The file.
+        path: PathBuf,
+        /// Whose list it is.
+        provider: String,
+        /// Why the account list is invalid.
         reason: String,
     },
     /// A provider's notification opt-in list is not an array of window keys.
@@ -482,6 +494,38 @@ impl Config {
         Ok(providers)
     }
 
+    /// Returns a provider's configured accounts in file order.
+    ///
+    /// A provider without an account list uses the single default account. A present account
+    /// list with the wrong shape is refused rather than silently choosing a different account.
+    pub fn accounts(&self, provider: &str) -> Result<Vec<String>, ConfigError> {
+        let Some(item) = self
+            .document
+            .get(PROVIDER_TABLE)
+            .and_then(|table| table.get(provider))
+            .and_then(|table| table.get(ACCOUNTS_KEY))
+        else {
+            return Ok(vec!["default".to_owned()]);
+        };
+        let array = item
+            .as_array()
+            .ok_or_else(|| ConfigError::InvalidAccounts {
+                path: self.path.clone(),
+                provider: provider.to_owned(),
+                reason: "must be an array of strings".to_owned(),
+            })?;
+        let mut accounts = Vec::new();
+        for entry in array.iter() {
+            let account = entry.as_str().ok_or_else(|| ConfigError::InvalidAccounts {
+                path: self.path.clone(),
+                provider: provider.to_owned(),
+                reason: "every accounts entry must be a string".to_owned(),
+            })?;
+            accounts.push(account.to_owned());
+        }
+        Ok(accounts)
+    }
+
     /// Adds a provider to the configured set and normalizes any existing duplicates.
     pub fn add_provider(&mut self, provider: &str) -> Result<bool, ConfigError> {
         let normalized = self.normalize_providers(None)?;
@@ -585,6 +629,26 @@ impl Config {
         }
         Ok(configured)
     }
+    /// Removes one account from a provider's ordered account list.
+    ///
+    /// Removing the default promotes the first survivor to the default id so that the
+    /// configured list always has one canonical first account. Removing the final account
+    /// removes the provider and its settings through [`Self::remove_provider`].
+    pub fn remove_account(&mut self, provider: &str, account: &str) -> Result<bool, ConfigError> {
+        let mut accounts = self.accounts(provider)?;
+        let Some(index) = accounts.iter().position(|configured| configured == account) else {
+            return Ok(false);
+        };
+        accounts.remove(index);
+        if accounts.is_empty() {
+            return self.remove_provider(provider);
+        }
+        if account == "default" {
+            accounts[0] = "default".to_owned();
+        }
+        self.set_accounts(provider, &accounts)?;
+        Ok(true)
+    }
 
     /// Sets one provider setting and writes the file.
     ///
@@ -617,6 +681,36 @@ impl Config {
                 table: format!("{PROVIDER_TABLE}.{provider}"),
             })?;
         table.insert(name, value(setting));
+        self.write()
+    }
+
+    /// Sets one provider's ordered account list and writes the file.
+    pub fn set_accounts(&mut self, provider: &str, accounts: &[String]) -> Result<(), ConfigError> {
+        self.normalize_providers(None)?;
+        let providers = self
+            .document
+            .entry(PROVIDER_TABLE)
+            .or_insert_with(|| Item::Table(implicit_table()));
+        let providers = providers
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: PROVIDER_TABLE.to_owned(),
+            })?;
+        let table = providers
+            .entry(provider)
+            .or_insert_with(|| Item::Table(Table::new()));
+        let table = table
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: format!("{PROVIDER_TABLE}.{provider}"),
+            })?;
+        let mut array = Array::new();
+        for account in accounts {
+            array.push(Value::from(account.as_str()));
+        }
+        table.insert(ACCOUNTS_KEY, Item::Value(array.into()));
         self.write()
     }
 
@@ -1038,6 +1132,63 @@ mod tests {
         let config = Config::at(scratch("providers-absent")).expect("missing is valid");
         assert_eq!(config.providers().expect("readable"), Vec::<String>::new());
     }
+    #[test]
+    fn a_provider_without_an_accounts_key_has_its_default_account() {
+        let path = scratch("accounts-absent");
+        std::fs::write(&path, "providers = [\"zai\"]\n").expect("seed");
+        let config = Config::at(path.clone()).expect("parses");
+        assert_eq!(config.accounts("zai").unwrap(), vec!["default".to_string()]);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn accounts_come_back_in_file_order() {
+        let path = scratch("accounts-order");
+        std::fs::write(
+            &path,
+            "[provider.claude]\naccounts = [\"default\", \"work\"]\n",
+        )
+        .expect("seed");
+        let config = Config::at(path.clone()).expect("parses");
+        assert_eq!(
+            config.accounts("claude").unwrap(),
+            vec!["default".to_string(), "work".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_accounts_list_can_be_written_and_read_back_in_order() {
+        let path = scratch("accounts-write");
+        let _ = std::fs::remove_file(&path);
+        let mut config = Config::at(path.clone()).expect("empty");
+        let accounts = ["default".to_owned(), "work".to_owned()];
+
+        config
+            .set_accounts("zai", &accounts)
+            .expect("accounts written");
+
+        let reread = Config::at(path.clone()).expect("parses");
+        assert_eq!(reread.accounts("zai").expect("accounts readable"), accounts);
+        let text = std::fs::read_to_string(&path).expect("written");
+        assert!(
+            text.contains("[provider.zai]\naccounts = [\"default\", \"work\"]"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_non_array_accounts_key_is_refused() {
+        let path = scratch("accounts-invalid");
+        std::fs::write(&path, "[provider.zai]\naccounts = \"work\"\n").expect("seed");
+        let config = Config::at(path.clone()).expect("parses");
+        assert!(matches!(
+            config.accounts("zai"),
+            Err(ConfigError::InvalidAccounts { .. })
+        ));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 
     #[test]
     fn configured_providers_keep_their_order_and_first_duplicate() {
@@ -1298,6 +1449,56 @@ mod tests {
         assert!(text.contains("# owned by the user"));
         assert!(text.contains("[unrelated]"));
         assert!(!text.contains("[provider.claude]"));
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn account_removals_preserve_default_promote_survivors_and_drop_provider() {
+        let path = scratch("account-mutations");
+        std::fs::write(
+            &path,
+            "providers = [\"claude\"]\n\
+             [provider.claude]\n\
+             accounts = [\"default\", \"work\"]\n",
+        )
+        .expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+
+        assert!(config.remove_account("claude", "work").expect("removed"));
+        assert_eq!(
+            Config::at(path.clone())
+                .expect("reloaded")
+                .accounts("claude")
+                .expect("accounts read"),
+            ["default"]
+        );
+
+        config
+            .set_accounts("claude", &["default".into(), "work".into()])
+            .expect("second account added");
+        assert!(
+            config
+                .remove_account("claude", "default")
+                .expect("promoted")
+        );
+        assert_eq!(
+            Config::at(path.clone())
+                .expect("reloaded")
+                .accounts("claude")
+                .expect("accounts read"),
+            ["default"]
+        );
+
+        assert!(config.remove_account("claude", "default").expect("dropped"));
+        let reread = Config::at(path.clone()).expect("reloaded");
+        assert!(reread.providers().expect("providers read").is_empty());
+        assert_eq!(
+            reread
+                .accounts("claude")
+                .expect("missing provider defaults"),
+            ["default"]
+        );
+        let text = std::fs::read_to_string(path.clone()).expect("read back");
+        assert!(!text.contains("[provider.claude]"), "{text}");
         let _ = std::fs::remove_file(path);
     }
 

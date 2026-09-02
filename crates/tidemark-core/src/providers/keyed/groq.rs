@@ -78,12 +78,19 @@ pub static SPEC: HandSpec = HandSpec {
 
 /// Builds a pollable client from the stored key and the account's settings. The query
 /// URL is resolved here, so a changed base URL takes effect on the next build.
-fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Groq::new(credential, options)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(Groq::new_for_account(
+        account, credential, options,
+    )?))
 }
 
 /// One Groq account: the key, and the one query endpoint four questions share.
 pub struct Groq {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
     query_url: String,
@@ -92,8 +99,17 @@ pub struct Groq {
 impl Groq {
     /// Builds a client. The metrics path hangs off the API root, resolved once here.
     pub fn new(credential: Credential, options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential, options)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         let base = base_url(options, BASE_URL, DEFAULT_BASE_URL)?;
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
             query_url: format!("{base}/metrics/prometheus/api/v1/query"),
@@ -125,7 +141,7 @@ impl Groq {
             self.scalar(OUTPUT_QUERY),
             self.scalar(CACHE_QUERY),
         );
-        Ok(snapshot(
+        Ok(snapshot_for_account(
             &Rates {
                 requests: requests?,
                 input_tokens: input?,
@@ -133,6 +149,7 @@ impl Groq {
                 cache_hits: cache?,
             },
             now,
+            &self.tidemark_account,
         ))
     }
 
@@ -166,7 +183,7 @@ impl Provider for Groq {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -244,7 +261,12 @@ fn parse_scalar(body: &str) -> Result<f64, ProviderError> {
 ///
 /// No window, ever: a throughput rate is not a quota, and the shape for that is details
 /// only — the card renders empty, which is accepted.
+#[cfg(test)]
 fn snapshot(rates: &Rates, now: Timestamp) -> Snapshot {
+    snapshot_for_account(rates, now, &AccountId::default())
+}
+
+fn snapshot_for_account(rates: &Rates, now: Timestamp, account_id: &AccountId) -> Snapshot {
     let mut rows = vec![
         labeled(
             "Requests",
@@ -266,7 +288,7 @@ fn snapshot(rates: &Rates, now: Timestamp) -> Snapshot {
     }
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows: Vec::new(),
         details: vec![DetailSection {
@@ -525,7 +547,14 @@ mod tests {
         assert_eq!(SPEC.title, "Groq");
         assert_eq!(SPEC.options.len(), 1);
         assert!(!SPEC.options[0].required, "the default host stands in");
-        assert!(build(Credential::new("gsk_test"), &Options::new()).is_ok());
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("gsk_test"),
+                &Options::new()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

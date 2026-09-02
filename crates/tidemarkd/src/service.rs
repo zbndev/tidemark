@@ -85,19 +85,21 @@ impl Published {
         Some(statuses.remove(index))
     }
 
-    /// Puts the accounts in this provider order.
+    /// Puts the accounts in the complete provider and account order.
     ///
     /// Applied to the shared vector rather than left to the next `GetStatus` to sort,
     /// because there is nothing for a client to sort by: the order is the user's and this
-    /// is where it is kept. An account whose provider the order does not name keeps its
-    /// place at the end — the sort is stable — so a sequence that has raced a removal
-    /// leaves the survivors alone instead of shuffling them.
-    pub async fn reorder(&self, providers: &[String]) {
+    /// is where it is kept. An account pair the order does not name keeps its place at the
+    /// end — the sort is stable — so a sequence that has raced a removal leaves survivors
+    /// alone instead of shuffling them.
+    pub async fn reorder(&self, accounts: &[(String, String)]) {
         self.0.write().await.sort_by_key(|status| {
-            providers
+            accounts
                 .iter()
-                .position(|slug| *slug == status.provider)
-                .unwrap_or(providers.len())
+                .position(|(provider, account)| {
+                    provider == &status.provider && account == &status.account
+                })
+                .unwrap_or(accounts.len())
         });
     }
 
@@ -343,6 +345,10 @@ impl Daemon {
         status.credential = Some(definition.credential.clone());
         status.credential_hint = Some(definition.credential_hint.clone());
         status.options = definition.options.clone();
+        // The same label the engine will publish once the first status exists, so a client
+        // does not see a card gain its name part-way through configuring the account.
+        status.account_label =
+            (account != AccountId::default().as_str()).then(|| account.to_owned());
         Ok(status)
     }
 
@@ -366,10 +372,10 @@ impl Daemon {
     }
 
     /// Sends a configuration mutation and waits until the poll loop has persisted it.
-    async fn config_request(
+    async fn config_request<T>(
         &self,
-        make: impl FnOnce(oneshot::Sender<Result<(), String>>) -> Command,
-    ) -> fdo::Result<()> {
+        make: impl FnOnce(oneshot::Sender<Result<T, String>>) -> Command,
+    ) -> fdo::Result<T> {
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(make(reply))
@@ -413,6 +419,44 @@ impl Daemon {
         )
     }
 
+    /// Every configured account id of one provider, sorted: the order their mutation
+    /// locks are taken in, so two operations touching the same provider cannot deadlock.
+    async fn provider_accounts(&self, provider: &str) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .configured
+            .read()
+            .await
+            .iter()
+            .filter(|(configured, _)| configured == provider)
+            .map(|(_, account)| account.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Takes every account mutation lock of one provider, in sorted id order, and holds
+    /// them for an identity migration.
+    async fn lock_provider_identities<'a>(&'a self, provider: &'a str) -> IdentityMigration<'a> {
+        loop {
+            let ids = self.provider_accounts(provider).await;
+            let mut guards = Vec::with_capacity(ids.len());
+            for id in &ids {
+                // Owned guards, so the lock's `Arc` lives exactly as long as the guard —
+                // one per account, all held until the migration has finished.
+                let mutation = self.mutation(provider, id).await;
+                guards.push(mutation.lock_owned().await);
+            }
+            if self.provider_accounts(provider).await == ids {
+                return IdentityMigration {
+                    daemon: self,
+                    provider,
+                    ids,
+                    _guards: guards,
+                };
+            }
+        }
+    }
+
     /// Removes and aborts a pending login, if one exists.
     async fn cancel_pending_login(&self, provider: &str, account: &str) {
         if let Some(mut pending) = self.logins.lock().await.remove(&key(provider, account)) {
@@ -429,6 +473,29 @@ impl Daemon {
     }
 }
 
+/// Every account mutation lock of one provider, held across an identity migration.
+///
+/// A rename or a promotion rekeys credential slots by id, and a credential written to
+/// any of the provider's ids while that is in flight is the write it would lose: the
+/// whole provider's ids are held, taken in sorted order so two such flows cannot
+/// deadlock. The id set is re-read once the guards are held and the attempt restarted
+/// if it moved — an account added while the locks were being taken must join the guard,
+/// not escape it.
+///
+/// The same holder carries the migration's epilogue: the engine's reply is the topology,
+/// and the service's mirror of it — the set every call validates ids against — is
+/// rebuilt from that answer rather than guessed at, because the published copy is
+/// updated asynchronously.
+struct IdentityMigration<'a> {
+    daemon: &'a Daemon,
+    provider: &'a str,
+    /// The ids the guards cover, in the sorted order their locks were taken in.
+    ids: Vec<String>,
+    /// One owned guard per id, held until the migration has finished. Underscored
+    /// because holding them is their whole job.
+    _guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+}
+
 /// The D-Bus error a keyring failure becomes.
 ///
 /// A locked keyring is the one that matters: it is not the caller's mistake and not a
@@ -439,6 +506,27 @@ fn keyring_error(error: SecretError) -> fdo::Error {
             fdo::Error::Failed("the keyring is locked; unlock it and try again".into())
         }
         other => fdo::Error::Failed(other.to_string()),
+    }
+}
+
+impl IdentityMigration<'_> {
+    /// Replaces this provider's configured pairs with the ones the engine's reply named.
+    ///
+    /// Only this provider's pairs move, under one guard: the reply is a snapshot of
+    /// every provider taken when the engine handled the command, and an add for a
+    /// different provider that completes meanwhile would be wiped out by a whole-set
+    /// replacement. Rebuilding the whole provider's set at once keeps a migration's
+    /// renames — the survivor's new id and the death of its old one — from
+    /// desynchronizing the validation every call depends on.
+    async fn reconcile(&self, topology: &[(String, String)]) {
+        let mut configured = self.daemon.configured.write().await;
+        configured.retain(|(held, _)| held != self.provider);
+        configured.extend(
+            topology
+                .iter()
+                .filter(|(held, _)| held == self.provider)
+                .cloned(),
+        );
     }
 }
 
@@ -494,34 +582,208 @@ impl Daemon {
         Ok(())
     }
 
-    /// Removes one configured account after clearing every credential Tidemark owns.
+    /// Removes one configured account, promoting the first survivor when it was the
+    /// default.
+    ///
+    /// Nothing is deleted from the keyring until the engine has persisted the removal: a
+    /// promotion can still fail after this point — a rekey collision, a history error, a
+    /// config write — and a topology that survives while its credentials are gone is the
+    /// one loss this file must never cause. Cleanup after success is identity-aware: a
+    /// promotion moves the survivor into the `default` slot and rekeys its credential
+    /// inside the engine, so the service deletes only for an id the answer shows is gone.
     async fn remove_provider(&self, provider: &str, account: &str) -> fdo::Result<()> {
-        let mutation = self.mutation(provider, account).await;
-        let _guard = mutation.lock().await;
+        let migration = self.lock_provider_identities(provider).await;
         self.account(provider, account).await?;
-        self.cancel_pending_login(provider, account).await;
 
+        // A login in flight for an id a promotion is about to rename would finish by
+        // storing a token under an id no configured account reads, so every pending
+        // login of the provider goes before the command — not just the target's.
+        if account == AccountId::default().as_str() && migration.ids.len() > 1 {
+            for id in &migration.ids {
+                self.cancel_pending_login(provider, id).await;
+            }
+        } else {
+            self.cancel_pending_login(provider, account).await;
+        }
+
+        let topology = self
+            .config_request(|reply| Command::RemoveProvider {
+                provider: provider.to_owned(),
+                account: account.to_owned(),
+                reply,
+            })
+            .await?;
+
+        // The same net for logins that started against an id the finished removal turns
+        // out not to have kept: the engine's answer, not the caller's intent, says which
+        // identities still exist.
+        let stranded: Vec<String> = self
+            .logins
+            .lock()
+            .await
+            .keys()
+            .filter(|(login_provider, id)| {
+                login_provider == provider && !topology.contains(&(provider.to_owned(), id.clone()))
+            })
+            .map(|(_, id)| id.clone())
+            .collect();
+        for id in stranded {
+            self.cancel_pending_login(provider, &id).await;
+        }
+
+        // Only now that the removal is durable, and only for an id nothing moved into: a
+        // promotion leaves the survivor living under `default`, and deleting there would
+        // take its credential. Both kinds are attempted so one locked keyring leaves at
+        // most one residue rather than skipping the second kind.
         let provider_id = ProviderId::new(provider);
         let account_id = AccountId::new(account);
-        self.secrets
-            .delete(Kind::Key, &provider_id, &account_id)
-            .await
-            .map_err(keyring_error)?;
-        self.secrets
-            .delete(Kind::Token, &provider_id, &account_id)
-            .await
-            .map_err(keyring_error)?;
+        let promoted = account == AccountId::default().as_str()
+            && topology.iter().any(|(held, _)| held == provider);
+        let mut cleanup = None;
+        if !promoted {
+            for kind in [Kind::Key, Kind::Token] {
+                if let Err(error) = self.secrets.delete(kind, &provider_id, &account_id).await {
+                    cleanup.get_or_insert(keyring_error(error));
+                }
+            }
+        }
 
-        self.config_request(|reply| Command::RemoveProvider {
+        // The engine's answer is the topology; the published mirror of it is updated by a
+        // separate task and can lag this reply, so it must not be guessed at.
+        migration.reconcile(&topology).await;
+
+        match cleanup {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Adds one more account to a provider this build knows and the config already has,
+    /// and waits for it to be persisted.
+    ///
+    /// The id is checked here for the same reason the provider slug is: an id config can
+    /// never hold should fail as an argument error, not as an engine failure after a
+    /// round trip. Whether the provider supports a second account at all is the engine's
+    /// to answer — that is a property of the provider, not of the argument.
+    async fn add_account(&self, provider: &str, account: &str) -> fdo::Result<()> {
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
+        if !self
+            .catalog
+            .iter()
+            .any(|definition| definition.provider == provider)
+        {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "provider {provider} is not supported by this build"
+            )));
+        }
+        if !crate::engine::valid_account_slug(account) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "account {account:?} is not a valid account id: lowercase letters, digits \
+                 and hyphens"
+            )));
+        }
+        if self
+            .configured
+            .read()
+            .await
+            .contains(&key(provider, account))
+        {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "account {provider}/{account} is already configured"
+            )));
+        }
+
+        self.config_request(|reply| Command::AddAccount {
             provider: provider.to_owned(),
             account: account.to_owned(),
             reply,
         })
         .await?;
-        self.configured
-            .write()
-            .await
-            .remove(&key(provider, account));
+        self.configured.write().await.insert(key(provider, account));
+        Ok(())
+    }
+
+    /// Renames one configured account, carrying its credential and history to the new id.
+    ///
+    /// The engine migrates them durability-first — the credential is copied before
+    /// anything is deleted, and the old slots go only once the new topology is on disk —
+    /// so a failure anywhere before that point leaves the old id exactly as it was. The
+    /// new id is validated here for the same reason `add_account` validates its own: an
+    /// id the config can never hold is an argument error, not an engine failure after a
+    /// round trip.
+    async fn rename_account(&self, provider: &str, account: &str, new: &str) -> fdo::Result<()> {
+        let migration = self.lock_provider_identities(provider).await;
+        self.account(provider, account).await?;
+        if account == AccountId::default().as_str() {
+            return Err(fdo::Error::InvalidArgs(
+                "the default account is the provider's structural first account and \n                 cannot be renamed"
+                    .into(),
+            ));
+        }
+        if new == account {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "account {provider}/{new} is already named that"
+            )));
+        }
+        if !crate::engine::valid_account_slug(new) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "account {new:?} is not a valid account id: lowercase letters, digits \n                 and hyphens"
+            )));
+        }
+        if self.configured.read().await.contains(&key(provider, new)) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "account {provider}/{new} is already configured"
+            )));
+        }
+
+        // A login in flight for the id the rename retires would finish by storing a
+        // token under an id no configured account reads. The new id cannot have one:
+        // nothing validates a login against an unconfigured id.
+        self.cancel_pending_login(provider, account).await;
+
+        let topology = self
+            .config_request(|reply| Command::RenameAccount {
+                provider: provider.to_owned(),
+                account: account.to_owned(),
+                new: new.to_owned(),
+                reply,
+            })
+            .await?;
+
+        // The engine's answer is the topology; the published mirror of it is updated by
+        // a separate task and can lag this reply, so it must not be guessed at.
+        migration.reconcile(&topology).await;
+        Ok(())
+    }
+
+    /// Puts one provider's accounts in the order a client's user arranged them in.
+    ///
+    /// The same contract as `SetOrder`, one level down: the list must name every
+    /// configured account of the provider exactly once, because the order and the set it
+    /// reorders live in the same `accounts` array. Whether the default account must lead
+    /// is the engine's rule — the engine is what rewrites the file — so a client that
+    /// gets it wrong hears it from the source of truth rather than from a copy of the
+    /// rule here.
+    async fn set_account_order(&self, provider: &str, accounts: Vec<String>) -> fdo::Result<()> {
+        let mut held = self.provider_accounts(provider).await;
+        let mut wanted = accounts.clone();
+        wanted.sort_unstable();
+        wanted.dedup();
+        held.sort_unstable();
+        if wanted.len() != accounts.len() || wanted != held {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "the order must name every configured account of {provider} exactly once"
+            )));
+        }
+
+        self.config_request(|reply| Command::SetAccountOrder {
+            provider: provider.to_owned(),
+            accounts: accounts.clone(),
+            reply,
+        })
+        .await?;
+        tracing::info!(provider, ?accounts, "account order changed");
         Ok(())
     }
 
@@ -1343,9 +1605,12 @@ mod tests {
         published.upsert(status("zai")).await;
         published.upsert(status("kimi")).await;
         published.upsert(status("claude")).await;
-
         published
-            .reorder(&["claude".into(), "zai".into(), "kimi".into()])
+            .reorder(&[
+                ("claude".into(), "default".into()),
+                ("zai".into(), "default".into()),
+                ("kimi".into(), "default".into()),
+            ])
             .await;
 
         let providers: Vec<String> = published
@@ -1358,13 +1623,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_published_order_follows_account_order_after_reordering() {
+        let published = Published::default();
+        let default = status("zai");
+        let mut work = status("zai");
+        work.account = "work".into();
+        published.upsert(default.clone()).await;
+        published.upsert(work.clone()).await;
+        published.upsert(status("kimi")).await;
+
+        published
+            .reorder(&[
+                ("zai".into(), "work".into()),
+                ("zai".into(), "default".into()),
+                ("kimi".into(), "default".into()),
+            ])
+            .await;
+
+        let accounts: Vec<(String, String)> = published
+            .all()
+            .await
+            .into_iter()
+            .map(|status| (status.provider, status.account))
+            .collect();
+        assert_eq!(
+            accounts,
+            [
+                ("zai".into(), "work".into()),
+                ("zai".into(), "default".into()),
+                ("kimi".into(), "default".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn a_reorder_leaves_an_account_it_does_not_name_at_the_end() {
         let published = Published::default();
         published.upsert(status("zai")).await;
         published.upsert(status("kimi")).await;
         published.upsert(status("claude")).await;
-
-        published.reorder(&["claude".into()]).await;
+        published
+            .reorder(&[("claude".into(), "default".into())])
+            .await;
 
         let providers: Vec<String> = published
             .all()
@@ -1391,6 +1691,13 @@ mod tests {
         status
     }
 
+    /// One non-default account of a provider, the shape a second card carries.
+    fn account_of(provider: &str, account: &str) -> ProviderStatus {
+        let mut status = key_account(provider);
+        status.account = account.to_owned();
+        status
+    }
+
     fn catalog() -> Vec<ProviderDefinition> {
         vec![ProviderDefinition {
             provider: "zai".into(),
@@ -1401,6 +1708,22 @@ mod tests {
             browser_auth: None,
             options: Vec::new(),
         }]
+    }
+
+    /// A catalog of keyed providers, for tests that need more than one provider.
+    fn catalog_with(providers: &[&str]) -> Vec<ProviderDefinition> {
+        providers
+            .iter()
+            .map(|provider| ProviderDefinition {
+                provider: (*provider).into(),
+                title: (*provider).into(),
+                credential: "key".into(),
+                credential_hint: format!("{provider} dashboard → API keys."),
+                external: None,
+                browser_auth: None,
+                options: Vec::new(),
+            })
+            .collect()
     }
 
     /// A daemon over a fixed set of accounts, with the channel its commands land on.
@@ -1548,6 +1871,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_configured_account_without_a_status_publishes_its_slug_as_the_label() {
+        let (commands, _queue) = mpsc::channel(4);
+        let daemon = Daemon::new(
+            Published::default(),
+            PublishedUpdate::default(),
+            catalog(),
+            vec![
+                ("zai".into(), "default".into()),
+                ("zai".into(), "work".into()),
+            ],
+            commands,
+            Arc::new(FakeSecrets::default()),
+        );
+
+        let labelled = daemon
+            .account("zai", "work")
+            .await
+            .expect("configured before publication");
+        assert_eq!(labelled.account_label.as_deref(), Some("work"));
+        let plain = daemon
+            .account("zai", "default")
+            .await
+            .expect("configured before publication");
+        assert_eq!(
+            plain.account_label, None,
+            "the default account is the provider itself"
+        );
+    }
+
+    #[tokio::test]
     async fn current_segment_is_serialized_through_the_engine() {
         let (daemon, _secrets, mut commands) = daemon_over(vec![key_account("zai")]).await;
         let responder = tokio::spawn(async move {
@@ -1650,7 +2003,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn removing_deletes_both_owned_secret_kinds_before_the_engine_request() {
+    async fn adding_an_account_waits_for_the_engine_result() {
+        let (daemon, _secrets, mut commands) =
+            daemon_over_catalog(vec![key_account("zai")], catalog()).await;
+        let responder = tokio::spawn(async move {
+            match commands.recv().await.expect("command") {
+                Command::AddAccount {
+                    provider,
+                    account,
+                    reply,
+                } => {
+                    assert_eq!((provider.as_str(), account.as_str()), ("zai", "work"));
+                    reply.send(Ok(())).expect("caller waits");
+                }
+                command => panic!("unexpected command: {command:?}"),
+            }
+        });
+
+        daemon.add_account("zai", "work").await.expect("added");
+        responder.await.expect("responder finished");
+
+        daemon
+            .account("zai", "work")
+            .await
+            .expect("the configured set knows the new account straight away");
+    }
+
+    #[tokio::test]
+    async fn adding_an_account_for_an_unknown_provider_is_an_invalid_argument() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(Vec::new(), catalog()).await;
+
+        let error = daemon
+            .add_account("not-a-provider", "work")
+            .await
+            .expect_err("unknown providers are rejected before the engine");
+
+        assert!(matches!(error, fdo::Error::InvalidArgs(_)));
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn adding_a_malformed_account_slug_is_an_invalid_argument() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(Vec::new(), catalog()).await;
+
+        for slug in ["", "Work", "work-", "-work", "two words", "work_1", "wörk"] {
+            let error = daemon.add_account("zai", slug).await.unwrap_err();
+            assert!(
+                matches!(error, fdo::Error::InvalidArgs(_)),
+                "{slug:?} is not an id the config can hold"
+            );
+        }
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn adding_an_already_configured_account_id_is_an_invalid_argument() {
+        let (daemon, _secrets, mut commands) =
+            daemon_over_catalog(vec![key_account("zai")], catalog()).await;
+
+        let error = daemon
+            .add_account("zai", "default")
+            .await
+            .expect_err("a configured id cannot be added twice");
+        assert!(matches!(error, fdo::Error::InvalidArgs(_)));
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        // And one added in this session, not only one loaded from config.
+        let responder = tokio::spawn(async move {
+            let Command::AddAccount { reply, .. } = commands.recv().await.expect("command") else {
+                panic!("unexpected command");
+            };
+            reply.send(Ok(())).expect("caller waits");
+            commands
+        });
+        daemon.add_account("zai", "work").await.expect("added");
+        let mut commands = responder.await.expect("responder finished");
+
+        let error = daemon
+            .add_account("zai", "work")
+            .await
+            .expect_err("the session's own add is in the configured set too");
+        assert!(matches!(error, fdo::Error::InvalidArgs(_)));
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_removal_deletes_its_credentials_only_after_the_engine_persisted_it() {
         let (daemon, secrets, mut commands) =
             daemon_over_catalog(vec![key_account("zai")], catalog()).await;
         for kind in [Kind::Key, Kind::Token] {
@@ -1664,6 +2114,8 @@ mod tests {
                 .await
                 .expect("seeded");
         }
+        let seeded = secrets.held();
+        assert_eq!(seeded.len(), 2, "both owned kinds are seeded");
         let observed = Arc::clone(&secrets);
         let responder = tokio::spawn(async move {
             match commands.recv().await.expect("command") {
@@ -1673,11 +2125,14 @@ mod tests {
                     reply,
                 } => {
                     assert_eq!((provider.as_str(), account.as_str()), ("zai", "default"));
-                    assert!(
-                        observed.held().is_empty(),
-                        "both secrets are gone before topology changes"
+                    assert_eq!(
+                        observed.held(),
+                        seeded,
+                        "nothing is deleted before the removal is durable: a promotion that \
+                         fails inside the engine would strand the topology without its \
+                         credentials"
                     );
-                    reply.send(Ok(())).expect("caller waits");
+                    reply.send(Ok(Vec::new())).expect("caller waits");
                 }
                 command => panic!("unexpected command: {command:?}"),
             }
@@ -1688,7 +2143,10 @@ mod tests {
             .await
             .expect("removed");
 
-        assert!(secrets.held().is_empty());
+        assert!(
+            secrets.held().is_empty(),
+            "after a durable removal the keyring holds nothing for the account"
+        );
         responder.await.expect("responder finished");
     }
 
@@ -1706,7 +2164,7 @@ mod tests {
             };
             remove_seen.send(()).expect("test is waiting");
             let _ = release_engine_reply.await;
-            reply.send(Ok(())).expect("caller waits");
+            reply.send(Ok(Vec::new())).expect("caller waits");
             commands
         });
         let removing = tokio::spawn({
@@ -1715,7 +2173,7 @@ mod tests {
         });
         removal_reached_engine
             .await
-            .expect("removal reached the engine after deleting secrets");
+            .expect("removal reached the engine holding the account's lock");
 
         let setting = tokio::spawn({
             let daemon = Arc::clone(&daemon);
@@ -1747,6 +2205,342 @@ mod tests {
         assert!(matches!(
             commands.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_promoting_removal_leaves_the_survivors_credential_to_the_engine() {
+        let (daemon, secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+        for account in ["default", "work"] {
+            secrets
+                .set(
+                    Kind::Key,
+                    &ProviderId::new("zai"),
+                    &AccountId::new(account),
+                    &Credential::new(format!("{account}-key")),
+                )
+                .await
+                .expect("seeded");
+        }
+        let held = secrets.held();
+        let responder = tokio::spawn(async move {
+            let Command::RemoveProvider {
+                provider,
+                account,
+                reply,
+            } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            assert_eq!((provider.as_str(), account.as_str()), ("zai", "default"));
+            // The engine promotes `work` into the `default` slot and moves that
+            // credential itself; deleting under `default` here would take the survivor's
+            // key with it.
+            reply
+                .send(Ok(vec![("zai".into(), "default".into())]))
+                .expect("caller waits");
+        });
+
+        daemon
+            .remove_provider("zai", "default")
+            .await
+            .expect("removed");
+
+        assert_eq!(
+            secrets.held(),
+            held,
+            "promotion cleanup belongs to the engine, which knows the survivor's kind"
+        );
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn a_promoting_removal_reconciles_the_configured_set_to_the_new_identity() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+        let responder = tokio::spawn(async move {
+            let Command::RemoveProvider { reply, .. } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            // The engine renamed `work` into `default`; the reply carries the survivors.
+            reply
+                .send(Ok(vec![("zai".into(), "default".into())]))
+                .expect("caller waits");
+        });
+
+        daemon
+            .remove_provider("zai", "default")
+            .await
+            .expect("removed");
+
+        daemon
+            .account("zai", "default")
+            .await
+            .expect("the promoted identity is configured under its new id");
+        assert!(
+            matches!(
+                daemon.account("zai", "work").await,
+                Err(fdo::Error::InvalidArgs(_))
+            ),
+            "the id the survivor no longer uses must stop validating"
+        );
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn a_credential_mutation_cannot_overlap_a_promoting_removal() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+        let daemon = Arc::new(daemon);
+        let (remove_seen, removal_reached_engine) = tokio::sync::oneshot::channel();
+        let (finish_removal, release_engine_reply) = tokio::sync::oneshot::channel();
+        let responder = tokio::spawn(async move {
+            let Command::RemoveProvider {
+                provider,
+                account,
+                reply,
+            } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            assert_eq!((provider.as_str(), account.as_str()), ("zai", "default"));
+            remove_seen.send(()).expect("test is waiting");
+            let _ = release_engine_reply.await;
+            reply
+                .send(Ok(vec![("zai".into(), "default".into())]))
+                .expect("caller waits");
+            commands
+        });
+        let removing = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.remove_provider("zai", "default").await }
+        });
+        removal_reached_engine
+            .await
+            .expect("removal reached the engine holding every account's lock");
+
+        // The survivor is still called `work` until the engine renames it; a credential
+        // stored under that id while the secret rekey is in flight is the write a
+        // promotion would lose.
+        let setting = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.set_key("zai", "work", "too-late").await }
+        });
+        for _ in 0..10 {
+            if setting.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !setting.is_finished(),
+            "a credential mutation for any of the provider's accounts serializes against \
+             the removal"
+        );
+
+        finish_removal.send(()).expect("responder waits");
+        removing
+            .await
+            .expect("removal task did not panic")
+            .expect("engine accepted removal");
+        let error = setting
+            .await
+            .expect("credential task did not panic")
+            .expect_err("the id the survivor no longer uses is gone");
+        assert!(matches!(error, fdo::Error::InvalidArgs(_)));
+        let mut commands = responder.await.expect("responder finished");
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_removal_locks_an_account_added_while_it_was_locking() {
+        let (daemon, secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+        let daemon = Arc::new(daemon);
+        let secrets = Arc::clone(&secrets);
+
+        // Hold `work`, the last lock in sorted order, so the removal is parked
+        // mid-acquisition — it already holds `default` — when a concurrent add widens
+        // the provider's id set.
+        let held = daemon.mutation("zai", "work").await;
+        let _held = held.lock().await;
+        let removing = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.remove_provider("zai", "default").await }
+        });
+        let mut parked = false;
+        for _ in 0..10_000 {
+            if daemon.mutation("zai", "default").await.try_lock().is_err() {
+                parked = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            parked,
+            "the removal takes the provider's account locks in sorted order"
+        );
+
+        // The concurrent add finished while the removal was locking: `extra` is
+        // configured now, and the removal must not leave it outside its guard.
+        daemon.configured.write().await.insert(key("zai", "extra"));
+        drop(_held);
+
+        let mut locked_extra = false;
+        for _ in 0..10_000 {
+            if daemon.mutation("zai", "extra").await.try_lock().is_err() {
+                locked_extra = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            locked_extra,
+            "a removal re-reads the id set while locking, so an account added beneath it \
+             cannot escape the provider-wide guard"
+        );
+
+        let setting = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.set_key("zai", "extra", "sk-late").await }
+        });
+        for _ in 0..10 {
+            if setting.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !setting.is_finished(),
+            "the late account's mutation waits too"
+        );
+
+        let responder = tokio::spawn(async move {
+            let Command::RemoveProvider { reply, .. } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            reply
+                .send(Ok(vec![
+                    ("zai".into(), "default".into()),
+                    ("zai".into(), "extra".into()),
+                ]))
+                .expect("caller waits");
+            commands
+        });
+        removing
+            .await
+            .expect("removal task did not panic")
+            .expect("engine accepted removal");
+        setting
+            .await
+            .expect("credential task did not panic")
+            .expect("the account the topology kept accepts its key");
+        assert_eq!(
+            secrets.held(),
+            vec![(
+                "key".to_owned(),
+                "zai".to_owned(),
+                "extra".to_owned(),
+                "sk-late".to_owned()
+            )]
+        );
+        let mut commands = responder.await.expect("responder finished");
+        assert!(matches!(
+            commands.recv().await.expect("the stored key wakes the loop"),
+            Command::Reload { provider: Some(provider) } if provider == "zai"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_removal_does_not_wipe_a_concurrent_add_for_another_provider() {
+        let (secrets, mut cleanup_gate) = GatedDeleteSecrets::new();
+        let published = Published::default();
+        published.upsert(key_account("zai")).await;
+        published.upsert(key_account("kimi")).await;
+        let (commands, mut queue) = mpsc::channel(8);
+        let daemon = Arc::new(Daemon::new(
+            published,
+            PublishedUpdate::default(),
+            catalog_with(&["zai", "kimi"]),
+            vec![
+                ("zai".into(), "default".into()),
+                ("kimi".into(), "default".into()),
+            ],
+            commands,
+            secrets,
+        ));
+        let responder = tokio::spawn(async move {
+            // The removal's answer is a snapshot taken before the concurrent add: kimi
+            // still has only its default account in it.
+            let Command::RemoveProvider {
+                provider, reply, ..
+            } = queue.recv().await.expect("removal reaches engine")
+            else {
+                panic!("unexpected command");
+            };
+            assert_eq!(provider, "zai");
+            reply
+                .send(Ok(vec![("kimi".into(), "default".into())]))
+                .expect("caller waits");
+            let Command::AddAccount {
+                provider,
+                account,
+                reply,
+            } = queue.recv().await.expect("add reaches engine")
+            else {
+                panic!("unexpected command");
+            };
+            assert_eq!((provider.as_str(), account.as_str()), ("kimi", "work"));
+            reply.send(Ok(())).expect("caller waits");
+            queue
+        });
+        let removing = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.remove_provider("zai", "default").await }
+        });
+
+        // Hold the removal inside its post-success keyring cleanup — two Secret Service
+        // round trips, not a microsecond — while another provider's add completes.
+        let release = cleanup_gate
+            .recv()
+            .await
+            .expect("the removal reached its cleanup window");
+        daemon
+            .add_account("kimi", "work")
+            .await
+            .expect("a different provider's add is not blocked");
+        release.send(()).expect("the removal finishes its cleanup");
+        removing
+            .await
+            .expect("removal task did not panic")
+            .expect("removed");
+        responder.await.expect("responder finished");
+
+        daemon
+            .account("kimi", "work")
+            .await
+            .expect("the concurrent add survives the removal's reconciliation");
+        assert!(matches!(
+            daemon.account("zai", "default").await,
+            Err(fdo::Error::InvalidArgs(_))
         ));
     }
 
@@ -1793,7 +2587,9 @@ mod tests {
             else {
                 panic!("unexpected command");
             };
-            reply.send(Ok(())).expect("caller waits for removal");
+            reply
+                .send(Ok(Vec::new()))
+                .expect("caller waits for removal");
         });
 
         daemon
@@ -1896,25 +2692,118 @@ mod tests {
         }
     }
 
+    /// A keyring whose first delete parks until the test releases it, so a removal can
+    /// be held deterministically inside its post-success cleanup window.
+    #[derive(Debug)]
+    struct GatedDeleteSecrets {
+        handoff: mpsc::UnboundedSender<oneshot::Sender<()>>,
+        gated: std::sync::atomic::AtomicBool,
+    }
+
+    impl GatedDeleteSecrets {
+        fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<oneshot::Sender<()>>) {
+            let (handoff, entered) = mpsc::unbounded_channel();
+            (
+                Arc::new(Self {
+                    handoff,
+                    gated: std::sync::atomic::AtomicBool::new(false),
+                }),
+                entered,
+            )
+        }
+    }
+
+    impl Secrets for GatedDeleteSecrets {
+        fn get<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<Option<Credential>, SecretError>>
+        {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            _secret: &'a Credential,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<(), SecretError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn compare_and_set<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+            _expected: &'a Credential,
+            _replacement: &'a Credential,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<bool, SecretError>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _kind: Kind,
+            _provider: &'a ProviderId,
+            _account: &'a AccountId,
+        ) -> tidemark_core::providers::BoxFuture<'a, Result<(), SecretError>> {
+            if self.gated.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Box::pin(async { Ok(()) });
+            }
+            let (release, released) = oneshot::channel();
+            let _ = self.handoff.send(release);
+            Box::pin(async {
+                released.await.expect("the test releases the first delete");
+                Ok(())
+            })
+        }
+    }
+
     #[tokio::test]
-    async fn a_secret_delete_failure_leaves_the_provider_configured() {
+    async fn a_cleanup_failure_after_a_durable_removal_still_reconciles_the_topology() {
         let published = Published::default();
         published.upsert(key_account("zai")).await;
         let (commands, mut command_queue) = mpsc::channel(4);
-        let daemon = Daemon::new(
+        let daemon = Arc::new(Daemon::new(
             published,
             PublishedUpdate::default(),
             catalog(),
             vec![("zai".into(), "default".into())],
             commands,
             Arc::new(FailingDeleteSecrets),
-        );
-
-        assert!(daemon.remove_provider("zai", "default").await.is_err());
-        assert!(matches!(
-            command_queue.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
         ));
+        let removing = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.remove_provider("zai", "default").await }
+        });
+        let Command::RemoveProvider { reply, .. } =
+            tokio::time::timeout(std::time::Duration::from_secs(5), command_queue.recv())
+                .await
+                .expect("the removal reaches the engine before any keyring write")
+                .expect("the queue is alive")
+        else {
+            panic!("unexpected command");
+        };
+        reply
+            .send(Ok(Vec::new()))
+            .expect("caller waits for the durable removal");
+
+        let error = removing
+            .await
+            .expect("removal task did not panic")
+            .expect_err("the keyring failure is surfaced, not swallowed");
+        assert!(matches!(error, fdo::Error::Failed(_)));
+        assert!(
+            matches!(
+                daemon.account("zai", "default").await,
+                Err(fdo::Error::InvalidArgs(_))
+            ),
+            "the topology the engine persisted is authoritative even when cleanup failed"
+        );
     }
 
     #[tokio::test]
@@ -1931,6 +2820,250 @@ mod tests {
             commands.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn renaming_rejects_every_invalid_argument_before_the_engine_is_asked() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+
+        for (provider, account, new) in [
+            ("kimi", "work", "team"),
+            ("zai", "missing", "team"),
+            ("zai", "default", "team"),
+            ("zai", "work", "work"),
+            ("zai", "work", "Team"),
+            ("zai", "work", "default"),
+        ] {
+            let error = daemon
+                .rename_account(provider, account, new)
+                .await
+                .expect_err(&format!(
+                    "renaming {provider}/{account} to {new} must be refused"
+                ));
+            assert!(
+                matches!(error, fdo::Error::InvalidArgs(_)),
+                "renaming {provider}/{account} to {new} is an argument error, not an engine failure"
+            );
+        }
+        assert!(
+            matches!(commands.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no refused rename reaches the engine"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rename_migrates_through_the_engine_and_reconciles_the_configured_set() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+        let responder = tokio::spawn(async move {
+            let Command::RenameAccount {
+                provider,
+                account,
+                new,
+                reply,
+            } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            assert_eq!(
+                (provider.as_str(), account.as_str(), new.as_str()),
+                ("zai", "work", "team")
+            );
+            reply
+                .send(Ok(vec![
+                    ("zai".into(), "default".into()),
+                    ("zai".into(), "team".into()),
+                ]))
+                .expect("caller waits");
+        });
+
+        daemon
+            .rename_account("zai", "work", "team")
+            .await
+            .expect("renamed");
+
+        assert!(
+            daemon.account("zai", "team").await.is_ok(),
+            "the configured set names the new id"
+        );
+        assert!(
+            matches!(
+                daemon.account("zai", "work").await,
+                Err(fdo::Error::InvalidArgs(_))
+            ),
+            "the retired id leaves the configured set with the reply's topology"
+        );
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn a_failed_rename_leaves_the_configured_set_alone() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+        let responder = tokio::spawn(async move {
+            let Command::RenameAccount { reply, .. } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            reply
+                .send(Err("the settings file refused the write".to_owned()))
+                .expect("caller waits");
+        });
+
+        let error = daemon
+            .rename_account("zai", "work", "team")
+            .await
+            .expect_err("the engine refused the rename");
+        assert!(matches!(error, fdo::Error::Failed(_)));
+        assert!(
+            daemon.account("zai", "work").await.is_ok(),
+            "the old id stays configured when nothing became durable"
+        );
+        assert!(
+            matches!(
+                daemon.account("zai", "team").await,
+                Err(fdo::Error::InvalidArgs(_))
+            ),
+            "the new id never entered the configured set"
+        );
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn a_rename_holds_the_providers_mutation_locks_until_it_finishes() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+        let daemon = Arc::new(daemon);
+        let (rename_seen, rename_reached_engine) = tokio::sync::oneshot::channel();
+        let (finish_rename, release_engine_reply) = tokio::sync::oneshot::channel();
+        let responder = tokio::spawn(async move {
+            let Command::RenameAccount { reply, .. } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            rename_seen.send(()).expect("test is waiting");
+            let _ = release_engine_reply.await;
+            reply
+                .send(Ok(vec![
+                    ("zai".into(), "default".into()),
+                    ("zai".into(), "team".into()),
+                ]))
+                .expect("caller waits");
+            commands
+        });
+        let renaming = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.rename_account("zai", "work", "team").await }
+        });
+        rename_reached_engine
+            .await
+            .expect("the rename reached the engine holding every account's lock");
+
+        // A credential stored under the id being retired while the migration is in
+        // flight is the write it would lose.
+        let setting = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.set_key("zai", "work", "too-late").await }
+        });
+        for _ in 0..10 {
+            if setting.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !setting.is_finished(),
+            "a credential mutation for the renamed id serializes against the rename"
+        );
+
+        finish_rename.send(()).expect("responder waits");
+        renaming
+            .await
+            .expect("rename task did not panic")
+            .expect("engine accepted the rename");
+        let error = setting
+            .await
+            .expect("credential task did not panic")
+            .expect_err("the retired id is gone from the configured set");
+        assert!(matches!(error, fdo::Error::InvalidArgs(_)));
+        let mut commands = responder.await.expect("responder finished");
+        assert!(matches!(
+            commands.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_rename_cancels_a_pending_login_for_the_retired_id() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = Dropped(task_dropped);
+            started.send(()).expect("test is waiting");
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        ready.await.expect("pending task started");
+        daemon
+            .logins
+            .lock()
+            .await
+            .insert(key("zai", "work"), Pending::new(task));
+        let responder = tokio::spawn(async move {
+            let Command::RenameAccount { reply, .. } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            reply
+                .send(Ok(vec![
+                    ("zai".into(), "default".into()),
+                    ("zai".into(), "team".into()),
+                ]))
+                .expect("caller waits");
+        });
+
+        daemon
+            .rename_account("zai", "work", "team")
+            .await
+            .expect("renamed");
+        for _ in 0..10 {
+            if dropped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(dropped.load(Ordering::SeqCst), "the login task was aborted");
+        assert!(daemon.logins.lock().await.is_empty());
+        responder.await.expect("responder finished");
     }
 
     #[tokio::test]
@@ -1966,7 +3099,7 @@ mod tests {
             else {
                 panic!("unexpected command");
             };
-            reply.send(Ok(())).expect("caller waits");
+            reply.send(Ok(Vec::new())).expect("caller waits");
         });
 
         daemon
@@ -1981,6 +3114,134 @@ mod tests {
         }
 
         assert!(dropped.load(Ordering::SeqCst), "the login task was aborted");
+        assert!(daemon.logins.lock().await.is_empty());
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn a_promoting_removal_cancels_every_pending_login_of_the_provider() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let mut work = oauth_account("zai");
+        work.account = "work".into();
+        let (daemon, _secrets, mut commands) =
+            daemon_over_catalog(vec![oauth_account("zai"), work], catalog()).await;
+        let pending = || {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&dropped);
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _guard = Dropped(flag);
+                started.send(()).expect("test is waiting");
+                std::future::pending::<()>().await;
+                Ok(())
+            });
+            (dropped, task, ready)
+        };
+        let (default_dropped, default_task, default_ready) = pending();
+        let (work_dropped, work_task, work_ready) = pending();
+        default_ready.await.expect("default login started");
+        work_ready.await.expect("work login started");
+        {
+            let mut logins = daemon.logins.lock().await;
+            logins.insert(key("zai", "default"), Pending::new(default_task));
+            logins.insert(key("zai", "work"), Pending::new(work_task));
+        }
+        let responder = tokio::spawn(async move {
+            let Command::RemoveProvider { reply, .. } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            reply
+                .send(Ok(vec![("zai".into(), "default".into())]))
+                .expect("caller waits");
+        });
+
+        daemon
+            .remove_provider("zai", "default")
+            .await
+            .expect("removed");
+        for _ in 0..10 {
+            if work_dropped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            default_dropped.load(Ordering::SeqCst),
+            "the removed account's login was aborted"
+        );
+        assert!(
+            work_dropped.load(Ordering::SeqCst),
+            "a login keyed by the promoted account's old id would commit a token under an \
+             id no configured account reads"
+        );
+        assert!(daemon.logins.lock().await.is_empty());
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn a_login_for_an_id_the_new_topology_drops_is_cancelled() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let mut work = oauth_account("zai");
+        work.account = "work".into();
+        let (daemon, _secrets, mut commands) =
+            daemon_over_catalog(vec![oauth_account("zai"), work], catalog()).await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&dropped);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = Dropped(flag);
+            started.send(()).expect("test is waiting");
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        ready.await.expect("pending task started");
+        daemon
+            .logins
+            .lock()
+            .await
+            .insert(key("zai", "work"), Pending::new(task));
+        let responder = tokio::spawn(async move {
+            let Command::RemoveProvider { reply, .. } = commands.recv().await.expect("command")
+            else {
+                panic!("unexpected command");
+            };
+            // The engine's answer drops the whole provider, `work` included.
+            reply.send(Ok(Vec::new())).expect("caller waits");
+        });
+
+        daemon
+            .remove_provider("zai", "default")
+            .await
+            .expect("removed");
+        for _ in 0..10 {
+            if dropped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "no pending login may outlive the topology the engine just answered with"
+        );
         assert!(daemon.logins.lock().await.is_empty());
         responder.await.expect("responder finished");
     }
@@ -2269,6 +3530,88 @@ mod tests {
             panic!("unexpected command");
         };
         assert_eq!(providers, ["kimi", "zai"]);
+        assert!(!ordering.is_finished(), "D-Bus waits for persistence");
+        reply.send(Ok(())).expect("caller waits for reply");
+        ordering
+            .await
+            .expect("ordering task did not panic")
+            .expect("engine accepted the order");
+    }
+
+    #[tokio::test]
+    async fn an_account_order_that_is_not_a_permutation_is_refused_before_the_engine() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+
+        for order in [
+            vec!["default".to_owned()],
+            vec!["default".to_owned(), "default".to_owned()],
+            vec!["default".to_owned(), "work".to_owned(), "extra".to_owned()],
+            Vec::new(),
+        ] {
+            assert!(
+                daemon
+                    .set_account_order("zai", order.clone())
+                    .await
+                    .is_err(),
+                "{order:?} is not the configured account set"
+            );
+        }
+        assert!(
+            commands.try_recv().is_err(),
+            "a refused order never reaches the engine"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_account_order_for_an_unconfigured_provider_is_refused() {
+        let (daemon, _secrets, mut commands) =
+            daemon_over_catalog(vec![key_account("zai")], catalog()).await;
+
+        assert!(
+            daemon
+                .set_account_order("kimi", vec!["default".into()])
+                .await
+                .is_err()
+        );
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_valid_account_order_is_serialized_through_the_engine() {
+        let (daemon, _secrets, mut commands) = daemon_over_catalog(
+            vec![key_account("zai"), account_of("zai", "work")],
+            catalog(),
+        )
+        .await;
+        let daemon = Arc::new(daemon);
+        // `work` first is a permutation of the configured set; whether the default must
+        // lead is the engine's rule to enforce, not a reason to reject the call here.
+        let ordering = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move {
+                daemon
+                    .set_account_order("zai", vec!["work".into(), "default".into()])
+                    .await
+            }
+        });
+
+        let Command::SetAccountOrder {
+            provider,
+            accounts,
+            reply,
+        } = tokio::time::timeout(std::time::Duration::from_secs(5), commands.recv())
+            .await
+            .expect("order reaches engine")
+            .expect("the queue is alive")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(provider, "zai");
+        assert_eq!(accounts, ["work", "default"]);
         assert!(!ordering.is_finished(), "D-Bus waits for persistence");
         reply.send(Ok(())).expect("caller waits for reply");
         ordering

@@ -133,13 +133,20 @@ pub static SPEC: HandSpec = HandSpec {
 
 /// Builds a pollable client from the stored key and the account's settings. The project
 /// filter is resolved here so a changed one takes effect on the next build.
-fn build(credential: Credential, options: &Options) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(OpenAiApi::new(credential, options)?))
+fn build(
+    account: AccountId,
+    credential: Credential,
+    options: &Options,
+) -> Result<Arc<dyn Provider>, ProviderError> {
+    Ok(Arc::new(OpenAiApi::new_for_account(
+        account, credential, options,
+    )?))
 }
 
 /// One OpenAI account: the Admin key, the project it is scoped to, and the three
 /// endpoints the card can come from.
 pub struct OpenAiApi {
+    tidemark_account: AccountId,
     client: reqwest::Client,
     credential: Credential,
     /// Trimmed and quote-stripped, exactly as CodexBar's `cleaned` reads it; `None` for
@@ -153,7 +160,16 @@ impl OpenAiApi {
     /// Builds a client. The project and the fallback gate are settings, resolved once
     /// here.
     pub fn new(credential: Credential, options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(AccountId::default(), credential, options)
+    }
+
+    fn new_for_account(
+        account_id: AccountId,
+        credential: Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
+            tidemark_account: account_id.clone(),
             client: http::client()?,
             credential,
             project: cleaned(options.get(PROJECT)),
@@ -238,7 +254,11 @@ impl OpenAiApi {
     async fn balance(&self, now: Timestamp) -> Result<Snapshot, ProviderError> {
         let body = super::request(PROVIDER_ID, &self.client, self.credit_request()?).await?;
         let grants = parse_credit_grants(&body, now)?;
-        Ok(balance_snapshot(&grants, now))
+        Ok(balance_snapshot_for_account(
+            &grants,
+            now,
+            &self.tidemark_account,
+        ))
     }
 
     /// Walks both endpoints over the whole history window.
@@ -250,7 +270,7 @@ impl OpenAiApi {
         let completions = self
             .pages(COMPLETIONS_URL, "model", &ranges, parse_completions_page)
             .await?;
-        snapshot(&costs, &completions, now)
+        snapshot_for_account(&costs, &completions, now, &self.tidemark_account)
     }
 
     /// Every page of one endpoint: each 31-day range in turn, each following its cursor
@@ -308,7 +328,7 @@ impl Provider for OpenAiApi {
     }
 
     fn account(&self) -> AccountId {
-        AccountId::default()
+        self.tidemark_account.clone()
     }
 
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
@@ -650,10 +670,20 @@ fn daily_ranges(now: Timestamp, days: i64) -> Vec<DayRange> {
 /// No window, ever: the Admin usage endpoints report spend with no limit to draw a bar
 /// against, and the shape for that is details only — the card renders empty, which is
 /// accepted.
+#[cfg(test)]
 fn snapshot(
     costs: &[CostBucket],
     completions: &[UsageBucket],
     now: Timestamp,
+) -> Result<Snapshot, ProviderError> {
+    snapshot_for_account(costs, completions, now, &AccountId::default())
+}
+
+fn snapshot_for_account(
+    costs: &[CostBucket],
+    completions: &[UsageBucket],
+    now: Timestamp,
+    account_id: &AccountId,
 ) -> Result<Snapshot, ProviderError> {
     let days = summarise(costs, completions, now)?;
     let totals = days.iter().fold(
@@ -719,7 +749,7 @@ fn snapshot(
     }
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows: Vec::new(),
         details,
@@ -805,7 +835,16 @@ fn summarise(
 /// The credit-grants fallback as a card: one fixed balance — spend against the grant —
 /// keyed `balance` because a grant budget has no length to key on, resetless or reset at
 /// the next grant's expiry.
+#[cfg(test)]
 fn balance_snapshot(grants: &CreditGrants, now: Timestamp) -> Snapshot {
+    balance_snapshot_for_account(grants, now, &AccountId::default())
+}
+
+fn balance_snapshot_for_account(
+    grants: &CreditGrants,
+    now: Timestamp,
+    account_id: &AccountId,
+) -> Snapshot {
     // The plugin's own degenerate cases: no grant to measure against means 0% when
     // something is still available and 100% when nothing is.
     let used_percent = if grants.total_granted > 0.0 {
@@ -817,7 +856,7 @@ fn balance_snapshot(grants: &CreditGrants, now: Timestamp) -> Snapshot {
     };
     Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
-        account: AccountId::default(),
+        account: account_id.clone(),
         captured_at: now,
         windows: vec![Window {
             key: WindowKey::named("balance"),
@@ -1630,7 +1669,14 @@ mod tests {
         assert_eq!(SPEC.title, "OpenAI");
         assert_eq!(SPEC.options.len(), 2);
         assert!(SPEC.options.iter().all(|option| !option.required));
-        assert!(build(Credential::new("sk-test"), &Options::new()).is_ok());
+        assert!(
+            build(
+                AccountId::default(),
+                Credential::new("sk-test"),
+                &Options::new()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
