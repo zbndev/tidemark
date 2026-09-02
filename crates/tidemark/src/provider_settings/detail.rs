@@ -11,7 +11,7 @@ use tidemark_types::{
 
 use super::browser_auth::BrowserAuth;
 use super::model::AuthSource;
-use super::{model, reason};
+use super::{DEFAULT_ACCOUNT, model, name_dialog, reason};
 use crate::bus::DaemonProxy;
 use crate::{format, mark};
 
@@ -313,6 +313,16 @@ impl ProviderDetail {
         let image = mark::image_at(72);
         mark::set(&image, &definition.provider);
         let title = adw::WindowTitle::new(&definition.title, "");
+        // The account's own name under the provider's, when this page is not the default
+        // account's: a page a second account lands on must say which account it is.
+        if status.account != DEFAULT_ACCOUNT {
+            title.set_subtitle(
+                status
+                    .account_label
+                    .as_deref()
+                    .unwrap_or(status.account.as_str()),
+            );
+        }
         let heading = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(6)
@@ -363,6 +373,7 @@ impl ProviderDetail {
         });
         detail.build_authentication();
         detail.build_options(&options);
+        detail.wire_rename();
         let initial_status = detail.status.borrow().clone();
         detail.apply(&initial_status);
         detail
@@ -370,6 +381,62 @@ impl ProviderDetail {
 
     pub(super) fn page(&self) -> &adw::NavigationPage {
         &self.page
+    }
+
+    /// The label pen, on the header of an account that is not the provider's default.
+    ///
+    /// The default account is the provider's structural first one; the daemon will not
+    /// move it, so the pen stays off its page. A confirmed rename retires this page — it
+    /// is keyed by an identity the rename just replaced — and the dialog returns to the
+    /// list when the daemon announces the old id's removal. Nothing here chases the new
+    /// id: the user is where the list is, and the new account's row is one click away.
+    fn wire_rename(self: &Rc<Self>) {
+        let status = self.status.borrow();
+        if status.account == DEFAULT_ACCOUNT {
+            return;
+        }
+        let provider = status.provider.clone();
+        let account = status.account.clone();
+        let label = status
+            .account_label
+            .clone()
+            .unwrap_or_else(|| account.clone());
+        drop(status);
+
+        let rename = gtk::Button::builder()
+            .icon_name("document-edit-symbolic")
+            .tooltip_text("Rename account")
+            .valign(gtk::Align::Center)
+            .build();
+        rename.connect_clicked({
+            let weak = Rc::downgrade(self);
+            let label = label.clone();
+            move |_| {
+                let Some(detail) = weak.upgrade() else {
+                    return;
+                };
+                let dialog = detail.dialog.clone();
+                let proxy = detail.proxy.clone();
+                let provider = provider.clone();
+                let account = account.clone();
+                let label = label.clone();
+                glib::spawn_future_local(async move {
+                    let Some(slug) =
+                        name_dialog(&dialog, "Rename account", &label, "Rename", Some(&account))
+                            .await
+                    else {
+                        return;
+                    };
+                    // Success needs no action here: the daemon publishes the old id's
+                    // removal and the new id's arrival, and the page keyed by the old id
+                    // is retired by that, not by anything it does to itself.
+                    if let Err(error) = proxy.rename_account(&provider, &account, &slug).await {
+                        detail.toast(&reason(&error));
+                    }
+                });
+            }
+        });
+        self.header.pack_end(&rename);
     }
 
     pub(super) fn matches(&self, provider: &str, account: &str) -> bool {

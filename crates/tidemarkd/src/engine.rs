@@ -259,16 +259,12 @@ pub struct Account {
 }
 
 /// Whether a string can serve as an account id in `config.toml`, the Secret Service and
-/// the history: lowercase, non-empty, and not starting or ending with a hyphen.
-/// Shared by the engine and the D-Bus service so a call rejected here is rejected for the
-/// same reason there.
+/// the history. The rule itself lives in `tidemark-types`, where the client typing a new
+/// account's name reads it too; this is the daemon-side spelling of it, shared by the
+/// engine and the D-Bus service so a call rejected here is rejected for the same reason
+/// there.
 pub(crate) fn valid_account_slug(account: &str) -> bool {
-    !account.is_empty()
-        && !account.starts_with('-')
-        && !account.ends_with('-')
-        && account
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    tidemark_types::valid_account_slug(account)
 }
 
 /// Everything about an account that is fixed at registration, kept together so both

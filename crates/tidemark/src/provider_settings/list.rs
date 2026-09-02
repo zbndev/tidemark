@@ -4,10 +4,59 @@ use std::rc::Rc;
 use adw::prelude::*;
 use tidemark_types::{ProviderDefinition, ProviderStatus, provider_label};
 
-use super::{model, opens_detail_after_add};
+use super::{model, multi_account_capable, opens_detail_after_add};
 use crate::mark;
 
 type IdentityCallback = Rc<dyn Fn(String, String)>;
+type ProviderCallback = Rc<dyn Fn(String)>;
+
+/// A provider and its accounts, in the order the list draws them.
+#[derive(Debug, PartialEq)]
+struct ProviderGroup {
+    /// The provider slug, keying the provider's own row.
+    provider: String,
+    /// The provider's accounts in configured order. The first is drawn on the provider's
+    /// own row — a provider with one account looks exactly as it always has — and the
+    /// rest are nested rows under it.
+    accounts: Vec<ProviderStatus>,
+}
+
+/// Groups a flat status list into providers: one entry per provider, in the order the
+/// provider first appears, with that provider's accounts in the order they appear.
+fn group(statuses: &[ProviderStatus]) -> Vec<ProviderGroup> {
+    let mut groups: Vec<ProviderGroup> = Vec::new();
+    for status in statuses {
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group.provider == status.provider)
+        {
+            group.accounts.push(status.clone());
+        } else {
+            groups.push(ProviderGroup {
+                provider: status.provider.clone(),
+                accounts: vec![status.clone()],
+            });
+        }
+    }
+    groups
+}
+
+/// The identity sequence the list draws: one provider key per provider, then one account
+/// key per account beyond the first. Held rows are compared against it to decide whether
+/// the picture changed only in words — updated in place, so a click never lands on a row
+/// replaced under it — or in shape, which is drawn fresh.
+fn structure(groups: &[ProviderGroup]) -> Vec<(&str, Option<&str>)> {
+    groups
+        .iter()
+        .flat_map(|group| {
+            std::iter::once((group.provider.as_str(), None)).chain(
+                group.accounts[1..]
+                    .iter()
+                    .map(|status| (group.provider.as_str(), Some(status.account.as_str()))),
+            )
+        })
+        .collect()
+}
 
 /// The configured rows on the dialog's main page.
 #[derive(Debug)]
@@ -17,13 +66,23 @@ pub(super) struct ConfiguredList {
     rows: RefCell<Vec<ConfiguredRow>>,
 }
 
+/// One drawn row of the configured list: a provider's own row, or one of the accounts
+/// nested under it.
 #[derive(Debug)]
 struct ConfiguredRow {
+    /// The provider every identity below belongs to.
     provider: String,
-    account: String,
+    /// The account the row is, or `None` for the provider's own row — which is the
+    /// provider's first account's row in everything but name.
+    account: Option<String>,
     row: adw::ActionRow,
     image: gtk::Image,
+    /// The pen: the provider row's opens the provider's first account, a nested row's
+    /// opens that account.
     edit: gtk::Button,
+    /// The "+", on the provider row alone. `None` on nested rows, which are the accounts
+    /// the "+" exists to create.
+    add: Option<gtk::Button>,
 }
 
 impl ConfiguredList {
@@ -59,53 +118,124 @@ impl ConfiguredList {
         is_waiting: &dyn Fn(&str, &str) -> bool,
         on_edit: IdentityCallback,
         on_remove: IdentityCallback,
+        on_add_account: ProviderCallback,
+    ) {
+        let groups = group(statuses);
+        let shape_held = {
+            let rows = self.rows.borrow();
+            rows.len()
+                == groups
+                    .iter()
+                    .map(|group| group.accounts.len())
+                    .sum::<usize>()
+                && rows
+                    .iter()
+                    .zip(structure(&groups))
+                    .all(|(row, key)| row.provider == key.0 && row.account.as_deref() == key.1)
+        };
+        if shape_held {
+            self.update(&groups, definitions, is_waiting);
+        } else {
+            self.rebuild(
+                &groups,
+                definitions,
+                is_waiting,
+                &on_edit,
+                &on_remove,
+                &on_add_account,
+            );
+        }
+        self.empty.set_visible(groups.is_empty());
+    }
+
+    /// Draws the whole list fresh. Only reached when the shape changed — an account or a
+    /// provider appearing or disappearing — because the rows carry no text of their own
+    /// to lose, and a list redrawn on every poll would take the click with it.
+    fn rebuild(
+        &self,
+        groups: &[ProviderGroup],
+        definitions: &[ProviderDefinition],
+        is_waiting: &dyn Fn(&str, &str) -> bool,
+        on_edit: &IdentityCallback,
+        on_remove: &IdentityCallback,
+        on_add_account: &ProviderCallback,
     ) {
         let mut rows = self.rows.borrow_mut();
-        let (kept, removed): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut *rows).into_iter().partition(|row| {
-                statuses
-                    .iter()
-                    .any(|status| status.provider == row.provider && status.account == row.account)
-            });
-        *rows = kept;
-        for removed in removed {
-            self.group.remove(&removed.row);
+        for row in std::mem::take(&mut *rows) {
+            self.group.remove(&row.row);
         }
-
-        for status in statuses {
+        for group in groups {
             let definition = definitions
                 .iter()
-                .find(|definition| definition.provider == status.provider);
-            if let Some(existing) = rows
-                .iter()
-                .find(|row| row.provider == status.provider && row.account == status.account)
-            {
-                update_row(existing, definition, status, is_waiting);
-                continue;
-            }
-
-            let built = configured_row(
+                .find(|definition| definition.provider == group.provider);
+            let built = provider_row(
                 definition,
-                status,
+                group,
                 is_waiting,
-                Rc::clone(&on_edit),
-                Rc::clone(&on_remove),
+                Rc::clone(on_edit),
+                Rc::clone(on_remove),
+                Rc::clone(on_add_account),
             );
             self.group.add(&built.row);
             rows.push(built);
+            for status in &group.accounts[1..] {
+                let built = account_row(
+                    definition,
+                    status,
+                    is_waiting,
+                    Rc::clone(on_edit),
+                    Rc::clone(on_remove),
+                );
+                self.group.add(&built.row);
+                rows.push(built);
+            }
         }
+    }
 
-        self.empty.set_visible(rows.is_empty());
+    /// Refreshes the words on rows whose shape did not change.
+    fn update(
+        &self,
+        groups: &[ProviderGroup],
+        definitions: &[ProviderDefinition],
+        is_waiting: &dyn Fn(&str, &str) -> bool,
+    ) {
+        let rows = self.rows.borrow();
+        for row in rows.iter() {
+            let Some(group) = groups.iter().find(|group| group.provider == row.provider) else {
+                continue;
+            };
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.provider == group.provider);
+            match row.account.as_deref() {
+                None => update_provider_row(row, definition, group, is_waiting),
+                Some(account) => {
+                    if let Some(status) = group
+                        .accounts
+                        .iter()
+                        .find(|status| status.account == account)
+                    {
+                        update_account_row(row, definition, status, is_waiting);
+                    }
+                }
+            }
+        }
     }
 }
 
-fn configured_row(
+/// The provider's own row: its mark, its name, and the state of its first account — which
+/// is the account the pen opens, and the only account a provider with just the one has
+/// ever shown. The "+" beside the pen adds another, for providers whose credential a
+/// second account can hold its own copy of.
+fn provider_row(
     definition: Option<&ProviderDefinition>,
-    status: &ProviderStatus,
+    group: &ProviderGroup,
     is_waiting: &dyn Fn(&str, &str) -> bool,
     on_edit: IdentityCallback,
     on_remove: IdentityCallback,
+    on_add_account: ProviderCallback,
 ) -> ConfiguredRow {
+    let status = &group.accounts[0];
     let image = mark::image();
     mark::set(&image, &status.provider);
     let row = adw::ActionRow::new();
@@ -114,6 +244,17 @@ fn configured_row(
     row.set_use_markup(false);
     row.add_prefix(&image);
 
+    let add = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add account")
+        .valign(gtk::Align::Center)
+        .build();
+    add.connect_clicked({
+        let on_add_account = Rc::clone(&on_add_account);
+        let provider = group.provider.clone();
+        move |_| on_add_account(provider.clone())
+    });
+
     let edit = gtk::Button::builder()
         .icon_name("document-edit-symbolic")
         .tooltip_text("Edit provider")
@@ -121,6 +262,7 @@ fn configured_row(
         .sensitive(definition.is_some())
         .build();
     edit.connect_clicked({
+        let on_edit = Rc::clone(&on_edit);
         let provider = status.provider.clone();
         let account = status.account.clone();
         move |_| on_edit(provider.clone(), account.clone())
@@ -133,6 +275,66 @@ fn configured_row(
         .css_classes(["destructive-action"])
         .build();
     remove.connect_clicked({
+        let on_remove = Rc::clone(&on_remove);
+        let provider = status.provider.clone();
+        let account = status.account.clone();
+        move |_| on_remove(provider.clone(), account.clone())
+    });
+
+    // Suffixes stack left to right in the order they are added, which is what puts the
+    // "+" left of the pen and the trash outside both.
+    row.add_suffix(&add);
+    row.add_suffix(&edit);
+    row.add_suffix(&remove);
+
+    let built = ConfiguredRow {
+        provider: status.provider.clone(),
+        account: None,
+        row,
+        image,
+        edit,
+        add: Some(add),
+    };
+    update_provider_row(&built, definition, group, is_waiting);
+    built
+}
+
+/// One account nested under its provider, indented to say which row it belongs to.
+fn account_row(
+    definition: Option<&ProviderDefinition>,
+    status: &ProviderStatus,
+    is_waiting: &dyn Fn(&str, &str) -> bool,
+    on_edit: IdentityCallback,
+    on_remove: IdentityCallback,
+) -> ConfiguredRow {
+    let image = mark::image();
+    mark::set(&image, &status.provider);
+    let row = adw::ActionRow::builder()
+        .margin_start(24)
+        .use_markup(false)
+        .build();
+    row.add_prefix(&image);
+
+    let edit = gtk::Button::builder()
+        .icon_name("document-edit-symbolic")
+        .tooltip_text("Edit account")
+        .valign(gtk::Align::Center)
+        .build();
+    edit.connect_clicked({
+        let on_edit = Rc::clone(&on_edit);
+        let provider = status.provider.clone();
+        let account = status.account.clone();
+        move |_| on_edit(provider.clone(), account.clone())
+    });
+
+    let remove = gtk::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Remove account")
+        .valign(gtk::Align::Center)
+        .css_classes(["destructive-action"])
+        .build();
+    remove.connect_clicked({
+        let on_remove = Rc::clone(&on_remove);
         let provider = status.provider.clone();
         let account = status.account.clone();
         move |_| on_remove(provider.clone(), account.clone())
@@ -143,26 +345,74 @@ fn configured_row(
 
     let built = ConfiguredRow {
         provider: status.provider.clone(),
-        account: status.account.clone(),
+        account: Some(status.account.clone()),
         row,
         image,
         edit,
+        add: None,
     };
-    update_row(&built, definition, status, is_waiting);
+    update_account_row(&built, definition, status, is_waiting);
     built
 }
 
-fn update_row(
+fn update_provider_row(
+    row: &ConfiguredRow,
+    definition: Option<&ProviderDefinition>,
+    group: &ProviderGroup,
+    is_waiting: &dyn Fn(&str, &str) -> bool,
+) {
+    let status = &group.accounts[0];
+    let title = definition
+        .map(|definition| definition.title.clone())
+        .unwrap_or_else(|| provider_label(&status.provider));
+    row.row.set_title(&title);
+    row.row.set_subtitle(&status_text(
+        definition,
+        status,
+        is_waiting(&status.provider, &status.account),
+    ));
+    // A provider with a source selector to pick at counts as editable however it logs in:
+    // which local login to read is configuration, not something polling works out.
+    let editable = definition.is_some_and(opens_detail_after_add);
+    row.edit.set_visible(editable);
+    row.edit.set_sensitive(editable);
+    if let Some(add) = &row.add {
+        let capable = definition.is_some_and(multi_account_capable);
+        add.set_visible(capable);
+        add.set_sensitive(capable);
+    }
+    mark::set(&row.image, &status.provider);
+}
+
+fn update_account_row(
     row: &ConfiguredRow,
     definition: Option<&ProviderDefinition>,
     status: &ProviderStatus,
     is_waiting: &dyn Fn(&str, &str) -> bool,
 ) {
-    let title = definition
-        .map(|definition| definition.title.clone())
-        .unwrap_or_else(|| provider_label(&status.provider));
-    row.row.set_title(&title);
-    let subtitle = if is_waiting(&status.provider, &status.account) {
+    // The account's own name: the daemon publishes the label, and derives it from the id
+    // until a rename says otherwise.
+    row.row.set_title(
+        status
+            .account_label
+            .as_deref()
+            .unwrap_or(status.account.as_str()),
+    );
+    row.row.set_subtitle(&status_text(
+        definition,
+        status,
+        is_waiting(&status.provider, &status.account),
+    ));
+    mark::set(&row.image, &status.provider);
+}
+
+/// The one line of state under a row's name.
+fn status_text(
+    definition: Option<&ProviderDefinition>,
+    status: &ProviderStatus,
+    waiting: bool,
+) -> String {
+    if waiting {
         "Waiting for your browser…".into()
     } else if let Some(definition) = definition {
         model::connection_text(definition, status)
@@ -171,14 +421,7 @@ fn update_row(
             .message
             .clone()
             .unwrap_or_else(|| status.state.clone())
-    };
-    row.row.set_subtitle(&subtitle);
-    // A provider with a source selector to pick at counts as editable however it logs in:
-    // which local login to read is configuration, not something polling works out.
-    let editable = definition.is_some_and(opens_detail_after_add);
-    row.edit.set_visible(editable);
-    row.edit.set_sensitive(editable);
-    mark::set(&row.image, &status.provider);
+    }
 }
 
 /// Searchable catalog page pushed from the main provider list.
@@ -302,5 +545,68 @@ impl Picker {
             self.group.add(&row);
             rows.push(row);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tidemark_types::{AccountId, ProviderId, ProviderStatus};
+
+    use super::{ProviderGroup, group};
+
+    fn status(provider: &str, account: &str) -> ProviderStatus {
+        ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))
+    }
+
+    fn keys(groups: &[ProviderGroup]) -> Vec<(&str, Vec<&str>)> {
+        groups
+            .iter()
+            .map(|group| {
+                (
+                    group.provider.as_str(),
+                    group
+                        .accounts
+                        .iter()
+                        .map(|status| status.account.as_str())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn statuses_of_one_provider_are_gathered_under_it_in_first_seen_order() {
+        // A status for a second account can arrive after another provider's, from a
+        // locally added pending row as much as from the daemon; the provider it belongs
+        // to is where it lands.
+        let groups = group(&[
+            status("kimi", "default"),
+            status("zai", "default"),
+            status("kimi", "work"),
+        ]);
+
+        assert_eq!(
+            keys(&groups),
+            vec![("kimi", vec!["default", "work"]), ("zai", vec!["default"])]
+        );
+    }
+
+    #[test]
+    fn accounts_keep_the_order_they_arrived_in() {
+        let groups = group(&[
+            status("kimi", "team"),
+            status("kimi", "default"),
+            status("kimi", "work"),
+        ]);
+
+        assert_eq!(
+            keys(&groups),
+            vec![("kimi", vec!["team", "default", "work"])]
+        );
+    }
+
+    #[test]
+    fn no_statuses_means_no_rows() {
+        assert!(group(&[]).is_empty());
     }
 }

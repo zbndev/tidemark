@@ -194,22 +194,26 @@ pub fn notification_rows(status: &ProviderStatus) -> Vec<NotificationRow> {
         .collect()
 }
 
-/// Keeps successful local additions visible until the daemon publishes their first status.
+/// Keeps successful local additions visible until the daemon publishes their first
+/// status, keyed by the identity the addition will hold. Provider-level enough for a
+/// provider's default account, account-level enough for the "+" beside it: a provider
+/// whose other accounts already poll must not swallow the pending row a just-added
+/// account is waiting on.
 pub fn merge_local_additions(
     incoming: &[ProviderStatus],
     current: &[ProviderStatus],
-    local_additions: &HashSet<String>,
+    local_additions: &HashSet<(String, String)>,
 ) -> Vec<ProviderStatus> {
     let mut merged = incoming.to_vec();
     for status in current {
-        let still_local = local_additions.contains(&status.provider)
-            && !incoming
-                .iter()
-                .any(|incoming| incoming.provider == status.provider);
-        let already_present = merged
+        let is = |other: &ProviderStatus| {
+            other.provider == status.provider && other.account == status.account
+        };
+        let still_local = local_additions
             .iter()
-            .any(|merged| merged.provider == status.provider && merged.account == status.account);
-        if still_local && !already_present {
+            .any(|(provider, account)| provider == &status.provider && account == &status.account)
+            && !incoming.iter().any(is);
+        if still_local && !merged.iter().any(is) {
             merged.push(status.clone());
         }
     }
@@ -291,6 +295,13 @@ mod tests {
             ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new("default"));
         status.set_state(state, None);
         status.has_credential = has_credential;
+        status
+    }
+
+    fn account_status(provider: &str, account: &str, state: ProviderState) -> ProviderStatus {
+        let mut status =
+            ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account));
+        status.set_state(state, None);
         status
     }
 
@@ -417,7 +428,7 @@ mod tests {
     fn an_unacknowledged_local_add_survives_an_unrelated_status_update() {
         let current = vec![status("codex", ProviderState::Pending, Some(false))];
         let incoming = vec![status("claude", ProviderState::Ok, Some(false))];
-        let local = HashSet::from(["codex".to_owned()]);
+        let local = HashSet::from([("codex".to_owned(), "default".to_owned())]);
 
         let merged = merge_local_additions(&incoming, &current, &local);
 
@@ -428,6 +439,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["claude", "codex"]
         );
+    }
+
+    #[test]
+    fn an_unacknowledged_local_account_survives_while_its_provider_has_other_accounts() {
+        // The provider's own status arriving is not the new account arriving: the "+"
+        // lands on a provider that already polls, and the pending row it added must not
+        // vanish the first time a sibling reports in.
+        let current = vec![
+            status("kimi", ProviderState::Ok, Some(true)),
+            account_status("kimi", "work", ProviderState::Pending),
+        ];
+        let incoming = vec![status("kimi", ProviderState::Ok, Some(true))];
+        let local = HashSet::from([("kimi".to_owned(), "work".to_owned())]);
+
+        let merged = merge_local_additions(&incoming, &current, &local);
+
+        let identities: Vec<(&str, &str)> = merged
+            .iter()
+            .map(|status| (status.provider.as_str(), status.account.as_str()))
+            .collect();
+        assert_eq!(identities, [("kimi", "default"), ("kimi", "work")]);
+    }
+
+    #[test]
+    fn a_locally_added_account_the_daemon_publishes_is_not_duplicated() {
+        let current = vec![account_status("kimi", "work", ProviderState::Pending)];
+        let incoming = vec![account_status("kimi", "work", ProviderState::Ok)];
+        let local = HashSet::from([("kimi".to_owned(), "work".to_owned())]);
+
+        let merged = merge_local_additions(&incoming, &current, &local);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].state, ProviderState::Ok.as_wire());
     }
 
     fn windowed(keys: &[(&str, &str)], notify: &[&str]) -> ProviderStatus {

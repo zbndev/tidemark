@@ -11,11 +11,18 @@ use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use gtk::glib;
-use tidemark_types::{AccountId, CredentialKind, ProviderDefinition, ProviderId, ProviderStatus};
+use tidemark_types::{
+    AccountId, CredentialKind, ProviderDefinition, ProviderId, ProviderStatus,
+    account_slug_suggestion, valid_account_slug,
+};
 
 use self::detail::ProviderDetail;
 use self::list::{ConfiguredList, Picker};
 use crate::bus::DaemonProxy;
+
+/// The account a provider's structural first add holds. The daemon will not rename it,
+/// so the label pen stays off its page.
+pub(super) const DEFAULT_ACCOUNT: &str = "default";
 
 /// OAuth attempts which the open dialog is responsible for cancelling on close.
 #[derive(Debug, Default)]
@@ -144,12 +151,12 @@ impl ActiveDetail {
 
 fn remove_local_provider<T>(
     statuses: &mut Vec<ProviderStatus>,
-    local_added: &mut HashSet<String>,
+    local_added: &mut HashSet<(String, String)>,
     details: &mut DetailCache<T>,
     provider: &str,
     account: &str,
 ) {
-    local_added.remove(provider);
+    local_added.remove(&(provider.into(), account.into()));
     statuses.retain(|status| status.provider != provider || status.account != account);
     details.remove(provider, account);
 }
@@ -161,7 +168,7 @@ pub struct ProviderSettings {
     proxy: DaemonProxy<'static>,
     definitions: RefCell<Vec<ProviderDefinition>>,
     statuses: RefCell<Vec<ProviderStatus>>,
-    local_added: RefCell<HashSet<String>>,
+    local_added: RefCell<HashSet<(String, String)>>,
     configured: ConfiguredList,
     picker: Rc<Picker>,
     details: RefCell<DetailCache<Rc<ProviderDetail>>>,
@@ -244,9 +251,11 @@ impl ProviderSettings {
             &self.statuses.borrow(),
             &self.local_added.borrow(),
         );
-        self.local_added
-            .borrow_mut()
-            .retain(|provider| !statuses.iter().any(|status| status.provider == *provider));
+        self.local_added.borrow_mut().retain(|(provider, account)| {
+            !statuses
+                .iter()
+                .any(|status| &status.provider == provider && &status.account == account)
+        });
         let return_to_list = self.active_detail.borrow_mut().take_if_missing(&merged);
         *self.statuses.borrow_mut() = merged;
         self.details.borrow_mut().retain(|provider, account| {
@@ -280,6 +289,7 @@ impl ProviderSettings {
             &|provider, account| self.pending.contains(provider, account),
             self.identity_callback(Self::open_detail),
             self.identity_callback(Self::confirm_removal),
+            self.provider_callback(Self::add_account),
         );
         self.picker.apply(&definitions, &statuses);
     }
@@ -292,6 +302,15 @@ impl ProviderSettings {
         Rc::new(move |provider, account| {
             if let Some(settings) = weak.upgrade() {
                 action(&settings, provider, account);
+            }
+        })
+    }
+
+    fn provider_callback(&self, action: fn(&Rc<Self>, String)) -> Rc<dyn Fn(String)> {
+        let weak = self.self_weak.borrow().clone();
+        Rc::new(move |provider| {
+            if let Some(settings) = weak.upgrade() {
+                action(&settings, provider);
             }
         })
     }
@@ -323,19 +342,74 @@ impl ProviderSettings {
                 .statuses
                 .borrow()
                 .iter()
-                .any(|status| status.provider == provider)
+                .any(|status| status.provider == provider && status.account == DEFAULT_ACCOUNT)
             {
-                settings.local_added.borrow_mut().insert(provider.clone());
+                settings
+                    .local_added
+                    .borrow_mut()
+                    .insert((provider.clone(), DEFAULT_ACCOUNT.to_owned()));
                 settings
                     .statuses
                     .borrow_mut()
-                    .push(pending_status(&definition));
+                    .push(pending_status(&definition, DEFAULT_ACCOUNT));
             }
             settings.refresh_views();
             settings.dialog.pop_subpage();
             if opens_detail_after_add(&definition) {
                 settings.open_detail(provider, AccountId::default().to_string());
             }
+        });
+    }
+
+    /// The provider row's "+": asks for a name, has the daemon add the account it
+    /// suggests, and lands on that account's page to give it a credential.
+    fn add_account(self: &Rc<Self>, provider: String) {
+        let definition = self
+            .definitions
+            .borrow()
+            .iter()
+            .find(|definition| definition.provider == provider)
+            .cloned();
+        let Some(definition) = definition else {
+            return;
+        };
+        let settings = Rc::clone(self);
+        glib::spawn_future_local(async move {
+            let Some(slug) = name_dialog(
+                &settings.dialog,
+                &format!("New {} account", definition.title),
+                "",
+                "Add",
+                None,
+            )
+            .await
+            else {
+                return;
+            };
+            if let Err(error) = settings.proxy.add_account(&provider, &slug).await {
+                settings.toast(&reason(&error));
+                return;
+            }
+            // The daemon persists the account before it answers, and publishes its first
+            // status from its own task; until that lands, the account exists only as this
+            // pending row, kept alive by the same machinery an added provider's is.
+            if !settings
+                .statuses
+                .borrow()
+                .iter()
+                .any(|status| status.provider == provider && status.account == slug)
+            {
+                settings
+                    .local_added
+                    .borrow_mut()
+                    .insert((provider.clone(), slug.clone()));
+                settings
+                    .statuses
+                    .borrow_mut()
+                    .push(pending_status(&definition, &slug));
+            }
+            settings.refresh_views();
+            settings.open_detail(provider, slug);
         });
     }
 
@@ -456,10 +530,10 @@ impl ProviderSettings {
     }
 }
 
-fn pending_status(definition: &ProviderDefinition) -> ProviderStatus {
+fn pending_status(definition: &ProviderDefinition, account: &str) -> ProviderStatus {
     let mut status = ProviderStatus::pending(
         &ProviderId::new(&definition.provider),
-        &AccountId::default(),
+        &AccountId::new(account),
     );
     status.credential = Some(definition.credential.clone());
     status.credential_hint = Some(definition.credential_hint.clone());
@@ -480,6 +554,83 @@ pub(super) fn opens_detail_after_add(definition: &ProviderDefinition) -> bool {
         || !definition.options.is_empty()
 }
 
+/// Whether a user can give this provider another account: a key or a browser login is
+/// something a second account can hold its own copy of, while an external or
+/// credential-free provider reads whatever one thing this machine already has.
+pub(super) fn multi_account_capable(definition: &ProviderDefinition) -> bool {
+    matches!(
+        definition.credential_kind(),
+        Some(CredentialKind::Key | CredentialKind::OAuth)
+    )
+}
+
+/// Whether a typed name can be confirmed: it must suggest an id the config can hold, and
+/// a rename must suggest one the account does not already have.
+pub(super) fn name_suggests_usable(name: &str, current: Option<&str>) -> bool {
+    let slug = account_slug_suggestion(name);
+    valid_account_slug(&slug) && current.is_none_or(|held| held != slug)
+}
+
+/// The name-to-id entry dialog the provider row's "+" and the account label's pen share.
+///
+/// The id, not the name, is what gets stored — so the id the name suggests is previewed
+/// live under the entry, and confirm stays disabled until the name suggests an id the
+/// config can hold (and, for a rename, one the account does not already have). Returns
+/// the suggested id, or `None` when the dialog was dismissed.
+pub(super) async fn name_dialog(
+    parent: &impl IsA<gtk::Widget>,
+    heading: &str,
+    prefill: &str,
+    confirm: &str,
+    current: Option<&str>,
+) -> Option<String> {
+    let entry = gtk::Entry::builder()
+        .placeholder_text("Account name")
+        .text(prefill)
+        .activates_default(true)
+        .build();
+    // Owned rather than borrowed: the entry keeps validating after this returns, and the
+    // id a rename may not re-suggest has to live as long as the preview does.
+    let current = current.map(str::to_owned);
+    let preview = gtk::Label::builder()
+        .xalign(0.0)
+        .css_classes(["caption", "dim-label"])
+        .build();
+    let dialog = adw::AlertDialog::builder().heading(heading).build();
+    dialog.add_responses(&[("cancel", "Cancel"), ("accept", confirm)]);
+    dialog.set_default_response(Some("accept"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("accept", adw::ResponseAppearance::Suggested);
+
+    let refresh_preview = {
+        let entry = entry.clone();
+        let preview = preview.clone();
+        let dialog = dialog.clone();
+        move || {
+            let name = entry.text().to_string();
+            let slug = account_slug_suggestion(&name);
+            preview.set_text(&format!("Account id: {slug}"));
+            dialog.set_response_enabled("accept", name_suggests_usable(&name, current.as_deref()));
+        }
+    };
+    entry.connect_changed({
+        let refresh_preview = refresh_preview.clone();
+        move |_| refresh_preview()
+    });
+    refresh_preview();
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    content.append(&entry);
+    content.append(&preview);
+    dialog.set_extra_child(Some(&content));
+
+    (dialog.choose_future(Some(parent)).await == "accept")
+        .then(|| account_slug_suggestion(&entry.text()))
+}
+
 /// A D-Bus error as one sentence for a toast.
 pub(super) fn reason(error: &zbus::Error) -> String {
     match error {
@@ -492,11 +643,15 @@ pub(super) fn reason(error: &zbus::Error) -> String {
 mod tests {
     use std::collections::HashSet;
 
-    use tidemark_types::{AuthMode, AuthSelector, CredentialKind, ProviderDefinition};
+    use tidemark_types::{
+        AccountId, AuthMode, AuthSelector, CredentialKind, ProviderDefinition, ProviderId,
+        ProviderStatus,
+    };
 
     use super::detail::{AfterBeginAction, after_begin_action};
     use super::{
-        ActiveDetail, DetailCache, PendingLogins, opens_detail_after_add, remove_local_provider,
+        ActiveDetail, DEFAULT_ACCOUNT, DetailCache, PendingLogins, multi_account_capable,
+        name_suggests_usable, opens_detail_after_add, remove_local_provider,
     };
 
     fn definition(credential: CredentialKind) -> ProviderDefinition {
@@ -559,6 +714,36 @@ mod tests {
     }
 
     #[test]
+    fn key_and_oauth_providers_can_hold_more_than_one_account() {
+        // A key or a browser login is something a second account can hold its own copy
+        // of; those are the providers the "+" is drawn on.
+        assert!(multi_account_capable(&definition(CredentialKind::Key)));
+        assert!(multi_account_capable(&definition(CredentialKind::OAuth)));
+    }
+
+    #[test]
+    fn external_and_credential_free_providers_cannot_hold_a_second_account() {
+        assert!(!multi_account_capable(&definition(
+            CredentialKind::External
+        )));
+        assert!(!multi_account_capable(&definition(CredentialKind::None)));
+        let mut unknown = definition(CredentialKind::None);
+        unknown.credential = "future-kind".into();
+        assert!(!multi_account_capable(&unknown));
+    }
+
+    #[test]
+    fn a_name_can_only_be_confirmed_when_it_suggests_a_fresh_id() {
+        assert!(!name_suggests_usable("", None));
+        assert!(!name_suggests_usable("   ", None));
+        assert!(name_suggests_usable("My Work", None));
+        // A rename to the id the account already has is the daemon's no-op refusal, and
+        // the confirm button is where the user should hear that from.
+        assert!(!name_suggests_usable("My Work", Some("my-work")));
+        assert!(name_suggests_usable("My Team", Some("my-work")));
+    }
+
+    #[test]
     fn pending_logins_are_taken_once_for_cancellation() {
         let pending = PendingLogins::default();
         pending.insert("antigravity", "default");
@@ -609,7 +794,7 @@ mod tests {
     fn remove_then_readd_uses_a_fresh_detail_value() {
         let mut details = DetailCache::default();
         let mut statuses = Vec::new();
-        let mut local_added = HashSet::from(["zai".to_owned()]);
+        let mut local_added = HashSet::from([("zai".to_owned(), DEFAULT_ACCOUNT.to_owned())]);
         details.insert("zai", "default", "old credential page");
 
         remove_local_provider(
@@ -623,7 +808,7 @@ mod tests {
 
         assert_eq!(details.get("zai", "default"), Some(&"fresh pending page"));
         assert_eq!(details.values().count(), 1);
-        assert!(!local_added.contains("zai"));
+        assert!(!local_added.contains(&("zai".to_owned(), DEFAULT_ACCOUNT.to_owned())));
     }
 
     #[test]
@@ -632,6 +817,21 @@ mod tests {
         active.show("zai", "default");
 
         assert!(active.take_if_missing(&[]));
+        assert_eq!(active.identity(), None);
+    }
+
+    #[test]
+    fn a_renamed_active_detail_is_retired_when_only_its_successor_remains() {
+        // A rename announces the old id's removal and the new id's arrival; the page keyed
+        // by the old id must return to the list rather than pretend to be its successor.
+        let mut active = ActiveDetail::default();
+        active.show("kimi", "work");
+        let successor = vec![ProviderStatus::pending(
+            &ProviderId::new("kimi"),
+            &AccountId::new("team"),
+        )];
+
+        assert!(active.take_if_missing(&successor));
         assert_eq!(active.identity(), None);
     }
 }

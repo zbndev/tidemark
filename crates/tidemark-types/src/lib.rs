@@ -23,7 +23,8 @@ pub use window::{DANGER_AT, WARNING_AT, Window, WindowKey, WindowLength};
 pub use wire::{
     AuthCandidate, AuthCandidateState, AuthMode, AuthSelection, AuthSelector, CredentialKind,
     DataInfo, ExternalLogin, HistoryPoint, OptionChoice, Preferences, ProviderDefinition,
-    ProviderOption, ProviderState, ProviderStatus, Remedy, WindowStatus,
+    ProviderOption, ProviderState, ProviderStatus, Remedy, WindowStatus, account_slug_suggestion,
+    valid_account_slug,
 };
 
 /// Identity constants. Changing any of these is a breaking change for installed units,
