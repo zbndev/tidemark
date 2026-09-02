@@ -63,26 +63,95 @@ fn structure(groups: &[ProviderGroup]) -> Vec<(&str, Option<&str>)> {
 pub(super) struct ConfiguredList {
     pub(super) group: adw::PreferencesGroup,
     empty: adw::StatusPage,
-    rows: RefCell<Vec<ConfiguredRow>>,
+    rows: RefCell<Vec<ProviderRow>>,
 }
 
-/// One drawn row of the configured list: a provider's own row, or one of the accounts
-/// nested under it.
+/// A provider row and its accounts. `AdwExpanderRow` owns the nested rows, which gives
+/// accounts libadwaita's standard tree indentation instead of imitating it with a glyph.
 #[derive(Debug)]
-struct ConfiguredRow {
-    /// The provider every identity below belongs to.
+struct ProviderRow {
     provider: String,
-    /// The account the row is, or `None` for the provider's own row — which is the
-    /// provider's first account's row in everything but name.
-    account: Option<String>,
+    row: ProviderWidget,
+    image: gtk::Image,
+    edit: gtk::Button,
+    add: gtk::Button,
+    accounts: Vec<AccountRow>,
+}
+
+/// The native row selected from the provider's account count.
+#[derive(Debug)]
+enum ProviderWidget {
+    Plain(adw::ActionRow),
+    Nested(adw::ExpanderRow),
+}
+
+/// The semantic row kind before GTK widgets are built.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderRowKind {
+    Plain,
+    Nested,
+}
+
+/// Only a provider with a second account needs an expansion affordance.
+fn provider_row_kind(group: &ProviderGroup) -> ProviderRowKind {
+    if group.accounts.len() > 1 {
+        ProviderRowKind::Nested
+    } else {
+        ProviderRowKind::Plain
+    }
+}
+
+impl ProviderWidget {
+    fn add_prefix(&self, widget: &impl IsA<gtk::Widget>) {
+        match self {
+            Self::Plain(row) => row.add_prefix(widget),
+            Self::Nested(row) => row.add_prefix(widget),
+        }
+    }
+
+    fn add_suffix(&self, widget: &impl IsA<gtk::Widget>) {
+        match self {
+            Self::Plain(row) => row.add_suffix(widget),
+            Self::Nested(row) => row.add_suffix(widget),
+        }
+    }
+
+    fn set_subtitle(&self, subtitle: &str) {
+        match self {
+            Self::Plain(row) => row.set_subtitle(subtitle),
+            Self::Nested(row) => row.set_subtitle(subtitle),
+        }
+    }
+
+    fn set_title(&self, title: &str) {
+        match self {
+            Self::Plain(row) => row.set_title(title),
+            Self::Nested(row) => row.set_title(title),
+        }
+    }
+
+    fn set_use_markup(&self, use_markup: bool) {
+        match self {
+            Self::Plain(row) => row.set_use_markup(use_markup),
+            Self::Nested(row) => row.set_use_markup(use_markup),
+        }
+    }
+
+    fn widget(&self) -> &gtk::Widget {
+        match self {
+            Self::Plain(row) => row.upcast_ref(),
+            Self::Nested(row) => row.upcast_ref(),
+        }
+    }
+}
+
+/// One account displayed beneath its provider.
+#[derive(Debug)]
+struct AccountRow {
+    account: String,
     row: adw::ActionRow,
     image: gtk::Image,
-    /// The pen: the provider row's opens the provider's first account, a nested row's
-    /// opens that account.
     edit: gtk::Button,
-    /// The "+", on the provider row alone. `None` on nested rows, which are the accounts
-    /// the "+" exists to create.
-    add: Option<gtk::Button>,
 }
 
 impl ConfiguredList {
@@ -123,15 +192,17 @@ impl ConfiguredList {
         let groups = group(statuses);
         let shape_held = {
             let rows = self.rows.borrow();
-            rows.len()
-                == groups
-                    .iter()
-                    .map(|group| group.accounts.len())
-                    .sum::<usize>()
-                && rows
-                    .iter()
-                    .zip(structure(&groups))
-                    .all(|(row, key)| row.provider == key.0 && row.account.as_deref() == key.1)
+            let held = rows
+                .iter()
+                .flat_map(|row| {
+                    std::iter::once((row.provider.as_str(), None)).chain(
+                        row.accounts
+                            .iter()
+                            .map(|account| (row.provider.as_str(), Some(account.account.as_str()))),
+                    )
+                })
+                .collect::<Vec<_>>();
+            held == structure(&groups)
         };
         if shape_held {
             self.update(&groups, definitions, is_waiting);
@@ -162,13 +233,13 @@ impl ConfiguredList {
     ) {
         let mut rows = self.rows.borrow_mut();
         for row in std::mem::take(&mut *rows) {
-            self.group.remove(&row.row);
+            self.group.remove(row.row.widget());
         }
         for group in groups {
             let definition = definitions
                 .iter()
                 .find(|definition| definition.provider == group.provider);
-            let built = provider_row(
+            let mut built = provider_row(
                 definition,
                 group,
                 is_waiting,
@@ -176,19 +247,24 @@ impl ConfiguredList {
                 Rc::clone(on_remove),
                 Rc::clone(on_add_account),
             );
-            self.group.add(&built.row);
-            rows.push(built);
-            for status in &group.accounts[1..] {
-                let built = account_row(
-                    definition,
-                    status,
-                    is_waiting,
-                    Rc::clone(on_edit),
-                    Rc::clone(on_remove),
-                );
-                self.group.add(&built.row);
-                rows.push(built);
+            match &built.row {
+                ProviderWidget::Plain(_) => {}
+                ProviderWidget::Nested(row) => {
+                    for status in &group.accounts[1..] {
+                        let account = account_row(
+                            definition,
+                            status,
+                            is_waiting,
+                            Rc::clone(on_edit),
+                            Rc::clone(on_remove),
+                        );
+                        row.add_row(&account.row);
+                        built.accounts.push(account);
+                    }
+                }
             }
+            self.group.add(built.row.widget());
+            rows.push(built);
         }
     }
 
@@ -207,16 +283,14 @@ impl ConfiguredList {
             let definition = definitions
                 .iter()
                 .find(|definition| definition.provider == group.provider);
-            match row.account.as_deref() {
-                None => update_provider_row(row, definition, group, is_waiting),
-                Some(account) => {
-                    if let Some(status) = group
-                        .accounts
-                        .iter()
-                        .find(|status| status.account == account)
-                    {
-                        update_account_row(row, definition, status, is_waiting);
-                    }
+            update_provider_row(row, definition, group, is_waiting);
+            for account in &row.accounts {
+                if let Some(status) = group
+                    .accounts
+                    .iter()
+                    .find(|status| status.account == account.account)
+                {
+                    update_account_row(account, definition, status, is_waiting);
                 }
             }
         }
@@ -234,11 +308,16 @@ fn provider_row(
     on_edit: IdentityCallback,
     on_remove: IdentityCallback,
     on_add_account: ProviderCallback,
-) -> ConfiguredRow {
+) -> ProviderRow {
     let status = &group.accounts[0];
     let image = mark::image();
     mark::set(&image, &status.provider);
-    let row = adw::ActionRow::new();
+    let row = match provider_row_kind(group) {
+        ProviderRowKind::Plain => ProviderWidget::Plain(adw::ActionRow::new()),
+        ProviderRowKind::Nested => {
+            ProviderWidget::Nested(adw::ExpanderRow::builder().expanded(true).build())
+        }
+    };
     // The picker's stay-off-markup rule again: the title and the subtitle both carry
     // the daemon's own words, which are data, never markup.
     row.set_use_markup(false);
@@ -287,41 +366,29 @@ fn provider_row(
     row.add_suffix(&edit);
     row.add_suffix(&remove);
 
-    let built = ConfiguredRow {
+    let built = ProviderRow {
         provider: status.provider.clone(),
-        account: None,
         row,
         image,
         edit,
-        add: Some(add),
+        add,
+        accounts: Vec::new(),
     };
     update_provider_row(&built, definition, group, is_waiting);
     built
 }
 
-/// One account nested under its provider, indented to say which row it belongs to.
+/// One account nested under its provider by `AdwExpanderRow`.
 fn account_row(
     definition: Option<&ProviderDefinition>,
     status: &ProviderStatus,
     is_waiting: &dyn Fn(&str, &str) -> bool,
     on_edit: IdentityCallback,
     on_remove: IdentityCallback,
-) -> ConfiguredRow {
+) -> AccountRow {
     let image = mark::image();
     mark::set(&image, &status.provider);
-    let row = adw::ActionRow::builder()
-        .margin_start(24)
-        .use_markup(false)
-        .build();
-    // A dimmed corner tying the row to the provider above it — the margin alone read as
-    // a stray indent rather than as nesting. Pango falls back to a font that draws the
-    // glyph when the interface font has none of its own.
-    let corner = gtk::Label::builder()
-        .label("⌞")
-        .valign(gtk::Align::Center)
-        .css_classes(["dim-label"])
-        .build();
-    row.add_prefix(&corner);
+    let row = adw::ActionRow::builder().use_markup(false).build();
     row.add_prefix(&image);
 
     let edit = gtk::Button::builder()
@@ -352,20 +419,18 @@ fn account_row(
     row.add_suffix(&edit);
     row.add_suffix(&remove);
 
-    let built = ConfiguredRow {
-        provider: status.provider.clone(),
-        account: Some(status.account.clone()),
+    let built = AccountRow {
+        account: status.account.clone(),
         row,
         image,
         edit,
-        add: None,
     };
     update_account_row(&built, definition, status, is_waiting);
     built
 }
 
 fn update_provider_row(
-    row: &ConfiguredRow,
+    row: &ProviderRow,
     definition: Option<&ProviderDefinition>,
     group: &ProviderGroup,
     is_waiting: &dyn Fn(&str, &str) -> bool,
@@ -385,16 +450,14 @@ fn update_provider_row(
     let editable = definition.is_some_and(opens_detail_after_add);
     row.edit.set_visible(editable);
     row.edit.set_sensitive(editable);
-    if let Some(add) = &row.add {
-        let capable = definition.is_some_and(multi_account_capable);
-        add.set_visible(capable);
-        add.set_sensitive(capable);
-    }
+    let capable = definition.is_some_and(multi_account_capable);
+    row.add.set_visible(capable);
+    row.add.set_sensitive(capable);
     mark::set(&row.image, &status.provider);
 }
 
 fn update_account_row(
-    row: &ConfiguredRow,
+    row: &AccountRow,
     definition: Option<&ProviderDefinition>,
     status: &ProviderStatus,
     is_waiting: &dyn Fn(&str, &str) -> bool,
@@ -567,7 +630,7 @@ impl Picker {
 mod tests {
     use tidemark_types::{AccountId, ProviderId, ProviderStatus};
 
-    use super::{ProviderGroup, group, structure};
+    use super::{ProviderGroup, ProviderRowKind, group, provider_row_kind, structure};
 
     fn status(provider: &str, account: &str) -> ProviderStatus {
         ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))
@@ -641,6 +704,15 @@ mod tests {
                 ("zai", None),
             ]
         );
+    }
+
+    #[test]
+    fn a_provider_with_one_account_uses_a_plain_row_but_multiple_accounts_expand() {
+        let single = group(&[status("kimi", "default")]);
+        let multiple = group(&[status("kimi", "default"), status("kimi", "work")]);
+
+        assert_eq!(provider_row_kind(&single[0]), ProviderRowKind::Plain);
+        assert_eq!(provider_row_kind(&multiple[0]), ProviderRowKind::Nested);
     }
 
     #[test]
