@@ -93,16 +93,19 @@ struct Shown {
     secondary: Vec<QuotaBar>,
 }
 
+/// The native account-group control shown on a provider's main card.
+pub(crate) struct CardExpansion {
+    pub(crate) extra_accounts: usize,
+    pub(crate) expanded: bool,
+    pub(crate) on_toggled: Rc<dyn Fn(bool)>,
+}
+
 /// A provider card.
 #[derive(Debug)]
 pub struct Card {
-    slot: adw::Bin,
+    slot: gtk::Overlay,
     mark: gtk::Image,
     name: gtk::Label,
-    /// The provider's name as the catalog spells it, resolved once at construction: slugs
-    /// never change and neither do the titles this build ships, so a status update has
-    /// nothing to re-resolve.
-    provider_name: String,
     plan: gtk::Label,
     chip: gtk::Label,
     reading: gtk::Box,
@@ -122,8 +125,9 @@ impl Card {
     pub fn new(
         status: &ProviderStatus,
         now: Timestamp,
-        provider_name: String,
+        title: String,
         on_activate: Rc<dyn Fn(String, String)>,
+        expansion: Option<CardExpansion>,
     ) -> Self {
         // All three ellipsize. None of them is expected to: a provider's name, its plan and
         // a state chip all fit the row this build ships. They ellipsize because the three
@@ -170,6 +174,19 @@ impl Card {
         title_row.append(&chip);
         plan.set_margin_start(TITLE_GAP - MARK_GAP);
 
+        let expansion = expansion.map(|expansion| {
+            let content = gtk::Label::builder()
+                .label(format!("+{}", expansion.extra_accounts))
+                .build();
+            let toggle = gtk::ToggleButton::builder()
+                .active(expansion.expanded)
+                .child(&content)
+                .css_classes(["flat", "circular", "quota-account-toggle"])
+                .tooltip_text("Show other accounts")
+                .build();
+            toggle.connect_toggled(move |toggle| (expansion.on_toggled)(toggle.is_active()));
+            toggle
+        });
         align_to_baseline(&name, &mark, &plan);
 
         let headline = gtk::Label::builder()
@@ -252,17 +269,21 @@ impl Card {
             .css_classes(["caption", "quota-footer"])
             .build();
 
-        let root = gtk::Box::builder()
+        let body = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(12)
+            .build();
+        body.append(&title_row);
+        body.append(&reading);
+        body.append(&blank);
+        body.append(&rows);
+        body.append(&footer);
+        let root = gtk::Overlay::builder()
+            .child(&body)
             .width_request(MIN_WIDTH)
             .css_classes(["card", "quota-card", "activatable"])
             .build();
-        root.append(&title_row);
-        root.append(&reading);
-        root.append(&blank);
-        root.append(&rows);
-        root.append(&footer);
+        root.set_overflow(gtk::Overflow::Visible);
 
         // The card owns the widget the grid allocates rather than letting the grid wrap it,
         // so that a reorder moves slots around a vector instead of taking widgets out of
@@ -274,11 +295,17 @@ impl Card {
         // is still for is the hover: `style.rs` matches `:hover` here and moves the card
         // inside, because a CSS transform moves what GTK picks and a card that lifted
         // itself out from under the pointer would flicker.
-        let slot = adw::Bin::builder()
+        let slot = gtk::Overlay::builder()
             .child(&root)
             .focusable(true)
             .css_classes([crate::grid::SLOT_CLASS])
             .build();
+        slot.set_overflow(gtk::Overflow::Visible);
+        if let Some(expansion) = expansion {
+            expansion.set_halign(gtk::Align::End);
+            expansion.set_valign(gtk::Align::Start);
+            slot.add_overlay(&expansion);
+        }
         slot.set_cursor_from_name(Some("pointer"));
         let identity = CardIdentity::from(status);
         let invoke: Rc<dyn Fn()> = Rc::new({
@@ -312,7 +339,6 @@ impl Card {
             slot,
             mark,
             name,
-            provider_name,
             plan,
             chip,
             reading,
@@ -329,6 +355,7 @@ impl Card {
                 secondary: Vec::new(),
             }),
         };
+        card.set_title(&title);
         card.apply(status, now);
         card
     }
@@ -343,10 +370,14 @@ impl Card {
         self.shown.borrow().status.clone()
     }
 
+    /// Replaces the title resolved by the window for this account.
+    pub fn set_title(&self, title: &str) {
+        self.name.set_label(title);
+    }
+
     /// Shows a new status for the same account.
     pub fn apply(&self, status: &ProviderStatus, now: Timestamp) {
         mark::set(&self.mark, &status.provider);
-        self.name.set_label(&self.provider_name);
 
         match status.plan() {
             Some(plan) => {

@@ -48,6 +48,8 @@ const MAX_COLUMNS: usize = 3;
 const REORDER_MS: u32 = 250;
 /// How long a released card takes to settle into its slot.
 const SETTLE_MS: u32 = 200;
+/// How long account cards take to enter or leave an expanded provider group.
+const GROUP_TRANSITION_MS: u32 = 180;
 /// How close to the edge of the scrolled view the pointer has to get before the view
 /// follows it. Roughly a finger's width: near enough to be deliberate, far enough that it
 /// engages before the pointer is jammed against the edge.
@@ -195,6 +197,36 @@ fn paint_order(motion: &[bool], carried: Option<usize>) -> Vec<usize> {
     order
 }
 
+/// The child order for cards that must travel beneath the preceding visible card.
+///
+/// Provider account cards are contiguous. Moving each entering or leaving account before
+/// the visible card before it means that card paints over the account for only the
+/// transition, then [`CardGrid::reset_child_order`] restores the ordinary slot order.
+fn paint_order_beneath_preceding(count: usize, lower: &[usize]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..count).collect();
+    for &index in lower {
+        let Some(anchor) = (0..index)
+            .rev()
+            .find(|candidate| !lower.contains(candidate))
+        else {
+            continue;
+        };
+        let Some(current) = order.iter().position(|candidate| *candidate == index) else {
+            continue;
+        };
+        let Some(before) = order.iter().position(|candidate| *candidate == anchor) else {
+            continue;
+        };
+        let lowered = order.remove(current);
+        let before = order
+            .iter()
+            .position(|candidate| *candidate == anchor)
+            .unwrap_or(before);
+        order.insert(before, lowered);
+    }
+    order
+}
+
 /// How fast the scrolled view should follow a pointer this far into its edge, in pixels per
 /// second. Positive scrolls down. Zero everywhere but the two edge bands.
 fn autoscroll_rate(pointer: f64, height: f64) -> f64 {
@@ -275,6 +307,9 @@ mod imp {
         /// allocation cannot come to different conclusions about where a slot is.
         pub(super) columns: Cell<usize>,
         pub(super) cell: Cell<(f64, f64)>,
+        /// The in-flight account-card transition, if any.
+        pub(super) group_transition: RefCell<Option<adw::TimedAnimation>>,
+        pub(super) transition_id: Cell<u64>,
     }
 
     // By hand because the reorder callback is a closure. What is worth printing is the
@@ -462,6 +497,197 @@ impl CardGrid {
             animation: RefCell::new(None),
         });
         self.queue_resize();
+    }
+
+    /// Replaces the visible cards, moving existing cards instead of teleporting them.
+    pub(crate) fn replace(&self, cards: Vec<gtk::Widget>) {
+        let existing: Vec<gtk::Widget> = self
+            .imp()
+            .slots
+            .borrow()
+            .iter()
+            .map(|slot| slot.child.clone())
+            .collect();
+        let disappearing: Vec<gtk::Widget> = existing
+            .iter()
+            .filter(|child| !cards.contains(child))
+            .cloned()
+            .collect();
+        let entering: Vec<gtk::Widget> = cards
+            .iter()
+            .filter(|card| !existing.contains(card))
+            .cloned()
+            .collect();
+
+        if disappearing.is_empty() {
+            if entering.is_empty() {
+                self.set_order(&cards);
+            } else {
+                self.expand(cards, existing, entering);
+            }
+            return;
+        }
+
+        self.collapse(cards, existing, disappearing);
+    }
+
+    fn expand(
+        &self,
+        cards: Vec<gtk::Widget>,
+        existing: Vec<gtk::Widget>,
+        entering: Vec<gtk::Widget>,
+    ) {
+        let id = self.imp().transition_id.get().wrapping_add(1);
+        self.imp().transition_id.set(id);
+        if let Some(animation) = self.imp().group_transition.borrow_mut().take() {
+            animation.pause();
+        }
+        self.replace_now(cards.clone());
+        let starts = {
+            let slots = self.imp().slots.borrow();
+            slots
+                .iter()
+                .enumerate()
+                .map(|(index, held)| {
+                    let origin = existing
+                        .iter()
+                        .position(|child| *child == held.child)
+                        .or_else(|| {
+                            cards[..index]
+                                .iter()
+                                .rev()
+                                .find_map(|card| existing.iter().position(|child| *child == *card))
+                        })
+                        .unwrap_or(index);
+                    let offset = origin as f64 - index as f64;
+                    held.offset.set(offset);
+                    held.target.set(0.0);
+                    offset
+                })
+                .collect::<Vec<_>>()
+        };
+        self.lower_cards_beneath_preceding(&entering);
+        self.add_css_class(REORDERING_CLASS);
+        let target = adw::CallbackAnimationTarget::new({
+            let grid = self.downgrade();
+            move |value| {
+                let Some(grid) = grid.upgrade() else {
+                    return;
+                };
+                for (slot, start) in grid.imp().slots.borrow().iter().zip(&starts) {
+                    slot.offset.set((1.0 - value) * start);
+                }
+                grid.queue_allocate();
+            }
+        });
+        let animation = adw::TimedAnimation::new(self, 0.0, 1.0, GROUP_TRANSITION_MS, target);
+        animation.set_easing(adw::Easing::EaseOutCubic);
+        animation.connect_done({
+            let grid = self.downgrade();
+            move |_| {
+                let Some(grid) = grid.upgrade() else {
+                    return;
+                };
+                if grid.imp().transition_id.get() != id {
+                    return;
+                }
+                grid.imp().group_transition.borrow_mut().take();
+                grid.reset_child_order();
+                grid.remove_css_class(REORDERING_CLASS);
+                grid.queue_allocate();
+            }
+        });
+        *self.imp().group_transition.borrow_mut() = Some(animation.clone());
+        animation.play();
+    }
+
+    fn collapse(
+        &self,
+        cards: Vec<gtk::Widget>,
+        existing: Vec<gtk::Widget>,
+        disappearing: Vec<gtk::Widget>,
+    ) {
+        let id = self.imp().transition_id.get().wrapping_add(1);
+        self.imp().transition_id.set(id);
+        if let Some(animation) = self.imp().group_transition.borrow_mut().take() {
+            animation.pause();
+        }
+        let shifts: Vec<(gtk::Widget, f64)> = existing
+            .iter()
+            .enumerate()
+            .map(|(index, child)| {
+                let target = cards
+                    .iter()
+                    .position(|card| *card == *child)
+                    .unwrap_or_else(|| {
+                        existing[..index]
+                            .iter()
+                            .rposition(|card| cards.contains(card))
+                            .unwrap_or(0)
+                    });
+                (child.clone(), target as f64 - index as f64)
+            })
+            .collect();
+        let target = adw::CallbackAnimationTarget::new({
+            let shifts = shifts.clone();
+            let grid = self.downgrade();
+            move |value| {
+                if let Some(grid) = grid.upgrade() {
+                    let slots = grid.imp().slots.borrow();
+                    for (child, shift) in &shifts {
+                        if let Some(slot) = slots.iter().find(|slot| slot.child == *child) {
+                            slot.offset.set(value * shift);
+                        }
+                    }
+                    grid.queue_allocate();
+                }
+            }
+        });
+        self.lower_cards_beneath_preceding(&disappearing);
+        self.add_css_class(REORDERING_CLASS);
+        let animation = adw::TimedAnimation::new(self, 0.0, 1.0, GROUP_TRANSITION_MS, target);
+        animation.set_easing(adw::Easing::EaseOutCubic);
+        animation.connect_done({
+            let grid = self.downgrade();
+            move |_| {
+                let Some(grid) = grid.upgrade() else {
+                    return;
+                };
+                if grid.imp().transition_id.get() != id {
+                    return;
+                }
+                grid.imp().group_transition.borrow_mut().take();
+                grid.replace_now(cards.clone());
+            }
+        });
+        *self.imp().group_transition.borrow_mut() = Some(animation.clone());
+        animation.play();
+    }
+
+    fn replace_now(&self, cards: Vec<gtk::Widget>) {
+        self.clear();
+        for card in cards {
+            self.append(&card);
+        }
+    }
+
+    /// Draws group-transition cards below their preceding provider card.
+    fn lower_cards_beneath_preceding(&self, lowered: &[gtk::Widget]) {
+        let slots = self.imp().slots.borrow();
+        let lowered: Vec<usize> = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| lowered.contains(&slot.child).then_some(index))
+            .collect();
+        let children: Vec<gtk::Widget> = slots.iter().map(|slot| slot.child.clone()).collect();
+        drop(slots);
+
+        let mut previous: Option<gtk::Widget> = None;
+        for index in paint_order_beneath_preceding(children.len(), &lowered) {
+            let child = children[index].clone();
+            child.insert_after(self, previous.as_ref());
+            previous = Some(child);
+        }
     }
 
     /// Removes one card, leaving the order of the rest alone.
@@ -1086,6 +1312,15 @@ mod tests {
     #[test]
     fn nothing_moving_leaves_the_cards_in_slot_order() {
         assert_eq!(paint_order(&[false; 4], None), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn entering_accounts_are_painted_below_their_provider_card() {
+        assert_eq!(
+            paint_order_beneath_preceding(4, &[1, 2]),
+            [1, 2, 0, 3],
+            "the provider card remains above its newly entering accounts"
+        );
     }
 
     #[test]

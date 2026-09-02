@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use tidemark_types::{ProviderDefinition, Snapshot, Window, WindowLength};
+use tidemark_types::{ProviderDefinition, ProviderStatus, Snapshot, Window, WindowLength};
 
 /// The catalog's spelling of each provider's name, by slug.
 pub type Titles = BTreeMap<String, String>;
@@ -30,6 +30,91 @@ pub fn name(titles: &Titles, slug: &str) -> String {
         .get(slug)
         .cloned()
         .unwrap_or_else(|| tidemark_types::provider_label(slug))
+}
+
+/// Keeps one provider's accounts adjacent while preserving first-seen provider order.
+pub fn provider_groups(statuses: &[ProviderStatus]) -> Vec<Vec<&ProviderStatus>> {
+    let mut groups: Vec<Vec<&ProviderStatus>> = Vec::new();
+    for status in statuses {
+        if let Some(group) = groups.iter_mut().find(|group| {
+            group
+                .first()
+                .is_some_and(|first| first.provider == status.provider)
+        }) {
+            group.push(status);
+        } else {
+            groups.push(vec![status]);
+        }
+    }
+    groups
+}
+
+/// The daemon operation a completed card drag represents.
+#[derive(Debug, Eq, PartialEq)]
+pub enum CardReorder {
+    /// Moves a whole provider group among the configured providers.
+    Providers(Vec<String>),
+    /// Moves one extra account within its provider, retaining the default account first.
+    Accounts {
+        provider: String,
+        accounts: Vec<String>,
+    },
+}
+
+/// Classifies a grid move without allowing an extra account to leave its provider group.
+pub fn card_reorder(
+    statuses: &[ProviderStatus],
+    visible: &[ProviderStatus],
+    from: usize,
+    to: usize,
+) -> Option<CardReorder> {
+    if from == to {
+        return None;
+    }
+    let source = visible.get(from)?;
+    let target = visible.get(to)?;
+    let groups = provider_groups(statuses);
+
+    if source.provider == target.provider {
+        if source.account == "default" || target.account == "default" {
+            return None;
+        }
+        let mut accounts: Vec<String> = groups
+            .iter()
+            .find(|group| group[0].provider == source.provider)?
+            .iter()
+            .map(|status| status.account.clone())
+            .collect();
+        let source_index = accounts
+            .iter()
+            .position(|account| *account == source.account)?;
+        let target_index = accounts
+            .iter()
+            .position(|account| *account == target.account)?;
+        let moved = accounts.remove(source_index);
+        accounts.insert(target_index, moved);
+        Some(CardReorder::Accounts {
+            provider: source.provider.clone(),
+            accounts,
+        })
+    } else {
+        if source.account != "default" {
+            return None;
+        }
+        let mut providers: Vec<String> = groups
+            .iter()
+            .map(|group| group[0].provider.clone())
+            .collect();
+        let source = providers
+            .iter()
+            .position(|provider| *provider == source.provider)?;
+        let target = providers
+            .iter()
+            .position(|provider| *provider == target.provider)?;
+        let moved = providers.remove(source);
+        providers.insert(target, moved);
+        Some(CardReorder::Providers(providers))
+    }
 }
 
 /// The windows of a reading, in the order the card draws them.
@@ -78,7 +163,7 @@ pub fn arrangement(slugs: &[String], order: &[String]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidemark_types::{AccountId, ProviderId, Timestamp, WindowKey};
+    use tidemark_types::{AccountId, ProviderId, ProviderStatus, Timestamp, WindowKey};
 
     fn window(length: Option<u64>, used: f64) -> Window {
         Window {
@@ -110,6 +195,10 @@ mod tests {
             resets_at: None,
             length: length.and_then(WindowLength::from_secs),
         }
+    }
+
+    fn status(provider: &str, account: &str) -> ProviderStatus {
+        ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))
     }
 
     #[test]
@@ -203,5 +292,75 @@ mod tests {
         let held = ["kimi".to_owned(), "zai".to_owned()];
         assert_eq!(arrangement(&held, &[]), [0, 1]);
         assert!(arrangement(&[], &["zai".to_owned()]).is_empty());
+    }
+
+    #[test]
+    fn statuses_of_one_provider_stay_together_in_first_seen_order() {
+        let statuses = [
+            status("zai", "default"),
+            status("claude", "default"),
+            status("zai", "work"),
+        ];
+        let groups = provider_groups(&statuses);
+
+        let identities: Vec<Vec<(&str, &str)>> = groups
+            .iter()
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|status| (status.provider.as_str(), status.account.as_str()))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            identities,
+            vec![
+                vec![("zai", "default"), ("zai", "work")],
+                vec![("claude", "default")],
+            ]
+        );
+    }
+
+    #[test]
+    fn dragging_an_extra_account_within_its_group_only_reorders_that_group() {
+        let statuses = [
+            status("zai", "default"),
+            status("zai", "work"),
+            status("zai", "team"),
+            status("claude", "default"),
+        ];
+
+        assert_eq!(
+            card_reorder(&statuses, &statuses, 1, 2),
+            Some(CardReorder::Accounts {
+                provider: "zai".into(),
+                accounts: vec!["default".into(), "team".into(), "work".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn dragging_a_main_card_across_groups_reorders_providers() {
+        let statuses = [
+            status("zai", "default"),
+            status("zai", "work"),
+            status("claude", "default"),
+        ];
+
+        assert_eq!(
+            card_reorder(&statuses, &statuses, 0, 2),
+            Some(CardReorder::Providers(vec!["claude".into(), "zai".into()]))
+        );
+    }
+
+    #[test]
+    fn dragging_an_extra_account_across_a_group_boundary_is_refused() {
+        let statuses = [
+            status("zai", "default"),
+            status("zai", "work"),
+            status("claude", "default"),
+        ];
+
+        assert_eq!(card_reorder(&statuses, &statuses, 1, 2), None);
     }
 }
