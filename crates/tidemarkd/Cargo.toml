@@ -17,7 +17,7 @@ update-check = ["dep:reqwest", "dep:semver"]
 
 [dependencies]
 tidemark-types = { path = "../tidemark-types" }
-tidemark-core = { version = "0.3.0", path = "../tidemark-core" }
+tidemark-core = { version = "0.3.1", path = "../tidemark-core" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "time", "net", "io-util"] }
 zbus = "5.13.2"
 tracing = "0.1.44"

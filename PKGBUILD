@@ -14,7 +14,7 @@
 # user's keyring for no benefit, and it has already run in the development loop.
 
 pkgname=tidemark
-pkgver=0.3.0
+pkgver=0.3.1
 pkgrel=1
 pkgdesc='Track AI provider quota limits: how much of each rate-limit window is burned, when it resets, and whether the current pace reaches it'
 arch=('x86_64')
