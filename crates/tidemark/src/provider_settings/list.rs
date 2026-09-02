@@ -92,6 +92,22 @@ enum ProviderRowKind {
     Nested,
 }
 
+/// The fixed visual order for provider-level account controls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderAction {
+    Add,
+    Edit,
+    Remove,
+}
+
+const PROVIDER_ACTION_SPACING: i32 = 6;
+
+#[derive(Debug, Eq, PartialEq)]
+struct NestedAccountPrefix {
+    margin_start: i32,
+    spacing: i32,
+}
+
 /// Only a provider with a second account needs an expansion affordance.
 fn provider_row_kind(group: &ProviderGroup) -> ProviderRowKind {
     if group.accounts.len() > 1 {
@@ -143,6 +159,58 @@ impl ProviderWidget {
             Self::Nested(row) => row.upcast_ref(),
         }
     }
+}
+
+fn provider_action_order() -> [ProviderAction; 3] {
+    [
+        ProviderAction::Add,
+        ProviderAction::Edit,
+        ProviderAction::Remove,
+    ]
+}
+
+fn provider_action_spacing() -> i32 {
+    PROVIDER_ACTION_SPACING
+}
+
+fn nested_account_prefix_spec() -> NestedAccountPrefix {
+    NestedAccountPrefix {
+        margin_start: 12,
+        spacing: 6,
+    }
+}
+
+fn nested_account_prefix(image: &gtk::Image) -> gtk::Box {
+    let spec = nested_account_prefix_spec();
+    let connector = gtk::Box::builder()
+        .width_request(12)
+        .height_request(28)
+        .valign(gtk::Align::Center)
+        .build();
+    connector.add_css_class("nested-account-connector");
+    let prefix = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .margin_start(spec.margin_start)
+        .spacing(spec.spacing)
+        .build();
+    prefix.append(&connector);
+    prefix.append(image);
+    prefix
+}
+
+fn provider_action_box(add: &gtk::Button, edit: &gtk::Button, remove: &gtk::Button) -> gtk::Box {
+    let actions = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(provider_action_spacing())
+        .build();
+    for action in provider_action_order() {
+        match action {
+            ProviderAction::Add => actions.append(add),
+            ProviderAction::Edit => actions.append(edit),
+            ProviderAction::Remove => actions.append(remove),
+        }
+    }
+    actions
 }
 
 /// One account displayed beneath its provider.
@@ -360,11 +428,9 @@ fn provider_row(
         move |_| on_remove(provider.clone(), account.clone())
     });
 
-    // Suffixes stack left to right in the order they are added, which is what puts the
-    // "+" left of the pen and the trash outside both.
-    row.add_suffix(&add);
-    row.add_suffix(&edit);
-    row.add_suffix(&remove);
+    // `AdwExpanderRow` reverses separately added suffixes. One ordered box keeps this
+    // provider's controls stable whether it is a plain or an expandable row.
+    row.add_suffix(&provider_action_box(&add, &edit, &remove));
 
     let built = ProviderRow {
         provider: status.provider.clone(),
@@ -389,7 +455,7 @@ fn account_row(
     let image = mark::image();
     mark::set(&image, &status.provider);
     let row = adw::ActionRow::builder().use_markup(false).build();
-    row.add_prefix(&image);
+    row.add_prefix(&nested_account_prefix(&image));
 
     let edit = gtk::Button::builder()
         .icon_name("document-edit-symbolic")
@@ -630,7 +696,10 @@ impl Picker {
 mod tests {
     use tidemark_types::{AccountId, ProviderId, ProviderStatus};
 
-    use super::{ProviderGroup, ProviderRowKind, group, provider_row_kind, structure};
+    use super::{
+        ProviderAction, ProviderGroup, ProviderRowKind, group, nested_account_prefix_spec,
+        provider_action_order, provider_action_spacing, provider_row_kind, structure,
+    };
 
     fn status(provider: &str, account: &str) -> ProviderStatus {
         ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))
@@ -680,6 +749,55 @@ mod tests {
         assert_eq!(
             keys(&groups),
             vec![("kimi", vec!["team", "default", "work"])]
+        );
+    }
+
+    #[test]
+    fn nested_provider_actions_keep_add_edit_remove_order() {
+        assert_eq!(
+            provider_action_order(),
+            [
+                ProviderAction::Add,
+                ProviderAction::Edit,
+                ProviderAction::Remove,
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_provider_actions_keep_breathing_room_between_controls() {
+        assert_eq!(provider_action_spacing(), 6);
+    }
+
+    #[test]
+    fn nested_account_prefixes_use_a_bold_inset_tree_elbow() {
+        let prefix = nested_account_prefix_spec();
+
+        assert_eq!(prefix.margin_start, 12);
+        assert_eq!(prefix.spacing, 6);
+        assert!(
+            crate::style::STYLE.contains(".nested-account-connector {"),
+            "nested accounts need a tree-elbow connector rather than a navigation arrow"
+        );
+        assert!(
+            crate::style::STYLE.contains("background-repeat: no-repeat;"),
+            "the connector must draw one elbow rather than tile across the row"
+        );
+        assert!(
+            crate::style::STYLE.contains("alpha(currentColor, 0.7)"),
+            "the connector must stay visible against an account row"
+        );
+        assert!(
+            crate::style::STYLE.contains("min-height: 28px;"),
+            "the connector must be as tall as the provider mark it follows"
+        );
+        assert!(
+            crate::style::STYLE.contains("background-size: 2px 14px, 10px 2px;"),
+            "the vertical stem must be bold, long, and joined to its branch"
+        );
+        assert!(
+            crate::style::STYLE.contains("background-position: 1px 1px, 1px center;"),
+            "the elbow must sit left of centre without touching its own bounds"
         );
     }
 

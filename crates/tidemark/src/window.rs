@@ -23,7 +23,7 @@ use tidemark_types::{
 
 use crate::about;
 use crate::bus::{self, DaemonProxy, Update};
-use crate::card::{Card, CardExpansion};
+use crate::card::{Card, CardExpansion, CardTitle};
 use crate::detail::DetailDialog;
 use crate::grid::CardGrid;
 use crate::model;
@@ -379,18 +379,10 @@ impl MainWindow {
         let mut cards = Vec::new();
         for group in model::provider_groups(&statuses) {
             let provider = &group[0].provider;
-            let provider_name = model::name(&self.titles(), provider);
             let expanded = self.expanded.borrow().contains(provider);
             let extra_accounts = group.len() - 1;
             for (index, status) in group.iter().enumerate() {
-                let title = if index == 0 {
-                    provider_name.clone()
-                } else {
-                    status
-                        .account_label
-                        .clone()
-                        .unwrap_or_else(|| status.account.clone())
-                };
+                let title = self.card_title(status, index == 0);
                 let expansion = (index == 0 && extra_accounts > 0).then(|| {
                     let weak = Rc::downgrade(self);
                     let provider = provider.clone();
@@ -442,7 +434,7 @@ impl MainWindow {
         match existing {
             Some(index) => {
                 let card = Rc::clone(&self.cards.borrow()[index]);
-                card.set_title(&self.card_title(&status, status.account == "default"));
+                card.set_title(self.card_title(&status, status.account == "default"));
                 card.apply(&status, now);
             }
             None => {
@@ -520,14 +512,13 @@ impl MainWindow {
     }
 
     /// The title a card shows: provider title for the main account, account label otherwise.
-    fn card_title(&self, status: &ProviderStatus, main: bool) -> String {
+    fn card_title(&self, status: &ProviderStatus, main: bool) -> CardTitle {
+        let provider = model::name(&self.titles(), &status.provider);
         if main {
-            model::name(&self.titles(), &status.provider)
+            CardTitle::main(provider)
         } else {
-            status
-                .account_label
-                .clone()
-                .unwrap_or_else(|| status.account.clone())
+            let account = status.account_label.as_deref().unwrap_or(&status.account);
+            CardTitle::child(&provider, account)
         }
     }
 
@@ -536,7 +527,7 @@ impl MainWindow {
         self: &Rc<Self>,
         status: &ProviderStatus,
         now: Timestamp,
-        title: String,
+        title: CardTitle,
         expansion: Option<CardExpansion>,
     ) -> Rc<Card> {
         let weak = Rc::downgrade(self);

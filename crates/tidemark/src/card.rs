@@ -100,12 +100,56 @@ pub(crate) struct CardExpansion {
     pub(crate) on_toggled: Rc<dyn Fn(bool)>,
 }
 
+/// The provider context and account name shown at the top of a quota card.
+#[derive(Debug)]
+pub(crate) struct CardTitle {
+    heading: String,
+    caption: Option<String>,
+}
+
+impl CardTitle {
+    pub(crate) fn main(heading: String) -> Self {
+        Self {
+            heading,
+            caption: None,
+        }
+    }
+
+    pub(crate) fn child(provider: &str, account: &str) -> Self {
+        Self {
+            heading: account.into(),
+            caption: Some(provider.into()),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct AccountToggleState {
+    label: String,
+    tooltip: &'static str,
+}
+
+fn account_toggle_state(extra_accounts: usize, expanded: bool) -> AccountToggleState {
+    if expanded {
+        AccountToggleState {
+            label: "−".into(),
+            tooltip: "Hide other accounts",
+        }
+    } else {
+        AccountToggleState {
+            label: format!("+{extra_accounts}"),
+            tooltip: "Show other accounts",
+        }
+    }
+}
+
 /// A provider card.
 #[derive(Debug)]
 pub struct Card {
     slot: gtk::Overlay,
     mark: gtk::Image,
     name: gtk::Label,
+    caption: gtk::Label,
     plan: gtk::Label,
     chip: gtk::Label,
     reading: gtk::Box,
@@ -125,7 +169,7 @@ impl Card {
     pub fn new(
         status: &ProviderStatus,
         now: Timestamp,
-        title: String,
+        title: CardTitle,
         on_activate: Rc<dyn Fn(String, String)>,
         expansion: Option<CardExpansion>,
     ) -> Self {
@@ -141,6 +185,11 @@ impl Card {
             .halign(gtk::Align::Start)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .css_classes(["heading"])
+            .build();
+        let caption = gtk::Label::builder()
+            .halign(gtk::Align::Start)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["caption", "dim-label"])
             .build();
         let plan = gtk::Label::builder()
             .halign(gtk::Align::Start)
@@ -168,23 +217,33 @@ impl Card {
         // at the tighter of the two and the plan makes up the difference. GTK margins cannot
         // be negative, which is why it is this way round.
         let title_row = gtk::Box::builder().spacing(MARK_GAP).build();
+        let title_stack = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(0)
+            .build();
+        title_stack.append(&caption);
+        title_stack.append(&name);
         title_row.append(&mark);
-        title_row.append(&name);
+        title_row.append(&title_stack);
         title_row.append(&plan);
         title_row.append(&chip);
         plan.set_margin_start(TITLE_GAP - MARK_GAP);
 
         let expansion = expansion.map(|expansion| {
-            let content = gtk::Label::builder()
-                .label(format!("+{}", expansion.extra_accounts))
-                .build();
+            let state = account_toggle_state(expansion.extra_accounts, expansion.expanded);
+            let content = gtk::Label::builder().label(&state.label).build();
             let toggle = gtk::ToggleButton::builder()
                 .active(expansion.expanded)
                 .child(&content)
                 .css_classes(["flat", "circular", "quota-account-toggle"])
-                .tooltip_text("Show other accounts")
+                .tooltip_text(state.tooltip)
                 .build();
-            toggle.connect_toggled(move |toggle| (expansion.on_toggled)(toggle.is_active()));
+            toggle.connect_toggled(move |toggle| {
+                let state = account_toggle_state(expansion.extra_accounts, toggle.is_active());
+                content.set_label(&state.label);
+                toggle.set_tooltip_text(Some(state.tooltip));
+                (expansion.on_toggled)(toggle.is_active());
+            });
             toggle
         });
         align_to_baseline(&name, &mark, &plan);
@@ -339,6 +398,7 @@ impl Card {
             slot,
             mark,
             name,
+            caption,
             plan,
             chip,
             reading,
@@ -355,7 +415,7 @@ impl Card {
                 secondary: Vec::new(),
             }),
         };
-        card.set_title(&title);
+        card.set_title(title);
         card.apply(status, now);
         card
     }
@@ -371,8 +431,11 @@ impl Card {
     }
 
     /// Replaces the title resolved by the window for this account.
-    pub fn set_title(&self, title: &str) {
-        self.name.set_label(title);
+    pub fn set_title(&self, title: CardTitle) {
+        self.name.set_label(&title.heading);
+        self.caption
+            .set_label(title.caption.as_deref().unwrap_or_default());
+        self.caption.set_visible(title.caption.is_some());
     }
 
     /// Shows a new status for the same account.
@@ -682,6 +745,35 @@ mod tests {
 
         identity.activate(activate.as_ref());
         assert_eq!(calls.borrow().as_slice(), [("zai".into(), "work".into())]);
+    }
+
+    #[test]
+    fn a_child_card_title_keeps_the_provider_and_account_identity_without_card_chrome() {
+        let title = CardTitle::child("Claude", "Work");
+
+        assert_eq!(title.caption.as_deref(), Some("Claude"));
+        assert_eq!(title.heading, "Work");
+        assert!(
+            !crate::style::STYLE.contains(".quota-child-card"),
+            "nested identity belongs in the provider settings list, not card chrome"
+        );
+    }
+
+    #[test]
+    fn expanding_an_account_toggle_changes_its_words_without_becoming_transparent() {
+        let collapsed = account_toggle_state(2, false);
+        let expanded = account_toggle_state(2, true);
+
+        assert_eq!(collapsed.label, "+2");
+        assert_eq!(collapsed.tooltip, "Show other accounts");
+        assert_eq!(expanded.label, "−");
+        assert_eq!(expanded.tooltip, "Hide other accounts");
+        assert!(
+            crate::style::STYLE.contains(
+                ".quota-account-toggle:checked {\n    background-color: @accent_bg_color;"
+            ),
+            "the active account toggle must remain opaque"
+        );
     }
 
     #[test]
