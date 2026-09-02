@@ -4,11 +4,15 @@ on:
   pull_request:
     branches: [main]
     paths-ignore:
+      # '**/*.md' does not match repository-root files (README, CONTEXT, AGENTS) — the
+      # root-level '*.md' entry is what closes that gap.
+      - '*.md'
       - '**/*.md'
       - 'docs/**'
   push:
     branches: [main]
     paths-ignore:
+      - '*.md'
       - '**/*.md'
       - 'docs/**'
 
