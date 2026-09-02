@@ -164,6 +164,14 @@ pub(crate) const STYLE: &str = "
     opacity: 0.45;
 }
 
+/* The wallet amount under the quota rows. Bold, and between the headline percentage and
+   the secondary rows in size: money is not a rate — no bar, no percentage — but it is the
+   number the account runs on, so it outranks the rows it sits under. */
+.quota-balance {
+    font-weight: 700;
+    font-size: 1.2em;
+}
+
 /* The credential pill sits in a preferences row of its own so that it gets the full width
    of the group — a header suffix ellipsized both of its labels, and neither `Tidemark
    login` nor `Claude Code login` can be shortened without becoming a guess. A plain

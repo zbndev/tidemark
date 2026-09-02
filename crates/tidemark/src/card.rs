@@ -160,6 +160,7 @@ pub struct Card {
     reset: gtk::Label,
     absolutes: gtk::Label,
     rows: gtk::Box,
+    balance: gtk::Label,
     footer: gtk::Label,
     shown: RefCell<Shown>,
 }
@@ -318,6 +319,16 @@ impl Card {
             .spacing(6)
             .build();
 
+        // The wallet amount under the quota rows. Money is not a rate, so it gets no bar
+        // and no percentage — just the provider's phrasing of the amount, bold and between
+        // the headline and the secondary rows in size. See `DetailSection::BALANCE` for the
+        // convention this rides on.
+        let balance = gtk::Label::builder()
+            .halign(gtk::Align::Start)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["quota-balance"])
+            .build();
+
         // Pinned to the bottom so that cards sharing a row line their footers up: the grid
         // gives every card the height of the tallest one, and without this the extra space
         // would fall in a different place on every card.
@@ -336,6 +347,7 @@ impl Card {
         body.append(&reading);
         body.append(&blank);
         body.append(&rows);
+        body.append(&balance);
         body.append(&footer);
         let root = gtk::Overlay::builder()
             .child(&body)
@@ -409,6 +421,7 @@ impl Card {
             reset,
             absolutes,
             rows,
+            balance,
             footer,
             shown: RefCell::new(Shown {
                 status: status.clone(),
@@ -476,6 +489,7 @@ impl Card {
                 self.blank.set_visible(false);
                 self.bar.widget().set_visible(true);
                 self.dominant_title.set_label(&dominant.title);
+                self.set_balance_line(balance);
                 self.rebuild_rows(rest)
             }
             (None, Some(balance)) => {
@@ -486,11 +500,13 @@ impl Card {
                 self.bar.widget().set_visible(false);
                 self.reset.set_visible(false);
                 self.set_absolutes(None);
+                self.set_balance_line(None);
                 self.rebuild_rows(&[])
             }
             (None, None) => {
                 self.reading.set_visible(false);
                 self.blank.set_visible(true);
+                self.set_balance_line(None);
                 let message = blank_message(status);
                 // The card shows the first `BLANK_LINES` of it; the tooltip is where the
                 // rest of a long one is, so that truncating it costs nothing on the way to
@@ -560,6 +576,24 @@ impl Card {
             None => {
                 self.absolutes.set_label("");
                 self.absolutes.set_visible(false);
+            }
+        }
+    }
+
+    /// Shows the wallet amount under the quota rows, or removes the line.
+    ///
+    /// Only a reading with windows draws it: a balance-only card already shows the amount
+    /// as its headline, and this line must not repeat it. Emptied as well as hidden, for
+    /// the same reason `set_absolutes` empties.
+    fn set_balance_line(&self, amount: Option<&str>) {
+        match amount {
+            Some(text) => {
+                self.balance.set_label(text);
+                self.balance.set_visible(true);
+            }
+            None => {
+                self.balance.set_label("");
+                self.balance.set_visible(false);
             }
         }
     }
