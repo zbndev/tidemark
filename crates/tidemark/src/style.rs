@@ -41,6 +41,17 @@ pub(crate) const STYLE: &str = "
     transition: transform 150ms ease-out, box-shadow 150ms ease-out;
 }
 
+.nested-account-connector {
+    min-width: 12px;
+    min-height: 28px;
+    background-image:
+        linear-gradient(to right, alpha(currentColor, 0.7), alpha(currentColor, 0.7)),
+        linear-gradient(to right, alpha(currentColor, 0.7), alpha(currentColor, 0.7));
+    background-size: 2px 14px, 10px 2px;
+    background-position: 1px 1px, 1px center;
+    background-repeat: no-repeat;
+}
+
 /* The slot keeps the pointer while the card inside it moves. */
 .quota-grid > .quota-slot:hover > .quota-card {
     transform: translateY(-2px);
@@ -118,6 +129,14 @@ pub(crate) const STYLE: &str = "
     transform: translate(10px, -10px);
     transition: transform 150ms ease-out;
     box-shadow: 0 1px 3px 0 alpha(black, 0.3);
+}
+
+.quota-account-toggle:checked {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+    box-shadow:
+        0 0 0 2px alpha(@accent_fg_color, 0.45),
+        0 1px 3px 0 alpha(black, 0.3);
 }
 
 /* The badge lives in the slot, outside the card surface, so it repeats the card's hover
