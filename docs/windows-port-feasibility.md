@@ -135,3 +135,85 @@ The CI-probe triage (compile-failure inventory from the windows-latest UCRT64 an
 **Remaining unknowns.**
 - UNVERIFIED: the concrete GTK runtime file set a Windows installer must carry (DLLs, loaders, schemas, icons). Resolved when the packaging decision is made, from a working MSYS2 or gvsbuild install tree on the VM.
 - UNVERIFIED: installer-driven per-user scheduled-task registration without elevation. Resolved by the packaging VM procedure.
+
+## Risk register
+
+| Risk | Likelihood | Impact | Mitigation | Port phase |
+|---|---|---|---|---|
+| R1 zbus p2p transport semantics: no name-ownership arbitration, SignalEmitter is connection-specific, multi-client fan-out and lagging-client eviction over AF_UNIX all unproven with the real zvariant types | Medium | High: the daemon/client contract depends on it | Port-time transport spike (gate 3): two simultaneous clients, GetStatus, ProviderChanged fan-out, lagging-client eviction, EOF/reconnect; ordered bounded queues per connection, lagging client disconnected, reconnect plus full reload as recovery; fall back from A1 (AF_UNIX) to A2 (named-pipe Socket adapter) if AF_UNIX misbehaves | PoC wave 2 |
+| R2 Stored credential blobs exceed the 2560-byte Credential Manager cap (CRED_MAX_CREDENTIAL_BLOB_SIZE); Codex-class access+refresh+ID JWT documents are the suspect | Medium | High: release blocker for the secrets backend until measured | Measure real blob sizes on Linux today (Measurements, procedure a); raw-blob credential form only, never the password form; if any blob exceeds the cap, fall back to a DPAPI-protected atomic file, never chunked credentials | Open now, decision before secrets backend lands |
+| R3 Chrome App-Bound encryption (v20) proves unavailable to unrelated native processes, blocking Chromium cookie decryption for the seventeen cookie-based providers | Medium | High for the affected providers; each still has other recorded browser sources | Port-time browser-auth spike ordered Firefox plaintext, then Chromium DPAPI, then App-Bound v20; if v20 is unreachable, affected providers authenticate through the other entries of browser::auth::Selection and the consequence is spelled out per provider | PoC wave 7 |
+| R4 Pixel parity ceiling: DirectWrite versus FreeType glyph rasterization, integer-only Win32 monitor scale (125 to 175 percent DPI cannot map to a fractional GDK scale), and MSYS2's patched font rendering (hinting re-enabled, dcomp disabled) make exact cross-OS pixel equality impossible | High that some delta exists | Low to Medium: geometry and content still match | Target logical-geometry parity, not pixel equality; bundle and privately register a pinned Cantarell on both platforms to close the font-absence gap; keep semantic libadwaita colors unpinned; region-based screenshot review at 100/125/150/200 percent on the user's VM | Continuous, visual QA per wave |
+| R5 Task Scheduler restart floor of 1 minute with at most 255 attempts versus systemd Restart=on-failure with RestartSec=5s: no parity without extra machinery | High: the floor is documented Task Scheduler behavior | Medium: slower crash recovery, no data risk | Decision framing in Measurements, procedure b: accept the floor or build a per-user supervisor; confirmed on the clean VM with the scheduled-task procedure | PoC wave 5 |
+| R6 MSVC/gvsbuild toolchain: GTK currency of the gvsbuild bundle and the BoringSSL plus bindgen build under MSVC are both unverified | Medium | High if MSYS2 were to fail, since gvsbuild is the fallback | MSYS2/UCRT64 is the primary bet (gtk4 4.22.4 and libadwaita 1.9.3 shipped today); the CI probe's MSVC job records the pinned gvsbuild bundle's gtk4 and libadwaita-1 modversions and the distinct-error inventory, and the toolchain is chosen on measurements, not argument | CI probe, decided before PoC wave 1 |
+
+## Go/no-go gates
+
+| Gate | Status | Evidence |
+|---|---|---|
+| 1. GTK runtime, MSYS2/UCRT64 | GREEN on paper | MSYS2 ships mingw-w64-gtk4 4.22.4 (built with the win32 backend) and mingw-w64-libadwaita 1.9.3 today, meeting the workspace's GTK 4.22 / libadwaita 1.9 floor (draft §Independent parent verification, 2026-09-03, MSYS2 PKGBUILDs); the probe run confirms on-runner resolution |
+| 2. GTK runtime, gvsbuild/MSVC | PENDING | The probe decides: the pinned gvsbuild 2026.8.0 bundle's gtk4 and libadwaita-1 modversions are recorded in the probe job log and fold into this document in a later commit |
+| 3. zbus p2p transport spike | PENDING | Port-time PoC gate; A1 (AF_UNIX via uds_windows, built into zbus 5.19.0) tried first, A2 (named-pipe adapter through the public Socket trait) as fallback; spike scope in the IPC transport section |
+| 4. Chromium decryptability (DPAPI / App-Bound v20) | PENDING | Port-time spike (PoC wave 7), ordered Firefox plaintext, then Chromium DPAPI, then App-Bound v20; seventeen cookie-based providers ride on the result |
+| 5. Credential blob sizes vs the 2560-byte cap | PENDING | Open measurement, executable today on Linux; exact procedure in Measurements, procedure (a) |
+
+One hard constraint stands outside the gates: the minimum supported Windows version is Windows 10 1803, the floor for AF_UNIX transport; the recommended baseline is Windows 10 22H2 or Windows 11.
+
+## Measurements
+
+### (a) Credential blob sizes vs the 2560-byte cap
+
+Executable today on Linux. Tidemark files API keys under the schema `io.github.zbndev.Tidemark.ProviderKey` and Tidemark-owned OAuth tokens under `io.github.zbndev.Tidemark.ProviderToken` (crates/tidemark-types/src/lib.rs:47 and crates/tidemark-types/src/lib.rs:49, re-exported by crates/tidemark-core/src/secrets.rs:44 and crates/tidemark-core/src/secrets.rs:47; the `xdg:schema` attribute name is set at crates/tidemark-core/src/secrets.rs:49).
+
+1. Sign into the Tidemark-owned flows for claude, codex, and antigravity, and let at least one token refresh happen so the stored document is the refreshed form.
+2. List the stored token entries:
+
+   ```
+   secret-tool search xdg:schema io.github.zbndev.Tidemark.ProviderToken
+   ```
+
+3. List the stored API-key entries:
+
+   ```
+   secret-tool search xdg:schema io.github.zbndev.Tidemark.ProviderKey
+   ```
+
+4. For each entry, print the raw secret and byte-count it (substitute the provider and account attributes shown by the search output):
+
+   ```
+   secret-tool lookup xdg:schema io.github.zbndev.Tidemark.ProviderToken provider <provider> account <account> | wc -c
+   ```
+
+5. Compare each byte count against 2560. If every blob fits, gate 5 goes green and the Credential Manager backend needs no fallback. If any blob exceeds 2560, the secrets verdict's fallback applies: a DPAPI-protected atomic file, never chunked credentials.
+
+### (b) Task-Scheduler restart floor
+
+Not measurable without Windows; this is the decision framing, and the user's VM procedure confirms the floor behavior on a clean machine.
+
+1. Note the documented limits: Task Scheduler's minimum restart interval is 1 minute and its restart attempt cap is 255. The systemd unit being replaced restarts on failure after 5 seconds with no attempt cap (data/tidemarkd.service).
+2. Frame the decision as a tradeoff. Accepting the floor means a crashed daemon stays down for up to a minute and the 255-attempt cap is effectively unreachable in normal use. Building a per-user supervisor restores systemd-like restart latency but adds a second supervised process, which is exactly the machinery the per-user Scheduled Task plus named-mutex design exists to avoid.
+3. On the clean Windows VM, register the per-user task, kill tidemarkd.exe, and observe the actual restart latency and attempt accounting.
+4. Record the outcome in this document: floor accepted, or supervisor scoped.
+
+### (c) Hosted-runner GTK init
+
+Resolvable only during port PoC wave 1; windows-latest has no documented virtual-display contract, so CI stays honestly headless until this is observed.
+
+1. On the windows-latest runner, build the UI crate and run a preflight binary that calls `adw::init()` under `GDK_BACKEND=win32`.
+2. Observe whether initialization succeeds on the runner's window station, whether a window maps, and whether libadwaita styles apply.
+3. If init fails on the hosted runner, CI guarantees compile plus headless tests only, and visual acceptance stays on the user's clean VM per the parity protocol.
+
+## Port waves
+
+The order follows the draft's PoC ranking: sort by risk retired per effort, so the existential question (does the unchanged GTK UI even launch) goes first and the deepest Unix-specific machinery (agy) goes last. Effort classes are S, M, L, judged from the blast radius.
+
+| Wave | Scope | Effort | Blast radius | Linux-regression guard |
+|---|---|---|---|---|
+| 1 | Unchanged GTK UI builds and launches on Windows | S | crates/tidemark build configuration and one CI matrix entry; the UI crate may compile unchanged (ksni is pure D-Bus) | Linux CI steps byte-identical; shell/desktop checks stay Linux-only |
+| 2 | zbus p2p transport with the real zvariant types and ProviderChanged fan-out (decides A1 vs A2) | M | New crates/tidemarkd/src/transport.rs; `features = ["p2p"]` on zbus in both Cargo.tomls; client reconnect contract in crates/tidemark/src/bus.rs | `Connection::session()` and `Builder::session()` stay the Linux implementation; p2p is additive in zbus; the Daemon1 interface and a{sv} shapes are shared |
+| 3 | tidemark-core compiles for the Windows target via target-gated dependencies only | M | crates/tidemark-core/Cargo.toml target-specific dependency arms | No silent provider stubs; Linux dependency set untouched |
+| 4 | One generic keyed provider end to end across all seams (secrets, paths, storage) | M | Credential Manager backend behind secrets::Secrets; AppData arm in paths.rs | oo7 backend cfg-isolated and untouched; XDG arms byte-identical; FakeSecrets tests unchanged |
+| 5 | Startup and tray lifecycle together | M | Windows variant behind startup::Startup; tray-icon backend swap in crates/tidemark/src/tray.rs; daemon signal handling | systemd unit, data/restart-user-daemon, and the ksni path stay exactly as they are; Windows backend never compiled into the Linux build |
+| 6 | oauth_file against real vendor CLI files | M | Platform split of the low-level primitives in crates/tidemark-core/src/oauth_file.rs only | CAS, JSON field-merge, and canonical-path refusal stay shared with their tests; the Unix primitive implementation is the current code moved, byte-identical behavior |
+| 7 | Browser auth: Firefox plaintext, then Chromium DPAPI, then App-Bound v20 | L | Platform submodules under crates/tidemark-core/src/browser/ (chromium.rs, safe_storage.rs, mod.rs discovery); seventeen keyed providers stay cfg-free | Linux PBKDF2/os_crypt code and snapshot-read discipline unchanged; the catalog registration stays the single registration point |
+| 8 | agy local-server fallback (ConPTY, Job Objects; first verify agy.exe has a Windows persistent-server mode) | L | Platform split inside crates/tidemark-core/src/providers/antigravity/agy.rs | The Unix implementation stays the Linux path behind the provider's local-server seam; nothing above it changes; if no Windows agy exists, the fallback reports unavailable rather than crashing |
