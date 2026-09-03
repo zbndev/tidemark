@@ -10,7 +10,9 @@ on:
       - '**/*.md'
       - 'docs/**'
   push:
-    branches: [main]
+    # The experimental branch also pushes, to feed the windows-ucrt64-probe job
+    # below; everything else in this workflow still ignores docs-only pushes.
+    branches: [main, feat/experimental-windows-native]
     paths-ignore:
       - '*.md'
       - '**/*.md'
@@ -81,3 +83,100 @@ jobs:
         run: |
           shellcheck scripts/*.sh data/restart-user-daemon \
             data/packaging/deb/postinst data/packaging/rpm/post-install.sh
+
+  # Windows-GNU compile-gap probe (experimental branch only). The point is to MEASURE
+  # how far the workspace gets on MSYS2 UCRT64, not to fix anything: the error list
+  # in the uploaded log IS the deliverable. The only hard assertion is tidemark-types
+  # (pure serde/zvariant logic); every other step may fail loudly, but nothing may
+  # hang the runner or hide its conclusion.
+  windows-ucrt64-probe:
+    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    concurrency:
+      group: windows-ucrt64-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      # RUSTUP_TOOLCHAIN outranks both `rustup default` and the repo's
+      # rust-toolchain.toml (which pins only channel=stable, i.e. the runner's MSVC
+      # host); without it the toolchain file would silently flip every cargo
+      # invocation back to MSVC. The GNU-host toolchain is installed in a step below.
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+      # Plain text so the artifact greps cleanly for error[E...] lines; the
+      # workflow-wide `always` would bake ANSI codes into the log.
+      CARGO_TERM_COLOR: never
+      # gtk-rs MinGW recipe: the UCRT64 pkgconfig trees backing the system
+      # GTK/libadwaita/SQLite that the workspace links.
+      PKG_CONFIG_PATH: /ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: msys2/setup-msys2@v2.27.0
+        with:
+          msystem: UCRT64
+          update: true
+          # path-type: inherit keeps the runner's PATH (notably ~/.cargo/bin) inside
+          # the msys2 shell; the default "minimal" rebuilds PATH from /etc/profile
+          # alone and drops it, which would kill every cargo step. /etc/profile still
+          # puts /ucrt64/bin first, so pkg-config/gcc/cmake/clang keep winning.
+          path-type: inherit
+          # sqlite3: rusqlite links the SYSTEM SQLite (the bundled feature is NOT
+          # enabled). go: provisional, boring-sys2's cmake may require it. clang,
+          # cmake and gcc/g++ build BoringSSL behind wreq (bindgen at build time).
+          install: >-
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-go
+
+      # Before any cargo step: prove the MSYS2 environment resolved. The
+      # gtk4/libadwaita-1/sqlite3 modversions MUST appear in the log (this step fails
+      # if any is missing); `go version` is advisory because go is provisional.
+      - name: Confirm the MSYS2 environment
+        shell: msys2 {0}
+        run: |
+          go version || echo "go not usable (acceptable unless boring-sys2 needs it)"
+          pkg-config --modversion gtk4 libadwaita-1 sqlite3
+          command -v gcc g++ clang cmake cargo rustup
+
+      # A full GNU-host toolchain, not just target std: build scripts and proc
+      # macros link for the HOST too, and the MSVC host's link.exe is shadowed by
+      # coreutils' link.exe under the msys2 PATH. Host==target==GNU, so the verbatim
+      # cargo commands build GNU throughout and link with gcc from /ucrt64.
+      - name: Default a GNU-host Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ucrt64-probe
+
+      # The probe. Compile errors are expected output, not job failure: they must
+      # reach the log verbatim. The msys2 wrapper already runs bash -o pipefail, so
+      # this step's own conclusion stays honest while the job carries on.
+      - name: Probe cargo check --workspace (failures expected)
+        id: workspace-check
+        continue-on-error: true
+        shell: msys2 {0}
+        run: cargo check --workspace 2>&1 | tee probe-ucrt64.log
+
+      # The one hard assertion: pure serde/zvariant logic that MUST pass on
+      # Windows-GNU. No continue-on-error here on purpose; a failure is a seam
+      # finding to document, never one to suppress. steps.types-test.outcome is
+      # individually checkable.
+      - name: Tests tidemark-types (must pass)
+        id: types-test
+        shell: msys2 {0}
+        run: cargo test -p tidemark-types
+
+      - name: Upload the probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-ucrt64-log
+          path: probe-ucrt64.log
