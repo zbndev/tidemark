@@ -180,3 +180,106 @@ jobs:
         with:
           name: probe-ucrt64-log
           path: probe-ucrt64.log
+
+  # Windows-MSVC compile-gap probe (experimental branch only): the same measurement
+  # as windows-ucrt64-probe, but against the runner's default MSVC host toolchain
+  # and a pinned gvsbuild-built GTK runtime, so the two runs bracket the Windows
+  # port gap (GNU-vs-MSVC, MSYS2-vs-gvsbuild). Like its sibling, this job MEASURES
+  # compile failures; the error list in the uploaded log is the deliverable, and
+  # nothing here may fix, hide, or hang on them.
+  windows-msvc-probe:
+    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    concurrency:
+      group: windows-msvc-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      # Pinned literals resolved once from wingtk/gvsbuild releases (tag 2026.8.0):
+      # the job must never re-resolve "latest" at run time and silently drift to an
+      # unmeasured runtime. The bundle zip is flat (bin/, lib/pkgconfig/,
+      # share/pkgconfig/ at its root), per its own file listing.
+      GVBUILD_RELEASE_TAG: '2026.8.0'
+      GVSBUILD_URL: 'https://github.com/wingtk/gvsbuild/releases/download/2026.8.0/GTK4_Gvsbuild_2026.8.0_x64.zip'
+      # Plain text so the artifact greps cleanly for error[E...] lines; overrides
+      # the workflow-wide `always` which would bake ANSI codes into the log.
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v5
+
+      # --fail makes a 404 or HTML error page exit non-zero; curl.exe is spelled out
+      # so no shell alias can quietly swap in a different downloader.
+      - name: Download the pinned gvsbuild GTK4 runtime
+        shell: pwsh
+        run: curl.exe --fail -L -o gvsbuild.zip "$env:GVSBUILD_URL"
+
+      # Validate BEFORE extracting: 7z refuses to list a corrupt or HTML payload
+      # and exits non-zero, so a bad download fails here and not somewhere deep
+      # inside a build script. The listing is kept as a small artifact.
+      - name: Validate the archive
+        shell: bash
+        run: 7z l gvsbuild.zip > gvsbuild-listing.txt
+
+      - name: Extract the archive
+        shell: bash
+        run: 7z x -y -ogvsbuild gvsbuild.zip
+
+      # Wire the runtime so every LATER step inherits it. GITHUB_PATH/GITHUB_ENV
+      # are the only step-to-step mechanism; a step-local $env:PATH mutation dies
+      # with its step. The flat bundle layout puts pkg-config.exe (pkgconf-based)
+      # and the DLLs in gvsbuild\bin and the .pc files in gvsbuild\lib\pkgconfig
+      # (gtk4.pc, libadwaita-1.pc) plus gvsbuild\share\pkgconfig (icon theme .pc).
+      - name: Wire the gvsbuild runtime into the environment
+        shell: pwsh
+        run: |
+          Add-Content $env:GITHUB_PATH "${{ github.workspace }}\gvsbuild\bin"
+          Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=${{ github.workspace }}\gvsbuild\lib\pkgconfig;${{ github.workspace }}\gvsbuild\share\pkgconfig"
+
+      # First-class diagnostics, captured into probe-msvc.log so the artifact
+      # carries its own evidence header (tag, asset URL, modversions, toolchain).
+      # `: >` initializes the log here; every later capture appends. The
+      # gtk4/libadwaita-1 modversions MUST print or this step fails: that is
+      # wiring, not measurement. pipefail is set explicitly so pkg-config's
+      # exit code survives its tee pipe; bash's -e alone would let tee mask it.
+      # clang/cmake absence is a measured finding (bindgen needs libclang) and
+      # only logs. rustup show records that the host really is MSVC (no
+      # RUSTUP_TOOLCHAIN override in this job, on purpose).
+      - name: Report the toolchain and GTK runtime
+        shell: bash
+        run: |
+          set -o pipefail
+          : > probe-msvc.log
+          echo "gvsbuild release tag: $GVBUILD_RELEASE_TAG" | tee -a probe-msvc.log
+          echo "gvsbuild asset: $GVSBUILD_URL" | tee -a probe-msvc.log
+          pkg-config --modversion gtk4 libadwaita-1 | tee -a probe-msvc.log
+          cmake --version | tee -a probe-msvc.log || echo "cmake absent" | tee -a probe-msvc.log
+          clang --version | tee -a probe-msvc.log || echo "clang absent" | tee -a probe-msvc.log
+          rustup show | tee -a probe-msvc.log
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msvc-probe
+
+      # The probe. Compile errors are expected output, not job failure: they must
+      # reach the log verbatim. GitHub's bash shell runs with -o pipefail (made
+      # explicit below), so cargo's non-zero exit becomes the step's conclusion;
+      # a pwsh pipeline would have swallowed it behind tee's success. tee -a
+      # appends to the header the diagnostics step wrote: plain tee would
+      # truncate it. The job carries on either way; steps.workspace-check.outcome
+      # records the truth.
+      - name: Probe cargo check --workspace (failures expected)
+        id: workspace-check
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --workspace 2>&1 | tee -a probe-msvc.log
+
+      - name: Upload the probe log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-msvc-log
+          path: |
+            probe-msvc.log
+            gvsbuild-listing.txt
