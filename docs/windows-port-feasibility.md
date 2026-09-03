@@ -269,3 +269,48 @@ The order follows the draft's PoC ranking: sort by risk retired per effort, so t
 | 6 | oauth_file against real vendor CLI files | M | Platform split of the low-level primitives in crates/tidemark-core/src/oauth_file.rs only | CAS, JSON field-merge, and canonical-path refusal stay shared with their tests; the Unix primitive implementation is the current code moved, byte-identical behavior |
 | 7 | Browser auth: Firefox plaintext, then Chromium DPAPI, then App-Bound v20 | L | Platform submodules under crates/tidemark-core/src/browser/ (chromium.rs, safe_storage.rs, mod.rs discovery); seventeen keyed providers stay cfg-free | Linux PBKDF2/os_crypt code and snapshot-read discipline unchanged; the catalog registration stays the single registration point |
 | 8 | agy local-server fallback (ConPTY, Job Objects; first verify agy.exe has a Windows persistent-server mode) | L | Platform split inside crates/tidemark-core/src/providers/antigravity/agy.rs | The Unix implementation stays the Linux path behind the provider's local-server seam; nothing above it changes; if no Windows agy exists, the fallback reports unavailable rather than crashing |
+
+## Provider rules (single workflow)
+
+The single-workflow guarantee is a property of how providers are written, not of the port. These rules keep it structural: a provider that satisfies all of them works on Linux and Windows with zero extra work, because every platform difference lives in shared infrastructure the seam sections already own.
+
+1. Register the provider in exactly one place. A single-request key-authenticated provider is a `Spec` with one line in the `CATALOG` table (crates/tidemark-core/src/providers/keyed/mod.rs:551); a multi-request provider or one whose build refuses an option value is a `HandSpec` in the `HAND_WRITTEN` table (crates/tidemarkd/src/registry.rs:142). No second registry, no Windows-only list.
+2. Write no `cfg(target_os = "windows")`, or any target cfg, anywhere under `crates/tidemark-core/src/providers/**`. Platform differences live in the shared seams (secrets, paths, browser, transport), never in provider code. If a provider seems to need a cfg, the seam it needs is missing; add the seam, not the cfg.
+3. Discover credentials through platform-neutral primitives only: the paths layer (`data_dir` / `config_dir`, crates/tidemark-core/src/paths.rs:29 and crates/tidemark-core/src/paths.rs:39) plus environment overrides. A provider names a logical location, such as "the vendor CLI's credentials file", and never an OS path literal like `~/.config` or `%APPDATA%`.
+4. Build cookie and browser-session providers on the browser factory only: `browser::stores()` at crates/tidemark-core/src/browser/mod.rs:445 and `browser::stores_in()` at crates/tidemark-core/src/browser/mod.rs:454. The factory owns per-browser profile discovery today and will own the Windows equivalents (AppData profile roots, DPAPI unsealing) inside the browser seam, so the seventeen existing cookie providers stay cfg-free; the list stays in the Browser seam section.
+5. Declare the Windows story of a vendor-CLI provider at authoring time. For claude, codex, and antigravity/agy the file must state, in a comment beside the discovery code, where the vendor's CLI writes credentials on Windows, or carry the labeled unknown "Windows discovery TODO". A silent Linux-only assumption is a defect; a labeled unknown with a resolution path is not.
+6. Keep tests platform-neutral. `parse(body, captured_at)` is a pure function and its tests run everywhere; no `#[cfg(unix)]` test gates under `providers/**`. A behavior that can only be tested on one OS belongs in a seam module's own tests, not in a provider test.
+
+## Pixel-parity protocol
+
+The parity target is logical-geometry equality, verified by region-based screenshot review: same widget tree, same sizes in layout units, same semantic colors, compared region by region. It is explicitly not literal pixel equality, and this protocol never promises that. Two findings from the research make pixel equality impossible by construction: DirectWrite and FreeType rasterize the same glyphs differently at the pixel level, and GTK 4.22 on Windows snaps to the integer Win32 monitor scale `max(1, dpi/96)`, so a 125% or 175% display maps to a different GDK scale than Linux fractional scaling would (the parity classification table in the ultrabrain advisory, .omo/drafts/windows-port-feasibility.md). What can be equal, and what this protocol checks, is the geometry and content the workspace controls.
+
+### Matrix
+
+Every comparison runs the full matrix: display scales 100%, 125%, 150%, 200%, in both light and dark themes, eight conditions per region. Regions are the window's functional areas (the provider list, a provider detail pane, the chart and bar widgets, the settings dialog), not the whole window as one image, so a font-rendering difference in one label does not mask a layout regression elsewhere.
+
+### Linux reference capture (runnable today)
+
+On the maintainer's Linux machine, against the current build:
+
+1. Build and run the app as usual (`cargo run -p tidemark` under the normal session).
+2. Set the display scale in the desktop's display settings to 100%, then 125%, 150%, and 200% in turn, relaunching the app after each change so GTK picks up the new scale.
+3. At each scale, capture each region twice: once in the light theme and once in the dark theme (toggle dark mode in the desktop appearance settings or the app's own preference). On GNOME, `gnome-screenshot --area` or the interactive screenshot UI works; any tool that crops to a region is fine.
+4. Sign into at least one keyed provider and one cookie provider first, so the reference regions show populated data rather than empty states.
+5. Store the captures outside the repository, named by scale, theme, and region (for example `linux-125-dark-provider-detail.png`). Screenshots are working artifacts, not deliverables; none are committed.
+
+These references are the baseline. Re-capture them whenever the widget tree or the CSS changes, since a stale reference produces false findings.
+
+### Windows capture procedure (after port PoC wave 1)
+
+UNVERIFIED until port PoC wave 1 yields a launchable tidemark.exe; resolution path is the wave 1 gate in the port-waves table. On the user's Windows VM (Q2: the user runs this personally):
+
+1. Launch the app under the Win32 backend: set `GDK_BACKEND=win32` in the session environment before starting tidemark.exe.
+2. Set the display scale in Windows Settings (System, Display, Scale) to 100%, 125%, 150%, and 200% in turn, relaunching the app after each change.
+3. At each scale, capture the same regions in both light and dark themes (Windows Settings, Personalization, Colors), using the Snipping Tool's region capture.
+4. Compare each Windows capture against its Linux reference side by side, region by region. A finding is a difference in logical geometry: a missing widget, a different layout-unit size, a wrong semantic color, a clipped or overlapping element. A difference confined to glyph rasterization or subpixel rendering is expected and is not a finding.
+5. Submit findings as entries in this document, each labeled UNVERIFIED until reproduced, with the scale, theme, region, and the resolution path: the seam section that owns the geometry (style and CSS, the bar/chart widgets, or the GTK-runtime risk row). Rasterization-only observations go in the same place labeled as expected differences, so later runs do not re-litigate them.
+
+### Font strategy
+
+Cantarell's absence on Windows is closable by design: bundle a pinned Cantarell build with the app and register it as a private font on both platforms, using the same registration mechanism on Linux and Windows so the comparison is fair and neither side falls back to a system font the other lacks. This is optional but recommended, since it removes the largest avoidable source of geometry drift (font metrics feed layout). What bundling does not remove is rasterization difference; that stays in the expected-differences class above. CJK parity is an explicit non-goal: bundling a Noto CJK set is a large binary cost and is excluded from this protocol unless later chosen as its own work item.
