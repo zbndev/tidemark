@@ -6,7 +6,59 @@ Each section below covers one seam: the Linux code as it stands today, the Windo
 
 The CI-probe triage (compile-failure inventory from the windows-latest UCRT64 and MSVC jobs) is inserted where marked, and the risk register, go/no-go gates, and recommended port waves follow in later commits. This file is the seam map those sections build on.
 
-<!-- measured-gap section lands here (todo 3) -->
+## Measured gap (CI probes)
+
+The CI probes ran as two `windows-latest` jobs on GitHub run 33796395826 of `github.com/zbndev/tidemark` at head `c1a446b`. Each job executed `cargo check --workspace` under a different host: UCRT64/GNU (MSYS2) and MSVC/gvsbuild (GTK4_Gvsbuild_2026.8.0_x64.zip, gvsbuild 2026.8.0, gtk4 4.22.4, libadwaita-1 1.9.2, cmake 4.4.2, clang 20.1.8). In both toolchains the build died in the dependency graph before `rustc` reached any workspace crate. The inventoried workspace seams (daemon signal handling, `update.rs` exec, `oauth_file` libc flags, browser homes, `agy` pty, engine permissions) were therefore not exercised and remain code-reading-derived expectations, not yet measured. `tidemark-types` compiled and its tests passed on Windows-GNU in the same job's hard-gate step (not shown in the `cargo check --workspace` logs below).
+
+### UCRT64 (GNU host)
+
+| error (verbatim, first line) | at | kind | seam id | in inventory? |
+|---|---|---|---|---|
+| error[E0433]: cannot find `unix` in `os` | C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ashpd-0.13.13\src\desktop\secret.rs:23:20 | rustc-E | other | N |
+| error[E0432]: unresolved import `std::os::fd` | C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ashpd-0.13.13\src\desktop\secret.rs:23:10 | rustc-E | other | N |
+| error[E0433]: cannot find `unix` in `os` | C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ashpd-0.13.13\src\file_path.rs:3:9 | rustc-E | other | N |
+| error[E0432]: unresolved import `zbus::zvariant::Fd` | C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ashpd-0.13.13\src\desktop\secret.rs:28:5 | rustc-E | other | N |
+| error: failed to run custom build command for `boring-sys2 v4.15.15` | probe-ucrt64.log:681 | build-script | other | N |
+| thread 'main' (3820) panicked at C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\boring-sys2-4.15.15\build\main.rs:791:39: | C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\boring-sys2-4.15.15\build\main.rs:791:39 | panic | other | N |
+| D:/a/_temp/msys64/ucrt64/include\time.h:158:30: error: expected ';' after top level declarator | D:/a/_temp/msys64/ucrt64/include/time.h:158:30 | clang-diagnostic | other | N |
+
+Counting check: UCRT64 has 4 `rustc-E` rows; `grep -Ec '^[ ]*error\[[A-Z0-9]+\]' probe-ucrt64.log` returned 4.
+
+Rows 1-4 (`ashpd`): these are Unix-only API usages in `ashpd`, which is pulled in by `oo7` (the Secret Service backend) declared at `crates/tidemark-core/Cargo.toml:25`. `ashpd` must not be compiled on Windows; the existing `secrets::Secrets` trait is the seam that lets us cfg-isolate `oo7`/`ashpd` and add a Windows Credential Manager backend.
+
+Row 5 (`boring-sys2` build-script failure): `boring-sys2` is pulled in by `wreq` declared at `crates/tidemark-core/Cargo.toml:49` (via `tokio-boring2`/`boring2`). The cargo-level build-script failure shows that the BoringSSL build is not free on Windows-GNU.
+
+Row 6 (`boring-sys2` panic): the same dependency; the panic records that bindgen is the failing step (`Unable to generate bindings: ClangDiagnostic(...)`).
+
+Row 7 (`boring-sys2` clang-diagnostic): the same dependency; the first header error is repeated for `time.h:158-160` and `stdlib.h:241,242,244,248,559,561,562` (10 ClangDiagnostic lines total). This means wreq's BoringSSL build needs either a corrected bindgen target/header environment or a Windows-specific TLS backend decision.
+
+### MSVC (gvsbuild host)
+
+| error (verbatim, first line) | at | kind | seam id | in inventory? |
+|---|---|---|---|---|
+| error[E0433]: cannot find `unix` in `os` | C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ashpd-0.13.13\src\desktop\secret.rs:23:20 | rustc-E | other | N |
+| error[E0432]: unresolved import `std::os::fd` | C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ashpd-0.13.13\src\desktop\secret.rs:23:10 | rustc-E | other | N |
+| error[E0433]: cannot find `unix` in `os` | C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ashpd-0.13.13\src\file_path.rs:3:9 | rustc-E | other | N |
+| error[E0432]: unresolved import `zbus::zvariant::Fd` | C:\Users\runneradmin\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ashpd-0.13.13\src\desktop\secret.rs:28:5 | rustc-E | other | N |
+
+Counting check: MSVC has 4 `rustc-E` rows; `grep -Ec '^[ ]*error\[[A-Z0-9]+\]' probe-msvc.log` returned 4.
+
+Rows 1-4 (`ashpd`): same new finding as UCRT64. `ashpd` is pulled in by `oo7` at `crates/tidemark-core/Cargo.toml:25` and is Unix-only. Because `ashpd` failed first, the MSVC job aborted before finishing `boring-sys2`, `gtk4-sys`, `libadwaita-sys`, or any workspace crate. The log does show `Checking boring-sys2 v4.15.15` (probe-msvc.log:30) before the ashpd failure, but no `boring-sys2`-specific diagnostic was observed.
+
+### Dependency outcomes
+
+| dependency | UCRT64 | MSVC |
+|---|---|---|
+| zbus (incl. uds_windows) | compiled | not reached |
+| zvariant | compiled | not reached |
+| gtk4-sys | compiled | not reached |
+| libadwaita-sys | compiled | not reached |
+| wreq / boring-sys2 (cmake+bindgen+go) | failed: error: failed to run custom build command for `boring-sys2 v4.15.15` | started (Checking), aborted by ashpd failure; no boring-sys2 error observed |
+| rusqlite + libsqlite3-sys (system SQLite) | libsqlite3-sys compiled; rusqlite wrapper not reached (Downloaded only) | not reached |
+| fs4 | not reached | not reached |
+| oo7 | not reached | not reached |
+
+UCRT64: `libsqlite3-sys` compiled without a pkg-config error, so the system SQLite link succeeded on that runner. MSVC: the gvsbuild bundle listing (`rerun-artifacts/probe-msvc-log/gvsbuild-listing.txt`) contains no `sqlite3.pc`; `rusqlite` was not reached and will lack a system sqlite3 when it is.
 
 ### IPC transport
 
