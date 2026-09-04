@@ -13,6 +13,7 @@
 mod engine;
 mod keyring;
 mod notify;
+mod peer;
 mod registry;
 mod scheduler;
 mod service;
@@ -29,11 +30,14 @@ use tidemark_core::paths;
 use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::secrets::Secrets;
 use tidemark_core::storage::History;
-use tidemark_types::ids;
+use tidemark_types::{ProviderStatus, ids};
 use tokio::sync::{mpsc, watch};
+
+#[cfg(unix)]
 use zbus::object_server::SignalEmitter;
 
 use crate::engine::{Command, Engine, Publication};
+use crate::peer::{Announcement, PeerHub};
 use crate::service::{Daemon, Published, PublishedUpdate};
 
 /// Commands from D-Bus clients. Small: a burst of refreshes is a user hammering a button,
@@ -140,6 +144,81 @@ fn shutdown_signals(
     }))
 }
 
+/// Where finished announcements go: the session-bus emitter on Linux, byte-for-byte the
+/// old path, or the p2p peer hub on Windows, which fans out to every connected client.
+#[derive(Clone)]
+enum Announcer {
+    #[cfg(unix)]
+    Session(SignalEmitter<'static>),
+    #[cfg(windows)]
+    Peers(Arc<PeerHub>),
+}
+
+impl Announcer {
+    async fn provider_changed(&self, status: ProviderStatus) {
+        match self {
+            #[cfg(unix)]
+            Self::Session(emitter) => {
+                if let Err(error) = Daemon::provider_changed(emitter, status).await {
+                    tracing::warn!(%error, "could not announce a change");
+                }
+            }
+            #[cfg(windows)]
+            Self::Peers(hub) => {
+                hub.publish(Announcement::ProviderChanged(status)).await;
+            }
+        }
+    }
+
+    async fn provider_removed(&self, provider: String, account: String) {
+        match self {
+            #[cfg(unix)]
+            Self::Session(emitter) => {
+                if let Err(error) = Daemon::provider_removed(emitter, &provider, &account).await {
+                    tracing::warn!(%error, "could not announce a removal");
+                }
+            }
+            #[cfg(windows)]
+            Self::Peers(hub) => {
+                hub.publish(Announcement::ProviderRemoved { provider, account })
+                    .await;
+            }
+        }
+    }
+
+    async fn order_changed(&self, providers: Vec<String>) {
+        match self {
+            #[cfg(unix)]
+            Self::Session(emitter) => {
+                if let Err(error) = Daemon::order_changed(emitter, providers).await {
+                    tracing::warn!(%error, "could not announce a reorder");
+                }
+            }
+            #[cfg(windows)]
+            Self::Peers(hub) => {
+                hub.publish(Announcement::OrderChanged(providers)).await;
+            }
+        }
+    }
+
+    #[cfg(feature = "update-check")]
+    async fn update_changed(&self, version: &str) {
+        match self {
+            #[cfg(unix)]
+            Self::Session(emitter) => {
+                if let Err(error) = Daemon::update_changed(emitter, version).await {
+                    tracing::warn!(%error, "could not announce update availability");
+                }
+            }
+            #[cfg(windows)]
+            Self::Peers(hub) => {
+                hub.publish(Announcement::UpdateChanged(version.to_owned()))
+                    .await;
+            }
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -234,6 +313,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(not(feature = "update-check"))]
     let _release_check_changes = release_check_changes;
 
+    #[cfg(unix)]
     let connection = zbus::connection::Builder::session()?
         .name(ids::DAEMON_BUS_NAME)?
         .serve_at(
@@ -265,28 +345,51 @@ async fn run() -> Result<(), Box<dyn Error>> {
             other => Box::<dyn Error>::from(other),
         })?;
 
+    #[cfg(unix)]
+    let announcer = Announcer::Session(SignalEmitter::new(&connection, ids::OBJECT_PATH)?);
+
+    // Windows has no session bus to serve the interface on: the p2p endpoint is the
+    // service. The hub is the fan-out point for everything the daemon announces, and
+    // every accepted peer gets its own connection serving this same shared state.
+    #[cfg(windows)]
+    let (announcer, accept_task) = {
+        let hub = Arc::new(PeerHub::default());
+        let daemon = Daemon::new(
+            published.clone(),
+            published_update.clone(),
+            catalog,
+            configured,
+            commands.clone(),
+            Arc::clone(&secrets),
+        )
+        .with_preferences(
+            config_path.clone(),
+            history_path.clone(),
+            Arc::new(startup::System),
+            release_checks.clone(),
+            cfg!(feature = "update-check"),
+        )
+        .with_hub(Arc::clone(&hub));
+        let accept_task = peer::listen(daemon, Arc::clone(&hub)).await?;
+        (Announcer::Peers(hub), accept_task)
+    };
+
     // Publishing is one task so that the shared state is always written before the signal
     // that announces it: a client woken by `ProviderChanged` and calling `GetStatus`
     // straight away must never see the older value.
-    let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH)?;
     let publisher = tokio::spawn({
         let published = published.clone();
+        let announcer = announcer.clone();
         async move {
             while let Some(publication) = update_queue.recv().await {
                 match publication {
                     Publication::Changed(status) => {
                         published.upsert(status.clone()).await;
-                        if let Err(error) = Daemon::provider_changed(&emitter, status).await {
-                            tracing::warn!(%error, "could not announce a change");
-                        }
+                        announcer.provider_changed(status).await;
                     }
                     Publication::Removed { provider, account } => {
                         let _ = published.remove(&provider, &account).await;
-                        if let Err(error) =
-                            Daemon::provider_removed(&emitter, &provider, &account).await
-                        {
-                            tracing::warn!(%error, "could not announce a removal");
-                        }
+                        announcer.provider_removed(provider, account).await;
                     }
                     Publication::Reordered(accounts) => {
                         published.reorder(&accounts).await;
@@ -296,9 +399,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 providers.push(provider.clone());
                             }
                         }
-                        if let Err(error) = Daemon::order_changed(&emitter, providers).await {
-                            tracing::warn!(%error, "could not announce a reorder");
-                        }
+                        announcer.order_changed(providers).await;
                     }
                 }
             }
@@ -309,7 +410,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let release_checker = match update::Checker::production() {
         Ok(checker) => {
             let published_update = published_update.clone();
-            let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH)?;
+            let announcer = announcer.clone();
             Some(tokio::spawn(async move {
                 let mut delay = update::INITIAL_DELAY;
                 loop {
@@ -321,9 +422,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let result = checker.check().await;
                     match publish_result(&published_update, result).await {
                         Ok(Some(version)) => {
-                            if let Err(error) = Daemon::update_changed(&emitter, &version).await {
-                                tracing::warn!(%error, "could not announce update availability");
-                            }
+                            announcer.update_changed(&version).await;
                         }
                         Ok(None) => {}
                         Err(error) => tracing::info!(%error, "release check failed"),
@@ -342,9 +441,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     let signals = shutdown_signals(commands.clone())?;
 
-    // The daemon's own session-bus connection carries the notifications too: it is already
+    // The daemon's own connection carries the notifications on Linux: it is already
     // open, and org.freedesktop.Notifications is on the same bus as everything else here.
+    // Windows has no session bus, and the toast transport (todo 16) needs none.
+    #[cfg(unix)]
     let notifier = Arc::new(notify::Desktop::new(connection.clone()));
+    #[cfg(windows)]
+    let notifier = Arc::new(notify::Desktop::new());
     let mut engine = Engine::new(
         accounts,
         history,
@@ -368,6 +471,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         release_checker.abort();
     }
     signals.abort();
+    #[cfg(windows)]
+    accept_task.abort();
     Ok(())
 }
 

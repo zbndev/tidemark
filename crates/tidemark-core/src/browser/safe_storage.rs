@@ -126,6 +126,9 @@ mod windows_dpapi {
             .map_err(|_| unavailable("the DPAPI-unprotected Chromium key is not 32 bytes"))
     }
 
+    // A test-only QA hook: it exists so a fixture can produce DPAPI-shaped blobs, so it
+    // is compiled only for tests (the one caller is a `#[cfg(windows)] #[test]`).
+    #[cfg(test)]
     pub(crate) fn protect_for_test(input: &[u8]) -> Result<Vec<u8>, CookieError> {
         crypt(input, true)
     }

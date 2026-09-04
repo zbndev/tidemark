@@ -3191,6 +3191,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uds_windows",
  "zbus",
 ]
 
@@ -3576,6 +3577,7 @@ version = "1.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "serde_core",
  "wasm-bindgen",

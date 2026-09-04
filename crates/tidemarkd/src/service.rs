@@ -49,6 +49,7 @@ use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
 
 use crate::engine::{Command, Preference, stored_kind};
+use crate::peer::{Announcement, PeerHub};
 use crate::registry;
 use crate::startup::Startup;
 
@@ -195,8 +196,12 @@ struct PreferencesRuntime {
 }
 
 /// The object served at `/io/github/zbndev/Tidemark`.
+///
+/// Arc-shared so every p2p peer connection on Windows serves the *same* state — one
+/// login table, one mutation map — while the interface stays on the concrete [`Daemon`]
+/// value each connection gets (there is no `Arc<I>` blanket interface).
 #[derive(Debug)]
-pub struct Daemon {
+pub struct DaemonState {
     statuses: Published,
     update: PublishedUpdate,
     catalog: Vec<ProviderDefinition>,
@@ -207,11 +212,119 @@ pub struct Daemon {
     mutations: Mutex<HashMap<AccountKey, AccountMutation>>,
     preferences: Option<PreferencesRuntime>,
     preference_mutation: Mutex<()>,
+    /// The p2p fan-out, present only where the daemon serves peers directly (Windows).
+    /// `None` keeps the session-bus emitters exactly as they were.
+    hub: Option<Arc<PeerHub>>,
+}
+
+/// The D-Bus interface handle: cloneable, and shared by every p2p peer connection.
+///
+/// The interface itself is implemented on this concrete type — zbus needs a concrete
+/// `Interface`, and the `Arc` inside is what makes per-peer clones one service.
+#[derive(Debug, Clone)]
+pub struct Daemon(Arc<DaemonState>);
+
+impl std::ops::Deref for Daemon {
+    type Target = DaemonState;
+
+    fn deref(&self) -> &DaemonState {
+        &self.0
+    }
 }
 
 impl Daemon {
     /// Wires the interface to the published state, the poll loop and the keyring.
     pub fn new(
+        statuses: Published,
+        update: PublishedUpdate,
+        catalog: Vec<ProviderDefinition>,
+        configured: Vec<AccountKey>,
+        commands: mpsc::Sender<Command>,
+        secrets: Arc<dyn Secrets>,
+    ) -> Self {
+        Self(Arc::new(DaemonState::new(
+            statuses, update, catalog, configured, commands, secrets,
+        )))
+    }
+
+    /// Adds the paths and system integrations behind the application preferences API.
+    /// Builders run before the handle is cloned to any peer, while the `Arc` is unique.
+    pub fn with_preferences(
+        self,
+        config_path: PathBuf,
+        history_path: PathBuf,
+        startup: Arc<dyn Startup>,
+        release_checks: watch::Sender<bool>,
+        release_check_available: bool,
+    ) -> Self {
+        let mut this = self;
+        Arc::get_mut(&mut this.0)
+            .expect("the daemon is not shared while it is being built")
+            .preferences = Some(PreferencesRuntime {
+            config_path,
+            history_path,
+            startup,
+            release_checks,
+            release_check_available,
+        });
+        this
+    }
+
+    /// Routes announcements through the p2p fan-out instead of a session bus.
+    #[cfg(any(windows, test))]
+    pub fn with_hub(self, hub: Arc<PeerHub>) -> Self {
+        let mut this = self;
+        Arc::get_mut(&mut this.0)
+            .expect("the daemon is not shared while it is being built")
+            .hub = Some(hub);
+        this
+    }
+
+    async fn publish_preferences(
+        &self,
+        emitter: &SignalEmitter<'_>,
+        preferences: Preferences,
+    ) -> fdo::Result<()> {
+        match &self.0.hub {
+            // A p2p peer's own emitter only reaches that peer; the hub reaches all of
+            // them, including the caller.
+            Some(hub) => {
+                hub.publish(Announcement::PreferencesChanged(preferences))
+                    .await;
+            }
+            None => Self::preferences_changed(emitter, preferences).await?,
+        }
+        Ok(())
+    }
+
+    /// Announces the empty update after a disable, on the hub or the session bus.
+    async fn announce_update_removal(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
+        match &self.0.hub {
+            Some(hub) => {
+                hub.publish(Announcement::UpdateChanged(String::new()))
+                    .await;
+            }
+            None => Self::update_changed(emitter, "").await?,
+        }
+        Ok(())
+    }
+
+    /// Announces fresh storage facts, on the hub or the session bus.
+    async fn announce_data(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
+        let data = self.get_data_info().await?;
+        match &self.0.hub {
+            Some(hub) => {
+                hub.publish(Announcement::DataChanged(data)).await;
+            }
+            None => Self::data_changed(emitter, data).await?,
+        }
+        Ok(())
+    }
+}
+
+impl DaemonState {
+    /// Wires the state to the published values, the poll loop and the keyring.
+    fn new(
         statuses: Published,
         update: PublishedUpdate,
         catalog: Vec<ProviderDefinition>,
@@ -230,26 +343,8 @@ impl Daemon {
             mutations: Mutex::new(HashMap::new()),
             preferences: None,
             preference_mutation: Mutex::new(()),
+            hub: None,
         }
-    }
-
-    /// Adds the paths and system integrations behind the application preferences API.
-    pub fn with_preferences(
-        mut self,
-        config_path: PathBuf,
-        history_path: PathBuf,
-        startup: Arc<dyn Startup>,
-        release_checks: watch::Sender<bool>,
-        release_check_available: bool,
-    ) -> Self {
-        self.preferences = Some(PreferencesRuntime {
-            config_path,
-            history_path,
-            startup,
-            release_checks,
-            release_check_available,
-        });
-        self
     }
 
     fn preferences_runtime(&self) -> fdo::Result<&PreferencesRuntime> {
@@ -268,15 +363,6 @@ impl Daemon {
             .await
             .map_err(|_| fdo::Error::Failed("the poll loop dropped the request".into()))?
             .map_err(fdo::Error::Failed)
-    }
-
-    async fn publish_preferences(
-        &self,
-        emitter: &SignalEmitter<'_>,
-        preferences: Preferences,
-    ) -> fdo::Result<()> {
-        Self::preferences_changed(emitter, preferences).await?;
-        Ok(())
     }
 
     async fn change_startup_mode(&self, mode: &str) -> fdo::Result<Preferences> {
@@ -487,7 +573,7 @@ impl Daemon {
 /// rebuilt from that answer rather than guessed at, because the published copy is
 /// updated asynchronously.
 struct IdentityMigration<'a> {
-    daemon: &'a Daemon,
+    daemon: &'a DaemonState,
     provider: &'a str,
     /// The ids the guards cover, in the sorted order their locks were taken in.
     ids: Vec<String>,
@@ -1155,7 +1241,7 @@ impl Daemon {
         let release_forgotten = self.update.set_enabled(enabled).await;
         runtime.release_checks.send_replace(enabled);
         if release_forgotten {
-            Self::update_changed(&emitter, "").await?;
+            self.announce_update_removal(&emitter).await?;
         }
         self.publish_preferences(&emitter, preferences).await
     }
@@ -1276,7 +1362,7 @@ impl Daemon {
     ) -> fdo::Result<()> {
         self.config_request(|reply| Command::ClearHistory { reply })
             .await?;
-        Self::data_changed(&emitter, self.get_data_info().await?).await?;
+        self.announce_data(&emitter).await?;
         Ok(())
     }
 

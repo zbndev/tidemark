@@ -221,9 +221,14 @@ fn display_name(provider: &str) -> String {
 #[derive(Debug, thiserror::Error)]
 pub enum NotifyError {
     /// No desktop notification transport accepted the message.
+    // The Unix transports raise both of these; the Windows transport (todo 16) will
+    // raise neither, and the engine's recorder still returns `Unreachable` in tests on
+    // every platform — so the variants are constructed, just not on every target.
+    #[allow(dead_code)]
     #[error("no notification server took the message")]
     Unreachable,
     /// The transport took the call and did not answer within [`DELIVERY_TIMEOUT`].
+    #[allow(dead_code)]
     #[error("the notification server did not answer in time")]
     Timeout,
     /// This build has no usable desktop notification transport.
@@ -254,9 +259,19 @@ pub struct Desktop {
 
 impl Desktop {
     /// Wraps an existing session-bus connection. The daemon already has one.
+    #[cfg(unix)]
     pub fn new(connection: zbus::Connection) -> Self {
         Self {
             transport: transport::Transport::new(connection),
+            showing: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The Windows transport stands alone: toasts (todo 16) need no bus connection.
+    #[cfg(windows)]
+    pub fn new() -> Self {
+        Self {
+            transport: transport::Transport,
             showing: Mutex::new(HashMap::new()),
         }
     }
@@ -360,10 +375,6 @@ mod transport {
     pub struct Transport;
 
     impl Transport {
-        pub fn new(_connection: zbus::Connection) -> Self {
-            Self
-        }
-
         pub async fn send(
             &self,
             _title: &str,
