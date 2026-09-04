@@ -39,20 +39,14 @@ rusqlite = "0.40.2"
 # AF_UNIX on Windows: std has no sockets there, and this is the transport the locked
 # A1 decision (zbus p2p over AF_UNIX) is built on.
 uds_windows = "1.2.1"
-<<<<<<< HEAD
-# Toast notifications (todo 16): direct WinRT — CreateToastNotifierWithId(AUMID),
-# ToastNotification with Tag replacement — per the locked u1-contracts appendix item 2.
+# Windows crate, one locked release for the whole daemon. Features are the union of its
+# consumers: toast notifications (todo 16) - direct WinRT CreateToastNotifierWithId(AUMID),
+# ToastNotification with Tag replacement - and the lifecycle primitives (todo 14) - singleton
+# mutex, job object, Scheduled Task COM, HKCU Run.
 windows = { version = "0.62.2", features = [
     "Data_Xml_Dom",
     "Foundation",
     "UI_Notifications",
-    "Win32_Foundation",
-    "Win32_System_Com",
-    "Win32_System_Registry",
-=======
-# The lifecycle primitives (singleton mutex, job object, HKCU Run) ride the same
-# locked `windows` release the rest of the workspace pins.
-windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_JobObjects",
@@ -61,5 +55,4 @@ windows = { version = "0.62.2", features = [
     "Win32_System_TaskScheduler",
     "Win32_System_Threading",
     "Win32_System_Variant",
->>>>>>> 064b80f (feat(lifecycle): windows scheduled task, mutex and job objects)
 ] }
