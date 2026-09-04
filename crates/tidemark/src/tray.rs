@@ -30,16 +30,10 @@
 //! than by opening a menu and looking at it.
 
 use gtk::glib;
-use ksni::TrayMethods;
-use tidemark_types::{DANGER_AT, ProviderStatus, ids, present};
+use tidemark_types::{DANGER_AT, ProviderStatus, present};
 
 use crate::format;
 use crate::model;
-
-/// The icon the panel shows. It deliberately uses the same full-colour icon name as the
-/// application: `data/icons` supplies native small sizes so a panel never has to enlarge a
-/// tiny fallback pixmap, and the `PKGBUILD` installs them all.
-const ICON: &str = ids::APP_ID;
 
 /// What a menu row asks the interface to do.
 ///
@@ -190,29 +184,6 @@ impl Model {
         }
     }
 
-    /// A row that says something rather than doing something.
-    fn caption(label: &str) -> ksni::MenuItem<Self> {
-        ksni::menu::StandardItem {
-            label: mnemonics(label),
-            enabled: false,
-            ..Default::default()
-        }
-        .into()
-    }
-
-    /// A row that sends `command` and returns immediately, as ksni asks: this runs on the
-    /// tray's own thread, and everything it could actually do lives on the GTK one.
-    fn action(label: &str, icon: &str, enabled: bool, command: Command) -> ksni::MenuItem<Self> {
-        ksni::menu::StandardItem {
-            label: mnemonics(label),
-            icon_name: icon.to_owned(),
-            enabled,
-            activate: Box::new(move |this: &mut Self| this.send(command)),
-            ..Default::default()
-        }
-        .into()
-    }
-
     /// Hands a command to the interface. Never blocks and never panics: the channel is
     /// unbounded, and a closed one means the window is already going away.
     fn send(&self, command: Command) {
@@ -222,55 +193,45 @@ impl Model {
     }
 }
 
-impl ksni::Tray for Model {
-    fn id(&self) -> String {
-        ids::APP_ID.to_owned()
+/// The platform-neutral representation of the panel icon's menu.
+#[derive(Debug)]
+enum MenuItem {
+    Caption(String),
+    Action {
+        label: String,
+        icon: String,
+        enabled: bool,
+        command: Command,
+    },
+    Separator,
+}
+
+/// What a native tray backend needs from the shared model.
+///
+/// Todo 15 implements this contract with `tray-icon` on Windows. Keeping it free of native
+/// tray types lets the channel bridge and state updates remain common to both backends.
+trait Backend {
+    fn set_icon(&self) -> bool;
+    fn set_tooltip(&self) -> String;
+    fn set_menu(&self) -> Vec<MenuItem>;
+    fn handle_watcher_offline(&self) -> bool;
+}
+
+impl Backend for Model {
+    fn set_icon(&self) -> bool {
+        self.state.attention
     }
 
-    fn title(&self) -> String {
-        "Tidemark".to_owned()
-    }
-
-    fn icon_name(&self) -> String {
-        ICON.to_owned()
-    }
-
-    fn attention_icon_name(&self) -> String {
-        ICON.to_owned()
-    }
-
-    fn status(&self) -> ksni::Status {
-        if self.state.attention {
-            ksni::Status::NeedsAttention
-        } else {
-            ksni::Status::Active
-        }
-    }
-
-    /// A left click shows the window. That is the whole of what a tray icon is for here,
-    /// and the menu is the right button, which is where a panel puts it anyway.
-    fn activate(&mut self, _x: i32, _y: i32) {
-        self.send(Command::Present);
-    }
-
-    /// The one line a panel shows on hover: the account nearest its limit, which is the
-    /// first row for the same reason it is the first card.
-    fn tool_tip(&self) -> ksni::ToolTip {
-        let description = match self.placeholder() {
+    fn set_tooltip(&self) -> String {
+        match self.placeholder() {
             Some(reason) => reason.to_owned(),
             None => self.state.entries[0].line(),
-        };
-        ksni::ToolTip {
-            icon_name: ICON.to_owned(),
-            title: "Tidemark".to_owned(),
-            description,
-            ..Default::default()
         }
     }
 
-    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+    fn set_menu(&self) -> Vec<MenuItem> {
         let mut items = match self.placeholder() {
-            Some(reason) => vec![Self::caption(reason)],
+            Some(reason) => vec![MenuItem::Caption(reason.to_owned())],
             None => self
                 .state
                 .entries
@@ -278,55 +239,212 @@ impl ksni::Tray for Model {
                 // An account row shows the window rather than being dead text: the panel
                 // is where the user noticed the number, and the window is where they can
                 // do anything about it.
-                .map(|entry| Self::action(&entry.line(), "", true, Command::Present))
+                .map(|entry| MenuItem::Action {
+                    label: entry.line(),
+                    icon: String::new(),
+                    enabled: true,
+                    command: Command::Present,
+                })
                 .collect(),
         };
 
-        items.push(ksni::MenuItem::Separator);
-        items.push(Self::action(
-            "Open Tidemark",
-            "window-new-symbolic",
-            true,
-            Command::Present,
-        ));
-        items.push(Self::action(
-            "Refresh now",
-            "view-refresh-symbolic",
-            self.state.connected,
-            Command::Refresh,
-        ));
-        items.push(ksni::MenuItem::Separator);
-        items.push(Self::action(
-            "Quit",
-            "application-exit-symbolic",
-            true,
-            Command::Quit,
-        ));
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Action {
+            label: "Open Tidemark".to_owned(),
+            icon: "window-new-symbolic".to_owned(),
+            enabled: true,
+            command: Command::Present,
+        });
+        items.push(MenuItem::Action {
+            label: "Refresh now".to_owned(),
+            icon: "view-refresh-symbolic".to_owned(),
+            enabled: self.state.connected,
+            command: Command::Refresh,
+        });
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Action {
+            label: "Quit".to_owned(),
+            icon: "application-exit-symbolic".to_owned(),
+            enabled: true,
+            command: Command::Quit,
+        });
         items
     }
 
-    fn watcher_online(&self) {
-        tracing::info!("a status-notifier watcher is on the bus");
-    }
-
-    /// Keep the item alive and wait: a shell being restarted takes its watcher with it, and
-    /// giving up would leave a window that can only be closed, never reopened.
-    fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
-        tracing::info!(
-            ?reason,
-            "the status-notifier watcher went away; waiting for it"
-        );
+    fn handle_watcher_offline(&self) -> bool {
         true
     }
 }
 
-/// Escapes a label for `com.canonical.dbusmenu`, which reads a single underscore as the
-/// marker before an access key and swallows it.
-///
-/// Not hypothetical: account slugs come from the user's `config.toml`, so an account called
-/// `work_key` would otherwise appear in the panel as `workkey` with a mnemonic on the `k`.
-fn mnemonics(label: &str) -> String {
-    label.replace('_', "__")
+#[cfg(unix)]
+mod backend {
+    use super::*;
+    use ksni::TrayMethods;
+    use tidemark_types::ids;
+
+    /// The icon the panel shows. It deliberately uses the same full-colour icon name as the
+    /// application: `data/icons` supplies native small sizes so a panel never has to enlarge a
+    /// tiny fallback pixmap, and the `PKGBUILD` installs them all.
+    const ICON: &str = ids::APP_ID;
+
+    pub type Error = ksni::Error;
+
+    pub struct Handle(ksni::Handle<Model>);
+
+    pub async fn spawn(model: Model) -> Result<Handle, Error> {
+        Ok(Handle(model.spawn().await?))
+    }
+
+    impl Handle {
+        pub async fn update(&self, state: State) -> bool {
+            self.0
+                .update(|model: &mut Model| model.state = state)
+                .await
+                .is_some()
+        }
+    }
+
+    impl ksni::Tray for Model {
+        fn id(&self) -> String {
+            ids::APP_ID.to_owned()
+        }
+
+        fn title(&self) -> String {
+            "Tidemark".to_owned()
+        }
+
+        fn icon_name(&self) -> String {
+            ICON.to_owned()
+        }
+
+        fn attention_icon_name(&self) -> String {
+            ICON.to_owned()
+        }
+
+        fn status(&self) -> ksni::Status {
+            if self.set_icon() {
+                ksni::Status::NeedsAttention
+            } else {
+                ksni::Status::Active
+            }
+        }
+
+        /// A left click shows the window. That is the whole of what a tray icon is for here,
+        /// and the menu is the right button, which is where a panel puts it anyway.
+        fn activate(&mut self, _x: i32, _y: i32) {
+            self.send(Command::Present);
+        }
+
+        /// The one line a panel shows on hover: the account nearest its limit, which is the
+        /// first row for the same reason it is the first card.
+        fn tool_tip(&self) -> ksni::ToolTip {
+            ksni::ToolTip {
+                icon_name: ICON.to_owned(),
+                title: "Tidemark".to_owned(),
+                description: self.set_tooltip(),
+                ..Default::default()
+            }
+        }
+
+        fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+            self.set_menu().into_iter().map(menu_item).collect()
+        }
+
+        fn watcher_online(&self) {
+            tracing::info!("a status-notifier watcher is on the bus");
+        }
+
+        /// Keep the item alive and wait: a shell being restarted takes its watcher with it, and
+        /// giving up would leave a window that can only be closed, never reopened.
+        fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
+            tracing::info!(
+                ?reason,
+                "the status-notifier watcher went away; waiting for it"
+            );
+            self.handle_watcher_offline()
+        }
+    }
+
+    fn menu_item(item: MenuItem) -> ksni::MenuItem<Model> {
+        match item {
+            MenuItem::Caption(label) => ksni::menu::StandardItem {
+                label: mnemonics(&label),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Action {
+                label,
+                icon,
+                enabled,
+                command,
+            } => ksni::menu::StandardItem {
+                label: mnemonics(&label),
+                icon_name: icon,
+                enabled,
+                activate: Box::new(move |model: &mut Model| model.send(command)),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator => ksni::MenuItem::Separator,
+        }
+    }
+
+    /// Escapes a label for `com.canonical.dbusmenu`, which reads a single underscore as the
+    /// marker before an access key and swallows it.
+    ///
+    /// Not hypothetical: account slugs come from the user's `config.toml`, so an account called
+    /// `work_key` would otherwise appear in the panel as `workkey` with a mnemonic on the `k`.
+    fn mnemonics(label: &str) -> String {
+        label.replace('_', "__")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_panel_receives_the_same_full_colour_icon_as_the_application() {
+            let (commands, _inbox) = async_channel::unbounded();
+            let tray = Model {
+                state: State::default(),
+                commands,
+            };
+
+            assert_eq!(ksni::Tray::icon_name(&tray), ids::APP_ID);
+            assert_eq!(ksni::Tray::attention_icon_name(&tray), ids::APP_ID);
+        }
+    }
+}
+
+#[cfg(windows)]
+mod backend {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Error;
+
+    impl std::fmt::Display for Error {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("Windows tray backend is not implemented")
+        }
+    }
+
+    impl std::error::Error for Error {}
+
+    #[derive(Debug)]
+    pub struct Handle;
+
+    /// Todo 15 replaces this typed failure with the tray-icon bridge-thread backend.
+    pub async fn spawn(_model: Model) -> Result<Handle, Error> {
+        Err(Error)
+    }
+
+    impl Handle {
+        pub async fn update(&self, _state: State) -> bool {
+            false
+        }
+    }
 }
 
 /// The tray, from the interface's side.
@@ -347,12 +465,11 @@ impl Tray {
     /// the one outcome worse than having no tray.
     ///
     /// `commands` receives what the user picked; it is drained on the GTK main context.
-    pub async fn spawn(commands: async_channel::Sender<Command>) -> Result<Self, ksni::Error> {
-        let handle = Model {
+    pub async fn spawn(commands: async_channel::Sender<Command>) -> Result<Self, backend::Error> {
+        let handle = backend::spawn(Model {
             state: State::default(),
             commands,
-        }
-        .spawn()
+        })
         .await?;
 
         // Updates go through one task rather than being spawned per change. `Handle::update`
@@ -362,11 +479,7 @@ impl Tray {
         let (outbox, inbox) = async_channel::unbounded::<State>();
         glib::spawn_future_local(async move {
             while let Ok(state) = inbox.recv().await {
-                if handle
-                    .update(|model: &mut Model| model.state = state)
-                    .await
-                    .is_none()
-                {
+                if !handle.update(state).await {
                     tracing::warn!("the tray service is gone; stopping updates");
                     return;
                 }
@@ -555,17 +668,5 @@ mod tests {
             vec![window(18_000, 3.0), window(604_800, 99.0)],
         );
         assert!(needs_attention(&[status]));
-    }
-
-    #[test]
-    fn the_panel_receives_the_same_full_colour_icon_as_the_application() {
-        let (commands, _inbox) = async_channel::unbounded();
-        let tray = Model {
-            state: State::default(),
-            commands,
-        };
-
-        assert_eq!(ksni::Tray::icon_name(&tray), ids::APP_ID);
-        assert_eq!(ksni::Tray::attention_icon_name(&tray), ids::APP_ID);
     }
 }

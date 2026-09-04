@@ -20,15 +20,17 @@ adw = { version = "0.9.2", package = "libadwaita", features = ["v1_9", "gtk_v4_2
 # async-io backend; named here because this crate uses it directly.
 async-channel = "2.5.0"
 gtk = { version = "0.11.4", package = "gtk4", features = ["v4_22"] }
-# StatusNotifierItem and com.canonical.dbusmenu. Unlicense (public domain), so unlike
-# libayatana-appindicator-glib it can be linked into an MIT project; and it is built on the
-# same zbus 5 with the same async-io backend this crate already talks to the daemon over.
-ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
 semver = "1.0.28"
 tidemark-types = { path = "../tidemark-types" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zbus = "5.13.2"
+
+[target.'cfg(unix)'.dependencies]
+# StatusNotifierItem and com.canonical.dbusmenu. Unlicense (public domain), so unlike
+# libayatana-appindicator-glib it can be linked into an MIT project; and it is built on the
+# same zbus 5 with the same async-io backend this crate already talks to the daemon over.
+ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
 
 # The Debian package. It carries binaries from two crates, so it is built from a prior
 # `cargo build --release --workspace` and invoked with `--no-build`. The metadata lives
