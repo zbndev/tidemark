@@ -55,4 +55,6 @@ wreq = { version = "~0.15.3", default-features = false, features = ["webpki-root
 wreq-util = "~0.1.0"
 
 [target.'cfg(windows)'.dependencies]
+aes-gcm = "0.11.1"
+getrandom = "0.4.3"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }

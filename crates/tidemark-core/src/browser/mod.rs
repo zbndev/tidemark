@@ -410,10 +410,9 @@ pub enum CookieError {
     /// Nothing answered on the bus, so the browser's key cannot be reached at all.
     #[error("the keyring is unavailable: {0}")]
     KeyringUnavailable(String),
-    /// The platform's half of reading cookies is declared and not built — the state the
-    /// Windows arms of the storage factory answer with until the Windows port's browser
-    /// work (todo 17) fills them in. A state to report, never a panic and never a faked
-    /// answer.
+    /// The platform can identify the store but cannot decrypt its cookie format. On
+    /// Windows this includes Chromium App-Bound `v20`: a state to report, never a panic
+    /// and never a faked answer.
     #[error("browser cookies cannot be read on this platform: {0}")]
     PlatformUnavailable(&'static str),
 }
@@ -432,13 +431,24 @@ impl Store {
         match self.browser.family {
             Family::Gecko => gecko::read(&snapshot.database(), query),
             Family::Chromium => {
-                let password = storage.password(self.browser.application).await.map_err(
-                    |error| match error {
-                        crate::secrets::SecretError::Locked => CookieError::KeyringLocked,
-                        other => CookieError::KeyringUnavailable(other.to_string()),
-                    },
-                )?;
-                chromium::read(&snapshot.database(), query, password.as_deref())
+                #[cfg(unix)]
+                {
+                    let password =
+                        storage
+                            .password(self.browser.application)
+                            .await
+                            .map_err(|error| match error {
+                                crate::secrets::SecretError::Locked => CookieError::KeyringLocked,
+                                other => CookieError::KeyringUnavailable(other.to_string()),
+                            })?;
+                    chromium::read(&snapshot.database(), query, password.as_deref())
+                }
+                #[cfg(windows)]
+                {
+                    let _ = storage;
+                    let key = safe_storage::key_for(&self.path)?;
+                    chromium::read_windows(&snapshot.database(), query, &key)
+                }
             }
         }
     }
@@ -451,10 +461,8 @@ impl Store {
 pub fn stores() -> Vec<Store> {
     let mut stores = Vec::new();
     for browser in BROWSERS {
-        // A platform whose discovery half is not built (Windows, until todo 17 of the
-        // Windows port) answers that it is unavailable — for this scan that is the same
-        // machine as one with no browsers installed, and the scan has no error channel
-        // to report through by design.
+        // Missing environment roots and absent browser installations are both an empty
+        // answer; the scan has no error channel because discovery is absence-tolerant.
         let Ok(roots) = storage::profile_roots(browser) else {
             return Vec::new();
         };
@@ -535,6 +543,36 @@ struct Snapshot {
 /// original: the snapshot is Tidemark's, so its layout is too.
 const SNAPSHOT_DATABASE: &str = "cookies";
 
+/// Copies one SQLite database through the browser platform's read-only snapshot primitive.
+/// The caller owns `directory` and its cleanup; `name` is the private copy's filename.
+pub(crate) fn copy_private_database(
+    source: &Path,
+    directory: &Path,
+    name: &str,
+) -> Result<(), CookieError> {
+    storage::copy_snapshot(source, directory)?;
+    if name != SNAPSHOT_DATABASE {
+        let from = directory.join(SNAPSHOT_DATABASE);
+        let to = directory.join(name);
+        std::fs::rename(&from, &to).map_err(|source_error| CookieError::Unreadable {
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = with_suffix(&from, suffix);
+            if sidecar.is_file() {
+                std::fs::rename(sidecar, with_suffix(&to, suffix)).map_err(|source_error| {
+                    CookieError::Unreadable {
+                        path: source.to_path_buf(),
+                        source: source_error,
+                    }
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Snapshot {
     fn of(path: &Path) -> Result<Self, CookieError> {
         static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -545,7 +583,7 @@ impl Snapshot {
         ));
         // The copy itself is the platform's half; the name and the cleanup are every
         // platform's.
-        match storage::copy_snapshot(path, &directory) {
+        match copy_private_database(path, &directory, SNAPSHOT_DATABASE) {
             Ok(()) => Ok(Self { directory }),
             Err(error) => {
                 // A half-made copy is a set of live sessions in the temp directory; it
@@ -579,14 +617,14 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// private copy of a cookie database is taken. Everything around it (the browser table,
 /// the profile scan, the queries, the reading of a copy) is the same on every platform.
 ///
-/// Both Windows arms are declared ahead of their implementation and answer
-/// [`CookieError::PlatformUnavailable`] until todo 17 of the Windows port builds them:
-/// the seam is complete and compiles everywhere today, and a platform missing its half
-/// says so instead of panicking or pretending to have scanned.
+/// Windows resolves vendor roots from AppData and takes a no-write, share-mode-compatible
+/// copy. Linux retains its HOME roots and owner-only copy with SQLite sidecars.
 mod storage {
     use std::path::{Path, PathBuf};
 
-    use super::{Browser, CookieError, SNAPSHOT_DATABASE, with_suffix};
+    use super::{Browser, CookieError};
+    #[cfg(unix)]
+    use super::{SNAPSHOT_DATABASE, with_suffix};
 
     /// The absolute directories one browser keeps its profiles under on this machine,
     /// in scan order. Linux resolves a browser's roots against `$HOME`: distribution
@@ -607,13 +645,64 @@ mod storage {
     }
 
     /// [`profile_roots`], for Windows: vendor directories under `%LOCALAPPDATA%` and
-    /// `%APPDATA%`. Declared for todo 17 of the Windows port, which owns the Windows
-    /// profile layout — until then this platform answers that its half is missing.
+    /// `%APPDATA%`. Either environment root may be absent without failing discovery.
     #[cfg(windows)]
-    pub(crate) fn profile_roots(_browser: &Browser) -> Result<Vec<PathBuf>, CookieError> {
-        Err(CookieError::PlatformUnavailable(
-            "windows profile discovery is not built",
-        ))
+    pub(crate) fn profile_roots(browser: &Browser) -> Result<Vec<PathBuf>, CookieError> {
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
+        Ok(match (local, roaming) {
+            (Some(local), Some(roaming)) => profile_roots_in(browser, &local, &roaming),
+            (Some(local), None) => profile_roots_in(browser, &local, Path::new("")),
+            (None, Some(roaming)) => profile_roots_in(browser, Path::new(""), &roaming),
+            (None, None) => Vec::new(),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn profile_roots_in(
+        browser: &Browser,
+        local: &Path,
+        roaming: &Path,
+    ) -> Vec<PathBuf> {
+        let (base, roots): (&Path, &[&str]) = match browser.slug {
+            "chrome" => (
+                local,
+                &[
+                    "Google/Chrome/User Data",
+                    "Google/Chrome Beta/User Data",
+                    "Google/Chrome Dev/User Data",
+                    "Google/Chrome SxS/User Data",
+                ],
+            ),
+            "chromium" => (local, &["Chromium/User Data"]),
+            "brave" => (
+                local,
+                &[
+                    "BraveSoftware/Brave-Browser/User Data",
+                    "BraveSoftware/Brave-Browser-Beta/User Data",
+                    "BraveSoftware/Brave-Browser-Nightly/User Data",
+                ],
+            ),
+            "edge" => (
+                local,
+                &[
+                    "Microsoft/Edge/User Data",
+                    "Microsoft/Edge Beta/User Data",
+                    "Microsoft/Edge Dev/User Data",
+                    "Microsoft/Edge SxS/User Data",
+                ],
+            ),
+            "vivaldi" => (local, &["Vivaldi/User Data"]),
+            "opera" => (roaming, &["Opera Software"]),
+            "firefox" => (roaming, &["Mozilla/Firefox/Profiles"]),
+            "zen" => (roaming, &["zen/Profiles"]),
+            "librewolf" => (roaming, &["librewolf/Profiles"]),
+            _ => return Vec::new(),
+        };
+        if base.as_os_str().is_empty() {
+            return Vec::new();
+        }
+        roots.iter().map(|root| base.join(root)).collect()
     }
 
     /// Takes the private copy of one cookie database into `directory`: the directory is
@@ -650,10 +739,44 @@ mod storage {
     /// platform's own share-mode open. Declared for todo 17 of the Windows port; until
     /// then this platform answers that its half is missing.
     #[cfg(windows)]
-    pub(crate) fn copy_snapshot(_source: &Path, _directory: &Path) -> Result<(), CookieError> {
-        Err(CookieError::PlatformUnavailable(
-            "windows snapshot copy is not built",
-        ))
+    #[allow(unsafe_code)]
+    pub(crate) fn copy_snapshot(source: &Path, directory: &Path) -> Result<(), CookieError> {
+        use std::os::windows::ffi::OsStrExt as _;
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows::Win32::Storage::FileSystem::{
+            CopyFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        use windows::core::PCWSTR;
+
+        let unreadable = |error: std::io::Error| CookieError::Unreadable {
+            path: source.to_path_buf(),
+            source: error,
+        };
+        std::fs::create_dir(directory).map_err(unreadable)?;
+        // Keep a share-mode read handle open while CopyFileW takes the snapshot. This asks
+        // for no write access and remains compatible with a live browser's SQLite handle.
+        let _source_handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+            .open(source)
+            .map_err(unreadable)?;
+        let destination = directory.join(super::SNAPSHOT_DATABASE);
+        let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination_wide: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: both arguments are live, NUL-terminated UTF-16 paths for this call.
+        unsafe {
+            CopyFileW(
+                PCWSTR(source_wide.as_ptr()),
+                PCWSTR(destination_wide.as_ptr()),
+                true,
+            )
+        }
+        .map_err(|error| unreadable(std::io::Error::other(error)))?;
+        Ok(())
     }
 }
 
@@ -912,6 +1035,71 @@ pub(crate) mod tests {
 
         assert!(stores_in(home.path()).is_empty());
         assert!(stores_in(&home.path().join("nowhere")).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_vendor_roots_are_discovered_from_real_profile_trees() {
+        let fixture = TestHome::new();
+        let local = fixture.path().join("Local");
+        let roaming = fixture.path().join("Roaming");
+        plant(
+            &local,
+            "Google/Chrome/User Data",
+            "Default",
+            "Network/Cookies",
+        );
+        plant(
+            &local,
+            "Microsoft/Edge/User Data",
+            "Profile 2",
+            "Network/Cookies",
+        );
+        plant(
+            &local,
+            "BraveSoftware/Brave-Browser/User Data",
+            "Default",
+            "Cookies",
+        );
+        plant(
+            &roaming,
+            "Opera Software",
+            "Opera Stable",
+            "Network/Cookies",
+        );
+
+        let found: Vec<(&str, String)> = BROWSERS
+            .iter()
+            .flat_map(|browser| {
+                storage::profile_roots_in(browser, &local, &roaming)
+                    .into_iter()
+                    .flat_map(|root| scan_roots(browser, &[root]))
+            })
+            .map(|store| (store.browser.slug, store.profile))
+            .collect();
+
+        assert_eq!(
+            found,
+            [
+                ("chrome", "Default".to_owned()),
+                ("brave", "Default".to_owned()),
+                ("edge", "Profile 2".to_owned()),
+                ("opera", "Opera Stable".to_owned()),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_snapshot_is_a_private_copy_without_unix_sidecars() {
+        let home = TestHome::new();
+        let path = home.profile("chromium/Default", "Cookies");
+        std::fs::write(with_suffix(&path, "-wal"), b"must not be copied").expect("writes");
+
+        let snapshot = Snapshot::of(&path).expect("copies");
+
+        assert_eq!(std::fs::read(snapshot.database()).expect("reads"), b"");
+        assert!(!with_suffix(&snapshot.database(), "-wal").exists());
     }
 
     #[cfg(unix)]

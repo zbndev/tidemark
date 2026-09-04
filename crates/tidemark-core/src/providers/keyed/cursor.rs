@@ -551,23 +551,15 @@ struct StateSnapshot {
 
 impl StateSnapshot {
     fn of(path: &Path) -> std::io::Result<Self> {
-        use std::os::unix::fs::DirBuilderExt;
-
         static SERIAL: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
             "tidemark-cursor-state-{}-{}",
             std::process::id(),
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         let snapshot = Self { directory };
-        std::fs::copy(path, snapshot.database())?;
-        for sidecar in ["-wal", "-shm"] {
-            let source = with_suffix(path, sidecar);
-            if source.is_file() {
-                std::fs::copy(source, with_suffix(&snapshot.database(), sidecar))?;
-            }
-        }
+        crate::browser::copy_private_database(path, &snapshot.directory, "state.vscdb")
+            .map_err(std::io::Error::other)?;
         Ok(snapshot)
     }
 
@@ -581,12 +573,6 @@ impl Drop for StateSnapshot {
         // Best effort: the private copy has mode 0700, and a failed cleanup cannot be fixed.
         let _ = std::fs::remove_dir_all(&self.directory);
     }
-}
-
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    PathBuf::from(name)
 }
 
 impl fmt::Debug for Cursor {

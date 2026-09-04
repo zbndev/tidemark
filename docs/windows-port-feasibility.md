@@ -140,9 +140,9 @@ UCRT64: `libsqlite3-sys` compiled without a pkg-config error, so the system SQLi
 
 **Linux regression guards.** The catalog registration in crates/tidemark-core/src/providers/keyed/mod.rs:551 stays the single registration point, and providers never name a platform: they consume the factory's platform-neutral operations. The Linux PBKDF2/os_crypt code and the snapshot-read discipline are unchanged.
 
-**Remaining unknowns.**
-- UNVERIFIED: DPAPI decryption of current Chrome/Edge/Brave/Vivaldi cookie stores on Windows, including App-Bound v20 reachability. Resolved by the port-time browser-auth spike (PoC gate 7), ordered Firefox plaintext first, then Chromium DPAPI, then App-Bound.
-- UNVERIFIED: Windows browser profile discovery layout per vendor. Resolved inside the same spike.
+**Measured Windows result (2026-09-04).** Profile discovery and ordinary Chromium `v10` decryption are implemented. The Windows factory scans the registered browsers' standard local/roaming vendor roots without writing or treating an absent vendor as an error. A fixture generated under the running user's real DPAPI context unwraps `Local State`'s `DPAPI`-prefixed key and decrypts an AES-256-GCM cookie; malformed base64/JSON, a tampered GCM tag, and an absent profile are unavailable rather than synthesized values.
+
+Chrome App-Bound `v20` is **WINDOWS-UNAVAILABLE** to Tidemark. The investigation spike activated the installed Google Chrome Elevation Service through its registered CLSID `{708860E0-F641-4611-8895-7D867DD3675B}` and current `IElevator2Chrome` IID `{1BF5208B-295F-4992-B5F4-3A9BB6494838}`, then passed the installed profile's genuine `APPB` payload to `DecryptData`. The service returned HRESULT `0x8004A003`, `last_error=5` (`ERROR_ACCESS_DENIED`) for the unelevated Tidemark-path caller. Chromium's interface contract binds decryption to the installed browser identity; impersonating or injecting into Chrome, running as SYSTEM, or otherwise escalating privilege is unacceptable for ordinary read-only credential discovery. A queried `v20` cookie therefore becomes the explicit `PlatformUnavailable` state, not a panic, fabricated value, or silent empty cookie.
 
 ### oauth_file
 
@@ -210,7 +210,7 @@ UCRT64: `libsqlite3-sys` compiled without a pkg-config error, so the system SQLi
 | 1. GTK runtime, MSYS2/UCRT64 | GREEN (measured) | The UCRT64 probe compiled gtk4-sys v0.11.4 (`v4_22`) and libadwaita-sys v0.9.2 (`v1_9`) on the runner (probe-ucrt64.log:557, :629); system-deps rejects anything below the floor, so on-runner pkg-config resolved gtk4 >= 4.22 and libadwaita-1 >= 1.9. MSYS2 ships mingw-w64-gtk4 4.22.4 (built with the win32 backend) and mingw-w64-libadwaita 1.9.3 (MINGW-packages PKGBUILDs, verified 2026-09-03) |
 | 2. GTK runtime, gvsbuild/MSVC | PARTIAL | The probe measured the pinned gvsbuild 2026.8.0 bundle: pkg-config resolves gtk4 4.22.4 and libadwaita-1 1.9.2 (probe-msvc.log:3-4; gtk4.pc and libadwaita-1.pc present in the bundle listing), both at or above the 4.22 / 1.9 floor. But gtk4-sys was not reached on MSVC — ashpd aborted the build first — so the -sys compile on MSVC stays pending |
 | 3. zbus p2p transport spike | PENDING | Port-time PoC gate; A1 (AF_UNIX via uds_windows, built into zbus 5.19.0) tried first, A2 (named-pipe adapter through the public Socket trait) as fallback; spike scope in the IPC transport section |
-| 4. Chromium decryptability (DPAPI / App-Bound v20) | PENDING | Port-time spike (PoC wave 7), ordered Firefox plaintext, then Chromium DPAPI, then App-Bound v20; seventeen cookie-based providers ride on the result |
+| 4. Chromium decryptability (DPAPI / App-Bound v20) | PARTIAL (measured 2026-09-04) | Ordinary DPAPI + AES-256-GCM `v10` is available. The real installed Chrome Elevation Service denied its genuine `APPB` payload to the unelevated Tidemark-path caller (`0x8004A003`, `ERROR_ACCESS_DENIED`), so `v20` is an explicit Windows-unavailable state. |
 | 5. Credential blob sizes vs the 2560-byte cap | PENDING | Open measurement, executable today on Linux; exact procedure in Measurements, procedure (a) |
 
 One hard constraint stands outside the gates: the minimum supported Windows version is Windows 10 1803, the floor for AF_UNIX transport; the recommended baseline is Windows 10 22H2 or Windows 11.

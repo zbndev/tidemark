@@ -112,6 +112,110 @@ pub fn read(
     Ok(cookies)
 }
 
+#[cfg(windows)]
+pub(crate) fn read_windows(
+    database: &Path,
+    query: &Query,
+    key: &[u8; 32],
+) -> Result<Vec<Cookie>, CookieError> {
+    let connection =
+        Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(
+            |source| CookieError::Database {
+                path: database.to_path_buf(),
+                source,
+            },
+        )?;
+    let mut statement = connection
+        .prepare(
+            "SELECT host_key, name, encrypted_value, value, path, is_secure, expires_utc \
+             FROM cookies",
+        )
+        .map_err(|source| CookieError::Database {
+            path: database.to_path_buf(),
+            source,
+        })?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })
+        .map_err(|source| CookieError::Database {
+            path: database.to_path_buf(),
+            source,
+        })?;
+    let mut cookies = Vec::new();
+    for row in rows {
+        let (host, name, encrypted, plain, path, secure, expires_utc) =
+            row.map_err(|source| CookieError::Database {
+                path: database.to_path_buf(),
+                source,
+            })?;
+        if !query.matches(&host, &name) {
+            continue;
+        }
+        let Some(value) = windows_value(&encrypted, &plain, &host, key)? else {
+            continue;
+        };
+        cookies.push(Cookie {
+            host,
+            name,
+            value,
+            path,
+            secure: secure != 0,
+            expires_at: expires(expires_utc),
+        });
+    }
+    Ok(cookies)
+}
+
+/// Decrypts Windows Chromium's `v10` AES-256-GCM envelope. Authentication failure is an
+/// absent value, never guessed plaintext. App-Bound `v20` is an explicit unavailable state.
+#[cfg(windows)]
+fn windows_value(
+    encrypted: &[u8],
+    plain: &str,
+    host: &str,
+    key: &[u8; 32],
+) -> Result<Option<String>, CookieError> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
+
+    if encrypted.is_empty() {
+        return Ok(Some(plain.to_owned()));
+    }
+    if encrypted.starts_with(b"v20") {
+        return Err(CookieError::PlatformUnavailable(
+            "Chromium App-Bound v20 cookie decryption is unavailable on Windows",
+        ));
+    }
+    let Some(body) = encrypted.strip_prefix(b"v10") else {
+        return Ok(None);
+    };
+    let Some((nonce, ciphertext)) = body.split_at_checked(12) else {
+        return Ok(None);
+    };
+    let cipher = Aes256Gcm::new_from_slice(key).expect("a Chromium master key is 256 bits");
+    let nonce = Nonce::try_from(nonce).expect("the envelope nonce is twelve bytes");
+    let Ok(plaintext) = cipher.decrypt(&nonce, ciphertext) else {
+        return Ok(None);
+    };
+    let digest = {
+        use sha2::Digest;
+        sha2::Sha256::digest(host.as_bytes())
+    };
+    let value = plaintext
+        .strip_prefix(digest.as_slice())
+        .unwrap_or(&plaintext);
+    Ok(String::from_utf8(value.to_vec()).ok())
+}
+
 /// The cookie's value: the plain-text column when Chromium stored it there, otherwise the
 /// decryption of the sealed one. `None` for a value this build cannot read — the wrong
 /// keyring password, a sealing version Chromium invents next — rather than garbage on the
@@ -229,6 +333,73 @@ mod tests {
                 .expect("inserts");
         }
         path
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_real_dpapi_local_state_key_decrypts_a_v10_aes_gcm_cookie() {
+        use aes_gcm::aead::{Aead, KeyInit};
+        use aes_gcm::{Aes256Gcm, Nonce};
+        use base64::Engine as _;
+
+        let home = TestHome::new();
+        let user_data = home.path().join("User Data");
+        let profile = user_data.join("Default/Network");
+        std::fs::create_dir_all(&profile).expect("creates profile");
+        let key = [0x5au8; 32];
+        let mut protected = b"DPAPI".to_vec();
+        protected
+            .extend(super::super::safe_storage::protect_for_test(&key).expect("DPAPI protects"));
+        std::fs::write(
+            user_data.join("Local State"),
+            serde_json::json!({
+                "os_crypt": {
+                    "encrypted_key": base64::engine::general_purpose::STANDARD.encode(protected)
+                }
+            })
+            .to_string(),
+        )
+        .expect("writes Local State");
+
+        let nonce = [0x33u8; 12];
+        let mut encrypted = b"v10".to_vec();
+        encrypted.extend_from_slice(&nonce);
+        encrypted.extend(
+            Aes256Gcm::new_from_slice(&key)
+                .expect("key")
+                .encrypt(
+                    &Nonce::try_from(nonce.as_slice()).expect("twelve-byte nonce"),
+                    b"real-round-trip".as_slice(),
+                )
+                .expect("seals"),
+        );
+        let source = profile.join("Cookies");
+        std::fs::write(&source, b"").expect("creates source path");
+        let loaded = super::super::safe_storage::key_for(&source).expect("loads real DPAPI key");
+
+        assert_eq!(
+            windows_value(&encrypted, "", ".example.test", &loaded).expect("decrypts"),
+            Some("real-round-trip".to_owned())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tampered_and_v20_values_are_unavailable_never_invented() {
+        let key = [0x5au8; 32];
+        let mut tampered = b"v10".to_vec();
+        tampered.extend_from_slice(&[0x33; 12]);
+        tampered.extend_from_slice(&[0x44; 16]);
+        assert_eq!(
+            windows_value(&tampered, "", ".example.test", &key).expect("skips tamper"),
+            None
+        );
+
+        let v20 = [b"v20".as_slice(), &[0u8; 28]].concat();
+        assert!(matches!(
+            windows_value(&v20, "", ".example.test", &key),
+            Err(CookieError::PlatformUnavailable(_))
+        ));
     }
 
     #[test]
