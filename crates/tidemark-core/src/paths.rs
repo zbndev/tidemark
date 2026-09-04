@@ -5,6 +5,10 @@
 //! specification requires it, and a daemon that honoured a stray `XDG_DATA_HOME=.` would
 //! write its history wherever it happened to be started from — a different database per
 //! working directory, which looks exactly like data loss.
+//!
+//! The OS-specific half lives in the private `platform` module: Unix keeps the
+//! XDG rule below, Windows maps everything onto the local-only
+//! `%LOCALAPPDATA%\tidemark` root.
 
 use std::path::{Path, PathBuf};
 
@@ -25,26 +29,17 @@ pub struct NoBaseDirectory {
     pub variable: &'static str,
 }
 
-/// `$XDG_DATA_HOME/tidemark`, or `$HOME/.local/share/tidemark`.
+/// `$XDG_DATA_HOME/tidemark`, or `$HOME/.local/share/tidemark`. On Windows,
+/// `%LOCALAPPDATA%\tidemark`.
 pub fn data_dir() -> Result<PathBuf, NoBaseDirectory> {
-    resolve(
-        "XDG_DATA_HOME",
-        std::env::var_os("XDG_DATA_HOME").as_deref().map(Path::new),
-        std::env::var_os("HOME").as_deref().map(Path::new),
-        ".local/share",
-    )
+    platform::data_dir()
 }
 
-/// `$XDG_CONFIG_HOME/tidemark`, or `$HOME/.config/tidemark`.
+/// `$XDG_CONFIG_HOME/tidemark`, or `$HOME/.config/tidemark`. On Windows,
+/// `%LOCALAPPDATA%\tidemark` too — a single local root, never the roaming
+/// `%APPDATA%`, matching Credential Manager's local-only stance.
 pub fn config_dir() -> Result<PathBuf, NoBaseDirectory> {
-    resolve(
-        "XDG_CONFIG_HOME",
-        std::env::var_os("XDG_CONFIG_HOME")
-            .as_deref()
-            .map(Path::new),
-        std::env::var_os("HOME").as_deref().map(Path::new),
-        ".config",
-    )
+    platform::config_dir()
 }
 
 /// Full path of the history database.
@@ -59,7 +54,9 @@ pub fn config_path() -> Result<PathBuf, NoBaseDirectory> {
 
 /// The resolution rule, with the environment passed in so it is testable without mutating
 /// the process — `std::env::set_var` is `unsafe` in this edition, and for good reason: the
-/// test suite is threaded.
+/// test suite is threaded. The Windows arm does not consult XDG variables, so outside
+/// Unix this rule compiles for the tests alone.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn resolve(
     variable: &'static str,
     xdg: Option<&Path>,
@@ -72,6 +69,110 @@ fn resolve(
     home.filter(|p| p.is_absolute())
         .map(|home| home.join(home_relative).join(APP_DIR))
         .ok_or(NoBaseDirectory { variable })
+}
+
+/// The OS-specific half of path resolution — plain cfg-selected functions, no
+/// trait objects: the seam is one call deep and both arms are final. Exactly one
+/// of the two modules below is compiled per target.
+#[cfg(unix)]
+mod platform {
+    use super::{NoBaseDirectory, Path, PathBuf, resolve};
+
+    pub(super) fn data_dir() -> Result<PathBuf, NoBaseDirectory> {
+        resolve(
+            "XDG_DATA_HOME",
+            std::env::var_os("XDG_DATA_HOME").as_deref().map(Path::new),
+            std::env::var_os("HOME").as_deref().map(Path::new),
+            ".local/share",
+        )
+    }
+
+    pub(super) fn config_dir() -> Result<PathBuf, NoBaseDirectory> {
+        resolve(
+            "XDG_CONFIG_HOME",
+            std::env::var_os("XDG_CONFIG_HOME")
+                .as_deref()
+                .map(Path::new),
+            std::env::var_os("HOME").as_deref().map(Path::new),
+            ".config",
+        )
+    }
+}
+
+#[cfg(windows)]
+mod platform {
+    use super::{APP_DIR, NoBaseDirectory, Path, PathBuf};
+
+    pub(super) fn data_dir() -> Result<PathBuf, NoBaseDirectory> {
+        resolve(std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new))
+    }
+
+    // One root for both directories: Credential Manager secrets are
+    // per-machine local, so nothing may drift to the roaming %APPDATA% and
+    // split the app's state across a roaming profile.
+    pub(super) fn config_dir() -> Result<PathBuf, NoBaseDirectory> {
+        resolve(std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new))
+    }
+
+    /// `%LOCALAPPDATA%\tidemark`, mirroring the HOME-missing error shape of
+    /// the Unix rule when the variable is unset (or not absolute). The
+    /// environment is a parameter for the same testability reason as the XDG
+    /// rule — no process-global mutation from tests.
+    fn resolve(localappdata: Option<&Path>) -> Result<PathBuf, NoBaseDirectory> {
+        localappdata
+            .filter(|base| base.is_absolute())
+            .map(|base| base.join(APP_DIR))
+            .ok_or(NoBaseDirectory {
+                variable: "LOCALAPPDATA",
+            })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn data_and_config_share_one_local_root() {
+            let base = Path::new(r"C:\Users\alice\AppData\Local");
+            assert_eq!(resolve(Some(base)).expect("resolvable"), base.join(APP_DIR));
+        }
+
+        #[test]
+        fn an_unset_localappdata_is_reported_not_guessed() {
+            let error = resolve(None).expect_err("nowhere to write");
+            assert!(error.to_string().contains("LOCALAPPDATA"), "{error}");
+        }
+
+        #[test]
+        fn an_empty_or_relative_localappdata_is_rejected() {
+            // The same absolute-only rule as the XDG variables: never join a
+            // stray value onto the working directory.
+            assert!(resolve(Some(Path::new(""))).is_err());
+            assert!(resolve(Some(Path::new(r"AppData\Local"))).is_err());
+            assert!(resolve(Some(Path::new("."))).is_err());
+        }
+
+        #[test]
+        fn odd_but_absolute_values_pass_through_unchanged() {
+            let base = Path::new(r"C:\Users\ünïcode ör\AppData\Local");
+            assert_eq!(resolve(Some(base)).expect("resolvable"), base.join(APP_DIR));
+        }
+
+        #[test]
+        fn the_public_helpers_read_localappdata_from_the_environment() {
+            let expected = rendered(resolve(
+                std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
+            ));
+            assert_eq!(rendered(data_dir()), expected);
+            assert_eq!(rendered(config_dir()), expected);
+        }
+
+        /// `NoBaseDirectory` deliberately has no `PartialEq`; compare through
+        /// the rendered form instead.
+        fn rendered(res: Result<PathBuf, NoBaseDirectory>) -> Result<PathBuf, String> {
+            res.map_err(|error| error.to_string())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -143,5 +244,69 @@ mod tests {
             .expect("resolvable")
             .join(HISTORY_FILE);
         assert_eq!(path, PathBuf::from("/srv/state/tidemark/history.db"));
+    }
+
+    #[test]
+    fn a_relative_home_is_rejected_too_rather_than_joined() {
+        // Characterization (split guard): the HOME fallback gets the same
+        // absolute-only treatment as the XDG variable — a relative HOME must not
+        // relocate the database into whatever directory the daemon started in.
+        let err = data(None, Some("relative/home")).expect_err("nowhere safe to write");
+        assert!(err.to_string().contains("HOME"), "{err}");
+    }
+
+    #[test]
+    fn a_relative_xdg_variable_with_no_home_is_an_error_not_a_guess() {
+        // Characterization (split guard): the ignored relative variable cannot
+        // silently become the base when there is no HOME to fall back to.
+        let err = data(Some("."), None).expect_err("nowhere to write");
+        assert!(err.to_string().contains("XDG_DATA_HOME"), "{err}");
+    }
+
+    #[test]
+    fn the_error_names_both_variables_it_considered() {
+        // Characterization (split guard): pin the user-facing error text verbatim
+        // — it reaches the daemon's startup diagnostics, and the split must not
+        // reword it.
+        assert_eq!(
+            data(None, None).expect_err("nowhere to write").to_string(),
+            "neither XDG_DATA_HOME nor HOME names an absolute directory"
+        );
+    }
+
+    #[test]
+    fn data_dir_reads_the_documented_variables_from_the_environment() {
+        // Characterization (split guard) of the env-reading wiring — the arm the
+        // platform split moves. Reads (never mutates) the process environment and
+        // checks the public helper against the rule applied to the same inputs, so
+        // a swapped variable name or suffix changes the result wherever the two
+        // variables disagree.
+        let expected = resolve(
+            "XDG_DATA_HOME",
+            std::env::var_os("XDG_DATA_HOME").as_deref().map(Path::new),
+            std::env::var_os("HOME").as_deref().map(Path::new),
+            ".local/share",
+        );
+        assert_eq!(rendered(data_dir()), rendered(expected));
+    }
+
+    #[test]
+    fn config_dir_reads_the_documented_variables_from_the_environment() {
+        // Characterization (split guard), same as the data_dir one above.
+        let expected = resolve(
+            "XDG_CONFIG_HOME",
+            std::env::var_os("XDG_CONFIG_HOME")
+                .as_deref()
+                .map(Path::new),
+            std::env::var_os("HOME").as_deref().map(Path::new),
+            ".config",
+        );
+        assert_eq!(rendered(config_dir()), rendered(expected));
+    }
+
+    /// `NoBaseDirectory` deliberately has no `PartialEq`; compare through the
+    /// rendered form instead so both `Ok` paths and error texts are pinned.
+    fn rendered(res: Result<PathBuf, NoBaseDirectory>) -> Result<PathBuf, String> {
+        res.map_err(|error| error.to_string())
     }
 }
