@@ -22,6 +22,32 @@ use std::time::Duration;
 use tidemark_core::providers::BoxFuture;
 use tidemark_types::{DANGER_AT, Timestamp, WARNING_AT, Window, present, provider_label};
 
+/// What the platform transport hands back to identify a still-showing message: the
+/// server-assigned id on Linux, the replacement Tag on Windows. Both are opaque to the
+/// bookkeeping around them, which only feeds one back to the next send.
+#[cfg(unix)]
+type TagId = u32;
+#[cfg(windows)]
+type TagId = String;
+
+/// The replacement Tag a toast about [`Notice::about`] carries.
+///
+/// Microsoft's toast Tag is limited to 16 characters, and an arbitrary window key does
+/// not fit — so the identity goes through a stable hash. FNV-1a is written out because
+/// `DefaultHasher` is explicitly free to differ across compiler releases, and a tag that
+/// changed between restarts would stop replacing anything. The `tm` prefix keeps the
+/// value in the `tm` group namespace a human would expect to see in a debugger.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn tag_for(about: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in about.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // 56 bits is 14 hex digits; with the prefix the tag lands exactly on the limit.
+    format!("tm{:014x}", hash & 0x00ff_ffff_ffff_ffff)
+}
+
 /// How long the notification server is given to answer.
 ///
 /// It is a local call and normally returns in milliseconds. The bound exists because the
@@ -251,10 +277,10 @@ pub trait Notifier: std::fmt::Debug + Send + Sync {
 #[derive(Debug)]
 pub struct Desktop {
     transport: transport::Transport,
-    /// The server-assigned id of the message still on screen for each window, so the next
-    /// one about that window replaces it. Lost on restart, which only costs one extra
+    /// The platform id ([`TagId`]) of the message still on screen for each window, so the
+    /// next one about that window replaces it. Lost on restart, which only costs one extra
     /// entry in the user's tray.
-    showing: Mutex<HashMap<String, u32>>,
+    showing: Mutex<HashMap<String, TagId>>,
 }
 
 impl Desktop {
@@ -284,11 +310,12 @@ impl Notifier for Desktop {
             let replaces = self
                 .showing
                 .lock()
-                .map(|showing| showing.get(&notice.about).copied())
+                .map(|showing| showing.get(&notice.about).cloned())
                 .unwrap_or(None);
             let id = self
                 .transport
                 .send(
+                    notice.about.as_str(),
                     notice.summary.as_str(),
                     notice.body.as_deref(),
                     notice.icon.as_deref(),
@@ -321,6 +348,7 @@ mod transport {
 
         pub async fn send(
             &self,
+            _about: &str,
             title: &str,
             body: Option<&str>,
             icon: Option<&str>,
@@ -368,22 +396,188 @@ mod transport {
 
 #[cfg(windows)]
 mod transport {
-    use super::*;
+    // Locally-audited exception, same as the tray and safe-storage modules: the
+    // generated WinRT/Win32 bindings are unsafe functions and there is no safe wrapper
+    // for the handful of calls the toast transport makes.
+    #![allow(unsafe_code)]
 
-    /// The Windows toast transport is implemented in todo 16.
+    use super::*;
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+    use windows::core::HSTRING;
+
+    /// The stable application identity the installer's Start-menu shortcut carries
+    /// (todo 21). Until that exists, dev runs compiled with the `dev-toast-aumid`
+    /// feature register the same id per-user under HKCU, which is all an unpackaged
+    /// app needs for the toast platform to accept its notifications.
+    const AUMID: &str = "io.github.zbndev.Tidemark";
+
+    /// The Windows toast transport.
     #[derive(Debug)]
     pub struct Transport;
 
+    /// One line of toast text, made safe to embed in the toast XML. Toast text is
+    /// arbitrary provider output, and a `&` in a summary must not cost the message.
+    fn xml_escaped(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
     impl Transport {
+        /// Raises one toast. Returns the replacement Tag it was filed under, so the
+        /// next toast about the same window can replace this one in place.
+        #[allow(clippy::too_many_arguments)]
         pub async fn send(
             &self,
-            _title: &str,
-            _body: Option<&str>,
+            about: &str,
+            title: &str,
+            body: Option<&str>,
             _icon: Option<&str>,
-            _urgency: Urgency,
-            _replaces: Option<u32>,
-        ) -> Result<u32, NotifyError> {
-            Err(NotifyError::Unavailable)
+            urgency: Urgency,
+            _replaces: Option<String>,
+        ) -> Result<String, NotifyError> {
+            #[cfg(feature = "dev-toast-aumid")]
+            dev_aumid::ensure();
+
+            // Replacement is the whole point of the Tag: every message about one
+            // window carries the same one, and the platform swaps the old toast for
+            // the new instead of stacking a second entry.
+            let tag = tag_for(about);
+            // ToastGeneric is the adaptive template: the system lays out the lines and
+            // truncates the tail, exactly the contract `compose` writes for.
+            let scenario = match urgency {
+                // Only the danger toast is allowed to outstay its welcome — the same
+                // policy the Linux transport expresses with urgency=critical.
+                Urgency::Critical => " scenario=\"reminder\"",
+                Urgency::Normal => "",
+            };
+            let text = match body {
+                Some(body) => {
+                    format!(
+                        "<text>{}</text><text>{}</text>",
+                        xml_escaped(title),
+                        xml_escaped(body)
+                    )
+                }
+                None => format!("<text>{}</text>", xml_escaped(title)),
+            };
+            let xml = format!(
+                "<toast{scenario}><visual><binding template=\"ToastGeneric\">\
+                 {text}</binding></visual></toast>"
+            );
+
+            let document = XmlDocument::new().map_err(|error| {
+                tracing::debug!(%error, "the toast XML document could not be created");
+                NotifyError::Unavailable
+            })?;
+            document
+                .LoadXml(&HSTRING::from(xml.as_str()))
+                .map_err(|error| {
+                    tracing::debug!(%error, "the toast XML was refused");
+                    NotifyError::Unavailable
+                })?;
+            let toast = ToastNotification::CreateToastNotification(&document).map_err(|error| {
+                tracing::debug!(%error, "the toast could not be created");
+                NotifyError::Unavailable
+            })?;
+            toast
+                .SetTag(&HSTRING::from(tag.as_str()))
+                .map_err(|error| {
+                    tracing::debug!(%error, "the toast Tag was refused");
+                    NotifyError::Unavailable
+                })?;
+            // Pop-ups are what a toast is for; the explicit false matches the plan's
+            // contract and documents that nothing here suppresses the banner.
+            toast.SetSuppressPopup(false).map_err(|error| {
+                tracing::debug!(%error, "the toast pop-up policy was refused");
+                NotifyError::Unavailable
+            })?;
+
+            // WinRT calls need an initialised apartment; the daemon's threads have no
+            // other COM user, so MTA it is. A different mode already on the thread is
+            // fine too — the call then runs in that mode instead.
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            }
+            let notifier =
+                ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(AUMID))
+                    .map_err(|error| {
+                        tracing::debug!(
+                            %error,
+                            "the toast notifier could not be created; \
+                             is the AUMID registered?"
+                        );
+                        NotifyError::Unavailable
+                    })?;
+            notifier.Show(&toast).map_err(|error| {
+                tracing::debug!(%error, "the toast was refused by the platform");
+                NotifyError::Unavailable
+            })?;
+            Ok(tag)
+        }
+    }
+
+    /// Dev-only AUMID registration, compiled only under the `dev-toast-aumid` feature
+    /// and removed once the installer (todo 21) ships the shortcut that does this for
+    /// real. Writes the same per-user key an installed app's shortcut would, so the
+    /// toast platform can attribute the daemon's notifications.
+    #[cfg(feature = "dev-toast-aumid")]
+    mod dev_aumid {
+        use super::*;
+        use windows::Win32::System::Registry::{
+            HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, RegCloseKey,
+            RegCreateKeyExW, RegSetValueExW,
+        };
+        use windows::core::PCWSTR;
+
+        fn wide(text: &str) -> Vec<u16> {
+            text.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        /// Idempotent: an existing key is reused, values re-written. Never fatal — a
+        /// registry refusal only costs the toast, which surfaces as `Unavailable`.
+        pub fn ensure() {
+            let subkey = wide(&format!("Software\\Classes\\AppUserModelId\\{AUMID}"));
+            let mut key = HKEY_CURRENT_USER;
+            let opened = unsafe {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    PCWSTR(subkey.as_ptr()),
+                    None,
+                    None,
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_SET_VALUE,
+                    None,
+                    &mut key,
+                    None,
+                )
+            };
+            if opened != windows::Win32::Foundation::ERROR_SUCCESS {
+                tracing::debug!(
+                    code = opened.0,
+                    "the dev AUMID registry key could not be opened"
+                );
+                return;
+            }
+            let name = wide("Tidemark (dev)");
+            // REG_SZ = 1u32. The slice must include the terminating NUL.
+            unsafe {
+                let _ = RegSetValueExW(
+                    key,
+                    PCWSTR(wide("DisplayName").as_ptr()),
+                    None,
+                    windows::Win32::System::Registry::REG_VALUE_TYPE(1),
+                    Some(std::slice::from_raw_parts(
+                        name.as_ptr().cast::<u8>(),
+                        name.len() * 2,
+                    )),
+                );
+            }
+            unsafe {
+                let _ = RegCloseKey(key);
+            }
         }
     }
 }
@@ -575,6 +769,32 @@ mod tests {
         assert_eq!(names.len(), Kind::ALL.len());
     }
 
+    /// The Windows transport replaces one toast with the next by way of this tag, so
+    /// the derivation must be stable: the same window, named the same way, always gets
+    /// the same tag — and no other window ever gets that tag.
+    #[test]
+    fn a_window_is_always_tagged_the_same_way_and_no_other_window_shares_it() {
+        let notice = compose("claude", &window(96.0, None), Kind::Reset, now());
+        assert_eq!(tag_for(&notice.about), tag_for(&notice.about));
+
+        let other = Window {
+            key: WindowKey::named("w604800"),
+            ..window(96.0, None)
+        };
+        let other_tag = tag_for(&compose("claude", &other, Kind::Reset, now()).about);
+        assert_ne!(tag_for(&notice.about), other_tag);
+    }
+
+    /// The platform rejects tags over 16 characters. The prefix also pins the exact
+    /// derivation: changing the hash — or the prefix — silently breaks replacement of
+    /// toasts still on screen across an upgrade.
+    #[test]
+    fn a_tag_is_at_most_sixteen_characters() {
+        let tag = tag_for("claude/5 hours");
+        assert!(tag.len() <= 16, "{tag}");
+        assert_eq!(tag, "tmbd4ad638300934");
+    }
+
     #[test]
     fn the_notice_carries_the_providers_own_mark() {
         let notice = compose(
@@ -613,5 +833,34 @@ mod tests {
             compose("claude", &window(1.0, None), Kind::Reset, now()).urgency,
             Urgency::Normal
         );
+    }
+
+    /// The dev AUMID feature gates the transport's toast permission; with it, this
+    /// raises the real thing on this machine.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "raises a real Windows toast; run with `cargo test -p tidemarkd --features dev-toast-aumid -- --ignored`"]
+    fn a_real_toast_is_raised_and_its_successor_files_the_same_tag() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let transport = transport::Transport;
+        let first = runtime.block_on(transport.send(
+            "manual-qa/5 hours",
+            "80% used — Manual QA · 5 hours",
+            Some("Resets in 5 min."),
+            None,
+            Urgency::Normal,
+            None,
+        ));
+        let replacement = runtime.block_on(transport.send(
+            "manual-qa/5 hours",
+            "Limit reset — Manual QA · 5 hours",
+            None,
+            None,
+            Urgency::Normal,
+            None,
+        ));
+        let first = first.expect("the first toast was raised");
+        let replacement = replacement.expect("the replacement toast was raised");
+        assert_eq!(first, replacement, "the same window must reuse its tag");
     }
 }
