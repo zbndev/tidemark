@@ -31,6 +31,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Real Windows runtime gate for the secrets backend. Keep this on the existing
+  # windows-latest/MSVC decision; unlike the probes below, failures are fatal.
+  windows-tests:
+    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the locked MSVC target
+        shell: pwsh
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          rustup show
+          cargo --version
+          rustc -vV
+
+      - name: Run secrets runtime tests
+        shell: pwsh
+        run: |
+          $exitCode = 0
+          try {
+            cargo test -p tidemark-core --target x86_64-pc-windows-msvc secrets -- --nocapture
+            $exitCode = $LASTEXITCODE
+          } finally {
+            Write-Host "secrets command exit code: $exitCode"
+            Write-Host "cleanup: test-owned Credential Manager and DPAPI entries are removed by the test teardown"
+          }
+          exit $exitCode
+
   checks:
     # The only hosted runner carrying GTK 4.22 / libadwaita 1.9, which is the project's
     # API floor. ubuntu-latest is still 24.04 and ships GTK 4.18; this code does not
