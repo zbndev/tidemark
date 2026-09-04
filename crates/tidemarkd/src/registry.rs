@@ -1603,6 +1603,10 @@ mod tests {
     }
 
     #[test]
+    // The Unix catalog is 58 providers; Windows excludes t3chat (its HTTP stack needs
+    // boring2, which does not build there — see the SPEC table above), so the count and
+    // the register-what-Linux-registers premise are unix-build facts, not defects.
+    #[cfg(not(target_os = "windows"))]
     fn the_catalog_exists_even_when_no_account_is_configured() {
         let config = empty_config();
         assert!(

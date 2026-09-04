@@ -2082,8 +2082,10 @@ mod tests {
     fn a_browser_only_provider_wraps_its_profile_report_in_the_browser_mode() {
         // BrowserAuth renders by mode id. Handing it a Firefox root directly makes the
         // selected Browser half look unavailable even when the profile was discovered.
+        // t3chat is not registered on Windows (its HTTP stack needs boring2), so the
+        // setup names qoder — a browser-session provider registered on every platform.
         let report = browser_mode_report(
-            "t3chat",
+            "qoder",
             vec![AuthCandidate {
                 id: "firefox".into(),
                 title: "Firefox".into(),
@@ -2120,8 +2122,10 @@ mod tests {
     fn a_challenged_browser_choice_is_persisted_as_its_challenged_profile() {
         // An edge challenge refuses the proof, not the session: the recorded profile
         // starts working the moment the edge lets polls through.
+        // t3chat is not registered on Windows (its HTTP stack needs boring2), so the
+        // setup names qoder — a browser-session provider registered on every platform.
         let report = browser_mode_report(
-            "t3chat",
+            "qoder",
             vec![AuthCandidate {
                 id: "firefox".into(),
                 title: "Firefox".into(),
@@ -2773,7 +2777,11 @@ mod tests {
 
     /// A directory that hands a config inside it back its writer when it goes, and
     /// nothing else — the test that owns the directory removes it.
-    #[cfg(unix)]
+    ///
+    /// Unix refuses through the directory's write mode. Windows has no directory
+    /// write mode, so the refusal pins `config.toml` itself read-only instead: the
+    /// staged write still succeeds, and the rename over the read-only target is
+    /// refused — the same durability point, one step later in the same write.
     struct ReadOnlyDir(std::path::PathBuf);
 
     #[cfg(unix)]
@@ -2786,11 +2794,35 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    impl ReadOnlyDir {
+        fn refuse_writes(path: &std::path::Path) -> Self {
+            let config = path.join("config.toml");
+            let mut permissions = std::fs::metadata(&config)
+                .expect("config exists")
+                .permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&config, permissions).expect("config made read-only");
+            Self(config)
+        }
+    }
+
     #[cfg(unix)]
     impl Drop for ReadOnlyDir {
         fn drop(&mut self) {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for ReadOnlyDir {
+        fn drop(&mut self) {
+            let mut permissions = std::fs::metadata(&self.0)
+                .expect("config exists")
+                .permissions();
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(&self.0, permissions);
         }
     }
 
@@ -3280,7 +3312,6 @@ mod tests {
 
         // The config write is the durability point; a directory that cannot be written
         // to refuses it after the credential copy and the history re-key.
-        #[cfg(unix)]
         let read_only = ReadOnlyDir::refuse_writes(&dir);
 
         assert!(
@@ -3345,7 +3376,6 @@ mod tests {
         );
 
         // The next attempt converges over the orphan the refusal left behind.
-        #[cfg(unix)]
         drop(read_only);
         harness
             .engine
@@ -3506,7 +3536,6 @@ mod tests {
             .ingest(&reading)
             .expect("history written");
 
-        #[cfg(unix)]
         let read_only = ReadOnlyDir::refuse_writes(&dir);
 
         assert!(
@@ -3557,7 +3586,6 @@ mod tests {
             2,
             "the in-memory topology never moved"
         );
-        #[cfg(unix)]
         drop(read_only);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3709,6 +3737,10 @@ mod tests {
         let _ = std::fs::remove_file(history_path);
     }
 
+    // The Windows build deliberately excludes the local agy source (gated on G2, see
+    // ANTIGRAVITY_LOCAL_SOURCE_AVAILABLE), so "cli" is not a settable source value there
+    // and the rebuild-on-change behaviour under test cannot be exercised.
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn changing_antigravity_usage_source_rebuilds_its_client() {
         // Antigravity owns its credential discovery, so it is registered with a client
