@@ -24,7 +24,7 @@ semver = "1.0.28"
 tidemark-types = { path = "../tidemark-types" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-zbus = "5.13.2"
+zbus = { version = "5.13.2", features = ["p2p"] }
 
 [target.'cfg(windows)'.dependencies]
 # The Windows tray backend (todo 15). tray-icon drives Win32 tray APIs on its own
@@ -37,11 +37,16 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# AF_UNIX on Windows: std has no sockets there. The transport the locked A1 decision
+# (zbus p2p over AF_UNIX) is built on; the same crate tidemarkd serves the endpoint with.
+uds_windows = "1.2.1"
+
 [target.'cfg(unix)'.dependencies]
 # StatusNotifierItem and com.canonical.dbusmenu. Unlicense (public domain), so unlike
 # libayatana-appindicator-glib it can be linked into an MIT project; and it is built on the
 # same zbus 5 with the same async-io backend this crate already talks to the daemon over.
 ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
+
 
 # The Debian package. It carries binaries from two crates, so it is built from a prior
 # `cargo build --release --workspace` and invoked with `--no-build`. The metadata lives

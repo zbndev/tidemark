@@ -220,10 +220,12 @@ pub fn watch(on: impl Fn(Update) + 'static) {
                     "The connection to the daemon closed.".into(),
                 )),
                 Err(error) => {
-                    tracing::warn!(%error, "cannot talk to the session bus");
-                    on(Update::Waiting(format!(
-                        "Cannot reach the session bus: {error}"
-                    )));
+                    tracing::warn!(%error, "cannot talk to the daemon");
+                    #[cfg(unix)]
+                    let unreachable = format!("Cannot reach the session bus: {error}");
+                    #[cfg(windows)]
+                    let unreachable = format!("Cannot reach the daemon: {error}");
+                    on(Update::Waiting(unreachable));
                 }
             }
             gtk::glib::timeout_future_seconds(RETRY_SECONDS).await;
@@ -234,11 +236,16 @@ pub fn watch(on: impl Fn(Update) + 'static) {
 /// One connection's worth of work. Returns when a stream ends, which on a session bus means
 /// the bus itself went away.
 async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
+    #[cfg(unix)]
     let connection = zbus::Connection::session().await?;
+    #[cfg(windows)]
+    let connection = reconnect::connect(on).await?;
     let proxy = DaemonProxy::new(&connection).await?;
 
     // Subscribed before the first `GetStatus`, so that a poll finishing between the two is
-    // delivered as a signal rather than missed by both.
+    // delivered as a signal rather than missed by both. On p2p there is no bus name to
+    // watch: the connection ending is the whole story of the daemon going away.
+    #[cfg(unix)]
     let mut owner = pin!(proxy.inner().receive_owner_changed().await?);
     let mut changes = pin!(proxy.receive_provider_changed().await?);
     let mut removals = pin!(proxy.receive_provider_removed().await?);
@@ -251,6 +258,7 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
 
     loop {
         let event = poll_fn(|context| {
+            #[cfg(unix)]
             if let Poll::Ready(owner) = owner.as_mut().poll_next(context) {
                 return Poll::Ready(Event::Owner(owner));
             }
@@ -279,10 +287,12 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
         match event {
             // The daemon appeared, or was replaced by a newer one. Anything it published
             // while we were not listening was announced to nobody, so re-read all of it.
+            #[cfg(unix)]
             Event::Owner(Some(Some(unique))) => {
                 tracing::info!(%unique, "the daemon is on the bus");
                 load(&proxy, on).await;
             }
+            #[cfg(unix)]
             Event::Owner(Some(None)) => {
                 tracing::info!("the daemon left the bus");
                 on(Update::Waiting("The daemon is not running.".into()));
@@ -315,8 +325,9 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
                 Err(error) => tracing::warn!(%error, "a DataChanged signal did not parse"),
             },
             // Any stream ending means the connection is finished with.
-            Event::Owner(None)
-            | Event::Changed(None)
+            #[cfg(unix)]
+            Event::Owner(None) => return Ok(()),
+            Event::Changed(None)
             | Event::Removed(None)
             | Event::Reordered(None)
             | Event::Available(None)
@@ -405,8 +416,289 @@ fn unknown_method(error: &zbus::Error) -> bool {
     }
 }
 
+/// The Windows reconnect protocol: probe the daemon's p2p endpoint, spawn `tidemarkd.exe`
+/// when it is genuinely absent, and retry on the frozen schedule until the 15-second
+/// outage deadline. The pure decision pieces (the retry table, the endpoint-error
+/// classification, the spawn throttle) are compiled wherever tests run, so their
+/// table-driven unit tests run in Linux CI too; only the transport itself is Windows-only.
+#[cfg(any(windows, test))]
+mod reconnect {
+    use std::io;
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    #[cfg(windows)]
+    use std::path::PathBuf;
+    #[cfg(windows)]
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    #[cfg(windows)]
+    use uds_windows::UnixStream;
+
+    #[cfg(windows)]
+    use super::{DaemonProxy, Update};
+
+    /// The frozen retry table: exponential steps per the contract, then the cap.
+    const RETRY_TABLE_MS: [u64; 6] = [50, 100, 200, 400, 800, 1000];
+
+    /// A whole outage gets this long before the startup error goes on screen and the
+    /// outer five-second loop takes over again.
+    const OUTAGE_DEADLINE: Duration = Duration::from_secs(15);
+
+    /// Readiness is bounded: an endpoint that connects but never answers `Version` is not
+    /// a ready daemon.
+    const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// At most one spawn per outage, and spawns never closer together than this.
+    const SPAWN_COOLDOWN: Duration = Duration::from_secs(30);
+
+    /// `CREATE_NO_WINDOW`: the daemon is a console-subsystem program and must not flash a
+    /// console window when the GUI brings it up.
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    /// The endpoint the daemon serves. Must stay in step with `tidemarkd::peer`.
+    #[cfg(windows)]
+    fn endpoint_path() -> io::Result<PathBuf> {
+        std::env::var_os("LOCALAPPDATA")
+            .map(|local| {
+                PathBuf::from(local)
+                    .join("tidemark")
+                    .join("run")
+                    .join("d.sock")
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "LOCALAPPDATA is not set; the daemon endpoint has nowhere to live",
+                )
+            })
+    }
+
+    /// What a failed endpoint probe says about the daemon.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum EndpointState {
+        /// No endpoint file: no daemon is running, and none has been asked to.
+        Absent,
+        /// The endpoint file is there but nothing answers: a daemon was killed outright
+        /// and left its socket behind.
+        Refused,
+        /// Anything else — permission trouble, a socket that never answers — is not a
+        /// state spawning on top of could fix.
+        Unreachable,
+    }
+
+    impl EndpointState {
+        fn classify(kind: io::ErrorKind) -> Self {
+            match kind {
+                io::ErrorKind::NotFound => Self::Absent,
+                io::ErrorKind::ConnectionRefused => Self::Refused,
+                _ => Self::Unreachable,
+            }
+        }
+
+        /// Only these two mean "there is no daemon, bring one up". A `PermissionDenied`
+        /// or a malformed handshake is a problem spawning cannot solve.
+        fn spawns(self) -> bool {
+            matches!(self, Self::Absent | Self::Refused)
+        }
+    }
+
+    /// Advances through the frozen table, holding at its cap.
+    #[derive(Debug, Default)]
+    struct RetrySchedule {
+        attempt: usize,
+    }
+
+    impl RetrySchedule {
+        fn next_delay(&mut self) -> Duration {
+            let delay = RETRY_TABLE_MS[self.attempt.min(RETRY_TABLE_MS.len() - 1)];
+            self.attempt += 1;
+            Duration::from_millis(delay)
+        }
+    }
+
+    /// Whether a spawn is allowed: at most one per outage, and never within the cooldown
+    /// of the previous one. UIs racing are safe — the daemon's mutex is authoritative —
+    /// so this throttle is about not stomping, not about correctness.
+    fn spawn_allowed(now: Instant, last_spawn: Option<Instant>, spawned_this_outage: bool) -> bool {
+        !spawned_this_outage && last_spawn.is_none_or(|at| now.duration_since(at) >= SPAWN_COOLDOWN)
+    }
+
+    /// When the last spawn happened, across outages: the cooldown outlives any single
+    /// outage, because the outer loop starts a fresh one every five seconds.
+    #[cfg(windows)]
+    static LAST_SPAWN: Mutex<Option<Instant>> = Mutex::new(None);
+
+    /// Brings `tidemarkd.exe` up: the sibling of this program, found by its own location
+    /// — never a `PATH` search — with no arguments and no environment overrides.
+    #[cfg(windows)]
+    fn spawn_daemon() {
+        let spawned = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("tidemarkd.exe")))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "this program has no directory to find tidemarkd.exe beside",
+                )
+            })
+            .and_then(|path| {
+                let mut command = std::process::Command::new(path);
+                command.creation_flags(CREATE_NO_WINDOW);
+                command.spawn().map(|_child| ())
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "could not spawn tidemarkd.exe");
+        }
+    }
+
+    /// Connects to the daemon's endpoint and makes sure it is really a daemon: readiness
+    /// is the endpoint accepting plus a `Version` answer inside [`READINESS_TIMEOUT`].
+    #[cfg(windows)]
+    async fn ready(stream: UnixStream) -> zbus::Result<zbus::Connection> {
+        let connect = async {
+            let connection = zbus::connection::Builder::async_io_unix_stream(stream)
+                .p2p()
+                .build()
+                .await?;
+            let proxy = DaemonProxy::new(&connection).await?;
+            let _version = proxy.version().await?;
+            Ok(connection)
+        };
+        let mut connect = std::pin::pin!(connect);
+        let mut timeout = gtk::glib::timeout_future(READINESS_TIMEOUT);
+        super::poll_fn(|context| {
+            if let super::Poll::Ready(result) = connect.as_mut().poll(context) {
+                return super::Poll::Ready(result);
+            }
+            if timeout.as_mut().poll(context).is_ready() {
+                return super::Poll::Ready(Err(zbus::Error::InputOutput(std::sync::Arc::new(
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "the endpoint answered but never became a ready daemon",
+                    ),
+                ))));
+            }
+            super::Poll::Pending
+        })
+        .await
+    }
+
+    /// One outage: probe, spawn when justified, retry on the frozen schedule, and give
+    /// up with a visible error at the deadline so the outer loop's five-second retry
+    /// takes over.
+    #[cfg(windows)]
+    pub(super) async fn connect(on: &impl Fn(Update)) -> zbus::Result<zbus::Connection> {
+        let endpoint = endpoint_path()
+            .map_err(|error| zbus::Error::InputOutput(std::sync::Arc::new(error)))?;
+        let deadline = Instant::now() + OUTAGE_DEADLINE;
+        let mut schedule = RetrySchedule::default();
+        let mut spawned_this_outage = false;
+
+        loop {
+            match UnixStream::connect(&endpoint) {
+                Ok(stream) => {
+                    // A listener that never becomes a ready daemon is not a missing
+                    // daemon: spawning on top of it is exactly the wrong move, so keep
+                    // probing until the deadline says otherwise.
+                    if let Ok(connection) = ready(stream).await {
+                        return Ok(connection);
+                    }
+                }
+                Err(error) => {
+                    let state = EndpointState::classify(error.kind());
+                    if state.spawns() {
+                        let now = Instant::now();
+                        let mut last = LAST_SPAWN.lock().expect("no code panics holding this");
+                        if spawn_allowed(now, *last, spawned_this_outage) {
+                            spawned_this_outage = true;
+                            *last = Some(now);
+                            drop(last);
+                            tracing::info!(
+                                state = ?state,
+                                "the daemon endpoint is absent; spawning tidemarkd.exe"
+                            );
+                            spawn_daemon();
+                        }
+                    } else {
+                        tracing::debug!(%error, "the daemon endpoint is unreachable");
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                let message = "The daemon did not come up. Waiting for it.";
+                on(Update::Waiting(message.into()));
+                return Err(zbus::Error::InputOutput(std::sync::Arc::new(
+                    io::Error::new(io::ErrorKind::TimedOut, message),
+                )));
+            }
+            gtk::glib::timeout_future(schedule.next_delay()).await;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_retry_table_is_the_frozen_one() {
+            let mut schedule = RetrySchedule::default();
+            let delays: Vec<u64> = std::iter::repeat_with(|| schedule.next_delay())
+                .map(|delay| delay.as_millis() as u64)
+                .take(8)
+                .collect();
+            assert_eq!(delays, vec![50, 100, 200, 400, 800, 1000, 1000, 1000]);
+        }
+
+        #[test]
+        fn only_an_absent_or_refused_endpoint_justifies_a_spawn() {
+            let table = [
+                (io::ErrorKind::NotFound, EndpointState::Absent, true),
+                (
+                    io::ErrorKind::ConnectionRefused,
+                    EndpointState::Refused,
+                    true,
+                ),
+                (
+                    io::ErrorKind::PermissionDenied,
+                    EndpointState::Unreachable,
+                    false,
+                ),
+                (io::ErrorKind::TimedOut, EndpointState::Unreachable, false),
+                (io::ErrorKind::AddrInUse, EndpointState::Unreachable, false),
+            ];
+            for (kind, state, spawns) in table {
+                assert_eq!(EndpointState::classify(kind), state, "{kind:?}");
+                assert_eq!(state.spawns(), spawns, "{kind:?}");
+            }
+        }
+
+        #[test]
+        fn the_spawn_throttle_is_one_per_outage_and_one_per_thirty_seconds() {
+            let start = Instant::now();
+            // (now, last spawn, already spawned this outage, expected)
+            let table = [
+                (start, None, false, true),
+                (start + Duration::from_millis(1), Some(start), true, false),
+                (start + Duration::from_secs(29), Some(start), false, false),
+                (start + Duration::from_secs(30), Some(start), false, true),
+                (start + Duration::from_secs(31), Some(start), true, false),
+            ];
+            for (now, last_spawn, this_outage, allowed) in table {
+                assert_eq!(
+                    spawn_allowed(now, last_spawn, this_outage),
+                    allowed,
+                    "now={now:?} last={last_spawn:?} this-outage={this_outage}"
+                );
+            }
+        }
+    }
+}
+
 /// One of the streams the [`serve`] loop watches produced something.
 enum Event {
+    #[cfg(unix)]
     Owner(Option<Option<zbus::names::UniqueName<'static>>>),
     Changed(Option<ProviderChanged>),
     Removed(Option<ProviderRemoved>),
