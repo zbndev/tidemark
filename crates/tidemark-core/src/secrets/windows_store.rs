@@ -539,6 +539,13 @@ fn win_error(operation: &str, error: WindowsError) -> String {
 mod tests {
     use super::*;
 
+    /// Every test below uses `Store::connect`, which is rooted at the real shared
+    /// `%LOCALAPPDATA%\tidemark\secrets\v1` directory. Concurrent tests performing
+    /// read-modify-write cycles (or concurrent `secure_directory` DACL setup) race on
+    /// that shared state, so each test holds this lock for its entire body.
+    /// Any future test touching the real store MUST acquire `STORE_LOCK` first.
+    static STORE_LOCK: SyncMutex<()> = SyncMutex::new(());
+
     fn ids(suffix: &str) -> (ProviderId, AccountId) {
         (
             ProviderId::new(format!("tidemark-test-{suffix}")),
@@ -548,6 +555,7 @@ mod tests {
 
     #[tokio::test]
     async fn boundaries_and_multibyte_utf8_round_trip_through_real_windows_storage() {
+        let _guard = STORE_LOCK.lock().unwrap();
         let store = Store::connect().await.unwrap();
         for (index, value) in [
             String::new(),
@@ -583,6 +591,7 @@ mod tests {
 
     #[tokio::test]
     async fn slots_are_isolated_and_stale_cas_never_resurrects_a_value() {
+        let _guard = STORE_LOCK.lock().unwrap();
         let store = Store::connect().await.unwrap();
         let provider = ProviderId::new("tidemark-test-isolation");
         let first = AccountId::new("first");
@@ -638,6 +647,7 @@ mod tests {
     async fn real_fallback_integrity_faults_are_never_reported_as_absent() {
         use sha2::{Digest as _, Sha256};
 
+        let _guard = STORE_LOCK.lock().unwrap();
         let store = Store::connect().await.unwrap();
         let provider = ProviderId::new("tidemark-test-integrity");
         let other_provider = ProviderId::new("tidemark-test-integrity-other");
@@ -721,6 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn simultaneous_cas_writers_have_exactly_one_winner() {
+        let _guard = STORE_LOCK.lock().unwrap();
         let store = Arc::new(Store::connect().await.unwrap());
         let provider = ProviderId::new("tidemark-test-cas-race");
         let account = AccountId::default();
