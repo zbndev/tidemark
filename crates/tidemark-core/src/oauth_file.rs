@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use fs4::FileExt;
 
-#[cfg(unix)]
 use platform::VendorWriteLock;
 
 /// A third-party credential file and the one path Tidemark is allowed to update.
@@ -124,6 +123,25 @@ pub enum UpdateOutcome {
 }
 
 impl LockedCredentialFile {
+    /// Reads the current document while the update lock is held.
+    ///
+    /// Windows byte-range locks are mandatory: a fresh handle on the locked destination
+    /// would be denied with `ERROR_LOCK_VIOLATION` even in the locking process itself, so
+    /// the locked target handle is the reader. Unix locks are advisory, where the plain
+    /// path read stays exactly as it was.
+    fn read_current(&self) -> std::io::Result<Vec<u8>> {
+        #[cfg(windows)]
+        {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            (&self.target_lock).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }
+        #[cfg(unix)]
+        {
+            fs::read(&self.path)
+        }
+    }
     /// Reads the complete JSON document.
     pub fn read_json(&self) -> Result<serde_json::Value, CredentialFileError> {
         let bytes = std::fs::read(&self.path)?;
@@ -178,7 +196,7 @@ impl LockedCredentialFile {
         // Re-read under the lock immediately before merging. The caller may have spent
         // time exchanging a refresh token since its first read, and unrelated CLI-owned
         // state written in that interval must survive.
-        let original = fs::read(&self.path)?;
+        let original = self.read_current()?;
         let document: serde_json::Value = serde_json::from_slice(&original)?;
         let root = document
             .as_object()
@@ -197,6 +215,14 @@ impl LockedCredentialFile {
             update_field(&mut updated, key, *field, value)?;
         }
         platform::atomic_private_publish(&self.path, &updated, || {
+            #[cfg(windows)]
+            {
+                // Windows byte-range locks are mandatory: the lock this process holds on
+                // the destination would block the replace move with a lock violation, so
+                // it is released for the atomic move itself. Unix renames ignore POSIX
+                // locks, so the Linux arm keeps its lock held to the very end.
+                FileExt::unlock(&self.target_lock)?;
+            }
             if let Some(vendor_lock) = _vendor_lock.as_ref() {
                 vendor_lock.verify_ownership()?;
             }
@@ -235,7 +261,7 @@ impl LockedCredentialFile {
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
             return Err(CredentialFileError::NotRegularFile(self.path.clone()));
         }
-        let original = fs::read(&self.path)?;
+        let original = self.read_current()?;
         let document: serde_json::Value = serde_json::from_slice(&original)?;
         if !unchanged(&document) {
             return Ok(UpdateOutcome::SourceChanged);
@@ -244,7 +270,15 @@ impl LockedCredentialFile {
         for (name, value) in updates {
             update_field(&mut updated, "", Field::Root(name), value)?;
         }
-        platform::atomic_private_publish(&self.path, &updated, || Ok(()))?;
+        platform::atomic_private_publish(&self.path, &updated, || {
+            #[cfg(windows)]
+            {
+                // See update_top_level: the mandatory destination lock must not cover
+                // the replace move on Windows.
+                FileExt::unlock(&self.target_lock)?;
+            }
+            Ok(())
+        })?;
         Ok(UpdateOutcome::Published)
     }
 
@@ -256,7 +290,7 @@ impl LockedCredentialFile {
                 canonical: self.canonical.clone(),
             });
         }
-        let bytes = fs::read(&self.path)?;
+        let bytes = self.read_current()?;
         let name = self
             .path
             .file_name()
@@ -836,6 +870,368 @@ mod platform {
     }
 }
 
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod platform {
+    use std::fs::{self, File, FileTimes, OpenOptions};
+    use std::io::{self, Write};
+    use std::mem::size_of;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+
+    use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE};
+    use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
+    use windows::Win32::Security::{
+        ACL, ACL_REVISION, AddAccessAllowedAce, DACL_SECURITY_INFORMATION, GetLengthSid,
+        GetTokenInformation, InitializeAcl, PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY,
+        TOKEN_USER, TokenUser,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileInformationByHandle, WRITE_DAC,
+    };
+    use windows::Win32::System::Threading::OpenProcessToken;
+
+    use super::CredentialFileError;
+
+    static NEXT_STAGE: AtomicU64 = AtomicU64::new(0);
+
+    fn win_io(error: windows::core::Error) -> io::Error {
+        io::Error::other(error)
+    }
+
+    fn file_handle(file: &File) -> HANDLE {
+        HANDLE(file.as_raw_handle())
+    }
+
+    /// Read/write plus `WRITE_DAC`: publishing the user-only DACL through
+    /// `SetSecurityInfo` needs the handle's write-DAC access right, which generic
+    /// read/write does not grant.
+    fn write_dac_access() -> u32 {
+        (FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC).0
+    }
+
+    /// Every handle this module opens shares read/write/delete. The delete share is not
+    /// optional: the publish move replaces the destination while this process still holds
+    /// the target handle open for its mandatory byte-range lock, and a replace blocked by
+    /// the writer's own handle would fail with `ERROR_SHARING_VIOLATION`.
+    fn share_all() -> u32 {
+        (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0
+    }
+
+    fn file_information(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION, CredentialFileError> {
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `file` owns a live kernel handle and `information` is writable for the call.
+        unsafe { GetFileInformationByHandle(file_handle(file), &mut information) }
+            .map_err(win_io)?;
+        Ok(information)
+    }
+
+    fn reject_reparse(
+        file: &File,
+        reported_path: &Path,
+    ) -> Result<BY_HANDLE_FILE_INFORMATION, CredentialFileError> {
+        let information = file_information(file)?;
+        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return Err(CredentialFileError::NotRegularFile(
+                reported_path.to_owned(),
+            ));
+        }
+        Ok(information)
+    }
+
+    fn open_reparse_file(path: &Path, reported_path: &Path) -> Result<File, CredentialFileError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL).0)
+            .access_mode(write_dac_access())
+            .share_mode(share_all())
+            .open(path)?;
+        reject_reparse(&file, reported_path)?;
+        if !file.metadata()?.is_file() {
+            return Err(CredentialFileError::NotRegularFile(
+                reported_path.to_owned(),
+            ));
+        }
+        Ok(file)
+    }
+
+    fn open_directory(path: &Path) -> Result<File, CredentialFileError> {
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL)
+                    .0,
+            )
+            .access_mode(write_dac_access())
+            .share_mode(share_all())
+            .open(path)?;
+        reject_reparse(&directory, path)?;
+        if !directory.metadata()?.is_dir() {
+            return Err(CredentialFileError::NotRegularFile(path.to_owned()));
+        }
+        Ok(directory)
+    }
+
+    fn set_user_only_acl(file: &File) -> Result<(), CredentialFileError> {
+        let mut token = HANDLE::default();
+        // `-1` is the documented current-process pseudo-handle and is not closed.
+        unsafe { OpenProcessToken(HANDLE(-1_isize as *mut _), TOKEN_QUERY, &mut token) }
+            .map_err(win_io)?;
+        struct TokenGuard(HANDLE);
+        impl Drop for TokenGuard {
+            fn drop(&mut self) {
+                // SAFETY: OpenProcessToken returned this owned handle.
+                let _ = unsafe { CloseHandle(self.0) };
+            }
+        }
+        let _token_guard = TokenGuard(token);
+
+        let mut bytes_needed = 0;
+        // The sizing call intentionally fails with ERROR_INSUFFICIENT_BUFFER and sets the size.
+        let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut bytes_needed) };
+        if bytes_needed == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let words = (bytes_needed as usize).div_ceil(size_of::<usize>());
+        let mut token_buffer = vec![0usize; words];
+        // SAFETY: the word buffer is suitably aligned and has the size returned above.
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(token_buffer.as_mut_ptr().cast()),
+                bytes_needed,
+                &mut bytes_needed,
+            )
+        }
+        .map_err(win_io)?;
+        // SAFETY: TokenUser guarantees a TOKEN_USER at the start of the returned buffer.
+        let sid = unsafe { (*(token_buffer.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+        let sid_length = unsafe { GetLengthSid(sid) } as usize;
+        let acl_bytes = size_of::<ACL>() + size_of::<u32>() * 2 + sid_length;
+        let acl_words = acl_bytes.div_ceil(size_of::<usize>());
+        let mut acl_buffer = vec![0usize; acl_words];
+        let acl = acl_buffer.as_mut_ptr().cast::<ACL>();
+        // SAFETY: the aligned backing buffer remains live through SetSecurityInfo; the SID is
+        // owned by token_buffer and AddAccessAllowedAce copies it into the ACL.
+        unsafe { InitializeAcl(acl, (acl_words * size_of::<usize>()) as u32, ACL_REVISION) }
+            .map_err(win_io)?;
+        unsafe { AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS.0, sid) }
+            .map_err(win_io)?;
+        // A protected DACL with one full-control ACE is Windows' 0600 equivalent: the current
+        // user is the sole principal and no directory ACE can broaden access after publication.
+        let status = unsafe {
+            SetSecurityInfo(
+                file_handle(file),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(acl),
+                None,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status.0 as i32).into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn open_lock_file(
+        path: &Path,
+        credential_path: &Path,
+    ) -> Result<File, CredentialFileError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL).0)
+            .access_mode(write_dac_access())
+            .share_mode(share_all())
+            .open(path)?;
+        reject_reparse(&file, credential_path)?;
+        if !file.metadata()?.is_file() {
+            return Err(CredentialFileError::NotRegularFile(
+                credential_path.to_owned(),
+            ));
+        }
+        set_user_only_acl(&file)?;
+        Ok(file)
+    }
+
+    pub(super) fn open_target_file(path: &Path) -> Result<File, CredentialFileError> {
+        open_reparse_file(path, path)
+    }
+
+    pub(super) fn atomic_private_publish(
+        path: &Path,
+        bytes: &[u8],
+        before_rename: impl FnOnce() -> Result<(), CredentialFileError>,
+    ) -> Result<(), CredentialFileError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| CredentialFileError::InvalidPath(path.to_owned()))?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| CredentialFileError::InvalidPath(path.to_owned()))?;
+        let mut stage_path = None;
+        let mut stage = None;
+        for _ in 0..16 {
+            let serial = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
+            let candidate = parent.join(format!(
+                ".{name}.tidemark-{}-{serial}.tmp",
+                std::process::id()
+            ));
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL).0)
+                .access_mode(write_dac_access())
+                .share_mode(share_all())
+                .open(&candidate)
+            {
+                Ok(file) => {
+                    stage_path = Some(candidate);
+                    stage = Some(file);
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let stage_path = stage_path.ok_or(CredentialFileError::StageCollisions)?;
+        let mut stage_guard = StageGuard(Some(stage_path.clone()));
+        let mut stage = stage.expect("path and file are set together");
+        reject_reparse(&stage, path)?;
+        set_user_only_acl(&stage)?;
+        stage.write_all(bytes)?;
+        stage.sync_all()?;
+        drop(stage);
+        before_rename()?;
+
+        // MoveFileExW, not ReplaceFileW: ReplaceFileW needs to open the destination for
+        // writing and trips over this process's own mandatory byte-range locks held under
+        // the update lock. The staged file already carries the user-only DACL, so there is
+        // no destination ACL worth preserving across the replace.
+        // A plain `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` is not usable here: it fails
+        // with ACCESS_DENIED whenever ANY handle is open on the destination, and this
+        // process itself must hold the target handle (opened with FILE_SHARE_DELETE) up
+        // to the move for its mandatory byte-range lock. `std::fs::rename` performs the
+        // replace through the POSIX-semantics rename-by-handle path first, which admits
+        // concurrent FILE_SHARE_DELETE handles, and falls back to MoveFileExW. Errors 5
+        // (ACCESS_DENIED), 32 (SHARING_VIOLATION) and 33 (LOCK_VIOLATION) from a reader
+        // that raced the replace are transient: retry a bounded, deterministic number of
+        // times instead of failing the publish or spinning forever.
+        let mut published = false;
+        let mut last_error = None;
+        for _ in 0..25 {
+            match fs::rename(&stage_path, path) {
+                Ok(()) => {
+                    published = true;
+                    break;
+                }
+                Err(error) if matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33)) => {
+                    last_error = Some(error);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if !published {
+            return Err(CredentialFileError::Io(last_error.unwrap_or_else(|| {
+                io::Error::other("publish move did not complete within the retry budget")
+            })));
+        }
+        stage_guard.0 = None;
+        Ok(())
+    }
+
+    struct StageGuard(Option<PathBuf>);
+
+    impl Drop for StageGuard {
+        fn drop(&mut self) {
+            if let Some(path) = self.0.take() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    pub(super) struct VendorWriteLock {
+        path: PathBuf,
+        directory: File,
+        volume_serial: u32,
+        file_id: u64,
+    }
+
+    impl VendorWriteLock {
+        pub(super) fn acquire(path: &Path) -> Result<Self, CredentialFileError> {
+            match fs::create_dir(path) {
+                Ok(()) => {
+                    let directory = match open_directory(path) {
+                        Ok(directory) => directory,
+                        Err(error) => {
+                            let _ = fs::remove_dir(path);
+                            return Err(error);
+                        }
+                    };
+                    set_user_only_acl(&directory)?;
+                    let identity = file_information(&directory)?;
+                    Ok(Self {
+                        path: path.to_owned(),
+                        directory,
+                        volume_serial: identity.dwVolumeSerialNumber,
+                        file_id: u64::from(identity.nFileIndexHigh) << 32
+                            | u64::from(identity.nFileIndexLow),
+                    })
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    Err(CredentialFileError::Contended)
+                }
+                Err(error) => Err(error.into()),
+            }
+        }
+
+        pub(super) fn verify_ownership(&self) -> Result<(), CredentialFileError> {
+            self.directory
+                .set_times(FileTimes::new().set_modified(SystemTime::now()))?;
+            if self.owns_current_path() {
+                Ok(())
+            } else {
+                Err(CredentialFileError::Contended)
+            }
+        }
+
+        fn owns_current_path(&self) -> bool {
+            open_directory(&self.path)
+                .and_then(|directory| file_information(&directory))
+                .is_ok_and(|identity| {
+                    identity.dwVolumeSerialNumber == self.volume_serial
+                        && (u64::from(identity.nFileIndexHigh) << 32
+                            | u64::from(identity.nFileIndexLow))
+                            == self.file_id
+                })
+        }
+    }
+
+    impl Drop for VendorWriteLock {
+        fn drop(&mut self) {
+            if self.owns_current_path() {
+                let _ = fs::remove_dir(&self.path);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,8 +1268,11 @@ mod tests {
         assert_eq!(updated["expiry_date"], 123);
         assert_eq!(updated["refresh_token"], "keep");
         assert_eq!(updated["unrelated"]["nested"], true);
-        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "published private");
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "published private");
+        }
         fs::remove_dir_all(&dir).expect("test cleanup");
     }
 
