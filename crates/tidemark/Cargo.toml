@@ -26,6 +26,17 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zbus = "5.13.2"
 
+[target.'cfg(windows)'.dependencies]
+# The Windows tray backend (todo 15). tray-icon drives Win32 tray APIs on its own
+# event-loop thread; `windows` supplies only the message pump that thread must run for
+# menu events to be delivered. Current version pinned per plan §15 via `cargo search`.
+tray-icon = "0.24.2"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [target.'cfg(unix)'.dependencies]
 # StatusNotifierItem and com.canonical.dbusmenu. Unlicense (public domain), so unlike
 # libayatana-appindicator-glib it can be linked into an MIT project; and it is built on the
