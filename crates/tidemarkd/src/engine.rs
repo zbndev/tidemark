@@ -1551,7 +1551,7 @@ impl Engine {
             Err(error @ SecretError::NotUtf8) => {
                 Loaded::State(ProviderState::NoCredential, Some(error.to_string()))
             }
-            Err(error @ SecretError::Dbus(_)) => {
+            Err(error @ SecretError::Unavailable(_)) => {
                 Loaded::State(ProviderState::KeyringUnavailable, Some(error.to_string()))
             }
         };

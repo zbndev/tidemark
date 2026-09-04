@@ -55,17 +55,23 @@ const ATTR_ACCOUNT: &str = "account";
 pub enum SecretError {
     /// The collection is locked. Not a failure — see the module docs. The caller should
     /// surface a "waiting for keyring" state and try again later rather than treat this as
-    /// a credential problem or a crash.
+    /// a credential problem or a crash. A Windows backend never returns this variant.
     #[error("the keyring is locked")]
     Locked,
     /// The stored secret is not valid UTF-8. Nothing we write can produce this; it means
     /// something else wrote to our schema.
     #[error("stored secret is not valid UTF-8")]
     NotUtf8,
-    /// Talking to `org.freedesktop.secrets` failed outright: no provider is running, the
-    /// bus is unreachable, or the call errored.
-    #[error("secret service unavailable: {0}")]
-    Dbus(#[from] oo7::dbus::Error),
+    /// The secret store cannot be reached or complete the requested operation.
+    #[error("secret store unavailable: {0}")]
+    Unavailable(String),
+}
+
+#[cfg(unix)]
+impl From<oo7::dbus::Error> for SecretError {
+    fn from(error: oo7::dbus::Error) -> Self {
+        Self::Unavailable(error.to_string())
+    }
 }
 
 /// Which of the two things stored under `(provider, account)` a call means.
@@ -391,6 +397,17 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_service_error_maps_to_an_unavailable_store() {
+        let error = oo7::dbus::Error::Deleted;
+
+        assert_eq!(
+            SecretError::from(error).to_string(),
+            "secret store unavailable: Item/Collection was deleted, can no longer be used"
+        );
     }
 
     #[tokio::test]
