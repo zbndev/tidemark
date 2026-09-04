@@ -30,7 +30,6 @@ use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::secrets::Secrets;
 use tidemark_core::storage::History;
 use tidemark_types::ids;
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 use zbus::object_server::SignalEmitter;
 
@@ -85,6 +84,60 @@ async fn publish_result(
     result: Result<Option<String>, update::CheckError>,
 ) -> Result<Option<String>, update::CheckError> {
     Ok(published.publish(result?).await)
+}
+
+/// Spawns the watcher that turns the platform's "stop now" notice into
+/// [`Command::Shutdown`], so the engine stops cleanly instead of being killed mid-poll.
+/// The streams are registered before the spawn: a daemon that cannot arrange to hear
+/// its own stop signal is a startup failure, never a runtime surprise.
+#[cfg(unix)]
+fn shutdown_signals(
+    commands: mpsc::Sender<Command>,
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut term = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(tokio::spawn(async move {
+        let reason = tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = interrupt.recv() => "SIGINT",
+        };
+        tracing::info!(reason, "tidemarkd stopping");
+        let _ = commands.send(Command::Shutdown).await;
+    }))
+}
+
+/// The same contract on Windows: there is no SIGTERM for a console application, the OS
+/// asks to be let go with console control events. tokio's signal feature — already
+/// linked — registers the one `SetConsoleCtrlHandler` a process may install and hands
+/// back every event a daemon can receive as streams, waited on exactly like the Unix
+/// arm's signal pair.
+///
+/// The `windows` crate is deliberately not used for this: its `SetConsoleCtrlHandler`
+/// is an `unsafe fn` taking an `unsafe extern "system" fn` handler, and this workspace
+/// forbids `unsafe`. tokio covers the same events through a safe API, so tidemarkd
+/// needs no `[target.'cfg(windows)'.dependencies]` entry here.
+#[cfg(windows)]
+fn shutdown_signals(
+    commands: mpsc::Sender<Command>,
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    let mut term = tokio::signal::windows::ctrl_break()?;
+    let mut interrupt = tokio::signal::windows::ctrl_c()?;
+    let mut close = tokio::signal::windows::ctrl_close()?;
+    let mut logoff = tokio::signal::windows::ctrl_logoff()?;
+    let mut system = tokio::signal::windows::ctrl_shutdown()?;
+    Ok(tokio::spawn(async move {
+        let reason = tokio::select! {
+            _ = term.recv() => "Ctrl+Break",
+            _ = interrupt.recv() => "Ctrl+C",
+            _ = close.recv() => "Ctrl+Close",
+            _ = logoff.recv() => "Ctrl+Logoff",
+            _ = system.recv() => "Ctrl+Shutdown",
+        };
+        tracing::info!(reason, "tidemarkd stopping");
+        let _ = commands.send(Command::Shutdown).await;
+    }))
 }
 
 fn main() -> std::process::ExitCode {
@@ -287,19 +340,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(not(feature = "update-check"))]
     let release_checker: Option<tokio::task::JoinHandle<()>> = None;
 
-    let mut term = signal(SignalKind::terminate())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let signals = tokio::spawn({
-        let commands = commands.clone();
-        async move {
-            let reason = tokio::select! {
-                _ = term.recv() => "SIGTERM",
-                _ = interrupt.recv() => "SIGINT",
-            };
-            tracing::info!(reason, "tidemarkd stopping");
-            let _ = commands.send(Command::Shutdown).await;
-        }
-    });
+    let signals = shutdown_signals(commands.clone())?;
 
     // The daemon's own session-bus connection carries the notifications too: it is already
     // open, and org.freedesktop.Notifications is on the same bus as everything else here.
@@ -406,5 +447,39 @@ mod tests {
             None
         );
         assert_eq!(published.get().await, "");
+    }
+}
+
+/// The signal wiring has no feature gate of its own; this module keeps it pinned
+/// separately so it runs in every configuration the daemon can be built in.
+#[cfg(all(test, unix))]
+mod signal_tests {
+    use super::*;
+
+    /// Pins the shutdown wiring end to end: once this process is told to terminate,
+    /// `Command::Shutdown` must reach the engine's command queue. The signal is real —
+    /// `kill(1)` stands in for the signal-raising API std does not have, the
+    /// alternative being a libc dependency just for this test — and it travels the
+    /// helper's whole path: registration, stream, select, channel send.
+    #[tokio::test]
+    async fn a_termination_signal_reaches_the_command_queue() {
+        let (commands, mut queue) = mpsc::channel(COMMAND_QUEUE);
+        shutdown_signals(commands).expect("the SIGTERM and SIGINT streams register");
+
+        let delivered = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(std::process::id().to_string())
+            .status()
+            .expect("kill(1) is on the test host");
+        assert!(
+            delivered.success(),
+            "the signal was delivered to this process"
+        );
+
+        let command = tokio::time::timeout(std::time::Duration::from_secs(5), queue.recv())
+            .await
+            .expect("the watcher wakes on its own")
+            .expect("the watcher keeps the queue open until it is aborted");
+        assert!(matches!(command, Command::Shutdown));
     }
 }
