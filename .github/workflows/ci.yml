@@ -33,6 +33,36 @@ env:
 jobs:
   # Real Windows runtime gate for the secrets backend. Keep this on the existing
   # windows-latest/MSVC decision; unlike the probes below, failures are fatal.
+  windows-tests-debug:
+    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the locked MSVC target
+        shell: pwsh
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Run secrets runtime tests with failure capture
+        shell: pwsh
+        run: |
+          $out = ""
+          $code = 0
+          try {
+            $out = & cargo test -p tidemark-core --target x86_64-pc-windows-msvc secrets -- --nocapture 2>&1 | Out-String
+            $code = $LASTEXITCODE
+          } catch {
+            $out = $_ | Out-String; $code = 1
+          }
+          Write-Output $out
+          if ($code -ne 0) {
+            $lines = $out -split "`r?`n" | Where-Object { $_ -match 'FAILED|panicked|failures:|error\[|^error|assertion|test result' } | Select-Object -First 12
+            if (-not $lines) { $lines = ($out -split "`r?`n" | Select-Object -Last 12) }
+            foreach ($l in $lines) { Write-Output ("::error title=secrets-fail::" + ($l -replace '^[:]+', '').Trim()) }
+            exit $code
+          }
   windows-tests:
     if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
     runs-on: windows-latest
