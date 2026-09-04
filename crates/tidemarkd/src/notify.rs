@@ -6,8 +6,8 @@
 //! first seen at ninety-six percent, a rollover into a window that is already hot, a
 //! restart that must not warn somebody twice.
 //!
-//! **Saying it** is `org.freedesktop.Notifications`, and the daemon holds no opinion about
-//! what the user's desktop does with it beyond urgency.
+//! **Saying it** is a platform desktop notification transport, and the daemon holds no
+//! opinion about what the user's desktop does with it beyond urgency.
 //!
 //! The deduplication key is the segment, filed in the history database rather than in
 //! memory — see `storage::History::record_notice`. A row is written only after the
@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+#[cfg(unix)]
 use std::time::Duration;
 
 use tidemark_core::providers::BoxFuture;
@@ -26,6 +27,7 @@ use tidemark_types::{DANGER_AT, Timestamp, WARNING_AT, Window, present, provider
 /// It is a local call and normally returns in milliseconds. The bound exists because the
 /// poll loop awaits this: a notification daemon wedged mid-restart must cost one warning,
 /// not every provider's next reading.
+#[cfg(unix)]
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One of the two levels of consumption worth interrupting somebody about.
@@ -138,6 +140,7 @@ pub enum Urgency {
 
 impl Urgency {
     /// The value of the `urgency` hint, as freedesktop defines it.
+    #[cfg(unix)]
     pub fn hint(self) -> u8 {
         match self {
             Self::Normal => 1,
@@ -217,13 +220,16 @@ fn display_name(provider: &str) -> String {
 /// Never fatal, and never recorded as delivered: the poll after this one tries again.
 #[derive(Debug, thiserror::Error)]
 pub enum NotifyError {
-    /// Nothing on the session bus implements `org.freedesktop.Notifications`, or it
-    /// refused the message.
+    /// No desktop notification transport accepted the message.
     #[error("no notification server took the message")]
     Unreachable,
-    /// It took the call and did not answer within [`DELIVERY_TIMEOUT`].
+    /// The transport took the call and did not answer within [`DELIVERY_TIMEOUT`].
     #[error("the notification server did not answer in time")]
     Timeout,
+    /// This build has no usable desktop notification transport.
+    #[cfg(windows)]
+    #[error("notification transport unavailable on this build")]
+    Unavailable,
 }
 
 /// Somewhere for a [`Notice`] to go.
@@ -236,10 +242,10 @@ pub trait Notifier: std::fmt::Debug + Send + Sync {
     fn send(&self, notice: &Notice) -> BoxFuture<'_, Result<(), NotifyError>>;
 }
 
-/// `org.freedesktop.Notifications` on the session bus.
+/// The shared replacement bookkeeping around the platform notification transport.
 #[derive(Debug)]
 pub struct Desktop {
-    connection: zbus::Connection,
+    transport: transport::Transport,
     /// The server-assigned id of the message still on screen for each window, so the next
     /// one about that window replaces it. Lost on restart, which only costs one extra
     /// entry in the user's tray.
@@ -250,51 +256,9 @@ impl Desktop {
     /// Wraps an existing session-bus connection. The daemon already has one.
     pub fn new(connection: zbus::Connection) -> Self {
         Self {
-            connection,
+            transport: transport::Transport::new(connection),
             showing: Mutex::new(HashMap::new()),
         }
-    }
-
-    async fn notify(&self, notice: &Notice) -> Result<u32, NotifyError> {
-        let replaces = self
-            .showing
-            .lock()
-            .map(|showing| showing.get(&notice.about).copied().unwrap_or(0))
-            .unwrap_or(0);
-        let mut hints: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
-        hints.insert("urgency", notice.urgency.hint().into());
-
-        let arguments = (
-            "Tidemark",
-            replaces,
-            notice.icon.as_deref().unwrap_or_default(),
-            notice.summary.as_str(),
-            notice.body.as_deref().unwrap_or_default(),
-            Vec::<String>::new(),
-            hints,
-            // The server's own default lifetime. Urgency already says which messages should
-            // outlive it, and second-guessing the desktop's timing is not our business.
-            -1_i32,
-        );
-        let call = self.connection.call_method(
-            Some("org.freedesktop.Notifications"),
-            "/org/freedesktop/Notifications",
-            Some("org.freedesktop.Notifications"),
-            "Notify",
-            &arguments,
-        );
-        let reply = match tokio::time::timeout(DELIVERY_TIMEOUT, call).await {
-            Err(_) => return Err(NotifyError::Timeout),
-            Ok(Err(error)) => {
-                tracing::debug!(%error, "the notification server refused the message");
-                return Err(NotifyError::Unreachable);
-            }
-            Ok(Ok(reply)) => reply,
-        };
-        reply.body().deserialize::<u32>().map_err(|error| {
-            tracing::debug!(%error, "the notification server answered with something else");
-            NotifyError::Unreachable
-        })
     }
 }
 
@@ -302,12 +266,114 @@ impl Notifier for Desktop {
     fn send(&self, notice: &Notice) -> BoxFuture<'_, Result<(), NotifyError>> {
         let notice = notice.clone();
         Box::pin(async move {
-            let id = self.notify(&notice).await?;
+            let replaces = self
+                .showing
+                .lock()
+                .map(|showing| showing.get(&notice.about).copied())
+                .unwrap_or(None);
+            let id = self
+                .transport
+                .send(
+                    notice.summary.as_str(),
+                    notice.body.as_deref(),
+                    notice.icon.as_deref(),
+                    notice.urgency,
+                    replaces,
+                )
+                .await?;
             if let Ok(mut showing) = self.showing.lock() {
                 showing.insert(notice.about, id);
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(unix)]
+mod transport {
+    use super::*;
+
+    /// The session-bus desktop notification transport.
+    #[derive(Debug)]
+    pub struct Transport {
+        connection: zbus::Connection,
+    }
+
+    impl Transport {
+        pub fn new(connection: zbus::Connection) -> Self {
+            Self { connection }
+        }
+
+        pub async fn send(
+            &self,
+            title: &str,
+            body: Option<&str>,
+            icon: Option<&str>,
+            urgency: Urgency,
+            replaces: Option<u32>,
+        ) -> Result<u32, NotifyError> {
+            let mut hints: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+            hints.insert("urgency", urgency.hint().into());
+
+            let arguments = (
+                "Tidemark",
+                replaces.unwrap_or(0),
+                icon.unwrap_or_default(),
+                title,
+                body.unwrap_or_default(),
+                Vec::<String>::new(),
+                hints,
+                // The server's own default lifetime. Urgency already says which messages
+                // should outlive it, and second-guessing the desktop's timing is not our
+                // business.
+                -1_i32,
+            );
+            let call = self.connection.call_method(
+                Some("org.freedesktop.Notifications"),
+                "/org/freedesktop/Notifications",
+                Some("org.freedesktop.Notifications"),
+                "Notify",
+                &arguments,
+            );
+            let reply = match tokio::time::timeout(DELIVERY_TIMEOUT, call).await {
+                Err(_) => return Err(NotifyError::Timeout),
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "the notification server refused the message");
+                    return Err(NotifyError::Unreachable);
+                }
+                Ok(Ok(reply)) => reply,
+            };
+            reply.body().deserialize::<u32>().map_err(|error| {
+                tracing::debug!(%error, "the notification server answered with something else");
+                NotifyError::Unreachable
+            })
+        }
+    }
+}
+
+#[cfg(windows)]
+mod transport {
+    use super::*;
+
+    /// The Windows toast transport is implemented in todo 16.
+    #[derive(Debug)]
+    pub struct Transport;
+
+    impl Transport {
+        pub fn new(_connection: zbus::Connection) -> Self {
+            Self
+        }
+
+        pub async fn send(
+            &self,
+            _title: &str,
+            _body: Option<&str>,
+            _icon: Option<&str>,
+            _urgency: Urgency,
+            _replaces: Option<u32>,
+        ) -> Result<u32, NotifyError> {
+            Err(NotifyError::Unavailable)
+        }
     }
 }
 
