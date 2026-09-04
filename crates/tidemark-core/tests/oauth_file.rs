@@ -1,6 +1,8 @@
 use std::fs;
 use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +48,7 @@ fn replacing_the_token_subtree_preserves_every_unrelated_value() {
     let dir = TestDir::new();
     let path = dir.join(".credentials.json");
     let before = copy_real_shape(&path);
+    #[cfg(unix)]
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("set broad mode");
     let file = CredentialFile::new(path.clone(), path.clone());
     let replacement = json!({
@@ -79,6 +82,7 @@ fn replacing_the_token_subtree_preserves_every_unrelated_value() {
         serde_json::from_slice(&fs::read(&path).expect("published file")).expect("valid JSON");
     assert_eq!(after["claudeAiOauth"], replacement);
     assert_eq!(after["mcpOAuth"], before["mcpOAuth"]);
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
         0o600
@@ -248,6 +252,7 @@ fn backup_is_an_exact_private_copy_created_before_exchange() {
     let backup = locked.backup().expect("backup published");
 
     assert_eq!(fs::read(&backup).expect("backup readable"), original);
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(backup)
             .expect("backup metadata")
@@ -315,6 +320,7 @@ fn duplicate_oauth_keys_are_rejected_before_exchange() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_symlink_target_is_never_followed() {
     let dir = TestDir::new();
     let real = dir.join("real.json");

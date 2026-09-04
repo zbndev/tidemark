@@ -2773,8 +2773,10 @@ mod tests {
 
     /// A directory that hands a config inside it back its writer when it goes, and
     /// nothing else — the test that owns the directory removes it.
+    #[cfg(unix)]
     struct ReadOnlyDir(std::path::PathBuf);
 
+    #[cfg(unix)]
     impl ReadOnlyDir {
         fn refuse_writes(path: &std::path::Path) -> Self {
             use std::os::unix::fs::PermissionsExt;
@@ -2784,6 +2786,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for ReadOnlyDir {
         fn drop(&mut self) {
             use std::os::unix::fs::PermissionsExt;
@@ -3277,6 +3280,7 @@ mod tests {
 
         // The config write is the durability point; a directory that cannot be written
         // to refuses it after the credential copy and the history re-key.
+        #[cfg(unix)]
         let read_only = ReadOnlyDir::refuse_writes(&dir);
 
         assert!(
@@ -3341,6 +3345,7 @@ mod tests {
         );
 
         // The next attempt converges over the orphan the refusal left behind.
+        #[cfg(unix)]
         drop(read_only);
         harness
             .engine
@@ -3501,6 +3506,7 @@ mod tests {
             .ingest(&reading)
             .expect("history written");
 
+        #[cfg(unix)]
         let read_only = ReadOnlyDir::refuse_writes(&dir);
 
         assert!(
@@ -3551,6 +3557,7 @@ mod tests {
             2,
             "the in-memory topology never moved"
         );
+        #[cfg(unix)]
         drop(read_only);
         let _ = std::fs::remove_dir_all(&dir);
     }

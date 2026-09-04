@@ -987,6 +987,7 @@ mod tests {
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
@@ -1250,6 +1251,7 @@ mod tests {
 
         let backup = home.path.with_file_name("auth.json.tidemark-backup");
         assert_eq!(fs::read(&backup).expect("backup readable"), before);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(backup)
                 .expect("backup metadata")

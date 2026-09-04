@@ -950,6 +950,7 @@ mod tests {
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -1279,6 +1280,7 @@ mod tests {
             .path
             .with_file_name(".credentials.json.tidemark-backup");
         assert_eq!(fs::read(&backup).expect("backup readable"), before_bytes);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(backup)
                 .expect("backup metadata")
