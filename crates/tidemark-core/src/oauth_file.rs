@@ -1,16 +1,15 @@
 //! Safe updates to OAuth credential files owned by third-party CLIs.
 
-use std::fs::{self, File, FileTimes, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File};
 use std::ops::Range;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(all(test, unix))]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
 
 use fs4::FileExt;
 
-static NEXT_STAGE: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
+use platform::VendorWriteLock;
 
 /// A third-party credential file and the one path Tidemark is allowed to update.
 #[derive(Debug)]
@@ -40,27 +39,9 @@ impl CredentialFile {
     pub fn lock(&self) -> Result<LockedCredentialFile, CredentialFileError> {
         let lock_path = lock_path(&self.path)?;
         reject_non_regular_if_present(&lock_path)?;
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(lock_path)?;
-        if !lock.metadata()?.file_type().is_file() {
-            return Err(CredentialFileError::NotRegularFile(self.path.clone()));
-        }
-        lock.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let lock = platform::open_lock_file(&lock_path, &self.path)?;
         try_lock(&lock)?;
-        let target_lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&self.path)?;
-        if !target_lock.metadata()?.file_type().is_file() {
-            return Err(CredentialFileError::NotRegularFile(self.path.clone()));
-        }
+        let target_lock = platform::open_target_file(&self.path)?;
         try_lock(&target_lock)?;
         Ok(LockedCredentialFile {
             path: self.path.clone(),
@@ -215,7 +196,7 @@ impl LockedCredentialFile {
         for (field, value) in updates {
             update_field(&mut updated, key, *field, value)?;
         }
-        atomic_private_publish(&self.path, &updated, || {
+        platform::atomic_private_publish(&self.path, &updated, || {
             if let Some(vendor_lock) = _vendor_lock.as_ref() {
                 vendor_lock.verify_ownership()?;
             }
@@ -263,7 +244,7 @@ impl LockedCredentialFile {
         for (name, value) in updates {
             update_field(&mut updated, "", Field::Root(name), value)?;
         }
-        atomic_private_publish(&self.path, &updated, || Ok(()))?;
+        platform::atomic_private_publish(&self.path, &updated, || Ok(()))?;
         Ok(UpdateOutcome::Published)
     }
 
@@ -282,7 +263,7 @@ impl LockedCredentialFile {
             .and_then(|name| name.to_str())
             .ok_or_else(|| CredentialFileError::InvalidPath(self.path.clone()))?;
         let backup = self.path.with_file_name(format!("{name}.tidemark-backup"));
-        atomic_private_publish(&backup, &bytes, || Ok(()))?;
+        platform::atomic_private_publish(&backup, &bytes, || Ok(()))?;
         Ok(backup)
     }
 }
@@ -566,132 +547,291 @@ fn skip_value(bytes: &[u8], start: usize) -> Result<usize, CredentialFileError> 
     }
 }
 
-fn atomic_private_publish(
-    path: &Path,
-    bytes: &[u8],
-    before_rename: impl FnOnce() -> Result<(), CredentialFileError>,
-) -> Result<(), CredentialFileError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| CredentialFileError::InvalidPath(path.to_owned()))?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| CredentialFileError::InvalidPath(path.to_owned()))?;
-    let mut stage_path = None;
-    let mut stage = None;
-    for _ in 0..16 {
-        let serial = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!(
-            ".{name}.tidemark-{}-{serial}.tmp",
-            std::process::id()
-        ));
-        match OpenOptions::new()
+#[cfg(unix)]
+mod platform {
+    use std::fs::{self, File, FileTimes, OpenOptions};
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+
+    use super::CredentialFileError;
+
+    static NEXT_STAGE: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn open_lock_file(
+        path: &Path,
+        credential_path: &Path,
+    ) -> Result<File, CredentialFileError> {
+        let file = OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .mode(0o600)
-            .open(&candidate)
-        {
-            Ok(file) => {
-                stage_path = Some(candidate);
-                stage = Some(file);
-                break;
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        if !file.metadata()?.file_type().is_file() {
+            return Err(CredentialFileError::NotRegularFile(
+                credential_path.to_owned(),
+            ));
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+
+    pub(super) fn open_target_file(path: &Path) -> Result<File, CredentialFileError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        if !file.metadata()?.file_type().is_file() {
+            return Err(CredentialFileError::NotRegularFile(path.to_owned()));
+        }
+        Ok(file)
+    }
+
+    pub(super) fn atomic_private_publish(
+        path: &Path,
+        bytes: &[u8],
+        before_rename: impl FnOnce() -> Result<(), CredentialFileError>,
+    ) -> Result<(), CredentialFileError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| CredentialFileError::InvalidPath(path.to_owned()))?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| CredentialFileError::InvalidPath(path.to_owned()))?;
+        let mut stage_path = None;
+        let mut stage = None;
+        for _ in 0..16 {
+            let serial = NEXT_STAGE.fetch_add(1, Ordering::Relaxed);
+            let candidate = parent.join(format!(
+                ".{name}.tidemark-{}-{serial}.tmp",
+                std::process::id()
+            ));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&candidate)
+            {
+                Ok(file) => {
+                    stage_path = Some(candidate);
+                    stage = Some(file);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
+        }
+        let stage_path = stage_path.ok_or(CredentialFileError::StageCollisions)?;
+        let mut stage = stage.expect("path and file are set together");
+        let mut stage_guard = StageGuard(Some(stage_path.clone()));
+        stage.set_permissions(fs::Permissions::from_mode(0o600))?;
+        stage.write_all(bytes)?;
+        stage.sync_all()?;
+        drop(stage);
+        before_rename()?;
+        fs::rename(&stage_path, path)?;
+        stage_guard.0 = None;
+
+        // Persist the directory entry as well as the file contents. The ADR only requires
+        // fsync of the staged file, but syncing the parent closes the last crash window in the
+        // rename itself on filesystems that journal metadata lazily.
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    }
+
+    struct StageGuard(Option<PathBuf>);
+
+    impl Drop for StageGuard {
+        fn drop(&mut self) {
+            if let Some(path) = self.0.take() {
+                let _ = fs::remove_file(path);
+            }
         }
     }
-    let stage_path = stage_path.ok_or(CredentialFileError::StageCollisions)?;
-    let mut stage = stage.expect("path and file are set together");
-    let mut stage_guard = StageGuard(Some(stage_path.clone()));
-    stage.set_permissions(fs::Permissions::from_mode(0o600))?;
-    stage.write_all(bytes)?;
-    stage.sync_all()?;
-    drop(stage);
-    before_rename()?;
-    fs::rename(&stage_path, path)?;
-    stage_guard.0 = None;
 
-    // Persist the directory entry as well as the file contents. The ADR only requires
-    // fsync of the staged file, but syncing the parent closes the last crash window in the
-    // rename itself on filesystems that journal metadata lazily.
-    File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
-struct StageGuard(Option<PathBuf>);
-
-impl Drop for StageGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = fs::remove_file(path);
-        }
+    pub(super) struct VendorWriteLock {
+        path: PathBuf,
+        directory: File,
+        device: u64,
+        inode: u64,
     }
-}
 
-struct VendorWriteLock {
-    path: PathBuf,
-    directory: File,
-    device: u64,
-    inode: u64,
-}
-
-impl VendorWriteLock {
-    fn acquire(path: &Path) -> Result<Self, CredentialFileError> {
-        let mut builder = fs::DirBuilder::new();
-        builder.mode(0o700);
-        match builder.create(path) {
-            Ok(()) => {
-                let directory = match OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                    .open(path)
-                {
-                    Ok(directory) => directory,
-                    Err(error) => {
-                        let _ = fs::remove_dir(path);
-                        return Err(error.into());
-                    }
-                };
-                let metadata = directory.metadata()?;
-                Ok(Self {
-                    path: path.to_owned(),
-                    directory,
-                    device: metadata.dev(),
-                    inode: metadata.ino(),
-                })
+    impl VendorWriteLock {
+        pub(super) fn acquire(path: &Path) -> Result<Self, CredentialFileError> {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(path) {
+                Ok(()) => {
+                    let directory = match OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                        .open(path)
+                    {
+                        Ok(directory) => directory,
+                        Err(error) => {
+                            let _ = fs::remove_dir(path);
+                            return Err(error.into());
+                        }
+                    };
+                    let metadata = directory.metadata()?;
+                    Ok(Self {
+                        path: path.to_owned(),
+                        directory,
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    Err(CredentialFileError::Contended)
+                }
+                Err(error) => Err(error.into()),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+        }
+
+        pub(super) fn verify_ownership(&self) -> Result<(), CredentialFileError> {
+            self.directory
+                .set_times(FileTimes::new().set_modified(SystemTime::now()))?;
+            if self.owns_current_path() {
+                Ok(())
+            } else {
                 Err(CredentialFileError::Contended)
             }
-            Err(error) => Err(error.into()),
+        }
+
+        fn owns_current_path(&self) -> bool {
+            fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+                metadata.file_type().is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.dev() == self.device
+                    && metadata.ino() == self.inode
+            })
         }
     }
 
-    fn verify_ownership(&self) -> Result<(), CredentialFileError> {
-        self.directory
-            .set_times(FileTimes::new().set_modified(SystemTime::now()))?;
-        if self.owns_current_path() {
-            Ok(())
-        } else {
-            Err(CredentialFileError::Contended)
+    impl Drop for VendorWriteLock {
+        fn drop(&mut self) {
+            if self.owns_current_path() {
+                let _ = fs::remove_dir(&self.path);
+            }
         }
     }
 
-    fn owns_current_path(&self) -> bool {
-        fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
-            metadata.file_type().is_dir()
-                && !metadata.file_type().is_symlink()
-                && metadata.dev() == self.device
-                && metadata.ino() == self.inode
-        })
-    }
-}
+    #[cfg(test)]
+    mod tests {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::sync::atomic::{AtomicU64, Ordering};
 
-impl Drop for VendorWriteLock {
-    fn drop(&mut self) {
-        if self.owns_current_path() {
-            let _ = fs::remove_dir(&self.path);
+        use super::*;
+
+        static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
+        struct TestDir(PathBuf);
+
+        impl TestDir {
+            fn new() -> Self {
+                let serial = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "tidemark-oauth-platform-{}-{serial}",
+                    std::process::id()
+                ));
+                fs::create_dir(&path).expect("test directory");
+                Self(path)
+            }
+
+            fn join(&self, name: &str) -> PathBuf {
+                self.0.join(name)
+            }
+        }
+
+        impl Drop for TestDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[test]
+        fn secure_open_is_private_and_never_follows_a_symlink() {
+            let dir = TestDir::new();
+            let target = dir.join("credentials.json");
+            let lock_path = dir.join("credentials.lock");
+            fs::write(&target, b"{}").expect("target file");
+
+            let lock = open_lock_file(&lock_path, &target).expect("secure lock open");
+            assert_eq!(
+                lock.metadata().expect("lock metadata").permissions().mode() & 0o777,
+                0o600
+            );
+            let linked = dir.join("linked.json");
+            symlink(&target, &linked).expect("symlink");
+            assert!(open_target_file(&linked).is_err());
+        }
+
+        #[test]
+        fn file_identity_tracks_the_open_directory() {
+            let dir = TestDir::new();
+            let path = dir.join("vendor.lock");
+            let lock = VendorWriteLock::acquire(&path).expect("directory lock");
+            let metadata = fs::symlink_metadata(&path).expect("path metadata");
+
+            assert_eq!(lock.device, metadata.dev());
+            assert_eq!(lock.inode, metadata.ino());
+            fs::remove_dir(&path).expect("remove named directory");
+            assert!(!lock.owns_current_path());
+        }
+
+        #[test]
+        fn vendor_directory_lock_round_trip_and_contention_are_deterministic() {
+            let dir = TestDir::new();
+            let path = dir.join("vendor.lock");
+            let lock = VendorWriteLock::acquire(&path).expect("first lock");
+
+            assert!(matches!(
+                VendorWriteLock::acquire(&path),
+                Err(CredentialFileError::Contended)
+            ));
+            lock.verify_ownership().expect("still owns lock");
+            drop(lock);
+            assert!(!path.exists(), "owned lock directory removed");
+        }
+
+        #[test]
+        fn private_publish_round_trip_and_failures_leave_no_staging_file() {
+            let dir = TestDir::new();
+            let path = dir.join("credentials.json");
+            fs::write(&path, b"old").expect("old file");
+
+            atomic_private_publish(&path, b"new", || Ok(())).expect("publish");
+            assert_eq!(fs::read(&path).expect("published file"), b"new");
+            assert_eq!(
+                fs::metadata(&path)
+                    .expect("published metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+
+            let refused =
+                atomic_private_publish(&path, b"refused", || Err(CredentialFileError::Contended));
+            assert!(matches!(refused, Err(CredentialFileError::Contended)));
+            assert_eq!(fs::read(&path).expect("original retained"), b"new");
+            assert!(
+                fs::read_dir(&dir.0)
+                    .expect("directory readable")
+                    .all(|entry| !entry
+                        .expect("directory entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".tmp"))
+            );
+            assert!(atomic_private_publish(&dir.join("missing/file"), b"x", || Ok(())).is_err());
         }
     }
 }
