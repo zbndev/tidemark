@@ -26,6 +26,7 @@
 //! dialog popping up from an unattended background process. Locked is a state for the
 //! caller to wait out, not an error to log and not a crash.
 
+#[cfg(unix)]
 use oo7::dbus::{Collection, Service};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as SyncMutex};
@@ -46,8 +47,11 @@ pub use tidemark_types::ids::SECRET_SCHEMA as SCHEMA;
 /// The separate schema a Tidemark-owned OAuth credential is filed under.
 pub use tidemark_types::ids::TOKEN_SCHEMA;
 
+#[cfg(unix)]
 const ATTR_SCHEMA: &str = "xdg:schema";
+#[cfg(unix)]
 const ATTR_PROVIDER: &str = "provider";
+#[cfg(unix)]
 const ATTR_ACCOUNT: &str = "account";
 
 /// Why a Secret Service operation did not produce a value.
@@ -92,6 +96,7 @@ impl Kind {
         }
     }
 
+    #[cfg(unix)]
     const fn noun(self) -> &'static str {
         match self {
             Self::Key => "key",
@@ -100,6 +105,7 @@ impl Kind {
     }
 }
 
+#[cfg(unix)]
 fn attributes(
     kind: Kind,
     provider: &ProviderId,
@@ -211,13 +217,22 @@ impl Secrets for Store {
     }
 }
 
+#[cfg(any(windows, test))]
+mod protocol;
+#[cfg(windows)]
+mod windows_store;
+#[cfg(windows)]
+pub use windows_store::Store;
+
 /// A connection to the freedesktop Secret Service, scoped to Tidemark's own secrets.
+#[cfg(unix)]
 #[derive(Debug)]
 pub struct Store {
     service: Service,
     mutations: MutationMap,
 }
 
+#[cfg(unix)]
 impl Store {
     /// Connects to `org.freedesktop.secrets`. Cheap, and safe to call again if a prior
     /// connection was lost — it does not itself touch a collection, so it never blocks on
@@ -378,7 +393,7 @@ impl Store {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     //! These tests talk to a real `org.freedesktop.secrets` implementation over the
     //! session bus — there is no mock in the loop, on the same principle as the corpus

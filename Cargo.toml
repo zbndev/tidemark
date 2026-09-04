@@ -16,7 +16,9 @@ repository = "https://github.com/zbndev/tidemark"
 authors = ["zbndev"]
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Unsafe remains denied workspace-wide. The Windows secrets FFI module is the sole,
+# locally-audited exception because the generated Win32 bindings are unsafe functions.
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
