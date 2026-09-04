@@ -112,6 +112,26 @@ fn oauth_entry(provider: &str) -> Option<&'static OAuthEntry> {
     OAUTH.iter().find(|entry| entry.slug == provider)
 }
 
+// Todo 19 remains gated on G2; Windows must not register the local agy source before it passes.
+#[cfg(target_os = "windows")]
+const ANTIGRAVITY_LOCAL_SOURCE_AVAILABLE: bool = false;
+// Todo 19 remains gated on G2; non-Windows builds retain the existing local agy registration.
+#[cfg(not(target_os = "windows"))]
+const ANTIGRAVITY_LOCAL_SOURCE_AVAILABLE: bool = true;
+
+/// Whether this build registers the vendor program's local credential source.
+fn local_source_available(provider: &str) -> bool {
+    provider != antigravity::PROVIDER_ID || ANTIGRAVITY_LOCAL_SOURCE_AVAILABLE
+}
+
+fn credential_hint(entry: &OAuthEntry) -> &'static str {
+    if local_source_available(entry.slug) {
+        entry.credential_hint
+    } else {
+        "Sign in with Google through Tidemark."
+    }
+}
+
 /// The hand-written key-authenticated providers: those whose fetch is more than one
 /// request, so a `keyed::Spec` cannot describe them — ai& pages a request log,
 /// Alibaba Coding Plan retries its one quota POST across the international and
@@ -226,8 +246,8 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
             provider: entry.slug.to_owned(),
             title: entry.title.to_owned(),
             credential: CredentialKind::OAuth.as_wire().to_owned(),
-            credential_hint: entry.credential_hint.to_owned(),
-            external: Some(ExternalLogin {
+            credential_hint: credential_hint(entry).to_owned(),
+            external: local_source_available(entry.slug).then(|| ExternalLogin {
                 option: AUTH_SOURCE.to_owned(),
                 label: entry.external_label.to_owned(),
                 location: entry.external_location.to_owned(),
@@ -493,33 +513,41 @@ fn published_option(
 /// The choice between an OAuth provider's two credentials: the login Tidemark performed
 /// itself, and the one the vendor's own program already holds on this machine.
 ///
-/// Exactly two choices, in a fixed order. `auto` is deliberately not among them: it
-/// survives as what an untouched `config.toml` means — which is why the value below may
-/// legitimately be a string the choices do not contain — but the user can only ever write
-/// one of the two concrete values. A control that offered "automatic" would let them
-/// re-ask for the silent picking this row exists to replace.
+/// Both choices are published in a fixed order when the local source is available; a
+/// platform without it publishes only OAuth. `auto` is deliberately not among them: it
+/// survives as what an untouched `config.toml` means where both sources exist — which is
+/// why the value below may legitimately be a string the choices do not contain — but the
+/// user can only ever write a concrete value. A control that offered "automatic" would
+/// let them re-ask for the silent picking this row exists to replace.
 ///
 /// No description: the dialog draws this row itself, in the authentication group, with
 /// its own explanation, and a sentence here would be shown twice.
 fn auth_source_option(entry: &OAuthEntry, config: &Config) -> ProviderOption {
+    let available = local_source_available(entry.slug);
+    let value = if available {
+        config
+            .option(entry.slug, AUTH_SOURCE)
+            .unwrap_or(AUTO_SOURCE)
+            .to_owned()
+    } else {
+        OAUTH_SOURCE.to_owned()
+    };
+    let mut choices = vec![OptionChoice {
+        value: OAUTH_SOURCE.to_owned(),
+        title: "Tidemark login".to_owned(),
+    }];
+    if available {
+        choices.push(OptionChoice {
+            value: CLI_SOURCE.to_owned(),
+            title: entry.external_label.to_owned(),
+        });
+    }
     ProviderOption {
         name: AUTH_SOURCE.to_owned(),
         title: "Credential".to_owned(),
         description: None,
-        value: config
-            .option(entry.slug, AUTH_SOURCE)
-            .unwrap_or(AUTO_SOURCE)
-            .to_owned(),
-        choices: vec![
-            OptionChoice {
-                value: OAUTH_SOURCE.to_owned(),
-                title: "Tidemark login".to_owned(),
-            },
-            OptionChoice {
-                value: CLI_SOURCE.to_owned(),
-                title: entry.external_label.to_owned(),
-            },
-        ],
+        value,
+        choices,
     }
 }
 
@@ -533,7 +561,15 @@ fn source_value(provider: &str, config: &Config) -> Source {
 /// Extra configured accounts have no vendor CLI file, so they always use Tidemark's login.
 pub(crate) fn source_for_account(provider: &str, account: &AccountId, config: &Config) -> Source {
     if account.as_str() == "default" {
-        source_value(provider, config)
+        supported_source(provider, source_value(provider, config))
+    } else {
+        Source::OAuth
+    }
+}
+
+fn supported_source(provider: &str, source: Source) -> Source {
+    if local_source_available(provider) {
+        source
     } else {
         Source::OAuth
     }
@@ -552,7 +588,7 @@ pub fn external_present(provider: &str) -> Option<bool> {
             Some(claude::cli_credentials_path().is_some_and(|path| path.exists()))
         }
         codex::PROVIDER_ID => Some(codex::cli_credentials_path().is_some_and(|path| path.exists())),
-        antigravity::PROVIDER_ID => Some(antigravity::agy::is_available()),
+        antigravity::PROVIDER_ID => Some(antigravity_external_present()),
         gemini::PROVIDER_ID => {
             Some(gemini::cli_credentials_path().is_some_and(|path| path.exists()))
         }
@@ -569,7 +605,7 @@ pub fn external_present(provider: &str) -> Option<bool> {
 /// have a vendor CLI file.
 pub fn auth_source(provider: &str, source: Source, status: &ProviderStatus) -> Option<String> {
     oauth_entry(provider)?;
-    let resolved = match source {
+    let resolved = match supported_source(provider, source) {
         Source::OAuth => OAUTH_SOURCE,
         Source::Cli => CLI_SOURCE,
         Source::Auto => match provider {
@@ -613,6 +649,38 @@ pub async fn login_document(
     }
 }
 
+// Todo 19 remains gated on G2; only non-Windows builds may inspect or start the agy supervisor.
+#[cfg(not(target_os = "windows"))]
+fn antigravity_external_present() -> bool {
+    antigravity::agy::is_available()
+}
+
+// Todo 19 remains gated on G2; Windows publishes the local agy source as unavailable.
+#[cfg(target_os = "windows")]
+fn antigravity_external_present() -> bool {
+    false
+}
+
+// Todo 19 remains gated on G2; non-Windows account construction retains the agy-capable provider.
+#[cfg(not(target_os = "windows"))]
+fn build_antigravity(
+    account: AccountId,
+    secrets: Arc<dyn Secrets>,
+    source: Source,
+) -> Result<antigravity::Antigravity, ProviderError> {
+    antigravity::Antigravity::new(account, Some(secrets), source)
+}
+
+// Todo 19 remains gated on G2; Windows constructs the same provider through its OAuth-only path.
+#[cfg(target_os = "windows")]
+fn build_antigravity(
+    account: AccountId,
+    secrets: Arc<dyn Secrets>,
+    _source: Source,
+) -> Result<antigravity::Antigravity, ProviderError> {
+    antigravity::Antigravity::oauth(account, secrets)
+}
+
 fn antigravity_account(
     account: &AccountId,
     secrets: &Arc<dyn Secrets>,
@@ -620,9 +688,9 @@ fn antigravity_account(
 ) -> Result<Account, ProviderError> {
     let source = source_for_account(antigravity::PROVIDER_ID, account, config);
     let account_id = account.clone();
-    Ok(Account::with_client(Arc::new(antigravity::Antigravity::new(
+    Ok(Account::with_client(Arc::new(build_antigravity(
         account_id.clone(),
-        Some(Arc::clone(secrets)),
+        Arc::clone(secrets),
         source,
     )?))
     .with_source(source)
@@ -630,19 +698,24 @@ fn antigravity_account(
         let secrets = Arc::clone(secrets);
         Box::new(move |account, options| {
             let source = if account.as_str() == "default" {
-                Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
+                supported_source(
+                    antigravity::PROVIDER_ID,
+                    Source::from_value(options.get(AUTH_SOURCE).map(String::as_str)),
+                )
             } else {
                 Source::OAuth
             };
-            Ok(Arc::new(antigravity::Antigravity::new(
+            Ok(Arc::new(build_antigravity(
                 account.clone(),
-                Some(Arc::clone(&secrets)),
+                Arc::clone(&secrets),
                 source,
             )?) as Arc<dyn Provider>)
         })
     })
     .with_credential(CredentialKind::OAuth)
-    .with_hint("Sign in with Google through Tidemark, or read a signed-in agy session."))
+    .with_hint(credential_hint(
+        oauth_entry(antigravity::PROVIDER_ID).expect("Antigravity is registered"),
+    )))
 }
 
 fn claude_account(
@@ -900,22 +973,13 @@ mod tests {
     }
 
     #[test]
-    fn every_oauth_provider_publishes_its_two_credentials_as_the_choice() {
+    fn every_oauth_provider_publishes_its_available_credentials() {
         let published = catalog(&empty_config());
         for entry in OAUTH {
             let definition = published
                 .iter()
                 .find(|definition| definition.provider == entry.slug)
                 .unwrap_or_else(|| panic!("{} is in the table but not published", entry.slug));
-            let external = definition
-                .external
-                .as_ref()
-                .expect("an OAuth provider has two credentials to name");
-            assert_eq!(external.option, AUTH_SOURCE);
-            assert_eq!(external.label, entry.external_label);
-            assert_eq!(external.location, entry.external_location);
-            assert_eq!(external.command, entry.external_command);
-            assert_eq!(external.writes_back, entry.writes_back);
             let option = definition
                 .options
                 .iter()
@@ -928,27 +992,153 @@ mod tests {
                 .iter()
                 .map(|choice| (choice.value.as_str(), choice.title.as_str()))
                 .collect();
-            assert_eq!(
-                choices,
-                [
-                    (OAUTH_SOURCE, "Tidemark login"),
-                    (CLI_SOURCE, entry.external_label)
-                ],
-                "auto is the unset default, never a choice, for {}",
-                entry.slug
-            );
+            if local_source_available(entry.slug) {
+                let external = definition
+                    .external
+                    .as_ref()
+                    .expect("an available local credential is named");
+                assert_eq!(external.option, AUTH_SOURCE);
+                assert_eq!(external.label, entry.external_label);
+                assert_eq!(external.location, entry.external_location);
+                assert_eq!(external.command, entry.external_command);
+                assert_eq!(external.writes_back, entry.writes_back);
+                assert_eq!(
+                    choices,
+                    [
+                        (OAUTH_SOURCE, "Tidemark login"),
+                        (CLI_SOURCE, entry.external_label)
+                    ],
+                    "auto is the unset default, never a choice, for {}",
+                    entry.slug
+                );
+            } else {
+                assert_eq!(definition.external, None);
+                assert_eq!(choices, [(OAUTH_SOURCE, "Tidemark login")]);
+            }
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn a_provider_with_one_credential_publishes_no_external_login() {
+    fn unix_publishes_antigravity_oauth_and_local_agy() {
+        let config = empty_config();
+        let definition = catalog(&config)
+            .into_iter()
+            .find(|definition| definition.provider == antigravity::PROVIDER_ID)
+            .expect("Antigravity remains in the catalog");
+        let external = definition
+            .external
+            .as_ref()
+            .expect("the local agy source remains published");
+        let source = definition
+            .options
+            .iter()
+            .find(|option| option.name == AUTH_SOURCE)
+            .expect("the credential selector remains published");
+
+        assert_eq!(definition.credential_kind(), Some(CredentialKind::OAuth));
+        assert_eq!(
+            definition.credential_hint,
+            "Sign in with Google through Tidemark, or read a signed-in agy session."
+        );
+        assert_eq!(external.option, AUTH_SOURCE);
+        assert_eq!(external.label, "agy session");
+        assert_eq!(external.command, "agy");
+        assert!(!external.writes_back);
+        assert_eq!(source.value, AUTO_SOURCE);
+        assert_eq!(
+            source
+                .choices
+                .iter()
+                .map(|choice| (choice.value.as_str(), choice.title.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (OAUTH_SOURCE, "Tidemark login"),
+                (CLI_SOURCE, "agy session")
+            ]
+        );
+        let built = account(
+            antigravity::PROVIDER_ID,
+            &AccountId::default(),
+            &secrets(),
+            &config,
+        )
+        .expect("account construction succeeds")
+        .expect("Antigravity account remains registered");
+        assert_eq!(
+            built.status().credential_kind(),
+            Some(CredentialKind::OAuth)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_publishes_antigravity_as_oauth_only() {
+        let path = scratch_config(
+            "windows-antigravity-source",
+            "providers = [\"antigravity\"]\n\n[provider.antigravity]\nsource = \"cli\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let definition = catalog(&config)
+            .into_iter()
+            .find(|definition| definition.provider == antigravity::PROVIDER_ID)
+            .expect("Antigravity remains in the catalog");
+        let source = definition
+            .options
+            .iter()
+            .find(|option| option.name == AUTH_SOURCE)
+            .expect("the OAuth source remains published");
+
+        println!(
+            "published Antigravity Windows capabilities: credential={}, external={}, choices={:?}",
+            definition.credential,
+            definition.external.is_some(),
+            source
+                .choices
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(definition.credential_kind(), Some(CredentialKind::OAuth));
+        assert_eq!(definition.external, None);
+        assert_eq!(
+            definition.credential_hint,
+            "Sign in with Google through Tidemark."
+        );
+        assert_eq!(source.value, OAUTH_SOURCE);
+        assert_eq!(source.choices.len(), 1);
+        assert_eq!(source.choices[0].value, OAUTH_SOURCE);
+        assert_eq!(
+            source_for_account(antigravity::PROVIDER_ID, &AccountId::default(), &config),
+            Source::OAuth
+        );
+        assert_eq!(external_present(antigravity::PROVIDER_ID), Some(false));
+        assert!(oauth_client(antigravity::PROVIDER_ID).is_some());
+        let built = account(
+            antigravity::PROVIDER_ID,
+            &AccountId::default(),
+            &secrets(),
+            &config,
+        )
+        .expect("account construction succeeds")
+        .expect("Antigravity account remains registered");
+        assert_eq!(
+            built.status().credential_kind(),
+            Some(CredentialKind::OAuth)
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_provider_publishes_external_login_exactly_when_available() {
         // The absent field is the whole signal a client dispatches on: no external login
         // means no credential choice to draw.
         for definition in catalog(&empty_config()) {
             assert_eq!(
                 definition.external.is_some(),
-                oauth_entry(&definition.provider).is_some(),
-                "{} must publish an external login exactly when it has two credentials",
+                oauth_entry(&definition.provider)
+                    .is_some_and(|entry| local_source_available(entry.slug)),
+                "{} must publish an external login exactly when it is available",
                 definition.provider
             );
         }
@@ -1180,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn the_credential_choice_reports_the_stored_value_verbatim() {
+    fn the_credential_choice_reports_a_supported_value() {
         for slug in [
             antigravity::PROVIDER_ID,
             claude::PROVIDER_ID,
@@ -1192,8 +1382,9 @@ mod tests {
                 .find(|option| option.name == AUTH_SOURCE)
                 .expect("the credential choice is published");
             assert_eq!(
-                source.value, AUTO_SOURCE,
-                "auto is what an unset file means"
+                source.value,
+                supported_source(slug, Source::Auto).as_value(),
+                "an unset file resolves only to a source this platform supports"
             );
 
             let path = scratch_config(
@@ -1206,7 +1397,7 @@ mod tests {
                 .iter()
                 .find(|option| option.name == AUTH_SOURCE)
                 .expect("the credential choice is published");
-            assert_eq!(source.value, CLI_SOURCE);
+            assert_eq!(source.value, supported_source(slug, Source::Cli).as_value());
             let _ = std::fs::remove_file(path);
         }
     }
@@ -1323,20 +1514,26 @@ mod tests {
             status.external_present = Some(true);
             assert_eq!(
                 auth_source_from_status(antigravity::PROVIDER_ID, &status).as_deref(),
-                Some(stored)
+                Some(
+                    supported_source(antigravity::PROVIDER_ID, Source::from_value(Some(stored)))
+                        .as_value()
+                )
             );
         }
-        for (external_present, expected) in [
-            (Some(true), CLI_SOURCE),
-            (Some(false), OAUTH_SOURCE),
-            (None, OAUTH_SOURCE),
-        ] {
+        for external_present in [Some(true), Some(false), None] {
             let mut status = probed_status(antigravity::PROVIDER_ID, None);
             status.external_present = external_present;
+            let expected = if local_source_available(antigravity::PROVIDER_ID)
+                && external_present == Some(true)
+            {
+                CLI_SOURCE
+            } else {
+                OAUTH_SOURCE
+            };
             assert_eq!(
                 auth_source_from_status(antigravity::PROVIDER_ID, &status).as_deref(),
                 Some(expected),
-                "auto tries the local server first whenever agy is installed"
+                "auto uses agy only on a platform where that source is registered"
             );
         }
     }
@@ -1422,11 +1619,11 @@ mod tests {
                 .external
                 .as_ref()
                 .map(|external| external.label.as_str()),
-            Some("agy session")
+            local_source_available(antigravity::PROVIDER_ID).then_some("agy session")
         );
         assert_eq!(
             definitions[0].credential_hint,
-            "Sign in with Google through Tidemark, or read a signed-in agy session."
+            credential_hint(oauth_entry(antigravity::PROVIDER_ID).expect("registered"))
         );
         assert!(
             definitions

@@ -35,6 +35,8 @@
 //! logged into. Every fetch therefore passes [`agy::USER_STATUS_PATH`] first, and this
 //! module's [`logged_in`] is the predicate that gate is built on.
 
+// Todo 19 remains gated on G2; until then the Unix supervisor must not compile on Windows.
+#[cfg(unix)]
 pub mod agy;
 pub mod direct;
 pub mod oauth;
@@ -51,7 +53,6 @@ use super::{
     BoxFuture, Credential, Provider, ProviderError, Source, http, length_title, title_case,
 };
 use crate::secrets::{self, Secrets};
-use agy::Agy;
 
 /// The slug this provider's history is filed under. Never changes once shipped.
 pub const PROVIDER_ID: &str = "antigravity";
@@ -83,29 +84,36 @@ trait LocalQuota: std::fmt::Debug + Send + Sync {
     fn fetch(&self, account: &AccountId) -> BoxFuture<'_, Result<Snapshot, ProviderError>>;
 }
 
-#[derive(Debug)]
-struct AgyQuota {
-    agy: Agy,
-}
+// Todo 19 remains gated on G2; this is the Unix local-source implementation it will port.
+#[cfg(unix)]
+mod local {
+    use super::agy::Agy;
+    use super::*;
 
-impl AgyQuota {
-    fn new() -> Result<Self, ProviderError> {
-        Ok(Self { agy: Agy::new()? })
-    }
-}
-
-impl LocalQuota for AgyQuota {
-    fn available(&self) -> bool {
-        agy::is_available()
+    #[derive(Debug)]
+    pub(super) struct AgyQuota {
+        agy: Agy,
     }
 
-    fn fetch(&self, account: &AccountId) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
-        let account = account.clone();
-        Box::pin(async move {
-            let ready = self.agy.ready().await?;
-            let quota = self.agy.rpc(ready.port, agy::QUOTA_SUMMARY_PATH).await?;
-            parse_for_account(&quota, &ready.status_body, Timestamp::now(), &account)
-        })
+    impl AgyQuota {
+        pub(super) fn new() -> Result<Self, ProviderError> {
+            Ok(Self { agy: Agy::new()? })
+        }
+    }
+
+    impl LocalQuota for AgyQuota {
+        fn available(&self) -> bool {
+            agy::is_available()
+        }
+
+        fn fetch(&self, account: &AccountId) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+            let account = account.clone();
+            Box::pin(async move {
+                let ready = self.agy.ready().await?;
+                let quota = self.agy.rpc(ready.port, agy::QUOTA_SUMMARY_PATH).await?;
+                parse_for_account(&quota, &ready.status_body, Timestamp::now(), &account)
+            })
+        }
     }
 }
 
@@ -122,7 +130,7 @@ pub struct Antigravity {
     own: Option<Arc<dyn Secrets>>,
     direct_endpoint: String,
     token_endpoint: String,
-    local: Box<dyn LocalQuota>,
+    local: Option<Box<dyn LocalQuota>>,
     source: Source,
     /// The configured account whose Tidemark login this client reads.
     account: AccountId,
@@ -130,6 +138,8 @@ pub struct Antigravity {
 
 impl Antigravity {
     /// Builds the provider. The local source starts no process until it is selected.
+    // Todo 19 remains gated on G2; only Unix may construct the local supervisor today.
+    #[cfg(unix)]
     pub fn new(
         account: AccountId,
         own: Option<Arc<dyn Secrets>>,
@@ -140,8 +150,21 @@ impl Antigravity {
             own,
             direct_endpoint: oauth::API_ENDPOINTS[0].to_owned(),
             token_endpoint: oauth::TOKEN_URL.to_owned(),
-            local: Box::new(AgyQuota::new()?),
+            local: Some(Box::new(local::AgyQuota::new()?)),
             source,
+            account,
+        })
+    }
+
+    /// Builds an OAuth-only provider without constructing a local supervisor.
+    pub fn oauth(account: AccountId, own: Arc<dyn Secrets>) -> Result<Self, ProviderError> {
+        Ok(Self {
+            client: http::client()?,
+            own: Some(own),
+            direct_endpoint: oauth::API_ENDPOINTS[0].to_owned(),
+            token_endpoint: oauth::TOKEN_URL.to_owned(),
+            local: None,
+            source: Source::OAuth,
             account,
         })
     }
@@ -159,7 +182,7 @@ impl Antigravity {
             own,
             direct_endpoint,
             token_endpoint,
-            local,
+            local: Some(local),
             source,
             account: AccountId::default(),
         })
@@ -183,8 +206,8 @@ impl Antigravity {
     /// knows. Its failure is not reported when there is a login to try: "`agy` is not
     /// running" is not news to a user whose account also has a login.
     async fn fetch_auto(&self) -> Result<Snapshot, ProviderError> {
-        let local = if self.local.available() {
-            match self.local.fetch(&self.account).await {
+        let local = if let Some(local) = self.local.as_ref().filter(|local| local.available()) {
+            match local.fetch(&self.account).await {
                 Ok(snapshot) => return Ok(snapshot),
                 Err(error) => Some(error),
             }
@@ -199,8 +222,8 @@ impl Antigravity {
 
     /// The local server, or the reason there is nothing to read.
     async fn fetch_local(&self) -> Result<Snapshot, ProviderError> {
-        if self.local.available() {
-            self.local.fetch(&self.account).await
+        if let Some(local) = self.local.as_ref().filter(|local| local.available()) {
+            local.fetch(&self.account).await
         } else {
             Err(ProviderError::NoCredential)
         }
