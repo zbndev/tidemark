@@ -1,0 +1,9 @@
+C:/Users/herald/tidemark-wt/windows-port-w2-10b\target-land13\debug\deps\gtk4_macros-f0a86822bc338de6.d: C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\lib.rs C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\attribute_parser.rs C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\composite_template_derive.rs C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\template_callbacks_attribute.rs C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\util.rs
+
+C:/Users/herald/tidemark-wt/windows-port-w2-10b\target-land13\debug\deps\gtk4_macros-f0a86822bc338de6.dll: C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\lib.rs C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\attribute_parser.rs C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\composite_template_derive.rs C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\template_callbacks_attribute.rs C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\util.rs
+
+C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\lib.rs:
+C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\attribute_parser.rs:
+C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\composite_template_derive.rs:
+C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\template_callbacks_attribute.rs:
+C:\Users\herald\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gtk4-macros-0.11.4\src\util.rs:

@@ -12,6 +12,8 @@
 
 mod engine;
 mod keyring;
+#[cfg(windows)]
+mod lifecycle;
 mod notify;
 mod peer;
 mod registry;
@@ -253,6 +255,23 @@ fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
+    // The single-instance lock comes before any shared state is opened: the history
+    // database is the first of it, and a second daemon must never get as far as
+    // opening it. Windows has no D-Bus name to race for, so this mutex is the whole
+    // arbitration; a duplicate exits 0 quietly because a running daemon is exactly
+    // the outcome a duplicate was started to provide.
+    #[cfg(windows)]
+    let _singleton = match lifecycle::Singleton::acquire() {
+        Ok(Some(singleton)) => Some(singleton),
+        Ok(None) => {
+            tracing::info!("another tidemarkd already runs for this user; this one is not needed");
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(format!("could not take the single-instance mutex: {error}").into());
+        }
+    };
+
     let history_path = paths::history_path()?;
     let history = History::open(&history_path)?;
     let config_path = paths::config_path()?;
