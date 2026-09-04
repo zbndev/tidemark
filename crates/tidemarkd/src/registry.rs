@@ -28,8 +28,12 @@ use tidemark_core::providers::keyed::{
     self, abacus, aiand, alibaba, augment, codebuff, commandcode, cursor, deepgram, deepinfra,
     factory, fireworks, gemini, grok, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo,
     mistral, nanogpt, notion, ollama, openai_api, opencode, openrouter, perplexity, poe, qoder,
-    sakana, stepfun, sub2api, t3chat, wayfinder, xai, zai, zoommate,
+    sakana, stepfun, sub2api, wayfinder, xai, zai, zoommate,
 };
+// t3chat is Unix-only for now: its HTTP stack wreq depends unconditionally on boring2
+// (BoringSSL), which does not build on Windows yet — reversible once boring-sys2 does.
+#[cfg(not(target_os = "windows"))]
+use tidemark_core::providers::keyed::t3chat;
 use tidemark_core::providers::{
     AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
     antigravity, claude, codex,
@@ -174,6 +178,9 @@ static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &sakana::SPEC,
     &stepfun::SPEC,
     &sub2api::SPEC,
+    // t3chat is Unix-only for now: wreq depends unconditionally on boring2 (BoringSSL),
+    // which does not build on Windows yet — reversible once boring-sys2 does.
+    #[cfg(not(target_os = "windows"))]
     &t3chat::SPEC,
     &wayfinder::SPEC,
     &xai::SPEC,
@@ -327,8 +334,17 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
         | perplexity::PROVIDER_ID
         | qoder::PROVIDER_ID
         | sakana::PROVIDER_ID
-        | t3chat::PROVIDER_ID
         | zoommate::PROVIDER_ID => Some(AuthSelector {
+            option: cursor::AUTH_SOURCE.into(),
+            modes: vec![AuthMode {
+                value: cursor::BROWSER_SOURCE.into(),
+                title: "Browser".into(),
+            }],
+        }),
+        // Split from the arm above only because a cfg attribute cannot sit on one
+        // alternative of an or-pattern; same boring2 reason as the use gate above.
+        #[cfg(not(target_os = "windows"))]
+        t3chat::PROVIDER_ID => Some(AuthSelector {
             option: cursor::AUTH_SOURCE.into(),
             modes: vec![AuthMode {
                 value: cursor::BROWSER_SOURCE.into(),
@@ -1028,6 +1044,9 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    // t3chat is Unix-only for now: wreq depends unconditionally on boring2 (BoringSSL),
+    // which does not build on Windows yet — reversible once boring-sys2 does.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn t3chat_publishes_browser_auth_and_restores_its_selected_profile() {
         // Without the selector, the settings dialog cannot write a Firefox choice and the
@@ -1091,6 +1110,10 @@ mod tests {
             perplexity::PROVIDER_ID,
             qoder::PROVIDER_ID,
             sakana::PROVIDER_ID,
+            // t3chat is Unix-only for now: wreq depends unconditionally on boring2
+            // (BoringSSL), which does not build on Windows yet — reversible once
+            // boring-sys2 does.
+            #[cfg(not(target_os = "windows"))]
             t3chat::PROVIDER_ID,
             zoommate::PROVIDER_ID,
         ] {

@@ -22,7 +22,6 @@ hmac = "0.13.0"
 libc = "0.2.180"
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 sha1 = { version = "0.11.0", default-features = false }
-oo7 = { version = "0.6.0", default-features = false, features = ["native_crypto", "tokio"] }
 # `socks`: without it a `socks5://` proxy URL parses and then refuses every connection
 # made through it. `system-proxy`: what "no proxy configured here" falls back to.
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "charset", "http2", "system-proxy", "socks", "json", "gzip", "form", "query"] }
@@ -40,6 +39,12 @@ time = { version = "0.3.47", features = ["formatting", "parsing"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "fs", "sync"] }
 toml_edit = { version = "0.25.13", default-features = false, features = ["parse", "display"] }
 tracing = "0.1.44"
+
+# Unix-only for now: oo7 speaks the Secret Service (D-Bus), and wreq depends
+# unconditionally on boring2 (BoringSSL), which does not build on Windows yet —
+# reversible once boring-sys2 builds there.
+[target.'cfg(unix)'.dependencies]
+oo7 = { version = "0.6.0", default-features = false, features = ["native_crypto", "tokio"] }
 # wreq: the browser-emulating HTTP stack T3 Chat's Vercel edge demands — it gates on the
 # client's TLS/HTTP2 fingerprint, and no honest rustls ClientHello passes (see
 # `providers/keyed/t3chat.rs`). Pinned below 0.16, which raises the toolchain above this
