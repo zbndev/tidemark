@@ -892,6 +892,9 @@ pub(crate) mod tests {
         std::fs::write(&path, b"").expect("writes");
     }
 
+    // `stores()` is rooted at $HOME only on unix; the windows arm roots at the
+    // LOCALAPPDATA vendor directories (todo 17), so this wiring pin is unix-only.
+    #[cfg(unix)]
     #[test]
     fn the_machine_scan_is_the_scan_of_the_home_directory() {
         // `stores()` is `stores_in($HOME)`: the only thing the machine scan knows that a
@@ -1158,6 +1161,10 @@ pub(crate) mod tests {
         }
     }
 
+    // -wal/-shm sidecar copying is the unix snapshot discipline; the windows
+    // snapshot (todo 17) copies the database alone because Windows SQLite lock
+    // semantics differ.
+    #[cfg(unix)]
     #[test]
     fn a_snapshot_copies_the_sidecars_and_takes_the_copy_with_it() {
         let home = TestHome::new();

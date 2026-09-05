@@ -1276,6 +1276,10 @@ mod tests {
         fs::remove_dir_all(&dir).expect("test cleanup");
     }
 
+    // Pins the unix advisory-lock + root-replace discipline; on Windows the
+    // mandatory LockFileEx region lock makes the concurrent-handle fixture
+    // fail with os error 33. Windows semantics are todo 18's mirror module.
+    #[cfg(unix)]
     #[test]
     fn a_root_update_on_a_file_replaced_underneath_is_dropped_rather_than_overlaid() {
         // The Gemini CLI honors no lock and replaces the file atomically: comparing

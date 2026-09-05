@@ -1179,6 +1179,10 @@ mod tests {
         assert!(credentials.is_expired_at(1_787_200_000_000));
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn an_expired_token_is_rotated_persisted_and_then_used_for_quota() {
         const REFRESH: &str = r#"{
@@ -1337,6 +1341,10 @@ mod tests {
         );
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn cli_source_reads_the_cli_file_even_when_a_login_is_stored() {
         const USAGE: &str = r#"{

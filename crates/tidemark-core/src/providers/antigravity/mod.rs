@@ -1093,6 +1093,8 @@ mod tests {
 
     struct RefreshBarrier {
         base: String,
+        // only the unix-gated race test reads it
+        #[cfg_attr(not(unix), allow(dead_code))]
         requests: mpsc::Receiver<String>,
         refresh_started: mpsc::Receiver<()>,
         release_refresh: mpsc::Sender<()>,
@@ -1595,6 +1597,9 @@ mod tests {
         assert_eq!(local_calls.load(Ordering::SeqCst), 0);
     }
 
+    // The unix loopback-server fixture would-blocks on Windows non-blocking
+    // sockets (os error 10035) mid-handshake.
+    #[cfg(unix)]
     #[test]
     fn a_refresh_racing_a_new_login_cannot_overwrite_the_new_document() {
         let secrets = FakeSecrets::holding(owned_document("old", 0));

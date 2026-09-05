@@ -175,7 +175,9 @@ mod platform {
     }
 }
 
-#[cfg(test)]
+// The XDG-variable resolution these tests pin is the unix arm's contract; the
+// windows arm maps LOCALAPPDATA instead (see the windows tests module above).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

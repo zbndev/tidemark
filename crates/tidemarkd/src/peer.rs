@@ -37,6 +37,11 @@ const ZBUS_QUEUE_BOUND: usize = 64;
 
 /// One of the six daemon signals, ready to hand to any peer's emitter.
 #[derive(Debug, Clone)]
+// Not boxed per clippy::large_enum_variant: the announcements are queued
+// at a rate of 128 per peer and moved once into the emitter — a heap
+// indirection on the hot path buys nothing measurable, and boxing the
+// largest variant would touch every construction site for it.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Announcement {
     ProviderChanged(ProviderStatus),
     ProviderRemoved { provider: String, account: String },

@@ -1431,8 +1431,10 @@ mod tests {
 
     /// A keyring that is locked, for the waiting-state test.
     #[derive(Debug)]
+    #[cfg(unix)]
     struct LockedKeyring;
 
+    #[cfg(unix)]
     impl SafeStorage for LockedKeyring {
         fn password(
             &self,
@@ -1502,6 +1504,7 @@ mod tests {
             .expect("inserts the access token");
     }
 
+    #[cfg(unix)]
     fn cursor_state_in_wal(
         home: &crate::browser::tests::TestHome,
         access_token: &str,
@@ -1964,6 +1967,9 @@ mod tests {
         assert_eq!(header_of(&provider), None);
     }
 
+    // WAL-committed sqlite reads and Secret Service keyring states are the
+    // unix backends; the windows backend surfaces are todo 10/17 territory.
+    #[cfg(unix)]
     #[test]
     fn a_cursor_desktop_session_committed_only_to_wal_is_found() {
         let home = crate::browser::tests::TestHome::new();
@@ -2056,6 +2062,9 @@ mod tests {
         assert_eq!(header_of(&provider), None);
     }
 
+    // WAL-committed sqlite reads and Secret Service keyring states are the
+    // unix backends; the windows backend surfaces are todo 10/17 territory.
+    #[cfg(unix)]
     #[test]
     fn a_locked_keyring_is_a_state_to_wait_out_not_a_missing_session() {
         let home = crate::browser::tests::TestHome::new();

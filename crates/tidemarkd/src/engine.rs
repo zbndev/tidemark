@@ -2821,6 +2821,11 @@ mod tests {
             let mut permissions = std::fs::metadata(&self.0)
                 .expect("config exists")
                 .permissions();
+            // Not clippy::permissions_set_readonly_false: that lint warns about
+            // this call's world-writable consequence on Unix, but this arm is
+            // cfg(windows)-only, where it clears FILE_ATTRIBUTE_READONLY — the
+            // exact inverse of refuse_writes' set_readonly(true) above.
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             let _ = std::fs::set_permissions(&self.0, permissions);
         }

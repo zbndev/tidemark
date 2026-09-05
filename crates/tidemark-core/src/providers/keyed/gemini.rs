@@ -739,10 +739,13 @@ mod tests {
     use crate::providers::Provider;
     use serde_json::json;
     use std::fs;
+    #[cfg(unix)]
     use std::io::{BufRead, BufReader, Read, Write};
+    #[cfg(unix)]
     use std::net::TcpListener;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(unix)]
     use std::sync::mpsc;
     use tidemark_types::{Timestamp, WindowKey, WindowLength};
 
@@ -752,6 +755,7 @@ mod tests {
     /// one bucket per tier.
     const QUOTA: &str = include_str!("../../../tests/fixtures/gemini/quota.json");
     /// The recorded `loadCodeAssistStandardTierResponse` — a tier, no project of its own.
+    #[cfg(unix)]
     const LOAD: &str = include_str!("../../../tests/fixtures/gemini/load.json");
 
     struct TestHome {
@@ -790,6 +794,7 @@ mod tests {
             .expect("write settings");
         }
 
+        #[cfg(unix)]
         fn document(&self) -> serde_json::Value {
             serde_json::from_str(
                 &fs::read_to_string(self.path().join(".gemini/oauth_creds.json"))
@@ -815,6 +820,7 @@ mod tests {
 
     /// Credentials whose access token expired in 2001, so the first poll must refresh.
     /// `unrelated` stands for every field the CLI owns that we do not.
+    #[cfg(unix)]
     fn expired_credentials() -> serde_json::Value {
         json!({
             "access_token": "old-access",
@@ -837,6 +843,7 @@ mod tests {
     /// A loopback server answering the given routes in order, asserting each request
     /// opens with its expected request line. Bodies are runtime strings because the
     /// refresh response carries a built id token.
+    #[cfg(unix)]
     fn chained_server(
         routes: Vec<(&'static str, u16, &'static str, String)>,
     ) -> (String, mpsc::Receiver<String>, std::thread::JoinHandle<()>) {
@@ -888,6 +895,7 @@ mod tests {
         (format!("http://{address}"), request_rx, server)
     }
 
+    #[cfg(unix)]
     fn route(
         expected: &'static str,
         status: u16,
@@ -1006,6 +1014,10 @@ mod tests {
         assert!(credentials_path(home.path()).exists());
     }
 
+    // The unix loopback-server + advisory-lock fixtures (blocking reads that
+    // would-block on Windows sockets, mandatory file locks) are unix-only;
+    // a_quota_request... HANGS on Windows without this gate.
+    #[cfg(unix)]
     #[test]
     fn an_expired_token_is_refreshed_merged_back_into_the_file_and_used() {
         let home = TestHome::new();
@@ -1105,6 +1117,10 @@ mod tests {
         assert_eq!(snapshot.details[1].rows[0].value, "Standard");
     }
 
+    // The unix loopback-server + advisory-lock fixtures (blocking reads that
+    // would-block on Windows sockets, mandatory file locks) are unix-only;
+    // a_quota_request... HANGS on Windows without this gate.
+    #[cfg(unix)]
     #[test]
     fn the_quota_request_carries_the_project_code_assist_named() {
         let home = TestHome::new();
@@ -1161,6 +1177,10 @@ mod tests {
         assert_eq!(pick_project(&empty.projects), None);
     }
 
+    // The unix loopback-server + advisory-lock fixtures (blocking reads that
+    // would-block on Windows sockets, mandatory file locks) are unix-only;
+    // a_quota_request... HANGS on Windows without this gate.
+    #[cfg(unix)]
     #[test]
     fn a_quota_request_rejected_as_unauthorized_is_no_credential() {
         let home = TestHome::new();
@@ -1181,6 +1201,10 @@ mod tests {
         );
     }
 
+    // The unix loopback-server + advisory-lock fixtures (blocking reads that
+    // would-block on Windows sockets, mandatory file locks) are unix-only;
+    // a_quota_request... HANGS on Windows without this gate.
+    #[cfg(unix)]
     #[test]
     fn a_credential_file_replaced_during_the_exchange_is_never_overlaid() {
         // The CLI replaces the file atomically and honors no advisory lock. A write-back
@@ -1260,6 +1284,10 @@ mod tests {
         assert_eq!(after["unrelated"], "cli-kept");
     }
 
+    // The unix loopback-server + advisory-lock fixtures (blocking reads that
+    // would-block on Windows sockets, mandatory file locks) are unix-only;
+    // a_quota_request... HANGS on Windows without this gate.
+    #[cfg(unix)]
     #[test]
     fn a_spent_token_with_nothing_to_refresh_it_is_no_credential_without_a_request() {
         let home = TestHome::new();

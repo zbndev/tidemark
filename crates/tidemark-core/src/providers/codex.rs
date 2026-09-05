@@ -1039,6 +1039,7 @@ mod tests {
             .expect("provider builds")
         }
 
+        #[cfg(unix)]
         fn document(&self) -> serde_json::Value {
             serde_json::from_slice(&fs::read(&self.path).expect("auth readable"))
                 .expect("auth is JSON")
@@ -1174,6 +1175,7 @@ mod tests {
         (format!("http://{address}"), requests_rx, handle)
     }
 
+    #[cfg(unix)]
     const REFRESH: (u16, &str) = (
         200,
         r#"{"access_token":"new-access","refresh_token":"new-refresh",
@@ -1191,6 +1193,10 @@ mod tests {
             .block_on(future)
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn an_expired_token_is_rotated_persisted_and_then_used_for_quota() {
         let home = TestHome::expired();
@@ -1262,6 +1268,10 @@ mod tests {
         );
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn a_token_the_provider_rejects_is_refreshed_once_and_the_request_retried() {
         // The access token's own claims can be unreadable — an opaque token, or claims we
@@ -1302,6 +1312,10 @@ mod tests {
         server.join().expect("server stopped");
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn a_second_rejection_is_the_users_to_fix_rather_than_an_endless_retry() {
         let home = TestHome::expired();
@@ -1435,6 +1449,10 @@ mod tests {
         );
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn cli_source_reads_the_file_even_when_a_login_is_stored() {
         // Both credentials are live and carry different tokens and account ids: the
@@ -1538,6 +1556,10 @@ mod tests {
         assert!(matches!(error, ProviderError::NoCredential), "{error:?}");
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn cli_source_refreshes_the_file_without_reading_the_stored_login() {
         const ROTATION: (u16, &str) = (

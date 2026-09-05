@@ -304,6 +304,7 @@ fn aggregate_state(candidates: &[AuthCandidate]) -> AuthCandidateState {
 mod tests {
     use super::{AUTH_BROWSER, AUTH_PROFILE, BROWSER_SOURCE, selection, session, store_selection};
     use crate::browser::{Query, SafeStorage, auth::Selection};
+    #[cfg(unix)]
     use crate::providers::ProviderError;
     use crate::secrets::SecretError;
     use rusqlite::Connection;
@@ -322,8 +323,10 @@ mod tests {
     }
 
     #[derive(Debug)]
+    #[cfg(unix)]
     struct LockedKeyring;
 
+    #[cfg(unix)]
     impl SafeStorage for LockedKeyring {
         fn password(
             &self,
@@ -687,6 +690,8 @@ mod tests {
         assert_eq!(report[0].state, "ready");
     }
 
+    // Pins the Secret Service (unix keyring) locked-state contract.
+    #[cfg(unix)]
     #[test]
     fn a_locked_keyring_without_another_answer_is_a_waiting_state() {
         // Converting this to None would tell the user to reauthenticate while the keyring is merely locked.

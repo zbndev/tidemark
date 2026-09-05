@@ -31,65 +31,85 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Real Windows runtime gate for the secrets backend. Keep this on the existing
-  # windows-latest/MSVC decision; unlike the probes below, failures are fatal.
-  windows-tests-debug:
-    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install the locked MSVC target
-        shell: pwsh
-        run: |
-          rustup target add x86_64-pc-windows-msvc
-
-      - name: Run secrets runtime tests with failure capture
-        shell: pwsh
-        run: |
-          $out = ""
-          $code = 0
-          try {
-            $out = & cargo test -p tidemark-core --target x86_64-pc-windows-msvc secrets -- --nocapture 2>&1 | Out-String
-            $code = $LASTEXITCODE
-          } catch {
-            $out = $_ | Out-String; $code = 1
-          }
-          Write-Output $out
-          if ($code -ne 0) {
-            $lines = $out -split "`r?`n" | Where-Object { $_ -match 'FAILED|panicked|failures:|error\[|^error|assertion|test result' } | Select-Object -First 12
-            if (-not $lines) { $lines = ($out -split "`r?`n" | Select-Object -Last 12) }
-            foreach ($l in $lines) { Write-Output ("::error title=secrets-fail::" + ($l -replace '^[:]+', '').Trim()) }
-            exit $code
-          }
+  # The real Windows test gate: the full workspace gate (fmt / clippy / tests) on
+  # the locked toolchain from todo 2's decision file. Wiring mirrors the
+  # windows-ucrt64-probe job byte-for-byte where it concerns the toolchain — the
+  # MSVC target this job originally used has never linked this dependency set
+  # (link.exe 1181), while UCRT64 links and tests green everywhere it runs.
   windows-tests:
     if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
+    concurrency:
+      group: windows-tests-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      # RUSTUP_TOOLCHAIN outranks both `rustup default` and the repo's
+      # rust-toolchain.toml (which pins only channel=stable, i.e. the runner's
+      # MSVC host); without it the toolchain file would silently flip every
+      # cargo invocation back to MSVC.
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+      # gtk-rs MinGW recipe: the UCRT64 pkgconfig trees backing the system
+      # GTK/libadwaita/SQLite that the workspace links.
+      PKG_CONFIG_PATH: /ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install the locked MSVC target
-        shell: pwsh
-        run: |
-          rustup target add x86_64-pc-windows-msvc
-          rustup show
-          cargo --version
-          rustc -vV
+      - uses: msys2/setup-msys2@v2.27.0
+        with:
+          msystem: UCRT64
+          update: true
+          # path-type: inherit keeps the runner's PATH (notably ~/.cargo/bin)
+          # inside the msys2 shell; the default "minimal" rebuilds PATH from
+          # /etc/profile alone and drops it, which would kill every cargo step.
+          # /etc/profile still puts /ucrt64/bin first, so pkg-config/gcc/cmake
+          # keep winning. sqlite3: rusqlite links the SYSTEM SQLite. clang and
+          # cmake build BoringSSL behind wreq (bindgen at build time).
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-go
 
-      - name: Run secrets runtime tests
+      # Before any cargo step: prove the MSYS2 environment resolved. The
+      # gtk4/libadwaita-1/sqlite3 modversions MUST appear in the log (this step
+      # fails if any is missing).
+      - name: Confirm the MSYS2 environment
+        shell: msys2 {0}
+        run: |
+          pkg-config --modversion gtk4 libadwaita-1 sqlite3
+          command -v gcc g++ clang cmake cargo rustup
+
+      # A full GNU-host toolchain, not just target std: build scripts and proc
+      # macros link for the HOST too. Host==target==GNU, so the verbatim cargo
+      # commands build GNU throughout and link with gcc from /ucrt64.
+      - name: Default a GNU-host Rust toolchain
         shell: pwsh
         run: |
-          $exitCode = 0
-          try {
-            cargo test -p tidemark-core --target x86_64-pc-windows-msvc secrets -- --nocapture
-            $exitCode = $LASTEXITCODE
-          } finally {
-            Write-Host "secrets command exit code: $exitCode"
-            Write-Host "cleanup: test-owned Credential Manager and DPAPI entries are removed by the test teardown"
-          }
-          exit $exitCode
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ucrt64-tests
+
+      # The real gate. NO continue-on-error anywhere: a failure fails the job.
+      # Unix-only tests are cfg-gated at their seams, so the suite must pass.
+      - name: Format
+        shell: msys2 {0}
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        shell: msys2 {0}
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        shell: msys2 {0}
+        run: cargo test --workspace
 
   checks:
     # The only hosted runner carrying GTK 4.22 / libadwaita 1.9, which is the project's
