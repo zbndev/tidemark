@@ -183,29 +183,6 @@ jobs:
           name: nsis-package
           path: data/packaging/windows/tidemark-installer.exe
 
-  checks-debug:
-    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install the toolkit
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake dbus-daemon
-
-      - name: Run workspace tests with failure capture
-        run: |
-          set -o pipefail
-          log=$(mktemp)
-          if ! cargo test --workspace 2>&1 | tee "$log"; then
-            grep -E "^(test .* \(\|\.\.\.)? FAILED|failures:$|---- .* stdout ----|panicked at|assertion|error\[|^error|test result: FAILED)" "$log" | head -40 | while IFS= read -r line; do
-              echo "::error title=linux-test-fail::${line}"
-            done
-            exit 1
-          fi
   checks:
     # The only hosted runner carrying GTK 4.22 / libadwaita 1.9, which is the project's
     # API floor. ubuntu-latest is still 24.04 and ships GTK 4.18; this code does not
