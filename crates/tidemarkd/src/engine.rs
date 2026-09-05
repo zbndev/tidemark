@@ -1511,13 +1511,14 @@ impl Engine {
         }
     }
 
-    /// The pasted session one account was rebuilt from, if it has one to be rebuilt from.
+    /// The pasted session one account was rebuilt from, if that is what it runs on.
     ///
-    /// Asked only of a provider that offers the paste mode at all, and escalated to a
-    /// visible state only when that is the mode the account is on. An account reading its
-    /// own browser profile must not fall to "waiting for keyring" because a keyring it
-    /// never touches is locked — that is the Linux path, where the browser jar is readable
-    /// and no paste was ever needed.
+    /// The slot is read only for an account whose selected mode *is* the pasted session.
+    /// An account reading its own browser profile never touches it — the common case
+    /// everywhere a browser jar is readable, which is every Linux profile and, until
+    /// Chrome M127, was every profile anywhere. Reading it anyway would put that account
+    /// one locked keyring away from `waiting for keyring` over a credential it does not
+    /// use, and would spend a Secret Service round trip per rebuild to learn nothing.
     ///
     /// Takes `&mut self` for the same reason every other awaiting method here does: the
     /// engine owns a SQLite connection and is not `Sync`, so a future holding a shared
@@ -1526,31 +1527,25 @@ impl Engine {
         &mut self,
         index: usize,
     ) -> Result<Credential, (ProviderState, Option<String>)> {
-        let provider = self.accounts[index].provider.clone();
-        if !crate::registry::has_pasted_session_auth(provider.as_str()) {
-            return Ok(Credential::new(String::new()));
-        }
-        let account = self.accounts[index].account.clone();
-        let required = self.accounts[index]
+        let on_a_paste = self.accounts[index]
             .status
             .auth_selection
             .as_ref()
             .is_some_and(|selection| selection.mode == session::PASTE_SOURCE);
+        if !on_a_paste {
+            return Ok(Credential::new(String::new()));
+        }
+        let provider = self.accounts[index].provider.clone();
+        let account = self.accounts[index].account.clone();
         let secrets = Arc::clone(&self.secrets);
         match secrets.get(Kind::Session, &provider, &account).await {
             Ok(Some(credential)) => Ok(credential),
+            // Selected the mode, stored nothing under it: the provider is handed an empty
+            // credential and says `NoCredential`, which is what the settings dialog draws
+            // an empty paste field for.
             Ok(None) => Ok(Credential::new(String::new())),
-            Err(SecretError::Locked) if required => Err((ProviderState::WaitingForKeyring, None)),
-            Err(error) if required => {
-                Err((ProviderState::KeyringUnavailable, Some(error.to_string())))
-            }
-            Err(error) => {
-                tracing::debug!(
-                    %error, provider = %provider,
-                    "no pasted session could be read; this account does not run on one"
-                );
-                Ok(Credential::new(String::new()))
-            }
+            Err(SecretError::Locked) => Err((ProviderState::WaitingForKeyring, None)),
+            Err(error) => Err((ProviderState::KeyringUnavailable, Some(error.to_string()))),
         }
     }
 
@@ -4298,6 +4293,72 @@ mod tests {
         let status = harness.published().pop().expect("published");
         assert_eq!(status.state(), Some(ProviderState::RateLimited));
         assert_eq!(harness.wait_secs(), 2400);
+    }
+
+    #[tokio::test]
+    async fn only_an_account_on_a_pasted_session_reads_the_slot_one_lives_in() {
+        // Every browser jar on Linux is readable, so an account there is on its browser and
+        // never needed a paste. Reading the session slot for it anyway would leave it one
+        // locked keyring away from waiting on a credential it does not use — which is what
+        // a keyring answering nothing but `Locked` proves either way here.
+        let handed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let account = |selection: AuthSelection, handed: Arc<Mutex<Vec<String>>>| {
+            Account::keyless(
+                ProviderId::new("cursor"),
+                AccountId::default(),
+                Box::new(move |_, credential: Credential, _| {
+                    handed
+                        .lock()
+                        .expect("no test panics here")
+                        .push(credential.expose().to_owned());
+                    Ok(Fake::new(vec![Ok(snapshot(1.0, 3600))]) as Arc<dyn Provider>)
+                }),
+            )
+            .with_auth_selection(Some(selection))
+        };
+
+        let mut on_browser = Harness::new(
+            vec![account(
+                AuthSelection {
+                    mode: session::BROWSER_SOURCE.into(),
+                    candidate: Some("firefox".into()),
+                },
+                Arc::clone(&handed),
+            )],
+            Arc::new(Keyring(|| Err(SecretError::Locked))),
+        );
+        on_browser.engine.ensure_client(0).await;
+
+        assert!(
+            on_browser.engine.accounts[0].client.is_some(),
+            "a locked keyring is nothing to do with an account reading its own browser"
+        );
+        assert_eq!(
+            handed.lock().expect("no test panics here").as_slice(),
+            [String::new()],
+            "and nothing is handed to it: the jar is the credential"
+        );
+
+        let mut on_a_paste = Harness::new(
+            vec![account(
+                AuthSelection {
+                    mode: session::PASTE_SOURCE.into(),
+                    candidate: None,
+                },
+                Arc::clone(&handed),
+            )],
+            Arc::new(Keyring(|| Err(SecretError::Locked))),
+        );
+        on_a_paste.engine.ensure_client(0).await;
+
+        assert!(
+            on_a_paste.engine.accounts[0].client.is_none(),
+            "an account whose credential is in the keyring waits for the keyring"
+        );
+        assert_eq!(
+            on_a_paste.engine.accounts[0].status.state(),
+            Some(ProviderState::WaitingForKeyring)
+        );
     }
 
     #[tokio::test]
