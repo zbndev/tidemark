@@ -241,6 +241,7 @@ fn endpoint_path() -> std::io::Result<PathBuf> {
 /// Returns the accept task's handle so shutdown can stop handing out new connections.
 /// The blocking listener thread dies with the process; a daemon that stops accepting is
 /// a daemon that is about to exit.
+#[cfg(windows)]
 pub(crate) async fn listen(
     daemon: Daemon,
     hub: Arc<PeerHub>,
@@ -415,7 +416,7 @@ mod tests {
         use tidemark_core::secrets::{Kind, SecretError};
         use tidemark_types::{AccountId, ProviderId, ids};
         use zbus::MessageStream;
-        use zbus::export::futures_core::Stream as _;
+        use zbus::export::futures_core::Stream;
 
         use crate::engine::Command;
         use crate::service::{Published, PublishedUpdate};
@@ -526,7 +527,7 @@ mod tests {
             assert!(statuses.is_empty());
 
             // Fan-out through the hub reaches the peer, in order, on its own connection.
-            let mut messages = MessageStream::new(&client);
+            let mut messages = MessageStream::from(&client);
             hub.publish(Announcement::UpdateChanged("9.9.0".into()))
                 .await;
             hub.publish(Announcement::OrderChanged(vec![
