@@ -114,9 +114,15 @@ cp -r "$PREFIX/share/fontconfig" "$DST/share/"
 # stale icon-theme.cache that would hide the merged marks, so it is dropped and GTK
 # falls back to a directory scan.
 APP_ICONS="$SCRIPT_DIR/../../../data/icons"
+APP_FONTS="$SCRIPT_DIR/../../../data/fonts/rubik"
+for file in "$APP_FONTS/Rubik%5Bwght%5D.ttf"; do
+  test -f "$file" || { echo "required application font input not found: $file" >&2; exit 1; }
+done
 cp -r "$APP_ICONS/hicolor/." "$DST/share/icons/hicolor/"
 rm -f "$DST/share/icons/hicolor/icon-theme.cache"
 cp "$APP_ICONS/tidemark.ico" "$DST/share/tidemark.ico"
+mkdir -p "$DST/share/fonts"
+cp "$APP_FONTS/Rubik%5Bwght%5D.ttf" "$DST/share/fonts/"
 
 DST_WIN="$(cygpath -m "$(cd "$DST" && pwd)")"
 CACHE="$DST/lib/gdk-pixbuf-2.0/2.10.0/loaders/loaders.cache"

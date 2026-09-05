@@ -2,7 +2,8 @@
 //!
 //! Everything that libadwaita already names is used by name — `card`, `title-1`, `heading`,
 //! `caption`, `dim-label`, `warning`, `error` — so the window follows the system's accent
-//! colour, dark mode and font scaling without being told to. What is left is the three
+//! colour, dark mode and font scaling without being told to. On Windows only, the bundled
+//! Rubik is selected after it has been registered with Pango for this process. What is left is the three
 //! things Adwaita has no class for: the pill around a state chip, the padding inside a
 //! card, which `.card` deliberately does not set because it does not know what is going in
 //! it, and the padding around the credential pill, for the same reason.
@@ -32,6 +33,27 @@
 //! is the only route to a themed accent: these three names are what a user's own stylesheet
 //! redefines when they change their accent colour, and a bar that asked libadwaita instead
 //! would stay blue in a window where everything else had turned grey.
+
+#[cfg(windows)]
+const PLATFORM_STYLE: &str = "
+* {
+    font-family: Rubik;
+}
+
+/* GTK's Windows text rasterizer is softer than the Linux FreeType path at
+   caption sizes. Keep captions one logical step larger everywhere, so GDK
+   still applies each display's own DPI and scale. */
+.caption {
+    font-size: 0.9em;
+}
+
+.quota-card .quota-footer {
+    font-size: 1em;
+}
+";
+
+#[cfg(not(windows))]
+const PLATFORM_STYLE: &str = "";
 
 pub(crate) const STYLE: &str = "
 .quota-card {
@@ -191,7 +213,7 @@ pub fn load() {
     };
 
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(STYLE);
+    provider.load_from_string(&format!("{PLATFORM_STYLE}{STYLE}"));
     gtk::style_context_add_provider_for_display(
         &display,
         &provider,

@@ -24,6 +24,8 @@ mod chart;
 mod detail;
 #[cfg(windows)]
 mod file_log;
+#[cfg(windows)]
+mod font;
 mod format;
 mod grid;
 mod mark;
@@ -111,7 +113,13 @@ fn main() -> glib::ExitCode {
         .application_id(ids::APP_ID)
         .build();
 
-    app.connect_startup(|_| style::load());
+    app.connect_startup(|_| {
+        // GTK has created its display-wide Pango map, but no application
+        // widgets exist yet. Register the packaged font before CSS selects it.
+        #[cfg(windows)]
+        font::configure();
+        style::load();
+    });
     app.connect_activate(move |app| {
         // A second `tidemark` on an already-running instance raises the window it has
         // rather than opening another one onto the same daemon.
@@ -133,6 +141,9 @@ fn main() -> glib::ExitCode {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    use std::path::{Path, PathBuf};
+
     #[test]
     fn background_flag_requests_a_hidden_start() {
         assert!(background_requested(["tidemark", "--background"]));
@@ -141,5 +152,49 @@ mod tests {
     #[test]
     fn ordinary_launch_requests_a_visible_start() {
         assert!(!background_requested(["tidemark"]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_bundled_rubik_font_file_is_found_beside_the_installed_executable() {
+        assert_eq!(
+            crate::font::bundled_font_file(Path::new(
+                r"C:\\Users\\Ada\\AppData\\Local\\Programs\\tidemark\\tidemark.exe"
+            )),
+            PathBuf::from(
+                r"C:\\Users\\Ada\\AppData\\Local\\Programs\\tidemark\\share\\fonts\\Rubik%5Bwght%5D.ttf"
+            )
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a process-global GTK display; run explicitly on Windows"]
+    fn the_bundled_rubik_font_is_visible_to_a_later_pango_context() {
+        let font = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/fonts/rubik/Rubik%5Bwght%5D.ttf");
+
+        if adw::init().is_err() {
+            eprintln!("skipped Pango inspection: no display is available");
+            return;
+        }
+        let label = gtk::Label::new(None);
+        let map = label
+            .pango_context()
+            .font_map()
+            .expect("a GTK label has a Pango font map");
+        crate::font::register(&map, &font).expect("Pango should load the bundled Rubik font");
+
+        let later_label = gtk::Label::new(None);
+        let description = gtk::pango::FontDescription::from_string("Rubik 11");
+        let resolved = later_label
+            .pango_context()
+            .load_font(&description)
+            .expect("Pango should resolve Rubik after the bundled font is added");
+        assert!(
+            resolved.describe().to_string().starts_with("Rubik"),
+            "Pango must use Rubik for newly created GTK widgets, got {}",
+            resolved.describe()
+        );
     }
 }

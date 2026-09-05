@@ -15,7 +15,9 @@ shortcut, and every installed file. Nothing machine-wide, no elevation.
 - `stage-gtk-runtime.sh` — walks the full PE import closure of both release
   executables and all MSYS2 gdk-pixbuf loaders, then assembles
   `build/nsis-staging/gtk/` with those UCRT64 DLLs, a relative-path
-  `loaders.cache`, compiled GLib schemas, fontconfig data and icon themes.
+  `loaders.cache`, compiled GLib schemas, fontconfig data and icon themes. It
+  also places the pinned Rubik font beside the runtime. Tidemark registers
+  it privately at launch, never as a Windows system font.
 - `msys2-runtime-packages.txt` — exact package versions and package-archive
   SHA-256 hashes for every staged DLL/data owner. CI downloads and verifies
   these archives before the release build, so linked and shipped DLL names

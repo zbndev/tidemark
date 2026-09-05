@@ -20,6 +20,9 @@ adw = { version = "0.9.2", package = "libadwaita", features = ["v1_9", "gtk_v4_2
 # async-io backend; named here because this crate uses it directly.
 async-channel = "2.5.0"
 gtk = { version = "0.11.4", package = "gtk4", features = ["v4_22"] }
+# Pango 1.56 adds FontMap::add_font_file, which lets the Windows build make its
+# bundled Rubik available to GTK without installing it for the user.
+pango = { version = "0.22.3", features = ["v1_56"] }
 semver = "1.0.28"
 tidemark-types = { path = "../tidemark-types" }
 tracing = "0.1.44"

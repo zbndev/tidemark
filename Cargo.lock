@@ -3758,6 +3758,7 @@ dependencies = [
  "gtk4",
  "ksni",
  "libadwaita",
+ "pango 0.22.8",
  "semver",
  "tidemark-types",
  "tracing",
