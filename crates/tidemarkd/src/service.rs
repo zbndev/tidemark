@@ -961,6 +961,7 @@ impl Daemon {
     /// a key works is the provider, and the poll this triggers is what asks it. A bad key
     /// arrives back as `credential-rejected`, which is a state the interface already draws.
     async fn set_key(&self, provider: &str, account: &str, key: &str) -> fdo::Result<()> {
+        tracing::info!(provider, account, "set_key called");
         let mutation = self.mutation(provider, account).await;
         let _guard = mutation.lock().await;
         let status = self.account(provider, account).await?;

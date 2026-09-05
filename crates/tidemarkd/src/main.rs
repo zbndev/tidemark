@@ -11,6 +11,8 @@
 //! handles shutdown.
 
 mod engine;
+#[cfg(windows)]
+mod file_log;
 mod keyring;
 #[cfg(windows)]
 mod lifecycle;
@@ -225,12 +227,17 @@ impl Announcer {
 }
 
 fn main() -> std::process::ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "tidemarkd=info".into()),
-        )
-        .init();
+    #[cfg(windows)]
+    let sink = file_log::init()
+        .map(file_log::Sink::File)
+        .unwrap_or(file_log::Sink::Stderr);
+    let subscriber = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "tidemarkd=info".into()),
+    );
+    #[cfg(windows)]
+    let subscriber = subscriber.with_writer(sink).with_ansi(false);
+    subscriber.init();
 
     if std::env::args().any(|a| a == "--version") {
         println!("tidemarkd {}", env!("CARGO_PKG_VERSION"));
