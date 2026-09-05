@@ -114,9 +114,8 @@ jobs:
         run: cargo test --workspace
 
   # Todo 21: compile the per-user NSIS installer and upload it as the
-  # `nsis-package` artifact. The toolchain wiring mirrors windows-tests (same
-  # UCRT64/GNU toolchain, same pinned gvsbuild runtime as the probe jobs), so
-  # the shipped binaries and DLLs are the locked set, never drift.
+  # `nsis-package` artifact. The binaries and staged DLLs both come from the
+  # exact MSYS2 UCRT64 package archives locked by name, version and SHA-256.
   nsis-package:
     if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
     runs-on: windows-latest
@@ -127,7 +126,6 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
       PKG_CONFIG_PATH: /ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig
-      GVBUILD_URL: 'https://github.com/wingtk/gvsbuild/releases/download/2026.8.0/GTK4_Gvsbuild_2026.8.0_x64.zip'
     steps:
       - uses: actions/checkout@v5
 
@@ -136,14 +134,30 @@ jobs:
           msystem: UCRT64
           update: true
           path-type: inherit
+          # Build tools only. Runtime/link packages are installed from the
+          # exact archives below, before Cargo can link against them.
           install: >-
-            mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-libadwaita
             mingw-w64-ucrt-x86_64-pkg-config
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-clang
-            mingw-w64-ucrt-x86_64-sqlite3
             mingw-w64-ucrt-x86_64-go
+
+      - name: Install the pinned MSYS2 UCRT64 runtime and link stack
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir -p build/msys2-packages
+          archives=()
+          while read -r package version sha256; do
+            [[ -n "$package" && "${package:0:1}" != '#' ]] || continue
+            archive="build/msys2-packages/${package}-${version}-any.pkg.tar.zst"
+            url="https://repo.msys2.org/mingw/ucrt64/${package}-${version}-any.pkg.tar.zst"
+            curl --fail --location --retry 3 --output "$archive" "$url"
+            printf '%s *%s\n' "$sha256" "$archive" | sha256sum --check --strict
+            curl --fail --location --retry 3 --output "$archive.sig" "$url.sig"
+            archives+=("$archive")
+          done < data/packaging/windows/msys2-runtime-packages.txt
+          pacman --noconfirm -U "${archives[@]}"
 
       - name: Default a GNU-host Rust toolchain
         shell: pwsh
@@ -165,11 +179,9 @@ jobs:
         shell: msys2 {0}
         run: cargo build --release -p tidemark -p tidemarkd
 
-      - name: Stage the pinned gvsbuild GTK runtime
-        shell: pwsh
-        run: |
-          curl.exe --fail -L -o build\gvsbuild.zip "$env:GVBUILD_URL"
-          bash data/packaging/windows/stage-gtk-runtime.sh build
+      - name: Stage the empirically resolved MSYS2 UCRT64 runtime
+        shell: msys2 {0}
+        run: bash data/packaging/windows/stage-gtk-runtime.sh build target/release
 
       - name: makensis
         shell: cmd
