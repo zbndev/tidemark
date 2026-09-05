@@ -443,10 +443,12 @@ mod reconnect {
 
     /// A whole outage gets this long before the startup error goes on screen and the
     /// outer five-second loop takes over again.
+    #[cfg(windows)]
     const OUTAGE_DEADLINE: Duration = Duration::from_secs(15);
 
     /// Readiness is bounded: an endpoint that connects but never answers `Version` is not
     /// a ready daemon.
+    #[cfg(windows)]
     const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 
     /// At most one spawn per outage, and spawns never closer together than this.
