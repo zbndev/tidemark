@@ -22,12 +22,16 @@ mod bus;
 mod card;
 mod chart;
 mod detail;
+#[cfg(windows)]
+mod file_log;
 mod format;
 mod grid;
 mod mark;
 mod model;
 mod preferences;
 mod provider_settings;
+#[cfg(windows)]
+mod single_instance;
 mod style;
 mod tray;
 #[cfg(windows)]
@@ -51,12 +55,19 @@ where
 }
 
 fn main() -> glib::ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "tidemark=info".into()),
-        )
-        .init();
+    #[cfg(windows)]
+    let sink = file_log::init()
+        .map(file_log::Sink::File)
+        .unwrap_or(file_log::Sink::Stderr);
+    let subscriber = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "tidemark=info".into()),
+    );
+    // No console on Windows (GUI subsystem above): without the file the client
+    // would be mute anywhere.
+    #[cfg(windows)]
+    let subscriber = subscriber.with_writer(sink).with_ansi(false);
+    subscriber.init();
 
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|argument| argument == "--version") {
@@ -64,6 +75,37 @@ fn main() -> glib::ExitCode {
         return glib::ExitCode::SUCCESS;
     }
     let background = background_requested(&args);
+
+    // No session bus on Windows, so no toolkit single-instance: a second Start
+    // launch raises the running window through the daemon and leaves instead of
+    // opening a second window with a second tray icon.
+    #[cfg(windows)]
+    let singleton: Option<single_instance::Guard> = match single_instance::Guard::acquire() {
+        Ok(Some(guard)) => Some(guard),
+        Ok(None) => {
+            glib::MainContext::default().block_on(async {
+                if let Err(error) = crate::bus::request_activation().await {
+                    tracing::warn!(%error, "could not ask the running window to come forward");
+                }
+            });
+            // On the GNU Windows runtime an ordinary return from `main` can leave
+            // GIO's startup machinery alive long enough to construct another
+            // application instance. Nothing in this duplicate owns user state;
+            // exit immediately after best-effort activation forwarding.
+            std::process::exit(0);
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the client singleton mutex is unusable; starting unguarded");
+            None
+        }
+    };
+    // GTK's Windows runtime can leave the process serving windows after its
+    // `Application::run` call returns, so a lexical RAII scope is too short for
+    // this process-wide invariant. The OS closes this kernel handle at process
+    // exit (including crash termination), which is exactly when another client
+    // may take the mutex.
+    #[cfg(windows)]
+    std::mem::forget(singleton);
 
     let app = adw::Application::builder()
         .application_id(ids::APP_ID)

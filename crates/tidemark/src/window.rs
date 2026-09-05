@@ -320,6 +320,9 @@ impl MainWindow {
             Update::Available(version) => self.show_update(&version),
             Update::Preferences(preferences) => self.apply_preferences(preferences),
             Update::Data(data) => self.apply_data(data),
+            // A second instance asked this one to come forward: raise the window
+            // however it currently stands, even over a waiting screen.
+            Update::Activate => self.window.present(),
             Update::Waiting(reason) => {
                 *self.daemon.borrow_mut() = None;
                 self.daemon_version.replace(None);

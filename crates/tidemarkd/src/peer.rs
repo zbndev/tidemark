@@ -65,6 +65,7 @@ pub(crate) enum Announcement {
     PreferencesChanged(Preferences),
     DataChanged(DataInfo),
     UpdateChanged(String),
+    ActivateRequested,
 }
 
 impl Announcement {
@@ -85,6 +86,7 @@ impl Announcement {
                 Daemon::preferences_changed(emitter, preferences.clone()).await
             }
             Self::DataChanged(data) => Daemon::data_changed(emitter, data.clone()).await,
+            Self::ActivateRequested => Daemon::activate_requested(emitter).await,
             Self::UpdateChanged(version) => Daemon::update_changed(emitter, version).await,
         }
     }
@@ -333,6 +335,7 @@ mod tests {
             Announcement::ProviderRemoved { provider, .. } => format!("removed:{provider}"),
             Announcement::PreferencesChanged(_) => "preferences".into(),
             Announcement::DataChanged(_) => "data".into(),
+            Announcement::ActivateRequested => "activate".into(),
         }
     }
 

@@ -78,6 +78,9 @@ pub trait Daemon {
     /// Polls now: one provider by slug, or everything when given an empty string.
     fn refresh(&self, provider: &str) -> zbus::Result<()>;
 
+    /// Asks the running window to come forward; the caller exits after this.
+    fn request_activate(&self) -> zbus::Result<()>;
+
     /// Stores an API key for an account.
     fn set_key(&self, provider: &str, account: &str, key: &str) -> zbus::Result<()>;
 
@@ -172,6 +175,10 @@ pub trait Daemon {
     /// Availability of a newer published application release changed.
     #[zbus(signal)]
     fn update_changed(&self, version: &str) -> zbus::Result<()>;
+
+    /// Another client asked this one to come forward.
+    #[zbus(signal)]
+    fn activate_requested(&self) -> zbus::Result<()>;
 }
 
 /// What the window is told.
@@ -203,6 +210,8 @@ pub enum Update {
     Preferences(Preferences),
     /// Paths or storage facts changed.
     Data(DataInfo),
+    /// Another client asked this one to come forward.
+    Activate,
     /// There is nothing to show, with the reason to put on the screen.
     Waiting(String),
 }
@@ -253,6 +262,7 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
     let mut updates = pin!(proxy.receive_update_changed().await?);
     let mut preference_changes = pin!(proxy.receive_preferences_changed().await?);
     let mut data_changes = pin!(proxy.receive_data_changed().await?);
+    let mut activations = pin!(proxy.receive_activate_requested().await?);
 
     load(&proxy, on).await;
 
@@ -279,6 +289,9 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
             }
             if let Poll::Ready(data) = data_changes.as_mut().poll_next(context) {
                 return Poll::Ready(Event::Data(data));
+            }
+            if let Poll::Ready(activation) = activations.as_mut().poll_next(context) {
+                return Poll::Ready(Event::Activate(activation));
             }
             Poll::Pending
         })
@@ -324,6 +337,7 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
                 Ok(args) => on(Update::Data(args.data)),
                 Err(error) => tracing::warn!(%error, "a DataChanged signal did not parse"),
             },
+            Event::Activate(Some(_)) => on(Update::Activate),
             // Any stream ending means the connection is finished with.
             #[cfg(unix)]
             Event::Owner(None) => return Ok(()),
@@ -332,9 +346,21 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
             | Event::Reordered(None)
             | Event::Available(None)
             | Event::Preferences(None)
-            | Event::Data(None) => return Ok(()),
+            | Event::Data(None)
+            | Event::Activate(None) => return Ok(()),
         }
     }
+}
+
+/// One-shot activation forward for the second-instance path (Windows): connect to
+/// the daemon and ask the running window to come forward. No GLib main loop runs
+/// yet, so the caller drives this with `MainContext::block_on`. Errors are the
+/// caller's to log; a missing daemon just means there is no window to raise.
+#[cfg(windows)]
+pub(crate) async fn request_activation() -> zbus::Result<()> {
+    let connection = reconnect::connect(&|_| {}).await?;
+    let proxy = DaemonProxy::new(&connection).await?;
+    proxy.request_activate().await
 }
 
 /// Asks for the whole picture, and reports what came back.
@@ -708,6 +734,7 @@ enum Event {
     Available(Option<UpdateChanged>),
     Preferences(Option<PreferencesChanged>),
     Data(Option<DataChanged>),
+    Activate(Option<ActivateRequested>),
 }
 
 #[cfg(test)]

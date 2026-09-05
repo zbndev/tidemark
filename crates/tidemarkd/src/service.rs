@@ -955,6 +955,19 @@ impl Daemon {
             .map_err(|_| fdo::Error::Failed("the poll loop has stopped".into()))
     }
 
+    /// Brings the running window forward: files `ActivateRequested` with the peer
+    /// fan-out, so the visible client presents itself. The caller — a second UI
+    /// instance — exits straight after this call. Without a fan-out (the session-bus
+    /// platforms, where the toolkit already single-instances) there is nobody to
+    /// tell, and success is still the honest answer: activation is best-effort.
+    async fn request_activate(&self) -> fdo::Result<()> {
+        #[cfg(any(windows, test))]
+        if let Some(hub) = &self.hub {
+            hub.publish(Announcement::ActivateRequested).await;
+        }
+        Ok(())
+    }
+
     /// Stores an API key for an account, and polls it straight away.
     ///
     /// The key is not validated here beyond being non-blank: the only authority on whether
@@ -1458,6 +1471,12 @@ impl Daemon {
     /// Availability of a newer published release changed; empty means there is none.
     #[zbus(signal)]
     pub async fn update_changed(emitter: &SignalEmitter<'_>, version: &str) -> zbus::Result<()>;
+
+    /// Another client asks the visible one to come forward. A second UI instance on a
+    /// platform without session-bus uniqueness calls `RequestActivate` and exits;
+    /// this is how the running window hears about it.
+    #[zbus(signal)]
+    pub async fn activate_requested(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
 fn file_size(path: impl AsRef<std::path::Path>) -> u64 {

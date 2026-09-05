@@ -10,6 +10,11 @@
 //! next poll is, and `service` is the D-Bus interface. This file wires them together and
 //! handles shutdown.
 
+// A background service must not keep a console window: on Windows the GUI subsystem
+// detaches it at link time. Gated off tests so failures still print. The file log
+// stays the eyes (see file_log).
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 mod engine;
 #[cfg(windows)]
 mod file_log;
