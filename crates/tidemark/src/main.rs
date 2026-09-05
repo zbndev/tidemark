@@ -26,6 +26,7 @@ mod preferences;
 mod provider_settings;
 mod style;
 mod tray;
+mod tray_icon_rgba;
 mod update;
 mod window;
 

@@ -454,8 +454,7 @@ mod backend {
         DispatchMessageW, GetMessageW, MSG, PostThreadMessageW, TranslateMessage, WM_QUIT,
     };
 
-    #[path = "../../tray_icon_rgba.rs"]
-    mod icon_rgba;
+    use crate::tray_icon_rgba as icon_rgba;
 
     /// A thread message no window here uses, posted only to wake the pump so an update
     /// sitting in the channel is drained without waiting for real input.
