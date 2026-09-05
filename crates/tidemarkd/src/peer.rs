@@ -563,8 +563,16 @@ mod tests {
             ]))
             .await;
 
+            // Read until both signals have been seen, rather than reading exactly two
+            // messages: the stream was built after the property get and the method call
+            // above, and zbus hands a new stream whatever is still sitting in the
+            // connection's broadcast queue. Whether either reply is still there when the
+            // stream is constructed is a matter of timing, so counting messages instead
+            // of signals loses a signal to a leftover method return often enough to fail
+            // a run. Each poll stays under `BOUNDED`, so a signal that never comes still
+            // fails the test rather than hanging it.
             let mut members = Vec::new();
-            for _ in 0..2 {
+            while members.len() < 2 {
                 let message = tokio::time::timeout(
                     BOUNDED,
                     poll_fn(|cx| Stream::poll_next(Pin::new(&mut messages), cx)),
