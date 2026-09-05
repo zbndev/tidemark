@@ -1252,11 +1252,15 @@ impl ProviderDetail {
             }
         }
 
-        let launcher = gtk::UriLauncher::new(&url);
-        if let Err(error) = launcher
+        // GTK's URI launcher can report success on Windows without dispatching the
+        // URL. `webbrowser` uses the Windows shell's default-browser handler instead.
+        #[cfg(windows)]
+        let launch = webbrowser::open(&url);
+        #[cfg(unix)]
+        let launch = gtk::UriLauncher::new(&url)
             .launch_future(self.dialog.root().and_downcast_ref::<gtk::Window>())
-            .await
-        {
+            .await;
+        if let Err(error) = launch {
             tracing::warn!(%error, "could not open the browser");
             self.toast("Could not open a browser. Use Copy link and open it yourself.");
         }

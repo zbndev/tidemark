@@ -207,6 +207,9 @@ pub struct DaemonState {
     catalog: Vec<ProviderDefinition>,
     configured: RwLock<HashSet<AccountKey>>,
     commands: mpsc::Sender<Command>,
+    /// The daemon runtime, retained because zbus executes p2p method callbacks on
+    /// its own executor rather than inside Tokio's reactor.
+    runtime: tokio::runtime::Handle,
     secrets: Arc<dyn Secrets>,
     logins: Mutex<HashMap<AccountKey, Pending>>,
     mutations: Mutex<HashMap<AccountKey, AccountMutation>>,
@@ -338,6 +341,7 @@ impl DaemonState {
             catalog,
             configured: RwLock::new(configured.into_iter().collect()),
             commands,
+            runtime: tokio::runtime::Handle::current(),
             secrets,
             logins: Mutex::new(HashMap::new()),
             mutations: Mutex::new(HashMap::new()),
@@ -1045,8 +1049,14 @@ impl Daemon {
 
         self.cancel_pending_login(provider, account).await;
 
-        let login = Login::begin(client)
+        // The zbus p2p executor that calls this method is not a Tokio runtime. The
+        // loopback listener is Tokio I/O, so create it on the daemon's runtime before
+        // replying with the browser URL.
+        let login = self
+            .runtime
+            .spawn(Login::begin(client))
             .await
+            .map_err(|error| fdo::Error::Failed(format!("OAuth login task stopped: {error}")))?
             .map_err(|error| fdo::Error::Failed(error.to_string()))?;
         let url = login.url().to_owned();
 
@@ -1055,7 +1065,7 @@ impl Daemon {
         let provider_name = provider.to_owned();
         let account_name = account.to_owned();
         let credential_mutation = Arc::clone(&mutation);
-        let task = tokio::spawn(async move {
+        let task = self.runtime.spawn(async move {
             let http = tidemark_core::oauth::client().map_err(|error| error.to_string())?;
             let response = login
                 .finish(&http)
@@ -4383,5 +4393,18 @@ mod tests {
             .await
             .expect("task did not panic")
             .expect("accepted");
+    }
+
+    #[tokio::test]
+    async fn a_daemon_uses_its_captured_runtime_for_oauth_callbacks() {
+        let (daemon, _secrets, _commands) = daemon_over(Vec::new()).await;
+        let expected = tokio::runtime::Handle::current().id();
+        let actual = daemon
+            .runtime
+            .spawn(async { tokio::runtime::Handle::current().id() })
+            .await
+            .expect("the captured runtime is still running");
+
+        assert_eq!(actual, expected);
     }
 }

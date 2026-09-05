@@ -309,16 +309,26 @@ impl Codex {
         now: i64,
         force: bool,
     ) -> Result<CodexCredentials, ProviderError> {
-        let credentials = self.credentials.as_ref().ok_or_else(|| {
+        let file = self.credentials.as_ref().ok_or_else(|| {
             ProviderError::Local("Codex CLI credentials are unavailable for this account".into())
         })?;
-        let locked = credentials.lock().map_err(map_file_error)?;
+        let document = file.read_json().map_err(map_file_error)?;
+        let credentials = CodexCredentials::from_document(&document)?;
+        if !force && !credentials.is_expired_at(now) {
+            return Ok(credentials);
+        }
+
+        // A live CLI may keep its credential file under an exclusive update lock.
+        // Reading above needs no mutation and must not contend with that lock; only a
+        // refresh must take it. Re-read after acquiring it so a CLI rotation between
+        // the two operations cannot be refreshed from stale token material.
+        let locked = file.lock().map_err(map_file_error)?;
         let document = locked.read_json().map_err(map_file_error)?;
         let credentials = CodexCredentials::from_document(&document)?;
-        if force || credentials.is_expired_at(now) {
-            return self.refresh(&locked, credentials).await;
+        if !force && !credentials.is_expired_at(now) {
+            return Ok(credentials);
         }
-        Ok(credentials)
+        self.refresh(&locked, credentials).await
     }
 
     /// The document of a login performed from Tidemark, if there is one.

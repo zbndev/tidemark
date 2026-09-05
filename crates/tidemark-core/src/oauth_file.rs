@@ -1,6 +1,7 @@
 //! Safe updates to OAuth credential files owned by third-party CLIs.
 
 use std::fs::{self, File};
+use std::io::Read;
 use std::ops::Range;
 #[cfg(all(test, unix))]
 use std::os::unix::fs::PermissionsExt;
@@ -32,6 +33,17 @@ impl CredentialFile {
     pub fn coordinated_by(mut self, write_lock: PathBuf) -> Self {
         self.write_lock = Some(write_lock);
         self
+    }
+
+    /// Reads a vendor-owned credential without taking the exclusive update lock.
+    ///
+    /// An otherwise-live CLI can hold that lock while it is idle. Reading does not
+    /// mutate the document, so only a token rotation needs the exclusive lock.
+    pub fn read_json(&self) -> Result<serde_json::Value, CredentialFileError> {
+        let mut file = platform::open_read_file(&self.path)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     /// Takes the update lock.
@@ -144,7 +156,7 @@ impl LockedCredentialFile {
     }
     /// Reads the complete JSON document.
     pub fn read_json(&self) -> Result<serde_json::Value, CredentialFileError> {
-        let bytes = std::fs::read(&self.path)?;
+        let bytes = self.read_current()?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
@@ -154,7 +166,7 @@ impl LockedCredentialFile {
         key: &str,
         fields: &[Field<'_>],
     ) -> Result<(), CredentialFileError> {
-        let bytes = fs::read(&self.path)?;
+        let bytes = self.read_current()?;
         let _: serde_json::Value = serde_json::from_slice(&bytes)?;
         for field in fields {
             let object = enclosing_object_span(&bytes, key, *field)?;
@@ -627,6 +639,17 @@ mod platform {
         Ok(file)
     }
 
+    pub(super) fn open_read_file(path: &Path) -> Result<File, CredentialFileError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        if !file.metadata()?.file_type().is_file() {
+            return Err(CredentialFileError::NotRegularFile(path.to_owned()));
+        }
+        Ok(file)
+    }
+
     pub(super) fn atomic_private_publish(
         path: &Path,
         bytes: &[u8],
@@ -1071,6 +1094,20 @@ mod platform {
         open_reparse_file(path, path)
     }
 
+    pub(super) fn open_read_file(path: &Path) -> Result<File, CredentialFileError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL).0)
+            .access_mode(FILE_GENERIC_READ.0)
+            .share_mode(share_all())
+            .open(path)?;
+        reject_reparse(&file, path)?;
+        if !file.metadata()?.is_file() {
+            return Err(CredentialFileError::NotRegularFile(path.to_owned()));
+        }
+        Ok(file)
+    }
+
     pub(super) fn atomic_private_publish(
         path: &Path,
         bytes: &[u8],
@@ -1235,6 +1272,26 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_credential_file_can_be_read_without_an_update_lock() {
+        let directory = std::env::temp_dir().join(format!(
+            "tidemark-read-only-credential-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).expect("test directory");
+        let path = directory.join("auth.json");
+        fs::write(&path, r#"{"tokens":{"access_token":"live"}}"#).expect("credential file");
+
+        let document = CredentialFile::new(path.clone(), path)
+            .read_json()
+            .expect("read-only credential read");
+
+        assert_eq!(document["tokens"]["access_token"], "live");
+        fs::remove_dir_all(directory).expect("test cleanup");
+    }
 
     #[test]
     fn a_root_update_replaces_named_fields_and_keeps_the_rest_of_the_document() {
