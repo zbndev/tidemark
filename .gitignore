@@ -25,3 +25,6 @@
 .codex
 .opencode
 .mcp.json
+
+# NSIS staging output, from building the Windows installer in place
+/build/

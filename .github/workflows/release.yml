@@ -112,10 +112,117 @@ jobs:
           path: target/generate-rpm/*.rpm
           if-no-files-found: error
 
-  # Depends on all three, so a failure anywhere means no release object is created at all.
+  # The Windows setup executable, built against the same pinned MSYS2 UCRT64 runtime the
+  # binaries link against: package name, version and archive SHA-256 are all locked in
+  # msys2-runtime-packages.txt, so what is linked and what is shipped cannot drift apart.
+  # Nothing is tested here — CI's windows-tests job has already run fmt, clippy and the
+  # whole suite on this target, on the commit the tag points at.
+  windows:
+    needs: checks
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      # RUSTUP_TOOLCHAIN outranks both `rustup default` and rust-toolchain.toml (which
+      # pins only channel=stable, i.e. the runner's MSVC host). MSVC has never linked
+      # this dependency set, and is not what the project ships.
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+      PKG_CONFIG_PATH: /ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: msys2/setup-msys2@v2.27.0
+        with:
+          msystem: UCRT64
+          update: true
+          # path-type: inherit keeps the runner's ~/.cargo/bin inside the msys2 shell;
+          # /etc/profile still puts /ucrt64/bin first, so pkg-config and gcc keep winning.
+          path-type: inherit
+          # Build tools only. Everything that is linked or shipped comes from the exact
+          # archives installed below, before Cargo can link against anything else.
+          install: >-
+            mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-go
+
+      - name: Install the pinned MSYS2 UCRT64 runtime and link stack
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir -p build/msys2-packages
+          archives=()
+          while read -r package version sha256; do
+            [[ -n "$package" && "${package:0:1}" != '#' ]] || continue
+            # Belt and suspenders next to .gitattributes eol=lf: a CR in the checksum
+            # breaks `sha256sum --check` on a CRLF checkout.
+            sha256=${sha256%$'\r'}
+            archive="build/msys2-packages/${package}-${version}-any.pkg.tar.zst"
+            url="https://repo.msys2.org/mingw/ucrt64/${package}-${version}-any.pkg.tar.zst"
+            curl --fail --location --retry 3 --output "$archive" "$url"
+            printf '%s *%s\n' "$sha256" "$archive" | sha256sum --check --strict
+            curl --fail --location --retry 3 --output "$archive.sig" "$url.sig"
+            archives+=("$archive")
+          done < data/packaging/windows/msys2-runtime-packages.txt
+          pacman --noconfirm -U "${archives[@]}"
+
+      - name: Default a GNU-host Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ucrt64-release
+
+      - name: Release binaries
+        shell: msys2 {0}
+        run: cargo build --release --locked -p tidemark -p tidemarkd
+
+      # The DLL set is not hand-written: the script walks the PE import closure of both
+      # executables and of every gdk-pixbuf loader, and refuses a package whose installed
+      # version is not the pinned one.
+      - name: Stage the resolved MSYS2 UCRT64 runtime
+        shell: msys2 {0}
+        run: bash data/packaging/windows/stage-gtk-runtime.sh build target/release
+
+      # choco's nsis package is NSIS 3.x with MUI2, the System plugin and lzma — the
+      # whole surface installer.nsi uses.
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      # Named for the release here rather than renamed further down: makensis is already
+      # told the version, because it writes it into the per-user uninstall entry, so the
+      # file may as well leave the compiler under the name a person downloads. The tag
+      # comes in through the environment rather than being interpolated into the script,
+      # so a tag name never becomes part of the PowerShell that runs.
+      - name: makensis
+        shell: pwsh
+        working-directory: data/packaging/windows
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $version = $env:TAG -replace '^v', ''
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            "/DVERSION=$version" `
+            "/DSRC_DIR=${env:GITHUB_WORKSPACE}\target\release" `
+            "/DGTK_DIR=${env:GITHUB_WORKSPACE}\build\nsis-staging\gtk" `
+            "/DOUT_FILE=Tidemark-${env:TAG}-setup.exe" `
+            installer.nsi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup
+          path: data/packaging/windows/Tidemark-*-setup.exe
+          if-no-files-found: error
+
+  # Depends on all four, so a failure anywhere means no release object is created at all.
   # A draft, not a publication: a person decides when it goes out.
   release:
-    needs: [checks, deb, rpm]
+    needs: [checks, deb, rpm, windows]
     runs-on: ubuntu-26.04
     # The one job that writes: creating the draft release is the only mutation anywhere
     # in this workflow, so the build jobs above stay read-only.
@@ -130,7 +237,8 @@ jobs:
       # The package tools name their outputs the way package managers expect — the -1 is
       # the Debian revision, the suffix the architecture. The file a person downloads gets
       # the project's own name instead, shaped by the tag the checks job has already
-      # agreed with Cargo.toml.
+      # agreed with Cargo.toml. The Windows installer arrives already named that way,
+      # so there is nothing here to rename it from.
       - name: Give the assets their release names
         run: |
           mv artifacts/*.deb "artifacts/Tidemark-${GITHUB_REF_NAME}.deb"

@@ -2,7 +2,6 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
     paths-ignore:
       # '**/*.md' does not match repository-root files (README, CONTEXT, AGENTS) — the
       # root-level '*.md' entry is what closes that gap.
@@ -10,9 +9,9 @@ on:
       - '**/*.md'
       - 'docs/**'
   push:
-    # The experimental branch also pushes, to feed the windows-ucrt64-probe job
-    # below; everything else in this workflow still ignores docs-only pushes.
-    branches: [main, feat/experimental-windows-native]
+    # Every branch, and tags excluded by saying so: a tag push belongs to the release
+    # workflow, which runs this same Linux gate itself before it builds anything.
+    branches: ['**']
     paths-ignore:
       - '*.md'
       - '**/*.md'
@@ -31,18 +30,67 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The real Windows test gate: the full workspace gate (fmt / clippy / tests) on
-  # the locked toolchain from todo 2's decision file. Wiring mirrors the
-  # windows-ucrt64-probe job byte-for-byte where it concerns the toolchain — the
-  # MSVC target this job originally used has never linked this dependency set
-  # (link.exe 1181), while UCRT64 links and tests green everywhere it runs.
+  checks:
+    # The only hosted runner carrying GTK 4.22 / libadwaita 1.9, which is the project's
+    # API floor. ubuntu-latest is still 24.04 and ships GTK 4.18; this code does not
+    # compile against it.
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the toolkit and the shell-check tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake \
+            dbus-daemon desktop-file-utils appstream shellcheck
+
+      - name: Confirm the toolkit meets the floor
+        run: |
+          pkg-config --atleast-version=4.22 gtk4
+          pkg-config --atleast-version=1.9 libadwaita-1
+          pkg-config --modversion gtk4 libadwaita-1
+
+      # rust-toolchain.toml pins the channel; rustup reads it on first use.
+      - name: Show the toolchain
+        run: rustup show && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # A session bus, because tidemark-core's Secret Service tests skip themselves
+      # without one and tidemarkd opens a session connection. With a bus but no Secret
+      # Service the keyring assertions still skip, which is the designed behaviour.
+      - name: Tests
+        run: dbus-run-session -- cargo test --workspace
+
+      - name: Layering
+        run: scripts/check-layering.sh
+
+      - name: Desktop integration
+        run: scripts/check-desktop-integration.sh
+
+      - name: The user-daemon restart helper
+        run: scripts/test-restart-user-daemon.sh
+
+      - name: Shell
+        run: |
+          shellcheck scripts/*.sh data/restart-user-daemon \
+            data/packaging/deb/postinst data/packaging/rpm/post-install.sh
+
+  # The same gate on Windows: fmt, clippy and the whole suite, on MSYS2 UCRT64. The
+  # MSVC target has never linked this dependency set (link.exe 1181) and is not what
+  # the project ships, so the GNU toolchain is the one thing this job insists on.
+  # Unix-only tests cfg-gate themselves out at their seams, and the GTK widget tests
+  # skip on a runner with no display, so a red run here is a real regression.
   windows-tests:
-    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
     runs-on: windows-latest
     timeout-minutes: 60
-    concurrency:
-      group: windows-tests-${{ github.ref }}
-      cancel-in-progress: true
     env:
       # RUSTUP_TOOLCHAIN outranks both `rustup default` and the repo's
       # rust-toolchain.toml (which pins only channel=stable, i.e. the runner's
@@ -99,8 +147,7 @@ jobs:
         with:
           key: ucrt64-tests
 
-      # The real gate. NO continue-on-error anywhere: a failure fails the job.
-      # Unix-only tests are cfg-gated at their seams, so the suite must pass.
+      # NO continue-on-error anywhere: a failure fails the job.
       - name: Format
         shell: msys2 {0}
         run: cargo fmt --all --check
@@ -112,341 +159,3 @@ jobs:
       - name: Tests
         shell: msys2 {0}
         run: cargo test --workspace
-
-  # Todo 21: compile the per-user NSIS installer and upload it as the
-  # `nsis-package` artifact. The binaries and staged DLLs both come from the
-  # exact MSYS2 UCRT64 package archives locked by name, version and SHA-256.
-  nsis-package:
-    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
-    runs-on: windows-latest
-    timeout-minutes: 60
-    concurrency:
-      group: nsis-package-${{ github.ref }}
-      cancel-in-progress: true
-    env:
-      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
-      PKG_CONFIG_PATH: /ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: msys2/setup-msys2@v2.27.0
-        with:
-          msystem: UCRT64
-          update: true
-          path-type: inherit
-          # Build tools only. Runtime/link packages are installed from the
-          # exact archives below, before Cargo can link against them.
-          install: >-
-            mingw-w64-ucrt-x86_64-pkg-config
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-clang
-            mingw-w64-ucrt-x86_64-go
-
-      - name: Install the pinned MSYS2 UCRT64 runtime and link stack
-        shell: msys2 {0}
-        run: |
-          set -euo pipefail
-          mkdir -p build/msys2-packages
-          archives=()
-          while read -r package version sha256; do
-            [[ -n "$package" && "${package:0:1}" != '#' ]] || continue
-            # Belt and suspenders next to .gitattributes eol=lf: a CR in the
-            # checksum breaks `sha256sum --check` on a CRLF checkout.
-            sha256=${sha256%$'\r'}
-            archive="build/msys2-packages/${package}-${version}-any.pkg.tar.zst"
-            url="https://repo.msys2.org/mingw/ucrt64/${package}-${version}-any.pkg.tar.zst"
-            curl --fail --location --retry 3 --output "$archive" "$url"
-            printf '%s *%s\n' "$sha256" "$archive" | sha256sum --check --strict
-            curl --fail --location --retry 3 --output "$archive.sig" "$url.sig"
-            archives+=("$archive")
-          done < data/packaging/windows/msys2-runtime-packages.txt
-          pacman --noconfirm -U "${archives[@]}"
-
-      - name: Default a GNU-host Rust toolchain
-        shell: pwsh
-        run: |
-          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-          rustup default stable-x86_64-pc-windows-gnu
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ucrt64-nsis
-
-      # choco's nsis package is NSIS 3.x with MUI2, the System plugin and lzma
-      # — the whole surface installer.nsi uses.
-      - name: Install NSIS
-        shell: pwsh
-        run: choco install nsis -y --no-progress
-
-      - name: Release binaries
-        shell: msys2 {0}
-        run: cargo build --release -p tidemark -p tidemarkd
-
-      - name: Stage the empirically resolved MSYS2 UCRT64 runtime
-        shell: msys2 {0}
-        run: bash data/packaging/windows/stage-gtk-runtime.sh build target/release
-
-      - name: makensis
-        shell: cmd
-        run: |
-          cd data\packaging\windows
-          "C:\Program Files (x86)\NSIS\makensis.exe" /DSRC_DIR=%GITHUB_WORKSPACE%\target\release /DGTK_DIR=%GITHUB_WORKSPACE%\build\nsis-staging\gtk /DOUT_FILE=tidemark-installer.exe installer.nsi
-
-      - name: Upload the installer artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: nsis-package
-          path: data/packaging/windows/tidemark-installer.exe
-
-  checks:
-    # The only hosted runner carrying GTK 4.22 / libadwaita 1.9, which is the project's
-    # API floor. ubuntu-latest is still 24.04 and ships GTK 4.18; this code does not
-    # compile against it.
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install the toolkit and the shell-check tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake \
-            dbus-daemon desktop-file-utils appstream shellcheck
-
-      - name: Confirm the toolkit meets the floor
-        run: |
-          pkg-config --atleast-version=4.22 gtk4
-          pkg-config --atleast-version=1.9 libadwaita-1
-          pkg-config --modversion gtk4 libadwaita-1
-
-      # rust-toolchain.toml pins the channel; rustup reads it on first use.
-      - name: Show the toolchain
-        run: rustup show && cargo --version
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      # A session bus, because tidemark-core's Secret Service tests skip themselves
-      # without one and tidemarkd opens a session connection. With a bus but no Secret
-      # Service the keyring assertions still skip, which is the designed behaviour.
-      - name: Tests
-        run: dbus-run-session -- cargo test --workspace
-
-      - name: Layering
-        run: scripts/check-layering.sh
-
-      - name: Desktop integration
-        run: scripts/check-desktop-integration.sh
-
-      - name: The user-daemon restart helper
-        run: scripts/test-restart-user-daemon.sh
-
-      - name: Shell
-        run: |
-          shellcheck scripts/*.sh data/restart-user-daemon \
-            data/packaging/deb/postinst data/packaging/rpm/post-install.sh
-
-  # Windows-GNU compile-gap probe (experimental branch only). The point is to MEASURE
-  # how far the workspace gets on MSYS2 UCRT64, not to fix anything: the error list
-  # in the uploaded log IS the deliverable. The only hard assertion is tidemark-types
-  # (pure serde/zvariant logic); every other step may fail loudly, but nothing may
-  # hang the runner or hide its conclusion.
-  windows-ucrt64-probe:
-    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
-    runs-on: windows-latest
-    timeout-minutes: 60
-    concurrency:
-      group: windows-ucrt64-${{ github.ref }}
-      cancel-in-progress: true
-    env:
-      # RUSTUP_TOOLCHAIN outranks both `rustup default` and the repo's
-      # rust-toolchain.toml (which pins only channel=stable, i.e. the runner's MSVC
-      # host); without it the toolchain file would silently flip every cargo
-      # invocation back to MSVC. The GNU-host toolchain is installed in a step below.
-      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
-      # Plain text so the artifact greps cleanly for error[E...] lines; the
-      # workflow-wide `always` would bake ANSI codes into the log.
-      CARGO_TERM_COLOR: never
-      # gtk-rs MinGW recipe: the UCRT64 pkgconfig trees backing the system
-      # GTK/libadwaita/SQLite that the workspace links.
-      PKG_CONFIG_PATH: /ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: msys2/setup-msys2@v2.27.0
-        with:
-          msystem: UCRT64
-          update: true
-          # path-type: inherit keeps the runner's PATH (notably ~/.cargo/bin) inside
-          # the msys2 shell; the default "minimal" rebuilds PATH from /etc/profile
-          # alone and drops it, which would kill every cargo step. /etc/profile still
-          # puts /ucrt64/bin first, so pkg-config/gcc/cmake/clang keep winning.
-          path-type: inherit
-          # sqlite3: rusqlite links the SYSTEM SQLite (the bundled feature is NOT
-          # enabled). go: provisional, boring-sys2's cmake may require it. clang,
-          # cmake and gcc/g++ build BoringSSL behind wreq (bindgen at build time).
-          install: >-
-            mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-libadwaita
-            mingw-w64-ucrt-x86_64-pkg-config
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-clang
-            mingw-w64-ucrt-x86_64-sqlite3
-            mingw-w64-ucrt-x86_64-go
-
-      # Before any cargo step: prove the MSYS2 environment resolved. The
-      # gtk4/libadwaita-1/sqlite3 modversions MUST appear in the log (this step fails
-      # if any is missing); `go version` is advisory because go is provisional.
-      - name: Confirm the MSYS2 environment
-        shell: msys2 {0}
-        run: |
-          go version || echo "go not usable (acceptable unless boring-sys2 needs it)"
-          pkg-config --modversion gtk4 libadwaita-1 sqlite3
-          command -v gcc g++ clang cmake cargo rustup
-
-      # A full GNU-host toolchain, not just target std: build scripts and proc
-      # macros link for the HOST too, and the MSVC host's link.exe is shadowed by
-      # coreutils' link.exe under the msys2 PATH. Host==target==GNU, so the verbatim
-      # cargo commands build GNU throughout and link with gcc from /ucrt64.
-      - name: Default a GNU-host Rust toolchain
-        shell: pwsh
-        run: |
-          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-          rustup default stable-x86_64-pc-windows-gnu
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ucrt64-probe
-
-      # The probe. Compile errors are expected output, not job failure: they must
-      # reach the log verbatim. The msys2 wrapper already runs bash -o pipefail, so
-      # this step's own conclusion stays honest while the job carries on.
-      - name: Probe cargo check --workspace (failures expected)
-        id: workspace-check
-        continue-on-error: true
-        shell: msys2 {0}
-        run: cargo check --workspace 2>&1 | tee probe-ucrt64.log
-
-      # The one hard assertion: pure serde/zvariant logic that MUST pass on
-      # Windows-GNU. No continue-on-error here on purpose; a failure is a seam
-      # finding to document, never one to suppress. steps.types-test.outcome is
-      # individually checkable.
-      - name: Tests tidemark-types (must pass)
-        id: types-test
-        shell: msys2 {0}
-        run: cargo test -p tidemark-types
-
-      - name: Upload the probe log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: probe-ucrt64-log
-          path: probe-ucrt64.log
-
-  # Windows-MSVC compile-gap probe (experimental branch only): the same measurement
-  # as windows-ucrt64-probe, but against the runner's default MSVC host toolchain
-  # and a pinned gvsbuild-built GTK runtime, so the two runs bracket the Windows
-  # port gap (GNU-vs-MSVC, MSYS2-vs-gvsbuild). Like its sibling, this job MEASURES
-  # compile failures; the error list in the uploaded log is the deliverable, and
-  # nothing here may fix, hide, or hang on them.
-  windows-msvc-probe:
-    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
-    runs-on: windows-latest
-    timeout-minutes: 60
-    concurrency:
-      group: windows-msvc-${{ github.ref }}
-      cancel-in-progress: true
-    env:
-      # Pinned literals resolved once from wingtk/gvsbuild releases (tag 2026.8.0):
-      # the job must never re-resolve "latest" at run time and silently drift to an
-      # unmeasured runtime. The bundle zip is flat (bin/, lib/pkgconfig/,
-      # share/pkgconfig/ at its root), per its own file listing.
-      GVBUILD_RELEASE_TAG: '2026.8.0'
-      GVSBUILD_URL: 'https://github.com/wingtk/gvsbuild/releases/download/2026.8.0/GTK4_Gvsbuild_2026.8.0_x64.zip'
-      # Plain text so the artifact greps cleanly for error[E...] lines; overrides
-      # the workflow-wide `always` which would bake ANSI codes into the log.
-      CARGO_TERM_COLOR: never
-    steps:
-      - uses: actions/checkout@v5
-
-      # --fail makes a 404 or HTML error page exit non-zero; curl.exe is spelled out
-      # so no shell alias can quietly swap in a different downloader.
-      - name: Download the pinned gvsbuild GTK4 runtime
-        shell: pwsh
-        run: curl.exe --fail -L -o gvsbuild.zip "$env:GVSBUILD_URL"
-
-      # Validate BEFORE extracting: 7z refuses to list a corrupt or HTML payload
-      # and exits non-zero, so a bad download fails here and not somewhere deep
-      # inside a build script. The listing is kept as a small artifact.
-      - name: Validate the archive
-        shell: bash
-        run: 7z l gvsbuild.zip > gvsbuild-listing.txt
-
-      - name: Extract the archive
-        shell: bash
-        run: 7z x -y -ogvsbuild gvsbuild.zip
-
-      # Wire the runtime so every LATER step inherits it. GITHUB_PATH/GITHUB_ENV
-      # are the only step-to-step mechanism; a step-local $env:PATH mutation dies
-      # with its step. The flat bundle layout puts pkg-config.exe (pkgconf-based)
-      # and the DLLs in gvsbuild\bin and the .pc files in gvsbuild\lib\pkgconfig
-      # (gtk4.pc, libadwaita-1.pc) plus gvsbuild\share\pkgconfig (icon theme .pc).
-      - name: Wire the gvsbuild runtime into the environment
-        shell: pwsh
-        run: |
-          Add-Content $env:GITHUB_PATH "${{ github.workspace }}\gvsbuild\bin"
-          Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=${{ github.workspace }}\gvsbuild\lib\pkgconfig;${{ github.workspace }}\gvsbuild\share\pkgconfig"
-
-      # First-class diagnostics, captured into probe-msvc.log so the artifact
-      # carries its own evidence header (tag, asset URL, modversions, toolchain).
-      # `: >` initializes the log here; every later capture appends. The
-      # gtk4/libadwaita-1 modversions MUST print or this step fails: that is
-      # wiring, not measurement. pipefail is set explicitly so pkg-config's
-      # exit code survives its tee pipe; bash's -e alone would let tee mask it.
-      # clang/cmake absence is a measured finding (bindgen needs libclang) and
-      # only logs. rustup show records that the host really is MSVC (no
-      # RUSTUP_TOOLCHAIN override in this job, on purpose).
-      - name: Report the toolchain and GTK runtime
-        shell: bash
-        run: |
-          set -o pipefail
-          : > probe-msvc.log
-          echo "gvsbuild release tag: $GVBUILD_RELEASE_TAG" | tee -a probe-msvc.log
-          echo "gvsbuild asset: $GVSBUILD_URL" | tee -a probe-msvc.log
-          pkg-config --modversion gtk4 libadwaita-1 | tee -a probe-msvc.log
-          cmake --version | tee -a probe-msvc.log || echo "cmake absent" | tee -a probe-msvc.log
-          clang --version | tee -a probe-msvc.log || echo "clang absent" | tee -a probe-msvc.log
-          rustup show | tee -a probe-msvc.log
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: msvc-probe
-
-      # The probe. Compile errors are expected output, not job failure: they must
-      # reach the log verbatim. GitHub's bash shell runs with -o pipefail (made
-      # explicit below), so cargo's non-zero exit becomes the step's conclusion;
-      # a pwsh pipeline would have swallowed it behind tee's success. tee -a
-      # appends to the header the diagnostics step wrote: plain tee would
-      # truncate it. The job carries on either way; steps.workspace-check.outcome
-      # records the truth.
-      - name: Probe cargo check --workspace (failures expected)
-        id: workspace-check
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo check --workspace 2>&1 | tee -a probe-msvc.log
-
-      - name: Upload the probe log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: probe-msvc-log
-          path: |
-            probe-msvc.log
-            gvsbuild-listing.txt

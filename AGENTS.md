@@ -85,7 +85,8 @@ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings \
   && cargo test --workspace && ./scripts/check-layering.sh
 ```
 
-CI (`ubuntu-26.04`, `.github/workflows/ci.yml`) runs exactly:
+CI (`.github/workflows/ci.yml`) runs on every push and every pull request. Its
+`checks` job (`ubuntu-26.04`) runs exactly:
 
 ```bash
 cargo fmt --all --check
@@ -97,6 +98,11 @@ scripts/test-restart-user-daemon.sh
 shellcheck scripts/*.sh data/restart-user-daemon \
   data/packaging/deb/postinst data/packaging/rpm/post-install.sh
 ```
+
+Its `windows-tests` job (`windows-latest`, MSYS2 UCRT64, `stable-x86_64-pc-windows-gnu`)
+runs the first three of those. The Windows installer is not built here: it is built from
+a `v*` tag by the `windows` job in `.github/workflows/release.yml`, which ships
+`Tidemark-v<version>-setup.exe` beside the `.deb` and the `.rpm`.
 
 Build prerequisites: `libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake g++
 libclang-dev` (Fedora: `gtk4-devel libadwaita-devel sqlite-devel pkgconf-pkg-config cmake

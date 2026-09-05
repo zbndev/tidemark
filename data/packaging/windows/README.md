@@ -19,9 +19,9 @@ shortcut, and every installed file. Nothing machine-wide, no elevation.
   also places the pinned Rubik font beside the runtime. Tidemark registers
   it privately at launch, never as a Windows system font.
 - `msys2-runtime-packages.txt` — exact package versions and package-archive
-  SHA-256 hashes for every staged DLL/data owner. CI downloads and verifies
-  these archives before the release build, so linked and shipped DLL names
-  cannot drift apart.
+  SHA-256 hashes for every staged DLL/data owner. The release workflow
+  downloads and verifies these archives before it builds, so linked and
+  shipped DLL names cannot drift apart.
 - `winget/` — winget manifest submission template (manifest only; submitting
   to winget-pkgs is the user's call).
 
@@ -36,7 +36,13 @@ makensis /DSRC_DIR=<abs path>/target/release /DGTK_DIR=<abs path>/build/nsis-sta
 ```
 
 Run this from an MSYS2 UCRT64 shell with the versions in
-`msys2-runtime-packages.txt` installed. The CI `nsis-package` job downloads
-those exact package archives, checks every SHA-256, builds against them, runs
-the same import-closure staging script, and uploads the installer as its
-`nsis-package` artifact.
+`msys2-runtime-packages.txt` installed.
+
+## Release build
+
+The installer is not built on every push — CI only tests this target. It is
+built by the `windows` job in `.github/workflows/release.yml`, which runs on a
+`v*` tag: it downloads those exact package archives, checks every SHA-256,
+builds against them, runs the same import-closure staging script, and hands
+makensis the version from the tag. The asset reaches the draft release as
+`Tidemark-v<version>-setup.exe`, beside the `.deb` and the `.rpm`.
