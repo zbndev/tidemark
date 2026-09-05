@@ -33,6 +33,7 @@ use crate::service::Daemon;
 pub const PEER_QUEUE_BOUND: usize = 128;
 
 /// zbus's own per-connection queue, the value the frozen A1 builder contract fixed.
+#[cfg(any(windows, test))]
 const ZBUS_QUEUE_BOUND: usize = 64;
 
 /// One of the six daemon signals, ready to hand to any peer's emitter.
@@ -53,6 +54,7 @@ pub(crate) enum Announcement {
 
 impl Announcement {
     /// Emits this signal through one emitter — one peer's on p2p, the session bus on Linux.
+    #[cfg(any(windows, test))]
     pub(crate) async fn emit(&self, emitter: &SignalEmitter<'_>) -> zbus::Result<()> {
         match self {
             Self::ProviderChanged(status) => {
@@ -91,6 +93,7 @@ pub(crate) struct PeerHub {
 impl PeerHub {
     /// Files a queue for a peer before its connection is built, so an announcement can
     /// never race the window between accept and registration.
+    #[cfg(any(windows, test))]
     pub(crate) fn register(&self) -> (u64, mpsc::Receiver<Announcement>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (queue, receiver) = mpsc::channel(PEER_QUEUE_BOUND);
@@ -108,6 +111,7 @@ impl PeerHub {
     }
 
     /// Remembers the peer's connection once the p2p handshake has completed.
+    #[cfg(any(windows, test))]
     fn attach(&self, id: u64, connection: &Connection) {
         if let Some(peer) = self
             .peers
@@ -120,6 +124,7 @@ impl PeerHub {
     }
 
     /// Drops a registration: the handshake failed, or the peer is gone.
+    #[cfg(any(windows, test))]
     pub(crate) fn forget(&self, id: u64) {
         self.peers
             .lock()
@@ -127,6 +132,7 @@ impl PeerHub {
             .remove(&id);
     }
 
+    #[cfg(any(windows, test))]
     pub(crate) fn peer_count(&self) -> usize {
         self.peers
             .lock()
