@@ -588,6 +588,9 @@ mod tests {
             // fired and the hub forgot the peer.
             drop(proxy);
             drop(client);
+            // The message stream owns a full `Connection` clone: without this drop the
+            // client's socket stays open and the hangup below never happens.
+            drop(messages);
             tokio::time::timeout(BOUNDED, served)
                 .await
                 .expect("the served task ends when the client hangs up")
