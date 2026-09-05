@@ -20,6 +20,8 @@ mod registry;
 mod scheduler;
 mod service;
 mod startup;
+#[cfg(windows)]
+mod supervisor;
 #[cfg(feature = "update-check")]
 mod update;
 

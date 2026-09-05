@@ -8,12 +8,14 @@
 //! surface is entirely safe, and raw handles never escape it.
 //!
 //! Mechanism choices, per the port plan's daemon-lifecycle verdict:
-//! - The daemon's login autostart is a **per-user Scheduled Task** (`schtasks.exe`
-//!   `/SC ONLOGON /IT`, only-when-logged-on), not a machine Windows Service and not
-//!   Task Scheduler COM: `schtasks` is on every Windows install, needs no elevation
-//!   for a task in the calling user's folder, and the spawn-free `Command::output`
-//!   path keeps this module free of COM apartment plumbing. Enable/disable maps to
-//!   `/Create /F` (overwrite, so re-registering is idempotent) and `/Delete /F`.
+//! - The daemon's login autostart is a **per-user Scheduled Task** registered
+//!   through the Task Scheduler 2.0 COM interface (`ITaskService`, the same
+//!   backend `Register-ScheduledTask` drives). The first cut drove
+//!   `schtasks.exe /SC ONLOGON`, but on this machine that command is denied to
+//!   an unelevated token even for the calling user's own task folder — while
+//!   COM accepts it with no elevation, no machine-level access and no helper
+//!   process. Enable/disable both map to `RegisterTaskDefinition` with
+//!   `TASK_CREATE_OR_UPDATE`: an overwrite, so re-registering is idempotent.
 //! - The singleton is a **session-local named mutex** (`Local\` prefix). Sessions on
 //!   Windows are per-user logons, so the `Local\` namespace is already per-user and
 //!   the machine-wide `Global\` namespace is deliberately avoided; the user SID in
@@ -23,6 +25,7 @@
 //! - The UI's login autostart is an **HKCU Run** value, the Windows equivalent of the
 //!   XDG autostart override the Linux arm writes for the desktop entry.
 
+#[cfg(test)]
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
@@ -42,7 +45,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject,
+    SetInformationJobObject, TerminateJobObject,
 };
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
@@ -113,15 +116,12 @@ impl std::fmt::Debug for Singleton {
 
 /// A kill-on-close job object: every process assigned to it dies when the job is
 /// dropped or its owner process exits, so a daemon death reaps the vendor helpers
-/// it spawned instead of orphaning them. The primitive ships here for the agy
-/// supervisor (todo 19) to attach its spawns to, so it is intentionally
-/// unconsumed until then.
-#[allow(dead_code)]
+/// it spawned instead of orphaning them. Consumed by the agy supervisor, which
+/// puts every ConPTY spawn into one of these at birth.
 pub struct KillOnCloseJob {
     handle: HANDLE,
 }
 
-#[allow(dead_code)]
 impl KillOnCloseJob {
     /// Creates an empty job whose processes are terminated when the job handle closes.
     pub fn new() -> Result<Self, windows::core::Error> {
@@ -150,10 +150,31 @@ impl KillOnCloseJob {
     /// Puts a spawned child process into the job. An already-terminating process is
     /// accepted by the kernel and dies on its own, so assignment never needs to fail
     /// the caller for a race it cannot observe.
+    ///
+    /// The supervisor spawns through `CreateProcessW` and uses [`Self::assign_handle`];
+    /// this `std::process::Child` arm is exercised by this module's own tests.
+    #[cfg(test)]
     pub fn assign(&self, child: &std::process::Child) -> Result<(), windows::core::Error> {
-        // SAFETY: the job handle is valid for as long as `&self` is borrowed, and the
-        // child's raw handle is valid for as long as `child` is.
-        unsafe { AssignProcessToJobObject(self.handle, HANDLE(child.as_raw_handle() as *mut _)) }
+        // SAFETY: the child's raw handle is valid for as long as `child` is.
+        self.assign_handle(HANDLE(child.as_raw_handle() as *mut _))
+    }
+
+    /// Puts an already-open process handle into the job. The raw-handle arm the
+    /// supervisor needs: a ConPTY child is spawned directly through
+    /// `CreateProcessW`, so there is no `std::process::Child` to borrow.
+    pub fn assign_handle(&self, process: HANDLE) -> Result<(), windows::core::Error> {
+        // SAFETY: the job handle is valid for as long as `&self` is borrowed,
+        // and `process` is a live handle the caller owns.
+        unsafe { AssignProcessToJobObject(self.handle, process) }
+    }
+
+    /// Terminates every process in the job now. The Unix supervisor's graceful
+    /// arm has no Windows analogue — there is no signal to send — so this
+    /// immediate termination *is* the teardown semantics.
+    pub fn terminate(&self) -> Result<(), windows::core::Error> {
+        // SAFETY: the job handle is ours and valid for as long as `&self` is
+        // borrowed.
+        unsafe { TerminateJobObject(self.handle, 0) }
     }
 }
 

@@ -41,16 +41,22 @@ rusqlite = "0.40.2"
 uds_windows = "1.2.1"
 # Windows crate, one locked release for the whole daemon. Features are the union of its
 # consumers: toast notifications (todo 16) - direct WinRT CreateToastNotifierWithId(AUMID),
-# ToastNotification with Tag replacement - and the lifecycle primitives (todo 14) - singleton
-# mutex, job object, Scheduled Task COM, HKCU Run.
+# ToastNotification with Tag replacement - the lifecycle primitives (todo 14) - singleton
+# mutex, job object, Scheduled Task COM, HKCU Run - and the agy supervisor (todo 19) -
+# ConPTY, toolhelp process discovery, per-pid TCP tables.
 windows = { version = "0.62.2", features = [
     "Data_Xml_Dom",
     "Foundation",
     "UI_Notifications",
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
     "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_Ole",
+    "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_TaskScheduler",
     "Win32_System_Threading",
