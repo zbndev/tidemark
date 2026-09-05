@@ -31,7 +31,7 @@ impl Startup for System {
         #[cfg(windows)]
         {
             crate::lifecycle::set_ui_run(desktop)?;
-            return crate::lifecycle::set_daemon_task(daemon);
+            crate::lifecycle::set_daemon_task(daemon)
         }
         #[cfg(unix)]
         {

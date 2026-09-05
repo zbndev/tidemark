@@ -468,10 +468,9 @@ fn spawn_with_attribute_list(
     // SAFETY: the list was allocated above with room for one attribute.
     let initialized =
         unsafe { InitializeProcThreadAttributeList(Some(attribute_list), 1, None, &mut list_size) };
-    if initialized.is_err() {
+    if let Err(error) = initialized {
         return Err(format!(
-            "could not prepare the process attribute list: {}",
-            initialized.unwrap_err()
+            "could not prepare the process attribute list: {error}"
         ));
     }
 
@@ -488,16 +487,15 @@ fn spawn_with_attribute_list(
             None,
         )
     };
-    if attached.is_err() {
+    if let Err(error) = attached {
         // SAFETY: the list is valid and initialized.
         unsafe { DeleteProcThreadAttributeList(attribute_list) };
         return Err(format!(
-            "could not attach the pseudoterminal to the spawn: {}",
-            attached.unwrap_err()
+            "could not attach the pseudoterminal to the spawn: {error}"
         ));
     }
 
-    let mut startup = STARTUPINFOEXW {
+    let startup = STARTUPINFOEXW {
         StartupInfo: STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
             ..Default::default()
@@ -524,7 +522,7 @@ fn spawn_with_attribute_list(
             working_directory
                 .as_ref()
                 .map_or(PCWSTR::null(), |dir| PCWSTR(dir.as_ptr())),
-            &mut startup.StartupInfo,
+            &startup.StartupInfo,
             &mut process,
         )
     };
