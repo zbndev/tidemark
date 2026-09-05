@@ -251,35 +251,6 @@ jobs:
           shellcheck scripts/*.sh data/restart-user-daemon \
             data/packaging/deb/postinst data/packaging/rpm/post-install.sh
 
-  # TEMPORARY diagnostic scaffolding (remove once the Linux clippy warning set is
-  # enumerated; see ledger diagnostic-scaffolding): re-runs clippy, emits every
-  # warning/error line as an annotation readable without log access, and stays green
-  # itself so it never masks the real gate.
-  checks-clippy-capture:
-    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install the toolkit
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake
-
-      - name: Show the toolchain
-        run: rustup show && cargo --version
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: clippy-capture
-
-      - name: Emit clippy diagnostics as annotations
-        run: |
-          cargo clippy --workspace --all-targets --message-format=short 2>&1 | grep -E 'warning|error' | head -40 | while IFS= read -r line; do printf '::error::%s\n' "$line"; done
-          echo CAPTURE-DONE
-
   # Windows-GNU compile-gap probe (experimental branch only). The point is to MEASURE
   # how far the workspace gets on MSYS2 UCRT64, not to fix anything: the error list
   # in the uploaded log IS the deliverable. The only hard assertion is tidemark-types
