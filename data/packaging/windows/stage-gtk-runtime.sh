@@ -25,7 +25,8 @@ PACKAGE_LOG="$WORK/nsis-runtime-packages.txt"
 for tool in objdump pacman cygpath; do
   command -v "$tool" >/dev/null || { echo "required tool not found: $tool" >&2; exit 1; }
 done
-for file in "$RELEASE_DIR/tidemark.exe" "$RELEASE_DIR/tidemarkd.exe" "$PACKAGE_LOCK"; do
+for file in "$RELEASE_DIR/tidemark.exe" "$RELEASE_DIR/tidemarkd.exe" "$PACKAGE_LOCK" \
+    "$SCRIPT_DIR/../../../data/icons/tidemark.ico"; do
   test -f "$file" || { echo "required input not found: $file" >&2; exit 1; }
 done
 mkdir -p "$WORK"
@@ -105,6 +106,17 @@ cp "$PREFIX/share/glib-2.0/schemas/gschema.dtd" "$DST/share/glib-2.0/schemas/"
 cp -r "$PREFIX/share/icons/Adwaita" "$DST/share/icons/"
 cp -r "$PREFIX/share/icons/hicolor" "$DST/share/icons/"
 cp -r "$PREFIX/share/fontconfig" "$DST/share/"
+
+# Tidemark's own artwork rides the prefix-relative lookup GTK already uses for the
+# staged sets above: the provider marks merge into hicolor (see
+# crates/tidemark/src/mark.rs — the theme lookup is what recolours them), and the
+# Start/taskbar icon lands beside share/ as tidemark.ico. The MSYS2 hicolor ships a
+# stale icon-theme.cache that would hide the merged marks, so it is dropped and GTK
+# falls back to a directory scan.
+APP_ICONS="$SCRIPT_DIR/../../../data/icons"
+cp -r "$APP_ICONS/hicolor/." "$DST/share/icons/hicolor/"
+rm -f "$DST/share/icons/hicolor/icon-theme.cache"
+cp "$APP_ICONS/tidemark.ico" "$DST/share/tidemark.ico"
 
 DST_WIN="$(cygpath -m "$(cd "$DST" && pwd)")"
 CACHE="$DST/lib/gdk-pixbuf-2.0/2.10.0/loaders/loaders.cache"

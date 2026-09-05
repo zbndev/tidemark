@@ -74,11 +74,13 @@ Section "Install"
 
   ; Start-menu shortcut with the toast-identity property. The property is
   ; REQUIRED (todo 16); if the helper cannot set it, the install is aborted
-  ; rather than shipping a silent toast-identity breakage.
+  ; rather than shipping a silent toast-identity breakage. The shortcut's icon
+  ; is the staged tidemark.ico: the exe carries no embedded Win32 icon, so
+  ; without it Start, the taskbar button and Alt-Tab all fall back to generic.
   InitPluginsDir
   File "/oname=$PLUGINSDIR\set-aumid.ps1" "set-aumid.ps1"
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\tidemark.exe"
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\tidemark.exe" "" "$INSTDIR\share\tidemark.ico"
   nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\set-aumid.ps1" -Lnk "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" -Aumid "${APP_ID}"'
   Pop $0
   ${If} $0 != 0
@@ -94,7 +96,7 @@ Section "Install"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "${APP_NAME}"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "zbndev"
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\tidemark.exe"
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\share\tidemark.ico,0"
   WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKCU "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
