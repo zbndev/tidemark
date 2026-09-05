@@ -233,7 +233,9 @@ fn main() -> std::process::ExitCode {
         .unwrap_or(file_log::Sink::Stderr);
     let subscriber = tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "tidemarkd=info".into()),
+            // Core included: the credential backends live there, and a daemon log
+            // that cannot show them is blind to exactly the failures that matter.
+            .unwrap_or_else(|_| "tidemarkd=info,tidemark_core=info".into()),
     );
     #[cfg(windows)]
     let subscriber = subscriber.with_writer(sink).with_ansi(false);

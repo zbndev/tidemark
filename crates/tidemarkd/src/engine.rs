@@ -1583,6 +1583,7 @@ impl Engine {
                     provider = %self.accounts[index].provider,
                     state = %state,
                     %error,
+                    error_debug = ?error,
                     "poll failed"
                 );
                 let account = &mut self.accounts[index];
