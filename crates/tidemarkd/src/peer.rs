@@ -37,6 +37,12 @@ pub const PEER_QUEUE_BOUND: usize = 128;
 const ZBUS_QUEUE_BOUND: usize = 64;
 
 /// One of the six daemon signals, ready to hand to any peer's emitter.
+///
+/// The Linux session-bus path constructs the Preferences/Data/Update variants but never
+/// reads them back — only the Windows deliverer matches on announcements — and the
+/// Provider/Order variants exist for Windows and the loopback test, so a Linux build
+/// would call every variant and its payload dead.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 // Not boxed per clippy::large_enum_variant: the announcements are queued
 // at a rate of 128 per peer and moved once into the emitter — a heap
@@ -87,6 +93,9 @@ struct Peer {
 #[derive(Debug, Default)]
 pub(crate) struct PeerHub {
     peers: StdMutex<BTreeMap<u64, Peer>>,
+    /// The counter's only reader is register(), which is Windows-or-test-only; the hub
+    /// itself stays live on Linux through the shared announce paths.
+    #[allow(dead_code)]
     next_id: AtomicU64,
 }
 
