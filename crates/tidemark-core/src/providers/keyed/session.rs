@@ -20,7 +20,7 @@ pub const AUTH_PROFILE: &str = "auth-profile";
 pub const BROWSER_SOURCE: &str = "browser";
 /// The mode a session the person pasted in is offered under, on D-Bus and as the
 /// `auth-source` value config stores for an account that runs on one.
-pub const PASTE_SOURCE: &str = "paste";
+pub use tidemark_types::ids::PASTE_AUTH_MODE as PASTE_SOURCE;
 
 /// The browser options every browser-session provider publishes.
 pub static OPTIONS: &[OptionSchema] = &[
@@ -419,8 +419,11 @@ where
     };
     AuthCandidate {
         id: PASTE_SOURCE.into(),
-        title: "Paste session".into(),
-        subtitle: Some("The Cookie header from a signed-in browser tab".into()),
+        title: "Stored session".into(),
+        subtitle: Some(
+            "Copy the Cookie request header from a signed-in tab, in the browser's              developer tools under Network"
+                .into(),
+        ),
         state: state.as_wire().to_owned(),
         children: Vec::new(),
     }

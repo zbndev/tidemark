@@ -47,6 +47,13 @@ pub mod ids {
     pub const SECRET_SCHEMA: &str = "io.github.zbndev.Tidemark.ProviderKey";
     /// Secret Service schema for OAuth tokens created by a login through Tidemark.
     pub const TOKEN_SCHEMA: &str = "io.github.zbndev.Tidemark.ProviderToken";
+    /// The authentication mode a browser session the user pasted in is offered under.
+    ///
+    /// Shared rather than spelled twice: the daemon publishes this mode in a provider's
+    /// selector, and the interface has to know which half of the selector is a place to
+    /// paste into rather than a list of sources to choose from.
+    pub const PASTE_AUTH_MODE: &str = "paste";
+
     /// Secret Service schema for a browser session header the user pasted in, for a
     /// provider whose only credential is a session cookie a browser holds — the Windows
     /// fallback for Chromium App-Bound (`v20`) cookies, which no process but the browser

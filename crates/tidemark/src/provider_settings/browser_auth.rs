@@ -14,7 +14,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
-use tidemark_types::{AuthCandidate, AuthCandidateState, AuthMode, AuthSelection, AuthSelector};
+use tidemark_types::{
+    AuthCandidate, AuthCandidateState, AuthMode, AuthSelection, AuthSelector, ids,
+};
 
 use super::model;
 
@@ -152,25 +154,41 @@ struct Half {
     group: adw::PreferencesGroup,
     notes: RefCell<Vec<adw::ActionRow>>,
     rows: RefCell<Vec<Rc<CandidateRow>>>,
+    /// The place to paste a session, on the one mode that has one. Held apart from the
+    /// rows because it is not built from a report: a report landing while somebody is
+    /// half-way through pasting a header must not take the header away.
+    entry: Option<adw::PasswordEntryRow>,
 }
 
 impl Half {
-    fn new(mode: &AuthMode) -> Self {
+    fn new(mode: &AuthMode, on_paste: &Rc<dyn Fn(String)>) -> Self {
         let group = adw::PreferencesGroup::builder()
             .visible(false)
             .margin_top(12)
             .build();
+        // The one mode whose source is the person rather than something to be discovered:
+        // its half is where a header is put in, and the row beneath says what the daemon
+        // made of the last one.
+        let entry = (mode.value == ids::PASTE_AUTH_MODE).then(|| paste_entry(&group, on_paste));
 
         Self {
             mode_value: mode.value.clone(),
             group,
             notes: RefCell::new(Vec::new()),
             rows: RefCell::new(Vec::new()),
+            entry,
         }
     }
 
     fn set_visible(&self, visible: bool) {
         self.group.set_visible(visible);
+        // Navigating away drops a half-typed header rather than leaving a live session
+        // sitting in a hidden field for the rest of the dialog's life. Only reachable
+        // after a click on this half's tab, which is what stops a report arriving
+        // underneath from clearing what somebody is in the middle of typing.
+        if !visible && let Some(entry) = &self.entry {
+            entry.set_text("");
+        }
     }
 
     fn clear_contents(&self) {
@@ -318,6 +336,7 @@ impl BrowserAuth {
         selector: &AuthSelector,
         status_selection: Option<&AuthSelection>,
         on_choose: Rc<dyn Fn(AuthSelection)>,
+        on_paste: Rc<dyn Fn(String)>,
     ) -> Self {
         // Full width, in a row of its own at the top of the group, rather than tucked
         // into the group's header — the same shape the OAuth/CLI credential pill takes,
@@ -340,7 +359,11 @@ impl BrowserAuth {
             .build();
         pill_row.add_css_class("credential-choice");
 
-        let halves: Vec<Half> = selector.modes.iter().map(Half::new).collect();
+        let halves: Vec<Half> = selector
+            .modes
+            .iter()
+            .map(|mode| Half::new(mode, &on_paste))
+            .collect();
 
         let suppress_toggle = Rc::new(Cell::new(false));
         let navigated = Rc::new(Cell::new(false));
@@ -464,6 +487,51 @@ impl BrowserAuth {
     }
 }
 
+/// The place a session is pasted in, added to the paste half and kept for its lifetime.
+///
+/// The header is cleared out of the widget the moment it is handed over: it is a live
+/// session, and leaving it in an entry would leave it on screen behind a reveal button
+/// for as long as the dialog stays open.
+fn paste_entry(
+    group: &adw::PreferencesGroup,
+    on_paste: &Rc<dyn Fn(String)>,
+) -> adw::PasswordEntryRow {
+    let entry = adw::PasswordEntryRow::builder()
+        .title("Cookie header")
+        .build();
+    let save = gtk::Button::builder()
+        .label("Save")
+        .valign(gtk::Align::Center)
+        .sensitive(false)
+        .css_classes(["suggested-action"])
+        .build();
+    entry.add_suffix(&save);
+    entry.connect_changed({
+        let save = save.clone();
+        move |entry| save.set_sensitive(!entry.text().trim().is_empty())
+    });
+
+    let store = {
+        let entry = entry.clone();
+        let on_paste = Rc::clone(on_paste);
+        move || {
+            let pasted = entry.text().trim().to_owned();
+            if pasted.is_empty() {
+                return;
+            }
+            entry.set_text("");
+            on_paste(pasted);
+        }
+    };
+    save.connect_clicked({
+        let store = store.clone();
+        move |_| store()
+    });
+    entry.connect_entry_activated(move |_| store());
+    group.add(&entry);
+    entry
+}
+
 fn active_name(toggles: &adw::ToggleGroup) -> Option<String> {
     toggles.active_name().map(|name| name.to_string())
 }
@@ -529,6 +597,45 @@ mod tests {
     }
 
     #[test]
+    fn only_the_paste_half_takes_a_header_and_it_keeps_none_of_it_behind() {
+        if !widgets() {
+            eprintln!("skipped: no display is available");
+            return;
+        }
+
+        let on_paste: Rc<dyn Fn(String)> = Rc::new(|_| {});
+        let paste = Half::new(
+            &AuthMode {
+                value: "paste".into(),
+                title: "Paste session".into(),
+            },
+            &on_paste,
+        );
+        let browser = Half::new(
+            &AuthMode {
+                value: "browser".into(),
+                title: "Browser".into(),
+            },
+            &on_paste,
+        );
+
+        let entry = paste
+            .entry
+            .clone()
+            .expect("the paste half is somewhere to paste");
+        assert!(
+            browser.entry.is_none(),
+            "a half that lists discovered sources has nothing to type into"
+        );
+
+        // A live session left in a hidden field would stay on screen, behind one reveal
+        // button, for as long as the dialog is open.
+        entry.set_text("session=tok");
+        paste.set_visible(false);
+        assert_eq!(entry.text(), "");
+    }
+
+    #[test]
     fn browser_auth_widgets_keep_rows_separate_and_marks_across_rebuilds() {
         if !widgets() {
             eprintln!("skipped: no display is available");
@@ -547,10 +654,13 @@ mod tests {
 
         assert!(row.row.is_activatable());
 
-        let half = Half::new(&AuthMode {
-            value: "browser".into(),
-            title: "Browser".into(),
-        });
+        let half = Half::new(
+            &AuthMode {
+                value: "browser".into(),
+                title: "Browser".into(),
+            },
+            &(Rc::new(|_| {}) as Rc<dyn Fn(String)>),
+        );
 
         assert!(half.group.title().is_empty());
         assert!(half.group.header_suffix().is_none());
@@ -569,7 +679,12 @@ mod tests {
             mode: "browser".into(),
             candidate: Some("firefox".into()),
         };
-        let auth = BrowserAuth::new(&selector, Some(&selection), Rc::new(|_| {}));
+        let auth = BrowserAuth::new(
+            &selector,
+            Some(&selection),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+        );
         let report = || {
             vec![AuthCandidate {
                 children: vec![candidate("firefox", AuthCandidateState::Ready)],
@@ -596,7 +711,7 @@ mod tests {
             mode: "browser".into(),
             candidate: Some("firefox/Default".into()),
         };
-        let auth = BrowserAuth::new(&selector, Some(&leaf), Rc::new(|_| {}));
+        let auth = BrowserAuth::new(&selector, Some(&leaf), Rc::new(|_| {}), Rc::new(|_| {}));
         auth.apply_report(report());
         auth.apply_report(report());
         assert_eq!(marks(&auth), [true]);

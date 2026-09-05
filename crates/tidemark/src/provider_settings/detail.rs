@@ -1003,8 +1003,29 @@ impl ProviderDetail {
                 });
             }
         });
+        let weak = Rc::downgrade(self);
+        let on_paste: Rc<dyn Fn(String)> = Rc::new(move |pasted| {
+            if let Some(detail) = weak.upgrade() {
+                let proxy = detail.proxy.clone();
+                let (provider, account) = {
+                    let status = detail.status.borrow();
+                    (status.provider.clone(), status.account.clone())
+                };
+                glib::spawn_future_local(async move {
+                    // Nothing is validated on the way in — the daemon stores the header and
+                    // polls, and the poll is what says whether the session works. A refused
+                    // one comes back as the account's own state, like a refused key.
+                    if let Err(error) = proxy.set_session(&provider, &account, &pasted).await {
+                        detail.toast(&reason(&error));
+                        return;
+                    }
+                    detail.toast("Session saved. Checking the account…");
+                    detail.open_browser_auth();
+                });
+            }
+        });
         let published = self.status.borrow().auth_selection.clone();
-        let rows = BrowserAuth::new(&selector, published.as_ref(), on_choose);
+        let rows = BrowserAuth::new(&selector, published.as_ref(), on_choose, on_paste);
         rows.attach(&self.authentication);
         *self.browser_auth.borrow_mut() = Some(rows);
 

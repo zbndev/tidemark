@@ -84,6 +84,9 @@ pub trait Daemon {
     /// Stores an API key for an account.
     fn set_key(&self, provider: &str, account: &str, key: &str) -> zbus::Result<()>;
 
+    /// Stores a browser session the user pasted in, and puts the account on it.
+    fn set_session(&self, provider: &str, account: &str, session: &str) -> zbus::Result<()>;
+
     /// Removes whatever credential Tidemark holds for an account.
     fn sign_out(&self, provider: &str, account: &str) -> zbus::Result<()>;
 
