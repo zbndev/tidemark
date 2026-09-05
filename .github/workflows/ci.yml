@@ -150,6 +150,9 @@ jobs:
           archives=()
           while read -r package version sha256; do
             [[ -n "$package" && "${package:0:1}" != '#' ]] || continue
+            # Belt and suspenders next to .gitattributes eol=lf: a CR in the
+            # checksum breaks `sha256sum --check` on a CRLF checkout.
+            sha256=${sha256%$'\r'}
             archive="build/msys2-packages/${package}-${version}-any.pkg.tar.zst"
             url="https://repo.msys2.org/mingw/ucrt64/${package}-${version}-any.pkg.tar.zst"
             curl --fail --location --retry 3 --output "$archive" "$url"

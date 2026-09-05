@@ -1,0 +1,4 @@
+# MSYS2-consumed inputs must stay LF: the CI msys2 steps parse them with
+# POSIX tools where a CR breaks formats (sha256sum --check) or execution.
+data/packaging/windows/msys2-runtime-packages.txt text eol=lf
+data/packaging/windows/stage-gtk-runtime.sh text eol=lf
