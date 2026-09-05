@@ -25,3 +25,6 @@
 .codex
 .opencode
 .mcp.json
+
+# Orchestrator landing caches (F4-1: once leaked by add -A)
+target-land*/
