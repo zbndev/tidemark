@@ -309,9 +309,7 @@ impl Backend for SystemBackend {
         };
         // SAFETY: FFI boundary UB/dangling pointers: every pointer in `credential` targets
         // initialized mutable storage retained for the call; lengths match those buffers.
-        let result =
-            unsafe { CredWriteW(&credential, 0) }.map_err(|error| win_error("CredWriteW", error));
-        result
+        unsafe { CredWriteW(&credential, 0) }.map_err(|error| win_error("CredWriteW", error))
     }
 
     fn delete_record(&self, target: &str) -> Result<(), String> {
