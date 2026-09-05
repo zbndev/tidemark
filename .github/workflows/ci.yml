@@ -92,6 +92,8 @@ jobs:
         run: |
           rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
           rustup default stable-x86_64-pc-windows-gnu
+          # minimal profile ships no rustfmt/clippy; the gate below needs both.
+          rustup component add rustfmt clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
