@@ -58,7 +58,12 @@ fn build(
 pub struct LongCat {
     tidemark_account: AccountId,
     client: reqwest::Client,
-    home: Option<PathBuf>,
+    /// The root the browser scan is taken under, and a test fixture in every build that
+    /// states one: production leaves it unset so that each platform's own browser layout
+    /// decides where profiles live. A browser home is not a vendor home — Windows keeps
+    /// browser profiles under `%LOCALAPPDATA%`/`%APPDATA%`, never under the user's own
+    /// profile directory — so rooting the scan at one would find no browser there at all.
+    browser_home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
     selection: Option<Selection>,
     #[cfg(test)]
@@ -74,7 +79,7 @@ impl LongCat {
         Ok(Self {
             tidemark_account: account_id.clone(),
             client: http::client()?,
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            browser_home: None,
             storage: Arc::new(Keyring),
             selection: session::selection(options),
             #[cfg(test)]
@@ -91,7 +96,7 @@ impl LongCat {
         Ok(Self {
             tidemark_account: AccountId::default(),
             client: http::client()?,
-            home: Some(home.to_path_buf()),
+            browser_home: Some(home.to_path_buf()),
             storage,
             selection: Some(Selection {
                 browser: "firefox".into(),
@@ -145,7 +150,7 @@ impl LongCat {
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
         let selection = self.selection.as_ref().ok_or(ProviderError::NoCredential)?;
         let session = session::session(
-            self.home.as_deref(),
+            self.browser_home.as_deref(),
             self.storage.as_ref(),
             selection,
             &[],
@@ -241,7 +246,7 @@ impl LongCat {
 
     async fn inspect_sources(&self) -> Vec<AuthCandidate> {
         session::inspect_sources(
-            self.home.as_deref(),
+            self.browser_home.as_deref(),
             self.storage.as_ref(),
             &[],
             &cookie_query(),

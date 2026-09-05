@@ -90,6 +90,13 @@ pub fn store_selection(options: &mut Options, selection: &Selection) {
     }
 }
 
+/// The cookie stores a provider may read.
+///
+/// A stated `home` is a fixture root, which is what a test hands in so that it reads its
+/// own tree and never the browser the developer is running beside it. Production states
+/// none and lets [`browser::stores`] resolve the platform's own layout: on Linux that is
+/// the same `$HOME` scan a stated home would have produced, and on Windows it is the
+/// `%LOCALAPPDATA%`/`%APPDATA%` vendor directories, where a home-rooted scan finds nothing.
 fn stores(home: Option<&Path>) -> Vec<browser::Store> {
     home.map(browser::stores_in).unwrap_or_else(browser::stores)
 }

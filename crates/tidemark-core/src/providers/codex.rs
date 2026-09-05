@@ -509,8 +509,8 @@ pub fn cli_credentials_path() -> Option<PathBuf> {
     {
         return Some(Path::new(&home).join("auth.json"));
     }
-    let home = std::env::var_os("HOME").filter(|home| Path::new(home).is_absolute())?;
-    Some(Path::new(&home).join(".codex/auth.json"))
+    let home = crate::paths::home()?;
+    Some(home.join(".codex/auth.json"))
 }
 
 /// Turns a usage response into a snapshot.

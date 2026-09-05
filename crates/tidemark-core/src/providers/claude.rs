@@ -29,7 +29,7 @@ use crate::oauth_file::{
 };
 use crate::secrets::{self, Secrets};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tidemark_types::{
@@ -151,8 +151,8 @@ pub struct Claude {
 /// Free-standing rather than a method so that a caller can ask whether the CLI's login
 /// exists on this machine without building the provider.
 pub fn cli_credentials_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").filter(|home| Path::new(home).is_absolute())?;
-    Some(Path::new(&home).join(".claude/.credentials.json"))
+    let home = crate::paths::home()?;
+    Some(home.join(".claude/.credentials.json"))
 }
 
 fn credentials_for(

@@ -87,8 +87,17 @@ const AUTH_ME_URL: &str = "https://cursor.com/api/auth/me";
 const REQUEST_USAGE_URL: &str = "https://cursor.com/api/usage";
 const SAND_USAGE_URL: &str = "https://cursor.com/api/dashboard/get-sand-usage-status";
 
-/// Cursor's standalone desktop app keeps its sign-in token in this VS Code-style state store.
+/// Cursor's standalone desktop app keeps its sign-in token in this VS Code-style state
+/// store, under the vendor directory its platform files application data in: XDG's
+/// `.config` on Linux, `AppData/Roaming` on Windows. Relative to the home in both cases,
+/// so the tests state one fixture root and every platform reads inside it.
+#[cfg(not(windows))]
 const STATE_DATABASE: &str = ".config/Cursor/User/globalStorage/state.vscdb";
+
+/// [`STATE_DATABASE`], where Windows keeps it: `%APPDATA%` is `AppData/Roaming` under the
+/// user's profile, which is the home this provider resolves.
+#[cfg(windows)]
+const STATE_DATABASE: &str = "AppData/Roaming/Cursor/User/globalStorage/state.vscdb";
 
 /// The key Cursor uses for the raw JWT in [`STATE_DATABASE`].
 const ACCESS_TOKEN_KEY: &str = "cursorAuth/accessToken";
@@ -96,10 +105,12 @@ const ACCESS_TOKEN_KEY: &str = "cursorAuth/accessToken";
 /// What the dashboard POST must be sent from. Cursor refuses the Bot endpoint without it.
 const ORIGIN: &str = "https://cursor.com";
 
-/// The cookie names Cursor has carried its session in, newest scheme first. WorkOS is the
-/// current one; the Auth.js (`next-auth`/`authjs`) names are what older sessions were filed
+/// The cookie names Cursor has carried its session in, newest scheme first. Better Auth is
+/// current; WorkOS and Auth.js (`next-auth`/`authjs`) names are what older sessions were filed
 /// under. Presence of any one of them is what makes a browser's cookies worth trying.
 const SESSION_COOKIE_NAMES: &[&str] = &[
+    "__Secure-better-auth.session_token",
+    "better-auth.session_token",
     "WorkosCursorSessionToken",
     "__Secure-next-auth.session-token",
     "next-auth.session-token",
@@ -220,6 +231,12 @@ pub struct Cursor {
     tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
+    /// The root the browser scan is taken under, and a test fixture in every build that
+    /// states one: production leaves it unset so that each platform's own browser layout
+    /// decides where profiles live. Separate from `home` because a browser home is not a
+    /// vendor home — Windows keeps browser profiles under `%LOCALAPPDATA%`/`%APPDATA%`,
+    /// never under the user's own profile directory, which is where Cursor's app lives.
+    browser_home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
     source: Option<Source>,
     #[cfg(test)]
@@ -235,7 +252,8 @@ impl Cursor {
         Ok(Self {
             tidemark_account: account_id.clone(),
             client: http::client()?,
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: crate::paths::home(),
+            browser_home: None,
             storage: Arc::new(Keyring),
             source: Source::from_options(options),
             #[cfg(test)]
@@ -254,6 +272,7 @@ impl Cursor {
             tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
+            browser_home: Some(home.to_path_buf()),
             storage,
             source: None,
             base_url: None,
@@ -344,7 +363,7 @@ impl Cursor {
             profile: profile.clone(),
         };
         session::session(
-            self.home.as_deref(),
+            self.browser_home.as_deref(),
             self.storage.as_ref(),
             &selection,
             SESSION_COOKIE_NAMES,
@@ -385,7 +404,7 @@ impl Cursor {
             None => AuthCandidateState::Missing,
         };
         let browsers = session::inspect_sources(
-            self.home.as_deref(),
+            self.browser_home.as_deref(),
             self.storage.as_ref(),
             SESSION_COOKIE_NAMES,
             &session_query(),
@@ -1486,9 +1505,9 @@ mod tests {
     fn cursor_state(home: &crate::browser::tests::TestHome, access_token: &str) {
         use rusqlite::Connection;
 
-        let path = home
-            .path()
-            .join(".config/Cursor/User/globalStorage/state.vscdb");
+        // The constant, not a spelling of it: the fixture must land where the platform
+        // being tested actually looks, or the Windows arm tests a path nothing reads.
+        let path = home.path().join(STATE_DATABASE);
         std::fs::create_dir_all(path.parent().expect("has parent")).expect("creates");
         let connection = Connection::open(path).expect("opens");
         connection
@@ -1509,9 +1528,9 @@ mod tests {
         home: &crate::browser::tests::TestHome,
         access_token: &str,
     ) -> rusqlite::Connection {
-        let path = home
-            .path()
-            .join(".config/Cursor/User/globalStorage/state.vscdb");
+        // The constant, not a spelling of it: the fixture must land where the platform
+        // being tested actually looks, or the Windows arm tests a path nothing reads.
+        let path = home.path().join(STATE_DATABASE);
         std::fs::create_dir_all(path.parent().expect("has parent")).expect("creates");
         let connection = rusqlite::Connection::open(path).expect("opens");
         connection
@@ -2035,6 +2054,31 @@ mod tests {
             .with_options(cursor_options("browser", Some("zen"), None));
 
         assert_eq!(header_of(&provider), None);
+    }
+
+    #[test]
+    fn current_better_auth_browser_sessions_are_credentials() {
+        let home = gecko_home(&[
+            (
+                ".cursor.com",
+                "better-auth.session_token",
+                "current-session",
+                0,
+            ),
+            (
+                ".cursor.com",
+                "__Secure-better-auth.session_token",
+                "secure-current-session",
+                0,
+            ),
+        ]);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("browser", Some("zen"), None));
+
+        let header = header_of(&provider).expect("a current browser session");
+        assert!(header.contains("better-auth.session_token=current-session"));
+        assert!(header.contains("__Secure-better-auth.session_token=secure-current-session"));
     }
 
     #[test]

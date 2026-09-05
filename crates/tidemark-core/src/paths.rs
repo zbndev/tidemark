@@ -52,6 +52,52 @@ pub fn config_path() -> Result<PathBuf, NoBaseDirectory> {
     Ok(config_dir()?.join(CONFIG_FILE))
 }
 
+/// The user's home directory for third-party vendor files: `$HOME` when it names an
+/// absolute directory, else on Windows `%USERPROFILE%`. Native Windows processes —
+/// Explorer, autostart, the UI-spawned daemon — never carry `HOME`, while every vendor
+/// CLI keeps its login under the profile; without the fallback the daemon cannot start
+/// there at all. Absolute-only, like every rule in this module; `None` when nothing
+/// usable names one.
+pub fn home() -> Option<PathBuf> {
+    home_in(
+        std::env::var_os("HOME").map(PathBuf::from),
+        fallback_profile(),
+    )
+}
+
+/// The second place [`home`] can come from: `%USERPROFILE%` on Windows, where the
+/// vendor CLIs keep their logins. Unix has none — HOME-only there.
+#[cfg(windows)]
+fn fallback_profile() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE").map(PathBuf::from)
+}
+
+/// [`home`] without the process environment, so tests never mutate it — the same
+/// reason `resolve` takes its inputs as arguments.
+#[cfg(not(windows))]
+fn fallback_profile() -> Option<PathBuf> {
+    None
+}
+
+fn home_in(home: Option<PathBuf>, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(home) = home.filter(|home| home.is_absolute()) {
+        return Some(home);
+    }
+    used_fallback(fallback)
+}
+
+/// The fallback counts only where one exists (Windows `%USERPROFILE%`).
+#[cfg(windows)]
+fn used_fallback(fallback: Option<PathBuf>) -> Option<PathBuf> {
+    fallback.filter(|fallback| fallback.is_absolute())
+}
+
+/// Unix keeps the HOME-only rule: the fallback never counts there.
+#[cfg(not(windows))]
+fn used_fallback(_fallback: Option<PathBuf>) -> Option<PathBuf> {
+    None
+}
+
 /// The resolution rule, with the environment passed in so it is testable without mutating
 /// the process — `std::env::set_var` is `unsafe` in this edition, and for good reason: the
 /// test suite is threaded. The Windows arm does not consult XDG variables, so outside
@@ -310,5 +356,46 @@ mod tests {
     /// rendered form instead so both `Ok` paths and error texts are pinned.
     fn rendered(res: Result<PathBuf, NoBaseDirectory>) -> Result<PathBuf, String> {
         res.map_err(|error| error.to_string())
+    }
+}
+
+/// [`home`](super::home) without the process environment: `temp_dir` is absolute on
+/// every platform, so these cases pin the rule without mutating anything global.
+#[cfg(test)]
+mod home_tests {
+    use super::{PathBuf, home_in};
+
+    fn dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
+    #[test]
+    fn an_absolute_home_wins_over_any_fallback() {
+        let home = dir("tidemark-home");
+        assert_eq!(
+            home_in(Some(home.clone()), Some(dir("tidemark-profile"))),
+            Some(home)
+        );
+    }
+
+    #[test]
+    fn a_relative_home_is_rejected_not_joined() {
+        // Same absolute-only discipline as the XDG rule: a relative HOME must
+        // never relocate a vendor login into the daemon's working directory.
+        assert_eq!(home_in(Some(PathBuf::from("relative/home")), None), None);
+    }
+
+    #[test]
+    fn the_fallback_counts_only_on_windows() {
+        let profile = dir("tidemark-profile");
+        assert_eq!(
+            home_in(None, Some(profile.clone())),
+            if cfg!(windows) { Some(profile) } else { None }
+        );
+    }
+
+    #[test]
+    fn a_relative_fallback_is_no_home_at_all() {
+        assert_eq!(home_in(None, Some(PathBuf::from("relative/profile"))), None);
     }
 }

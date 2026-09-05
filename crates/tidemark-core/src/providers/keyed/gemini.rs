@@ -396,8 +396,8 @@ impl Provider for Gemini {
 /// Free-standing rather than a method so that a caller can ask whether the CLI's login
 /// exists on this machine without building the provider.
 pub fn cli_credentials_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").filter(|home| Path::new(home).is_absolute())?;
-    Some(credentials_path(Path::new(&home)))
+    let home = crate::paths::home()?;
+    Some(credentials_path(&home))
 }
 
 fn credentials_path(home: &Path) -> PathBuf {
