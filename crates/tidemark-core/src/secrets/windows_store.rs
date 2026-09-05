@@ -3,6 +3,12 @@
 //!
 //! This is the only workspace module allowed to contain unsafe Rust. Its public surface is
 //! entirely safe; raw pointers and Win32-owned allocations never leave `SystemBackend`.
+//!
+//! EXECUTOR RULE: every public method here must run to completion on whatever thread
+//! calls it — no `spawn_blocking`, no sleep, no `block_on`. Daemon D-Bus handlers run
+//! on zbus's own executor thread, which has no Tokio runtime context; reaching for one
+//! panics the call (silently, on a Windows daemon with no console) and the UI hangs
+//! forever waiting for a reply that never comes.
 
 use super::protocol::{
     self, Attributes, Backend, ReadError, Record, STORAGE_ATTRIBUTE, STORAGE_VALUE,
@@ -42,10 +48,7 @@ impl Store {
     /// Opens the local fallback directory and applies a user/SYSTEM-only DACL.
     pub async fn connect() -> Result<Self, SecretError> {
         let root = fallback_root()?;
-        let checked = root.clone();
-        tokio::task::spawn_blocking(move || secure_directory(&checked))
-            .await
-            .map_err(join_error)??;
+        secure_directory(&root)?;
         Ok(Self {
             root,
             mutations: SyncMutex::new(std::collections::HashMap::new()),
@@ -75,13 +78,10 @@ impl Store {
     ) -> Result<Option<Credential>, SecretError> {
         let target = protocol::target(kind.schema(), provider.as_str(), account.as_str());
         let backend = SystemBackend::new(self.root.clone());
-        let bytes = tokio::task::spawn_blocking(move || protocol::get(&backend, &target))
-            .await
-            .map_err(join_error)?
-            .map_err(|error| match error {
-                ReadError::NotUtf8 => SecretError::NotUtf8,
-                ReadError::Unavailable(error) => SecretError::Unavailable(error),
-            })?;
+        let bytes = protocol::get(&backend, &target).map_err(|error| match error {
+            ReadError::NotUtf8 => SecretError::NotUtf8,
+            ReadError::Unavailable(error) => SecretError::Unavailable(error),
+        })?;
         bytes
             .map(|bytes| String::from_utf8(bytes).map(Credential::new))
             .transpose()
@@ -113,10 +113,7 @@ impl Store {
         let account = account.as_str().to_owned();
         let bytes = secret.expose().as_bytes().to_vec();
         let backend = SystemBackend::new(self.root.clone());
-        tokio::task::spawn_blocking(move || protocol::set(&backend, &target, &account, &bytes))
-            .await
-            .map_err(join_error)?
-            .map_err(SecretError::Unavailable)
+        protocol::set(&backend, &target, &account, &bytes).map_err(SecretError::Unavailable)
     }
 
     /// Replaces a slot only if its complete current UTF-8 document matches `expected`.
@@ -150,15 +147,8 @@ impl Store {
         let _guard = mutation.lock().await;
         let target = protocol::target(kind.schema(), provider.as_str(), account.as_str());
         let backend = SystemBackend::new(self.root.clone());
-        tokio::task::spawn_blocking(move || protocol::delete(&backend, &target))
-            .await
-            .map_err(join_error)?
-            .map_err(SecretError::Unavailable)
+        protocol::delete(&backend, &target).map_err(SecretError::Unavailable)
     }
-}
-
-fn join_error(error: tokio::task::JoinError) -> SecretError {
-    SecretError::Unavailable(format!("Windows credential worker failed: {error}"))
 }
 
 fn fallback_root() -> Result<PathBuf, SecretError> {
@@ -319,7 +309,9 @@ impl Backend for SystemBackend {
         };
         // SAFETY: FFI boundary UB/dangling pointers: every pointer in `credential` targets
         // initialized mutable storage retained for the call; lengths match those buffers.
-        unsafe { CredWriteW(&credential, 0) }.map_err(|error| win_error("CredWriteW", error))
+        let result =
+            unsafe { CredWriteW(&credential, 0) }.map_err(|error| win_error("CredWriteW", error));
+        result
     }
 
     fn delete_record(&self, target: &str) -> Result<(), String> {
