@@ -18,20 +18,27 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 #[cfg(windows)]
 use std::thread;
 
-use tidemark_types::{DataInfo, Preferences, ProviderStatus, ids};
+#[cfg(any(windows, test))]
+use tidemark_types::ids;
+use tidemark_types::{DataInfo, Preferences, ProviderStatus};
 use tokio::sync::mpsc;
+use zbus::Connection;
+#[cfg(any(windows, test))]
+use zbus::Guid;
+#[cfg(any(windows, test))]
 use zbus::object_server::SignalEmitter;
-use zbus::{Connection, Guid};
 
 #[cfg(all(unix, any(windows, test)))]
 use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use uds_windows::{UnixListener, UnixStream};
 
+#[cfg(any(windows, test))]
 use crate::service::Daemon;
 
 /// Every peer's queue holds at most this many announcements. A peer that falls further
 /// behind than this is evicted rather than allowed to slow the daemon down.
+#[cfg(any(windows, test))]
 pub const PEER_QUEUE_BOUND: usize = 128;
 
 /// zbus's own per-connection queue, the value the frozen A1 builder contract fixed.
@@ -438,7 +445,7 @@ mod tests {
         use crate::engine::Command;
         use crate::service::{Published, PublishedUpdate};
 
-        #[derive(Debug, Default)]
+        #[derive(Debug)]
         struct FakeSecrets;
 
         impl tidemark_core::secrets::Secrets for FakeSecrets {
@@ -489,7 +496,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 mpsc::channel::<Command>(4).0,
-                Arc::new(FakeSecrets::default()),
+                Arc::new(FakeSecrets),
             )
         }
 
