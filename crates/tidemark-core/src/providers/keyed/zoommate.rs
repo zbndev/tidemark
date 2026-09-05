@@ -4,7 +4,9 @@
 //! durable credential, and a fresh `nak` avoids making another secret lifetime persistent.
 
 use super::{HandSpec, Options, ProviderError, http, redact_query, session};
-use crate::browser::{self, Keyring, SafeStorage, auth::Selection};
+#[cfg(test)]
+use crate::browser::auth::Selection;
+use crate::browser::{self, Keyring, SafeStorage};
 use crate::providers::{BoxFuture, Credential, Provider};
 use serde::Deserialize;
 use std::fmt;
@@ -38,10 +40,14 @@ pub static SPEC: HandSpec = HandSpec {
 
 fn build(
     account: AccountId,
-    _credential: Credential,
+    credential: Credential,
     options: &Options,
 ) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(ZoomMate::new_for_account(account, options)?))
+    Ok(Arc::new(ZoomMate::new_for_account(
+        account,
+        &credential,
+        options,
+    )?))
 }
 
 /// One ZoomMate account, authenticated by its chosen browser profile.
@@ -55,7 +61,7 @@ pub struct ZoomMate {
     /// profile directory — so rooting the scan at one would find no browser there at all.
     browser_home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
-    selection: Option<Selection>,
+    source: Option<session::Source>,
     #[cfg(test)]
     base_url: Option<String>,
     #[cfg(test)]
@@ -64,16 +70,24 @@ pub struct ZoomMate {
 
 impl ZoomMate {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
-        Self::new_for_account(AccountId::default(), options)
+        Self::new_for_account(
+            AccountId::default(),
+            &Credential::new(String::new()),
+            options,
+        )
     }
 
-    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
+    fn new_for_account(
+        account_id: AccountId,
+        credential: &Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
             tidemark_account: account_id.clone(),
             client: http::client()?,
             browser_home: None,
             storage: Arc::new(Keyring),
-            selection: session::selection(options),
+            source: session::source(credential, options),
             #[cfg(test)]
             base_url: None,
             #[cfg(test)]
@@ -92,7 +106,7 @@ impl ZoomMate {
             client: http::client()?,
             browser_home: Some(home.to_path_buf()),
             storage,
-            selection: None,
+            source: None,
             base_url: Some(base_url.trim_end_matches('/').to_owned()),
             fallback_base_url: None,
         })
@@ -100,7 +114,7 @@ impl ZoomMate {
 
     #[cfg(test)]
     fn with_selection(mut self, selection: Selection) -> Self {
-        self.selection = Some(selection);
+        self.source = Some(session::Source::Browser(selection));
         self
     }
 
@@ -129,11 +143,11 @@ impl ZoomMate {
     }
 
     async fn session(&self, url: &str) -> Result<session::Session, ProviderError> {
-        let selection = self.selection.as_ref().ok_or(ProviderError::NoCredential)?;
+        let source = self.source.as_ref().ok_or(ProviderError::NoCredential)?;
         session::session_prefix(
             self.browser_home.as_deref(),
             self.storage.as_ref(),
-            selection,
+            source,
             SESSION_PREFIX,
             &cookie_query(),
             url,
@@ -232,13 +246,19 @@ impl ZoomMate {
     }
 
     async fn inspect_sources(&self) -> Vec<AuthCandidate> {
-        session::inspect_sources_prefix(
+        let browsers = session::inspect_sources_prefix(
             self.browser_home.as_deref(),
             self.storage.as_ref(),
             SESSION_PREFIX,
             &cookie_query(),
             &Self::cookie_url(AI_HOST, LOGIN_PATH),
             |credential| async move { self.validate_header(credential.header()).await },
+        )
+        .await;
+        session::modes(
+            browsers,
+            self.source.as_ref().and_then(session::Source::pasted),
+            |header| async move { self.validate_header(&header).await },
         )
         .await
     }

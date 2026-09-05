@@ -35,8 +35,8 @@ use tidemark_core::providers::keyed::{
 #[cfg(not(target_os = "windows"))]
 use tidemark_core::providers::keyed::t3chat;
 use tidemark_core::providers::{
-    AUTO_SOURCE, CLI_SOURCE, Credential, OAUTH_SOURCE, Provider, ProviderError, Source,
-    antigravity, claude, codex,
+    AUTO_SOURCE, CLI_SOURCE, OAUTH_SOURCE, Provider, ProviderError, Source, antigravity, claude,
+    codex,
 };
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
@@ -339,6 +339,10 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
                     value: cursor::BROWSER_SOURCE.into(),
                     title: "Browser".into(),
                 },
+                AuthMode {
+                    value: keyed::session::PASTE_SOURCE.into(),
+                    title: "Paste session".into(),
+                },
             ],
         }),
         abacus::PROVIDER_ID
@@ -356,33 +360,47 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
         | sakana::PROVIDER_ID
         | zoommate::PROVIDER_ID => Some(AuthSelector {
             option: cursor::AUTH_SOURCE.into(),
-            modes: vec![AuthMode {
-                value: cursor::BROWSER_SOURCE.into(),
-                title: "Browser".into(),
-            }],
+            modes: vec![
+                AuthMode {
+                    value: cursor::BROWSER_SOURCE.into(),
+                    title: "Browser".into(),
+                },
+                AuthMode {
+                    value: keyed::session::PASTE_SOURCE.into(),
+                    title: "Paste session".into(),
+                },
+            ],
         }),
         // Split from the arm above only because a cfg attribute cannot sit on one
         // alternative of an or-pattern; same boring2 reason as the use gate above.
         #[cfg(not(target_os = "windows"))]
         t3chat::PROVIDER_ID => Some(AuthSelector {
             option: cursor::AUTH_SOURCE.into(),
-            modes: vec![AuthMode {
-                value: cursor::BROWSER_SOURCE.into(),
-                title: "Browser".into(),
-            }],
+            modes: vec![
+                AuthMode {
+                    value: cursor::BROWSER_SOURCE.into(),
+                    title: "Browser".into(),
+                },
+                AuthMode {
+                    value: keyed::session::PASTE_SOURCE.into(),
+                    title: "Paste session".into(),
+                },
+            ],
         }),
         _ => None,
     }
 }
 
-/// Whether a provider's local-auth report contains only the browser mode.
+/// Whether a provider offers a pasted session as one of its authentication modes.
 ///
-/// Cursor has a second, Cursor-App mode and already returns mode bodies itself. The other
-/// browser-session providers return browser/profile candidates, which the engine puts under
-/// the sole mode before publishing them over D-Bus.
-pub(crate) fn has_browser_session_auth(provider: &str) -> bool {
+/// The engine asks before it reads the session slot at all, so that an account of a
+/// provider that has no paste mode never queries the keyring for one.
+pub(crate) fn has_pasted_session_auth(provider: &str) -> bool {
     browser_auth(provider).is_some_and(|selector| {
-        selector.modes.len() == 1 && selector.modes[0].value == keyed::session::BROWSER_SOURCE
+        selector
+            .modes
+            .iter()
+            .any(|mode| mode.value == keyed::session::PASTE_SOURCE)
     })
 }
 
@@ -395,6 +413,12 @@ pub(crate) fn browser_auth_selection(provider: &str, config: &Config) -> Option<
     match config.option(provider, cursor::AUTH_SOURCE) {
         Some(cursor::CURSOR_APP_SOURCE) => Some(AuthSelection {
             mode: cursor::CURSOR_APP_SOURCE.into(),
+            candidate: None,
+        }),
+        // The paste mode names no candidate: the stored header is the whole selection,
+        // and the settings deliberately hold nothing that could identify it.
+        Some(keyed::session::PASTE_SOURCE) => Some(AuthSelection {
+            mode: keyed::session::PASTE_SOURCE.into(),
             candidate: None,
         }),
         Some(cursor::BROWSER_SOURCE) => {
@@ -696,7 +720,7 @@ fn antigravity_account(
     .with_source(source)
     .with_rebuild({
         let secrets = Arc::clone(secrets);
-        Box::new(move |account, options| {
+        Box::new(move |account, _credential, options| {
             let source = if account.as_str() == "default" {
                 supported_source(
                     antigravity::PROVIDER_ID,
@@ -733,7 +757,7 @@ fn claude_account(
     .with_source(source)
     .with_rebuild({
         let secrets = Arc::clone(secrets);
-        Box::new(move |account, options| {
+        Box::new(move |account, _credential, options| {
             let source = if account.as_str() == "default" {
                 Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
             } else {
@@ -765,7 +789,7 @@ fn codex_account(
     .with_source(source)
     .with_rebuild({
         let secrets = Arc::clone(secrets);
-        Box::new(move |account, options| {
+        Box::new(move |account, _credential, options| {
             let source = if account.as_str() == "default" {
                 Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
             } else {
@@ -820,8 +844,8 @@ fn hand_written_account(spec: &'static keyed::HandSpec, account: &AccountId) -> 
         let account = Account::keyless(
             ProviderId::new(spec.id),
             account.clone(),
-            Box::new(move |account_id, options| {
-                (spec.build)(account_id.clone(), Credential::new(String::new()), options)
+            Box::new(move |account_id, credential, options| {
+                (spec.build)(account_id.clone(), credential, options)
             }),
         )
         .with_credential(spec.credential);
@@ -1166,6 +1190,7 @@ mod tests {
             [
                 (cursor::CURSOR_APP_SOURCE, "Cursor App"),
                 (cursor::BROWSER_SOURCE, "Browser"),
+                (keyed::session::PASTE_SOURCE, "Paste session"),
             ]
         );
 
@@ -1208,7 +1233,10 @@ mod tests {
                 .iter()
                 .map(|mode| (mode.value.as_str(), mode.title.as_str()))
                 .collect::<Vec<_>>(),
-            [(cursor::BROWSER_SOURCE, "Browser")]
+            [
+                (cursor::BROWSER_SOURCE, "Browser"),
+                (keyed::session::PASTE_SOURCE, "Paste session"),
+            ]
         );
 
         let path = scratch_config(
@@ -1255,7 +1283,10 @@ mod tests {
                 .iter()
                 .map(|mode| (mode.value.as_str(), mode.title.as_str()))
                 .collect::<Vec<_>>(),
-            [(cursor::BROWSER_SOURCE, "Browser")]
+            [
+                (cursor::BROWSER_SOURCE, "Browser"),
+                (keyed::session::PASTE_SOURCE, "Paste session"),
+            ]
         );
 
         let path = scratch_config(
@@ -1321,7 +1352,10 @@ mod tests {
                     .iter()
                     .map(|mode| (mode.value.as_str(), mode.title.as_str()))
                     .collect::<Vec<_>>(),
-                [(cursor::BROWSER_SOURCE, "Browser")],
+                [
+                    (cursor::BROWSER_SOURCE, "Browser"),
+                    (keyed::session::PASTE_SOURCE, "Paste session"),
+                ],
                 "{provider}"
             );
         }
@@ -1343,7 +1377,10 @@ mod tests {
                 .iter()
                 .map(|mode| (mode.value.as_str(), mode.title.as_str()))
                 .collect::<Vec<_>>(),
-            [(cursor::BROWSER_SOURCE, "Browser")]
+            [
+                (cursor::BROWSER_SOURCE, "Browser"),
+                (keyed::session::PASTE_SOURCE, "Paste session"),
+            ]
         );
 
         let path = scratch_config(

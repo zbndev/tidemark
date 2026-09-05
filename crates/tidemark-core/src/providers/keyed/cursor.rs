@@ -81,6 +81,8 @@ pub const AUTH_PROFILE: &str = "auth-profile";
 pub const CURSOR_APP_SOURCE: &str = "cursor-app";
 /// A browser-cookie source.
 pub const BROWSER_SOURCE: &str = "browser";
+/// A session the person pasted in, for a browser whose jar this machine will not open.
+pub use super::session::PASTE_SOURCE;
 
 const USAGE_SUMMARY_URL: &str = "https://cursor.com/api/usage-summary";
 const AUTH_ME_URL: &str = "https://cursor.com/api/auth/me";
@@ -160,6 +162,7 @@ pub static SPEC: HandSpec = HandSpec {
             choices: &[
                 (CURSOR_APP_SOURCE, "Cursor App"),
                 (BROWSER_SOURCE, "Browser"),
+                (PASTE_SOURCE, "Paste session"),
             ],
             required: false,
         },
@@ -185,26 +188,53 @@ pub static SPEC: HandSpec = HandSpec {
 
 fn build(
     account: AccountId,
-    _credential: Credential,
+    credential: Credential,
     options: &Options,
 ) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Cursor::new_for_account(account, options)?))
+    Ok(Arc::new(Cursor::new_for_account(
+        account,
+        &credential,
+        options,
+    )?))
 }
 
 /// The one local Cursor session a provider instance may read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Source {
     CursorApp,
     Browser {
         browser: String,
         profile: Option<String>,
     },
+    /// A `Cookie:` header the person pasted in, for a browser profile this machine will
+    /// not let Tidemark open. See [`super::session::Source::Pasted`].
+    Pasted(String),
+}
+
+// Never derived: the pasted variant holds a live session, and a `Debug` that printed it
+// would put one in a log the moment an account is traced.
+impl fmt::Debug for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CursorApp => f.write_str("CursorApp"),
+            Self::Browser { browser, profile } => f
+                .debug_struct("Browser")
+                .field("browser", browser)
+                .field("profile", profile)
+                .finish(),
+            Self::Pasted(_) => f.debug_tuple("Pasted").field(&"<redacted>").finish(),
+        }
+    }
 }
 
 impl Source {
-    fn from_options(options: &Options) -> Option<Self> {
+    fn from_credential(credential: &Credential, options: &Options) -> Option<Self> {
         match options.get(AUTH_SOURCE).map(String::as_str) {
             Some(CURSOR_APP_SOURCE) => Some(Self::CursorApp),
+            Some(PASTE_SOURCE) => {
+                let pasted = credential.expose().trim();
+                (!pasted.is_empty()).then(|| Self::Pasted(pasted.to_owned()))
+            }
             Some(BROWSER_SOURCE) => {
                 let browser = options
                     .get(AUTH_BROWSER)
@@ -245,17 +275,25 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
-        Self::new_for_account(AccountId::default(), options)
+        Self::new_for_account(
+            AccountId::default(),
+            &Credential::new(String::new()),
+            options,
+        )
     }
 
-    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
+    fn new_for_account(
+        account_id: AccountId,
+        credential: &Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
             tidemark_account: account_id.clone(),
             client: http::client()?,
             home: crate::paths::home(),
             browser_home: None,
             storage: Arc::new(Keyring),
-            source: Source::from_options(options),
+            source: Source::from_credential(credential, options),
             #[cfg(test)]
             base_url: None,
         })
@@ -287,7 +325,7 @@ impl Cursor {
 
     #[cfg(test)]
     fn with_options(mut self, options: Options) -> Self {
-        self.source = Source::from_options(&options);
+        self.source = Source::from_credential(&Credential::new(String::new()), &options);
         self
     }
 
@@ -349,6 +387,7 @@ impl Cursor {
             Source::Browser { browser, profile } => {
                 self.browser_session_header(browser, profile).await
             }
+            Source::Pasted(header) => self.read(&session::Source::Pasted(header.clone())).await,
         }
     }
 
@@ -358,14 +397,19 @@ impl Cursor {
         browser: &str,
         profile: &Option<String>,
     ) -> Result<Option<String>, ProviderError> {
-        let selection = crate::browser::auth::Selection {
+        self.read(&session::Source::Browser(crate::browser::auth::Selection {
             browser: browser.to_owned(),
             profile: profile.clone(),
-        };
+        }))
+        .await
+    }
+
+    /// The Cookie header one session source still holds, if it holds one.
+    async fn read(&self, source: &session::Source) -> Result<Option<String>, ProviderError> {
         session::session(
             self.browser_home.as_deref(),
             self.storage.as_ref(),
-            &selection,
+            source,
             SESSION_COOKIE_NAMES,
             &cookie_query(),
             USAGE_SUMMARY_URL,
@@ -413,6 +457,14 @@ impl Cursor {
         )
         .await;
         let browser_state = candidate_state(&browsers);
+        let pasted = match &self.source {
+            Some(Source::Pasted(header)) => Some(header.as_str()),
+            _ => None,
+        };
+        let paste = session::paste_source(pasted, |header| async move {
+            self.validate_header(&header).await
+        })
+        .await;
 
         Ok(vec![
             AuthCandidate {
@@ -429,6 +481,7 @@ impl Cursor {
                 state: browser_state.as_wire().into(),
                 children: browsers,
             },
+            paste,
         ])
     }
 
@@ -1048,7 +1101,7 @@ fn parse_for_account(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, Options, SPEC, parse};
+    use super::{Cursor, Options, SPEC, STATE_DATABASE, parse};
     use crate::providers::{Credential, Provider, ProviderError};
     use tidemark_types::{AccountId, AuthCandidateState, CredentialKind, DetailSection, Timestamp};
 

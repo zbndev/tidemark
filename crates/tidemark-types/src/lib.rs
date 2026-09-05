@@ -47,6 +47,11 @@ pub mod ids {
     pub const SECRET_SCHEMA: &str = "io.github.zbndev.Tidemark.ProviderKey";
     /// Secret Service schema for OAuth tokens created by a login through Tidemark.
     pub const TOKEN_SCHEMA: &str = "io.github.zbndev.Tidemark.ProviderToken";
+    /// Secret Service schema for a browser session header the user pasted in, for a
+    /// provider whose only credential is a session cookie a browser holds — the Windows
+    /// fallback for Chromium App-Bound (`v20`) cookies, which no process but the browser
+    /// itself can decrypt. Stored, read and redacted exactly like the other two.
+    pub const SESSION_SCHEMA: &str = "io.github.zbndev.Tidemark.ProviderSession";
 }
 
 /// The value every outbound request identifies itself with.

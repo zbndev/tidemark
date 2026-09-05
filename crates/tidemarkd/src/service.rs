@@ -38,6 +38,7 @@ use std::sync::Arc;
 use tidemark_core::config::Config;
 use tidemark_core::oauth::Login;
 use tidemark_core::providers::Credential;
+use tidemark_core::providers::keyed::session;
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_types::{
     AccountId, AuthCandidate, AuthSelection, CredentialKind, DataInfo, HistoryPoint, Preferences,
@@ -723,15 +724,15 @@ impl Daemon {
 
         // Only now that the removal is durable, and only for an id nothing moved into: a
         // promotion leaves the survivor living under `default`, and deleting there would
-        // take its credential. Both kinds are attempted so one locked keyring leaves at
-        // most one residue rather than skipping the second kind.
+        // take its credential. Every kind is attempted so one locked keyring leaves at
+        // most one residue rather than skipping the kinds behind it.
         let provider_id = ProviderId::new(provider);
         let account_id = AccountId::new(account);
         let promoted = account == AccountId::default().as_str()
             && topology.iter().any(|(held, _)| held == provider);
         let mut cleanup = None;
         if !promoted {
-            for kind in [Kind::Key, Kind::Token] {
+            for kind in Kind::ALL {
                 if let Err(error) = self.secrets.delete(kind, &provider_id, &account_id).await {
                     cleanup.get_or_insert(keyring_error(error));
                 }
@@ -1004,6 +1005,54 @@ impl Daemon {
             .map_err(keyring_error)?;
         tracing::info!(provider, account, "stored an API key");
         self.reload(provider).await
+    }
+
+    /// Stores a browser session the person pasted in, and puts the account on it.
+    ///
+    /// The fallback for a browser profile this machine will not let Tidemark open — since
+    /// Chrome M127, every Chromium profile on Windows. Like `SetKey`, the header is not
+    /// validated here beyond being non-blank: the provider is the only authority on
+    /// whether a session works, and the poll this triggers is what asks it. An expired
+    /// paste arrives back as `credential-rejected`, which the interface already draws.
+    async fn set_session(&self, provider: &str, account: &str, session: &str) -> fdo::Result<()> {
+        tracing::info!(provider, account, "set_session called");
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
+        self.account(provider, account).await?;
+        if !registry::has_pasted_session_auth(provider) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "{provider} does not take a pasted browser session"
+            )));
+        }
+        let session = session.trim();
+        if session.is_empty() {
+            return Err(fdo::Error::InvalidArgs(
+                "an empty session is not a session; select another source to stop using one".into(),
+            ));
+        }
+        self.secrets
+            .set(
+                Kind::Session,
+                &ProviderId::new(provider),
+                &AccountId::new(account),
+                &Credential::new(session),
+            )
+            .await
+            .map_err(keyring_error)?;
+        tracing::info!(provider, account, "stored a pasted browser session");
+        // Storing it is only half the change: an account still pointing at a browser would
+        // go on reading that browser. The selection write is what puts it on the paste, and
+        // it clears the browser fields on its way in.
+        self.config_request(|reply| Command::SelectAuthSource {
+            provider: provider.to_owned(),
+            account: account.to_owned(),
+            selection: AuthSelection {
+                mode: session::PASTE_SOURCE.to_owned(),
+                candidate: None,
+            },
+            reply,
+        })
+        .await
     }
 
     /// Removes whatever credential Tidemark holds for an account.
@@ -1576,6 +1625,7 @@ mod tests {
         let kind = match kind {
             Kind::Key => "key",
             Kind::Token => "token",
+            Kind::Session => "session",
         };
         (
             kind.to_owned(),
@@ -2219,7 +2269,7 @@ mod tests {
     async fn a_removal_deletes_its_credentials_only_after_the_engine_persisted_it() {
         let (daemon, secrets, mut commands) =
             daemon_over_catalog(vec![key_account("zai")], catalog()).await;
-        for kind in [Kind::Key, Kind::Token] {
+        for kind in Kind::ALL {
             secrets
                 .set(
                     kind,
@@ -2231,7 +2281,7 @@ mod tests {
                 .expect("seeded");
         }
         let seeded = secrets.held();
-        assert_eq!(seeded.len(), 2, "both owned kinds are seeded");
+        assert_eq!(seeded.len(), Kind::ALL.len(), "every owned kind is seeded");
         let observed = Arc::clone(&secrets);
         let responder = tokio::spawn(async move {
             match commands.recv().await.expect("command") {

@@ -232,14 +232,22 @@ pub type Factory = Box<
         + Sync,
 >;
 
-/// Rebuilds a provider client that finds its own credential, from its settings alone.
+/// Rebuilds a provider client that finds its own credential, from its settings.
 ///
 /// The counterpart of [`Factory`] for a provider registered with [`Account::with_client`].
 /// Such a provider has no stored key for the engine to hand it, but it can still have
 /// settings — and a setting that never reached the built client would take effect only on
 /// the next daemon restart.
+///
+/// The credential is empty for all but one case: a browser-session account the person put
+/// on a pasted session, whose header is the one thing its settings cannot hold, because a
+/// live session does not belong in a config file. See [`Engine::pasted_session`].
 pub type Rebuild = Box<
-    dyn Fn(&AccountId, &BTreeMap<String, String>) -> Result<Arc<dyn Provider>, ProviderError>
+    dyn Fn(
+            &AccountId,
+            Credential,
+            &BTreeMap<String, String>,
+        ) -> Result<Arc<dyn Provider>, ProviderError>
         + Send
         + Sync,
 >;
@@ -728,7 +736,7 @@ impl Engine {
     /// error returned here would tell the caller the rename or promotion failed when
     /// the file says it did not.
     async fn forget_secret_slots(secrets: &Arc<dyn Secrets>, provider: &str, account: &str) {
-        for kind in [Kind::Key, Kind::Token] {
+        for kind in Kind::ALL {
             if let Err(error) = secrets
                 .delete(kind, &ProviderId::new(provider), &AccountId::new(account))
                 .await
@@ -821,7 +829,7 @@ impl Engine {
         if let Some(old) = promote_from.as_ref() {
             Self::forget_secret_slots(&self.secrets, provider, old).await;
             let provider_id = ProviderId::new(provider);
-            for kind in [Kind::Key, Kind::Token] {
+            for kind in Kind::ALL {
                 if Some(kind) == promoted_kind {
                     continue;
                 }
@@ -1181,7 +1189,7 @@ impl Engine {
             .inspect_auth_sources()
             .await
             .map_err(|error| error.to_string())?;
-        Ok(browser_mode_report(provider, sources))
+        Ok(sources)
     }
 
     /// Revalidates, then atomically persists one selected dynamic local source.
@@ -1196,9 +1204,23 @@ impl Engine {
         }) else {
             return Err(format!("account {provider}/{account} is not configured"));
         };
-        let sources = self.inspect_auth_sources(provider, account).await?;
-        let Some(selection) = resolvable_auth_selection(&sources, &selection) else {
-            return Err("the selected authentication source is not ready".into());
+        // A pasted session is stored, not discovered: there are no candidates to resolve
+        // it against, and nothing can prove it until the client is rebuilt around it. The
+        // poll this schedules is what asks — the same contract `SetKey` has.
+        let selection = if selection.mode == session::PASTE_SOURCE {
+            if !crate::registry::has_pasted_session_auth(provider) {
+                return Err(format!("{provider} does not take a pasted browser session"));
+            }
+            AuthSelection {
+                mode: selection.mode,
+                candidate: None,
+            }
+        } else {
+            let sources = self.inspect_auth_sources(provider, account).await?;
+            let Some(resolved) = resolvable_auth_selection(&sources, &selection) else {
+                return Err("the selected authentication source is not ready".into());
+            };
+            resolved
         };
 
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
@@ -1489,17 +1511,72 @@ impl Engine {
         }
     }
 
+    /// The pasted session one account was rebuilt from, if it has one to be rebuilt from.
+    ///
+    /// Asked only of a provider that offers the paste mode at all, and escalated to a
+    /// visible state only when that is the mode the account is on. An account reading its
+    /// own browser profile must not fall to "waiting for keyring" because a keyring it
+    /// never touches is locked — that is the Linux path, where the browser jar is readable
+    /// and no paste was ever needed.
+    ///
+    /// Takes `&mut self` for the same reason every other awaiting method here does: the
+    /// engine owns a SQLite connection and is not `Sync`, so a future holding a shared
+    /// borrow of it could not be spawned.
+    async fn pasted_session(
+        &mut self,
+        index: usize,
+    ) -> Result<Credential, (ProviderState, Option<String>)> {
+        let provider = self.accounts[index].provider.clone();
+        if !crate::registry::has_pasted_session_auth(provider.as_str()) {
+            return Ok(Credential::new(String::new()));
+        }
+        let account = self.accounts[index].account.clone();
+        let required = self.accounts[index]
+            .status
+            .auth_selection
+            .as_ref()
+            .is_some_and(|selection| selection.mode == session::PASTE_SOURCE);
+        let secrets = Arc::clone(&self.secrets);
+        match secrets.get(Kind::Session, &provider, &account).await {
+            Ok(Some(credential)) => Ok(credential),
+            Ok(None) => Ok(Credential::new(String::new())),
+            Err(SecretError::Locked) if required => Err((ProviderState::WaitingForKeyring, None)),
+            Err(error) if required => {
+                Err((ProviderState::KeyringUnavailable, Some(error.to_string())))
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %error, provider = %provider,
+                    "no pasted session could be read; this account does not run on one"
+                );
+                Ok(Credential::new(String::new()))
+            }
+        }
+    }
+
     /// Loads the credential and builds the client, unless one is already in hand.
     async fn ensure_client(&mut self, index: usize) {
         if self.accounts[index].client.is_some() {
             return;
         }
-        if let Some(rebuild) = self.accounts[index].rebuild.as_ref() {
+        if self.accounts[index].rebuild.is_some() {
             // Owns its credential discovery: there is no stored key to read, so the
-            // settings are the whole of what the replacement is built from.
+            // settings — plus a pasted session where the account runs on one — are the
+            // whole of what the replacement is built from.
             let account = self.accounts[index].account.clone();
+            let pasted = match self.pasted_session(index).await {
+                Ok(credential) => credential,
+                Err((state, detail)) => {
+                    self.accounts[index].set_state(state, detail);
+                    return;
+                }
+            };
             let options = self.accounts[index].option_values();
-            match rebuild(&account, &options) {
+            let rebuild = self.accounts[index]
+                .rebuild
+                .as_ref()
+                .expect("checked just above");
+            match rebuild(&account, pasted, &options) {
                 Ok(client) => self.accounts[index].client = Some(client),
                 Err(error) => {
                     self.accounts[index].failures = self.accounts[index].failures.saturating_add(1);
@@ -1933,18 +2010,6 @@ impl Engine {
     }
 }
 
-/// Gives browser-profile candidates the mode body the settings protocol renders.
-fn browser_mode_report(provider: &str, sources: Vec<AuthCandidate>) -> Vec<AuthCandidate> {
-    if crate::registry::has_browser_session_auth(provider)
-        && !sources
-            .iter()
-            .any(|candidate| candidate.id == session::BROWSER_SOURCE)
-    {
-        return session::browser_sources(sources);
-    }
-    sources
-}
-
 /// Which schema a credential of this kind is stored under, or `None` where Tidemark stores
 /// nothing of its own.
 pub fn stored_kind(credential: CredentialKind) -> Option<Kind> {
@@ -2083,24 +2148,19 @@ mod tests {
     fn a_browser_only_provider_wraps_its_profile_report_in_the_browser_mode() {
         // BrowserAuth renders by mode id. Handing it a Firefox root directly makes the
         // selected Browser half look unavailable even when the profile was discovered.
-        // t3chat is not registered on Windows (its HTTP stack needs boring2), so the
-        // setup names qoder — a browser-session provider registered on every platform.
-        let report = browser_mode_report(
-            "qoder",
-            vec![AuthCandidate {
-                id: "firefox".into(),
-                title: "Firefox".into(),
+        let report = session::browser_sources(vec![AuthCandidate {
+            id: "firefox".into(),
+            title: "Firefox".into(),
+            subtitle: None,
+            state: "ready".into(),
+            children: vec![AuthCandidate {
+                id: "firefox/Default".into(),
+                title: "Default".into(),
                 subtitle: None,
                 state: "ready".into(),
-                children: vec![AuthCandidate {
-                    id: "firefox/Default".into(),
-                    title: "Default".into(),
-                    subtitle: None,
-                    state: "ready".into(),
-                    children: Vec::new(),
-                }],
+                children: Vec::new(),
             }],
-        );
+        }]);
 
         assert_eq!(report[0].id, "browser");
         assert_eq!(report[0].children[0].id, "firefox");
@@ -2123,24 +2183,19 @@ mod tests {
     fn a_challenged_browser_choice_is_persisted_as_its_challenged_profile() {
         // An edge challenge refuses the proof, not the session: the recorded profile
         // starts working the moment the edge lets polls through.
-        // t3chat is not registered on Windows (its HTTP stack needs boring2), so the
-        // setup names qoder — a browser-session provider registered on every platform.
-        let report = browser_mode_report(
-            "qoder",
-            vec![AuthCandidate {
-                id: "firefox".into(),
-                title: "Firefox".into(),
+        let report = session::browser_sources(vec![AuthCandidate {
+            id: "firefox".into(),
+            title: "Firefox".into(),
+            subtitle: None,
+            state: "challenged".into(),
+            children: vec![AuthCandidate {
+                id: "firefox/Default".into(),
+                title: "Default".into(),
                 subtitle: None,
                 state: "challenged".into(),
-                children: vec![AuthCandidate {
-                    id: "firefox/Default".into(),
-                    title: "Default".into(),
-                    subtitle: None,
-                    state: "challenged".into(),
-                    children: Vec::new(),
-                }],
+                children: Vec::new(),
             }],
-        );
+        }]);
 
         assert_eq!(
             resolvable_auth_selection(
@@ -2159,16 +2214,13 @@ mod tests {
 
     #[test]
     fn an_unanswered_browser_choice_is_still_refused() {
-        let report = browser_mode_report(
-            "t3chat",
-            vec![AuthCandidate {
-                id: "firefox".into(),
-                title: "Firefox".into(),
-                subtitle: None,
-                state: "unreachable".into(),
-                children: Vec::new(),
-            }],
-        );
+        let report = session::browser_sources(vec![AuthCandidate {
+            id: "firefox".into(),
+            title: "Firefox".into(),
+            subtitle: None,
+            state: "unreachable".into(),
+            children: Vec::new(),
+        }]);
 
         assert_eq!(
             resolvable_auth_selection(
@@ -2314,6 +2366,7 @@ mod tests {
                         match kind {
                             Kind::Key => "key",
                             Kind::Token => "token",
+                            Kind::Session => "session",
                         }
                         .to_owned(),
                         provider.clone(),
@@ -3855,7 +3908,7 @@ mod tests {
         let account = Account::keyless(
             ProviderId::new("cursor"),
             AccountId::default(),
-            Box::new(move |_, _| {
+            Box::new(move |_, _, _| {
                 Ok(Arc::new(AuthFake {
                     sources: source_copy.clone(),
                 }) as Arc<dyn Provider>)
@@ -4718,7 +4771,7 @@ mod tests {
         let mut harness = harness_with_config(
             vec![
                 Account::with_client(Fake::new(vec![Ok(reading(0, 42.0, 3600))])).with_rebuild(
-                    Box::new(|_, _| {
+                    Box::new(|_, _, _| {
                         Ok(Fake::new(vec![Ok(reading(0, 42.0, 3600))]) as Arc<dyn Provider>)
                     }),
                 ),

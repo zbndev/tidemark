@@ -726,7 +726,9 @@ impl Config {
         selection: &AuthSelection,
     ) -> Result<(), ConfigError> {
         let browser_profile = match (selection.mode.as_str(), selection.candidate.as_deref()) {
-            ("cursor-app", None) => None,
+            // Neither of these names a browser: Cursor's app session and a pasted header
+            // are each one thing, and both clear the browser fields on their way in.
+            ("cursor-app" | "paste", None) => None,
             ("browser", Some(candidate)) => {
                 Some(parse_browser_candidate(candidate).ok_or_else(|| {
                     ConfigError::InvalidAuthSelection {
@@ -742,6 +744,13 @@ impl Config {
                     path: self.path.clone(),
                     provider: provider.to_owned(),
                     reason: "Cursor App does not take a browser candidate".into(),
+                });
+            }
+            ("paste", Some(_)) => {
+                return Err(ConfigError::InvalidAuthSelection {
+                    path: self.path.clone(),
+                    provider: provider.to_owned(),
+                    reason: "a pasted session does not take a browser candidate".into(),
                 });
             }
             ("browser", None) => {

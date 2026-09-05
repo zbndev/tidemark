@@ -4,7 +4,9 @@
 //! only from the explicitly selected browser profile and never stores or logs it.
 
 use super::{HandSpec, Options, ProviderError, http, redact_query, session};
-use crate::browser::{self, Keyring, SafeStorage, auth::Selection};
+#[cfg(test)]
+use crate::browser::auth::Selection;
+use crate::browser::{self, Keyring, SafeStorage};
 use crate::providers::{BoxFuture, Credential, Provider};
 use serde_json::Value;
 use std::fmt;
@@ -41,10 +43,14 @@ pub static SPEC: HandSpec = HandSpec {
 
 fn build(
     account: AccountId,
-    _credential: Credential,
+    credential: Credential,
     options: &Options,
 ) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Manus::new_for_account(account, options)?))
+    Ok(Arc::new(Manus::new_for_account(
+        account,
+        &credential,
+        options,
+    )?))
 }
 
 /// One Manus account, authenticated by one explicitly chosen browser profile.
@@ -58,23 +64,31 @@ pub struct Manus {
     /// profile directory — so rooting the scan at one would find no browser there at all.
     browser_home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
-    selection: Option<Selection>,
+    source: Option<session::Source>,
     #[cfg(test)]
     base_url: Option<String>,
 }
 
 impl Manus {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
-        Self::new_for_account(AccountId::default(), options)
+        Self::new_for_account(
+            AccountId::default(),
+            &Credential::new(String::new()),
+            options,
+        )
     }
 
-    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
+    fn new_for_account(
+        account_id: AccountId,
+        credential: &Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
             tidemark_account: account_id.clone(),
             client: http::client()?,
             browser_home: None,
             storage: Arc::new(Keyring),
-            selection: session::selection(options),
+            source: session::source(credential, options),
             #[cfg(test)]
             base_url: None,
         })
@@ -91,10 +105,10 @@ impl Manus {
             client: http::client()?,
             browser_home: Some(home.to_path_buf()),
             storage,
-            selection: Some(Selection {
+            source: Some(session::Source::Browser(Selection {
                 browser: "firefox".into(),
                 profile: None,
-            }),
+            })),
             base_url: Some(base_url.trim_end_matches('/').to_owned()),
         })
     }
@@ -125,11 +139,11 @@ impl Manus {
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
-        let selection = self.selection.as_ref().ok_or(ProviderError::NoCredential)?;
+        let source = self.source.as_ref().ok_or(ProviderError::NoCredential)?;
         let session = session::session(
             self.browser_home.as_deref(),
             self.storage.as_ref(),
-            selection,
+            source,
             SESSION_COOKIE_NAMES,
             &cookie_query(),
             SESSION_URL,
@@ -168,13 +182,19 @@ impl Manus {
     }
 
     async fn inspect_sources(&self) -> Vec<AuthCandidate> {
-        session::inspect_sources(
+        let browsers = session::inspect_sources(
             self.browser_home.as_deref(),
             self.storage.as_ref(),
             SESSION_COOKIE_NAMES,
             &cookie_query(),
             SESSION_URL,
             |credential| async move { self.validate_header(credential.header()).await },
+        )
+        .await;
+        session::modes(
+            browsers,
+            self.source.as_ref().and_then(session::Source::pasted),
+            |header| async move { self.validate_header(&header).await },
         )
         .await
     }

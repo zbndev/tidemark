@@ -16,7 +16,9 @@
 //! is reported as a sentence.
 
 use super::{HandSpec, Options, ProviderError, http, session};
-use crate::browser::{self, Keyring, SafeStorage, auth::Selection};
+#[cfg(test)]
+use crate::browser::auth::Selection;
+use crate::browser::{self, Keyring, SafeStorage};
 use crate::providers::{BoxFuture, Credential, Provider};
 use serde::Deserialize;
 use std::fmt;
@@ -56,10 +58,14 @@ pub static SPEC: HandSpec = HandSpec {
 
 fn build(
     account: AccountId,
-    _credential: Credential,
+    credential: Credential,
     options: &Options,
 ) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(T3Chat::new_for_account(account, options)?))
+    Ok(Arc::new(T3Chat::new_for_account(
+        account,
+        &credential,
+        options,
+    )?))
 }
 
 /// One T3 Chat account, authenticated by one explicitly chosen browser profile. The gate
@@ -74,27 +80,39 @@ pub struct T3Chat {
     /// profile directory — so rooting the scan at one would find no browser there at all.
     browser_home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
-    selection: Option<Selection>,
+    source: Option<session::Source>,
     #[cfg(test)]
     base_url: Option<String>,
 }
 
 impl T3Chat {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
-        Self::new_for_account(AccountId::default(), options)
+        Self::new_for_account(
+            AccountId::default(),
+            &Credential::new(String::new()),
+            options,
+        )
     }
 
-    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
-        let selection = session::selection(options);
-        let browser = selection
-            .as_ref()
-            .map_or("chrome", |selection| selection.browser.as_str());
+    fn new_for_account(
+        account_id: AccountId,
+        credential: &Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
+        let source = session::source(credential, options);
+        // A pasted session names no browser, so it takes the default impersonation: the
+        // header travelled out of some browser, and Chrome's is the shape T3 Chat's edge
+        // is least likely to challenge.
+        let browser = match &source {
+            Some(session::Source::Browser(selection)) => selection.browser.as_str(),
+            Some(session::Source::Pasted(_)) | None => "chrome",
+        };
         Ok(Self {
             tidemark_account: account_id.clone(),
             client: Self::browser_client(browser)?,
             browser_home: None,
             storage: Arc::new(Keyring),
-            selection,
+            source,
             #[cfg(test)]
             base_url: None,
         })
@@ -111,10 +129,10 @@ impl T3Chat {
             client: Self::browser_client("firefox")?,
             browser_home: Some(home.to_path_buf()),
             storage,
-            selection: Some(Selection {
+            source: Some(session::Source::Browser(Selection {
                 browser: "firefox".into(),
                 profile: None,
-            }),
+            })),
             base_url: Some(base_url.trim_end_matches('/').to_owned()),
         })
     }
@@ -170,11 +188,11 @@ impl T3Chat {
     }
 
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
-        let selection = self.selection.as_ref().ok_or(ProviderError::NoCredential)?;
+        let source = self.source.as_ref().ok_or(ProviderError::NoCredential)?;
         let session = session::session(
             self.browser_home.as_deref(),
             self.storage.as_ref(),
-            selection,
+            source,
             &[],
             &cookie_query(),
             API_URL,
@@ -279,13 +297,19 @@ impl T3Chat {
     }
 
     async fn inspect_sources(&self) -> Vec<AuthCandidate> {
-        session::inspect_sources(
+        let browsers = session::inspect_sources(
             self.browser_home.as_deref(),
             self.storage.as_ref(),
             &[],
             &cookie_query(),
             API_URL,
             |credential| async move { self.validate_header(credential.header()).await },
+        )
+        .await;
+        session::modes(
+            browsers,
+            self.source.as_ref().and_then(session::Source::pasted),
+            |header| async move { self.validate_header(&header).await },
         )
         .await
     }

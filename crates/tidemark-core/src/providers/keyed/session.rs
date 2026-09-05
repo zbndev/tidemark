@@ -6,6 +6,7 @@ use crate::browser::{
     self, Query, SafeStorage,
     auth::{self, Selection},
 };
+use crate::providers::Credential;
 use std::fmt;
 use std::future::Future;
 use std::path::Path;
@@ -17,6 +18,9 @@ pub const AUTH_BROWSER: &str = "auth-browser";
 pub const AUTH_PROFILE: &str = "auth-profile";
 /// The browser mode that contains scanned browser and profile candidates on D-Bus.
 pub const BROWSER_SOURCE: &str = "browser";
+/// The mode a session the person pasted in is offered under, on D-Bus and as the
+/// `auth-source` value config stores for an account that runs on one.
+pub const PASTE_SOURCE: &str = "paste";
 
 /// The browser options every browser-session provider publishes.
 pub static OPTIONS: &[OptionSchema] = &[
@@ -90,6 +94,60 @@ pub fn store_selection(options: &mut Options, selection: &Selection) {
     }
 }
 
+/// Where one account's cookies come from.
+///
+/// The two are alternatives, not a fallback chain. Substituting one for the other after a
+/// failure is exactly what the explicit selector exists to prevent: it would read a
+/// different person's session and publish it under this account.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Source {
+    /// One browser profile, picked out of a scan of this machine.
+    Browser(Selection),
+    /// A `Cookie:` header the person copied out of their own browser.
+    ///
+    /// The fallback for a profile no process but the browser itself may read. Chrome M127
+    /// bound the Chromium cookie key to the browser binary through an elevation service
+    /// that checks its caller, so on Windows every Chromium profile is in that state and a
+    /// scan finds a jar it cannot open. Reading it anyway is what credential stealers do,
+    /// and Tidemark will not: it asks the person for the header instead.
+    Pasted(String),
+}
+
+impl Source {
+    /// The pasted header, when a paste is what this account reads.
+    pub fn pasted(&self) -> Option<&str> {
+        match self {
+            Self::Pasted(header) => Some(header),
+            Self::Browser(_) => None,
+        }
+    }
+}
+
+// Never derived: a pasted header carries a live session, and a `Debug` that printed it
+// would put one in a log the moment an account is traced.
+impl fmt::Debug for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Browser(selection) => f.debug_tuple("Browser").field(selection).finish(),
+            Self::Pasted(_) => f.debug_tuple("Pasted").field(&"<redacted>").finish(),
+        }
+    }
+}
+
+/// The source an account's settings and stored credential together name.
+///
+/// A named browser wins over a stored paste, because the daemon writes exactly one of the
+/// two shapes: selecting a browser removes the browser fields' absence that a pasted
+/// account is recognised by. An account naming neither, with nothing pasted, has no source
+/// at all — the `NoCredential` the settings dialog asks the person to resolve.
+pub fn source(credential: &Credential, options: &Options) -> Option<Source> {
+    if let Some(selection) = selection(options) {
+        return Some(Source::Browser(selection));
+    }
+    let pasted = credential.expose().trim();
+    (!pasted.is_empty()).then(|| Source::Pasted(pasted.to_owned()))
+}
+
 /// The cookie stores a provider may read.
 ///
 /// A stated `home` is a fixture root, which is what a test hands in so that it reads its
@@ -101,11 +159,11 @@ fn stores(home: Option<&Path>) -> Vec<browser::Store> {
     home.map(browser::stores_in).unwrap_or_else(browser::stores)
 }
 
-/// Reads a session from exactly the selected store.
+/// Reads a session from exactly the selected source.
 pub async fn session(
     home: Option<&Path>,
     storage: &dyn SafeStorage,
-    selection: &Selection,
+    source: &Source,
     session_names: &[&str],
     query: &Query,
     url: &str,
@@ -113,7 +171,7 @@ pub async fn session(
     session_matching(
         home,
         storage,
-        selection,
+        source,
         |name| session_names.is_empty() || session_names.contains(&name),
         query,
         url,
@@ -126,7 +184,7 @@ pub async fn session(
 pub async fn session_prefix(
     home: Option<&Path>,
     storage: &dyn SafeStorage,
-    selection: &Selection,
+    source: &Source,
     prefix: &str,
     query: &Query,
     url: &str,
@@ -134,7 +192,7 @@ pub async fn session_prefix(
     session_matching(
         home,
         storage,
-        selection,
+        source,
         |name| name.starts_with(prefix),
         query,
         url,
@@ -145,7 +203,7 @@ pub async fn session_prefix(
 async fn session_matching<M>(
     home: Option<&Path>,
     storage: &dyn SafeStorage,
-    selection: &Selection,
+    source: &Source,
     matches: M,
     query: &Query,
     url: &str,
@@ -153,6 +211,13 @@ async fn session_matching<M>(
 where
     M: Fn(&str) -> bool,
 {
+    let selection = match source {
+        // A pasted header is already the cookies the request URL would receive — the
+        // browser it was copied out of did the scoping — so the name gate is all that is
+        // left to apply, and it is applied exactly as it is to a scanned jar.
+        Source::Pasted(header) => return Ok(pasted_session(header, matches)),
+        Source::Browser(selection) => selection,
+    };
     let now = tidemark_types::Timestamp::now();
     let mut keyring_locked = false;
 
@@ -193,6 +258,48 @@ where
         return Err(ProviderError::KeyringLocked);
     }
     Ok(None)
+}
+
+/// Reads a pasted `Cookie:` header, rebuilt from its own pairs.
+///
+/// Rebuilding rather than forwarding is what makes a paste safe to put in a request: the
+/// header is whatever was on a clipboard, and a value carrying a newline would otherwise
+/// travel as a second header. Pairs with a control character in them are dropped rather
+/// than escaped, and a leading `Cookie:` — what copying the header line out of a browser's
+/// network panel produces — is accepted, because asking for the value without the name it
+/// is displayed under is asking people to edit a secret by hand.
+fn pasted_session<M>(header: &str, matches: M) -> Option<Session>
+where
+    M: Fn(&str) -> bool,
+{
+    let header = header.trim();
+    let header = header
+        .split_once(':')
+        .filter(|(name, _)| name.trim().eq_ignore_ascii_case("cookie"))
+        .map_or(header, |(_, rest)| rest.trim());
+    let pairs: Vec<(&str, &str)> = header
+        .split(';')
+        .filter_map(|cookie| cookie.split_once('='))
+        .map(|(name, value)| (name.trim(), value.trim()))
+        .filter(|(name, value)| {
+            !name.is_empty()
+                && !name.contains(|c: char| c.is_ascii_control())
+                && !value.contains(|c: char| c.is_ascii_control())
+        })
+        .collect();
+    let (name, value) = pairs
+        .iter()
+        .copied()
+        .find(|(name, value)| !value.is_empty() && matches(name))?;
+    Some(Session {
+        header: pairs
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+        session_name: name.to_owned(),
+        session_value: value.to_owned(),
+    })
 }
 
 /// Inspects every local browser profile while leaving its session values inside core.
@@ -272,6 +379,53 @@ pub fn browser_sources(children: Vec<AuthCandidate>) -> Vec<AuthCandidate> {
     }]
 }
 
+/// Both modes a browser-session provider offers: the profiles a scan of this machine
+/// found, and the session the person pasted in.
+///
+/// Emitting the browser mode here rather than leaving the daemon to wrap the flat list
+/// keeps one report shape for every provider: with a second mode beside it, browser
+/// candidates can no longer be the report's top-level entries.
+pub async fn modes<F, Fut>(
+    browsers: Vec<AuthCandidate>,
+    pasted: Option<&str>,
+    validate: F,
+) -> Vec<AuthCandidate>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = auth::Validation>,
+{
+    let mut sources = browser_sources(browsers);
+    sources.push(paste_source(pasted, validate).await);
+    sources
+}
+
+/// The pasted-session mode, proved the same way a scanned profile is.
+///
+/// A stored paste is revalidated on every inspection, so an expired one reads as rejected
+/// rather than as a source that keeps being offered and keeps failing the poll.
+pub async fn paste_source<F, Fut>(pasted: Option<&str>, validate: F) -> AuthCandidate
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = auth::Validation>,
+{
+    let state = match pasted.map(str::trim).filter(|header| !header.is_empty()) {
+        Some(header) => match validate(header.to_owned()).await {
+            auth::Validation::Ready => AuthCandidateState::Ready,
+            auth::Validation::Rejected => AuthCandidateState::Rejected,
+            auth::Validation::Unreachable => AuthCandidateState::Unreachable,
+            auth::Validation::Challenged => AuthCandidateState::Challenged,
+        },
+        None => AuthCandidateState::Missing,
+    };
+    AuthCandidate {
+        id: PASTE_SOURCE.into(),
+        title: "Paste session".into(),
+        subtitle: Some("The Cookie header from a signed-in browser tab".into()),
+        state: state.as_wire().to_owned(),
+        children: Vec::new(),
+    }
+}
+
 fn aggregate_state(candidates: &[AuthCandidate]) -> AuthCandidateState {
     let states = candidates.iter().filter_map(AuthCandidate::state);
     if states
@@ -309,13 +463,17 @@ fn aggregate_state(candidates: &[AuthCandidate]) -> AuthCandidateState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AUTH_BROWSER, AUTH_PROFILE, BROWSER_SOURCE, selection, session, store_selection};
+    use super::{
+        AUTH_BROWSER, AUTH_PROFILE, BROWSER_SOURCE, PASTE_SOURCE, Source, selection, session,
+        source, store_selection,
+    };
     use crate::browser::{Query, SafeStorage, auth::Selection};
+    use crate::providers::Credential;
     #[cfg(unix)]
     use crate::providers::ProviderError;
     use crate::secrets::SecretError;
     use rusqlite::Connection;
-    use tidemark_types::AuthCandidate;
+    use tidemark_types::{AuthCandidate, AuthCandidateState};
 
     #[derive(Debug)]
     struct NoKeyring;
@@ -407,16 +565,16 @@ mod tests {
         let home = crate::browser::tests::TestHome::new();
         gecko_profile(&home, ".mozilla/firefox/aa", &[("session", "tok")]);
         gecko_profile(&home, ".zen/bb", &[("session", "other")]);
-        let selection = Selection {
+        let source = Source::Browser(Selection {
             browser: "firefox".into(),
             profile: Some("aa".into()),
-        };
+        });
 
         let found = runtime()
             .block_on(session(
                 Some(home.path()),
                 &NoKeyring,
-                &selection,
+                &source,
                 &["session"],
                 &query(),
                 "https://example.com/api",
@@ -434,16 +592,16 @@ mod tests {
         // Treating analytics cookies as credentials would make a provider poll an account it cannot use.
         let home = crate::browser::tests::TestHome::new();
         gecko_profile(&home, ".mozilla/firefox/aa", &[("_ga", "analytics")]);
-        let selection = Selection {
+        let source = Source::Browser(Selection {
             browser: "firefox".into(),
             profile: None,
-        };
+        });
 
         let found = runtime()
             .block_on(session(
                 Some(home.path()),
                 &NoKeyring,
-                &selection,
+                &source,
                 &["session"],
                 &query(),
                 "https://example.com/api",
@@ -458,16 +616,16 @@ mod tests {
         // Requiring a name here would make whole-jar providers fail despite having a valid session.
         let home = crate::browser::tests::TestHome::new();
         gecko_profile(&home, ".mozilla/firefox/aa", &[("provider-session", "tok")]);
-        let selection = Selection {
+        let source = Source::Browser(Selection {
             browser: "firefox".into(),
             profile: None,
-        };
+        });
 
         let found = runtime()
             .block_on(session(
                 Some(home.path()),
                 &NoKeyring,
-                &selection,
+                &source,
                 &[],
                 &query(),
                 "https://example.com/api",
@@ -488,16 +646,16 @@ mod tests {
             ".mozilla/firefox/aa",
             &[("ory_session_admin", "tok")],
         );
-        let selection = Selection {
+        let source = Source::Browser(Selection {
             browser: "firefox".into(),
             profile: None,
-        };
+        });
 
         let found = runtime()
             .block_on(super::session_prefix(
                 Some(home.path()),
                 &NoKeyring,
-                &selection,
+                &source,
                 "ory_session_",
                 &query(),
                 "https://example.com/api",
@@ -522,16 +680,16 @@ mod tests {
                 ("analytics", "public", "/"),
             ],
         );
-        let selection = Selection {
+        let source = Source::Browser(Selection {
             browser: "firefox".into(),
             profile: None,
-        };
+        });
 
         let found = runtime()
             .block_on(session(
                 Some(home.path()),
                 &NoKeyring,
-                &selection,
+                &source,
                 &["session"],
                 &query(),
                 "https://example.com/api",
@@ -554,16 +712,16 @@ mod tests {
             ".mozilla/firefox/aa",
             &[("session", "narrow", "/settings"), ("session", "root", "/")],
         );
-        let selection = Selection {
+        let source = Source::Browser(Selection {
             browser: "firefox".into(),
             profile: None,
-        };
+        });
 
         let found = runtime()
             .block_on(session(
                 Some(home.path()),
                 &NoKeyring,
-                &selection,
+                &source,
                 &["session"],
                 &query(),
                 "https://example.com/api",
@@ -704,15 +862,15 @@ mod tests {
         // Converting this to None would tell the user to reauthenticate while the keyring is merely locked.
         let home = crate::browser::tests::TestHome::new();
         home.profile("chromium/Default", "Cookies");
-        let selection = Selection {
+        let source = Source::Browser(Selection {
             browser: "chromium".into(),
             profile: None,
-        };
+        });
 
         let result = runtime().block_on(session(
             Some(home.path()),
             &LockedKeyring,
-            &selection,
+            &source,
             &["session"],
             &query(),
             "https://example.com/api",
@@ -741,5 +899,141 @@ mod tests {
         assert_eq!(options.get(AUTH_BROWSER), Some(&"firefox".to_owned()));
         assert!(!options.contains_key(AUTH_PROFILE));
         assert_eq!(selection(&options), Some(default));
+    }
+
+    #[test]
+    fn a_pasted_header_passes_the_same_name_gate_a_scanned_jar_does() {
+        // Accepting any paste would let a page's analytics cookies be stored as a session,
+        // and the account would poll from a header that can never authenticate.
+        let analytics = Source::Pasted("_ga=analytics; _gid=more".into());
+        let signed_in = Source::Pasted("_ga=analytics; session=tok".into());
+
+        let refused = runtime()
+            .block_on(session(
+                None,
+                &NoKeyring,
+                &analytics,
+                &["session"],
+                &query(),
+                "https://example.com/api",
+            ))
+            .expect("a paste is read without touching a store");
+        let found = runtime()
+            .block_on(session(
+                None,
+                &NoKeyring,
+                &signed_in,
+                &["session"],
+                &query(),
+                "https://example.com/api",
+            ))
+            .expect("a paste is read without touching a store")
+            .expect("the gated cookie is there");
+
+        assert!(refused.is_none());
+        assert_eq!(found.session_name, "session");
+        assert_eq!(found.session_value, "tok");
+    }
+
+    #[test]
+    fn a_pasted_header_is_rebuilt_from_its_pairs_before_it_travels() {
+        // Forwarding the clipboard verbatim would put whatever it holds into a request
+        // header — a value carrying a newline would travel as a header of its own.
+        let pasted = Source::Pasted(
+            "Cookie: _ga=analytics ;\n  session=tok ; injected=a\r\nX-Evil: 1".into(),
+        );
+
+        let found = runtime()
+            .block_on(session(
+                None,
+                &NoKeyring,
+                &pasted,
+                &["session"],
+                &query(),
+                "https://example.com/api",
+            ))
+            .expect("a paste is read without touching a store")
+            .expect("the gated cookie is there");
+
+        assert_eq!(found.session_name, "session");
+        assert_eq!(found.session_value, "tok");
+        assert_eq!(found.header, "_ga=analytics; session=tok");
+    }
+
+    #[test]
+    fn a_prefix_gate_reads_a_pasted_header_the_same_way() {
+        // A rotating suffix is the reason the prefix gate exists; a paste that skipped it
+        // would offer whole-jar providers a source the fetch then refuses.
+        let pasted = Source::Pasted("ory_session_admin=tok".into());
+
+        let found = runtime()
+            .block_on(super::session_prefix(
+                None,
+                &NoKeyring,
+                &pasted,
+                "ory_session_",
+                &query(),
+                "https://example.com/api",
+            ))
+            .expect("a paste is read without touching a store")
+            .expect("the prefixed cookie is there");
+
+        assert_eq!(found.session_name, "ory_session_admin");
+    }
+
+    #[test]
+    fn a_named_browser_wins_over_a_stored_paste() {
+        // The daemon writes exactly one of the two shapes, and selecting a browser removes
+        // the browser fields a paste is recognised by the absence of. Preferring the paste
+        // would leave an account that was put back on its browser reading a stale header.
+        let mut options = crate::providers::keyed::Options::new();
+        store_selection(
+            &mut options,
+            &Selection {
+                browser: "firefox".into(),
+                profile: None,
+            },
+        );
+        let pasted = Credential::new("session=tok");
+
+        assert!(matches!(
+            source(&pasted, &options),
+            Some(Source::Browser(_))
+        ));
+        assert!(matches!(
+            source(&pasted, &crate::providers::keyed::Options::new()),
+            Some(Source::Pasted(_))
+        ));
+        assert!(
+            source(
+                &Credential::new(String::new()),
+                &crate::providers::keyed::Options::new()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn the_paste_mode_is_missing_until_something_is_stored_under_it() {
+        // A mode that reported ready with nothing stored would be selectable, and the
+        // account behind it would poll with no credential at all.
+        let empty = runtime().block_on(super::paste_source(None, |_| async {
+            unreachable!("nothing is validated when nothing is stored")
+        }));
+        let blank = runtime().block_on(super::paste_source(Some("   "), |_| async {
+            unreachable!("nothing is validated when nothing is stored")
+        }));
+        let held = runtime().block_on(super::paste_source(
+            Some("session=tok"),
+            |header| async move {
+                assert_eq!(header, "session=tok");
+                crate::browser::auth::Validation::Ready
+            },
+        ));
+
+        assert_eq!(empty.id, PASTE_SOURCE);
+        assert_eq!(empty.state(), Some(AuthCandidateState::Missing));
+        assert_eq!(blank.state(), Some(AuthCandidateState::Missing));
+        assert_eq!(held.state(), Some(AuthCandidateState::Ready));
     }
 }
