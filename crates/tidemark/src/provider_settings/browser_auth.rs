@@ -597,45 +597,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_paste_half_takes_a_header_and_it_keeps_none_of_it_behind() {
-        if !widgets() {
-            eprintln!("skipped: no display is available");
-            return;
-        }
-
-        let on_paste: Rc<dyn Fn(String)> = Rc::new(|_| {});
-        let paste = Half::new(
-            &AuthMode {
-                value: "paste".into(),
-                title: "Paste session".into(),
-            },
-            &on_paste,
-        );
-        let browser = Half::new(
-            &AuthMode {
-                value: "browser".into(),
-                title: "Browser".into(),
-            },
-            &on_paste,
-        );
-
-        let entry = paste
-            .entry
-            .clone()
-            .expect("the paste half is somewhere to paste");
-        assert!(
-            browser.entry.is_none(),
-            "a half that lists discovered sources has nothing to type into"
-        );
-
-        // A live session left in a hidden field would stay on screen, behind one reveal
-        // button, for as long as the dialog is open.
-        entry.set_text("session=tok");
-        paste.set_visible(false);
-        assert_eq!(entry.text(), "");
-    }
-
-    #[test]
     fn browser_auth_widgets_keep_rows_separate_and_marks_across_rebuilds() {
         if !widgets() {
             eprintln!("skipped: no display is available");
@@ -715,6 +676,27 @@ mod tests {
         auth.apply_report(report());
         auth.apply_report(report());
         assert_eq!(marks(&auth), [true]);
+
+        // Only the paste half is somewhere to type, and it keeps nothing behind: a half
+        // that lists discovered sources has nothing to type into, and a live session left
+        // in a hidden field would stay on screen behind one reveal button for as long as
+        // the dialog is open.
+        let on_paste: Rc<dyn Fn(String)> = Rc::new(|_| {});
+        let paste = Half::new(
+            &AuthMode {
+                value: "paste".into(),
+                title: "Paste session".into(),
+            },
+            &on_paste,
+        );
+        assert!(half.entry.is_none());
+        let entry = paste
+            .entry
+            .clone()
+            .expect("the paste half is somewhere to paste");
+        entry.set_text("session=tok");
+        paste.set_visible(false);
+        assert_eq!(entry.text(), "");
     }
 
     #[test]
