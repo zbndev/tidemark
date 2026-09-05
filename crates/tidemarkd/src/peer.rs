@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 use std::fs;
 #[cfg(windows)]
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(any(windows, test))]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 #[cfg(windows)]
 use std::thread;

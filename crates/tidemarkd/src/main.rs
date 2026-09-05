@@ -41,6 +41,7 @@ use tokio::sync::{mpsc, watch};
 use zbus::object_server::SignalEmitter;
 
 use crate::engine::{Command, Engine, Publication};
+#[cfg(windows)]
 use crate::peer::{Announcement, PeerHub};
 use crate::service::{Daemon, Published, PublishedUpdate};
 
