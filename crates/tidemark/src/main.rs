@@ -12,6 +12,10 @@
 //! `format` decides what they say, and `style` adds the handful of CSS rules libadwaita
 //! does not already provide.
 
+// A desktop client must not keep a console window: on Windows the GUI subsystem
+// detaches it at link time. Gated off tests so failures still print.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 mod about;
 mod bar;
 mod bus;
