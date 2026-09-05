@@ -111,6 +111,76 @@ jobs:
         shell: msys2 {0}
         run: cargo test --workspace
 
+  # Todo 21: compile the per-user NSIS installer and upload it as the
+  # `nsis-package` artifact. The toolchain wiring mirrors windows-tests (same
+  # UCRT64/GNU toolchain, same pinned gvsbuild runtime as the probe jobs), so
+  # the shipped binaries and DLLs are the locked set, never drift.
+  nsis-package:
+    if: github.event_name == 'push' && github.ref_name == 'feat/experimental-windows-native'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    concurrency:
+      group: nsis-package-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+      PKG_CONFIG_PATH: /ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig
+      GVBUILD_URL: 'https://github.com/wingtk/gvsbuild/releases/download/2026.8.0/GTK4_Gvsbuild_2026.8.0_x64.zip'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: msys2/setup-msys2@v2.27.0
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-go
+
+      - name: Default a GNU-host Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ucrt64-nsis
+
+      # choco's nsis package is NSIS 3.x with MUI2, the System plugin and lzma
+      # — the whole surface installer.nsi uses.
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Release binaries
+        shell: msys2 {0}
+        run: cargo build --release -p tidemark -p tidemarkd
+
+      - name: Stage the pinned gvsbuild GTK runtime
+        shell: pwsh
+        run: |
+          curl.exe --fail -L -o build\gvsbuild.zip "$env:GVBUILD_URL"
+          bash data/packaging/windows/stage-gtk-runtime.sh build
+
+      - name: makensis
+        shell: cmd
+        run: |
+          cd data\packaging\windows
+          "C:\Program Files (x86)\NSIS\makensis.exe" /DSRC_DIR=%GITHUB_WORKSPACE%\target\release /DGTK_DIR=%GITHUB_WORKSPACE%\build\nsis-staging\gtk /DOUT_FILE=tidemark-installer.exe installer.nsi
+
+      - name: Upload the installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsis-package
+          path: data/packaging/windows/tidemark-installer.exe
+
   checks:
     # The only hosted runner carrying GTK 4.22 / libadwaita 1.9, which is the project's
     # API floor. ubuntu-latest is still 24.04 and ships GTK 4.18; this code does not

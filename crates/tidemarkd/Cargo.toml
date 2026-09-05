@@ -14,9 +14,6 @@ workspace = true
 [features]
 default = ["update-check"]
 update-check = ["dep:reqwest", "dep:semver"]
-# Dev-only: registers the temporary per-user AUMID so toasts can be raised before the
-# NSIS installer (todo 21) ships the Start-menu shortcut that registers it for real.
-dev-toast-aumid = []
 
 [dependencies]
 tidemark-types = { path = "../tidemark-types" }

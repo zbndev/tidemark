@@ -408,9 +408,8 @@ mod transport {
     use windows::core::HSTRING;
 
     /// The stable application identity the installer's Start-menu shortcut carries
-    /// (todo 21). Until that exists, dev runs compiled with the `dev-toast-aumid`
-    /// feature register the same id per-user under HKCU, which is all an unpackaged
-    /// app needs for the toast platform to accept its notifications.
+    /// (`System.AppUserModel.ID`, set by the NSIS installer). An unpackaged app needs
+    /// it for the toast platform to accept its notifications.
     const AUMID: &str = "io.github.zbndev.Tidemark";
 
     /// The Windows toast transport.
@@ -438,9 +437,6 @@ mod transport {
             urgency: Urgency,
             _replaces: Option<String>,
         ) -> Result<String, NotifyError> {
-            #[cfg(feature = "dev-toast-aumid")]
-            dev_aumid::ensure();
-
             // Replacement is the whole point of the Tag: every message about one
             // window carries the same one, and the platform swaps the old toast for
             // the new instead of stacking a second entry.
@@ -516,68 +512,6 @@ mod transport {
                 NotifyError::Unavailable
             })?;
             Ok(tag)
-        }
-    }
-
-    /// Dev-only AUMID registration, compiled only under the `dev-toast-aumid` feature
-    /// and removed once the installer (todo 21) ships the shortcut that does this for
-    /// real. Writes the same per-user key an installed app's shortcut would, so the
-    /// toast platform can attribute the daemon's notifications.
-    #[cfg(feature = "dev-toast-aumid")]
-    mod dev_aumid {
-        use super::*;
-        use windows::Win32::System::Registry::{
-            HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, RegCloseKey,
-            RegCreateKeyExW, RegSetValueExW,
-        };
-        use windows::core::PCWSTR;
-
-        fn wide(text: &str) -> Vec<u16> {
-            text.encode_utf16().chain(std::iter::once(0)).collect()
-        }
-
-        /// Idempotent: an existing key is reused, values re-written. Never fatal — a
-        /// registry refusal only costs the toast, which surfaces as `Unavailable`.
-        pub fn ensure() {
-            let subkey = wide(&format!("Software\\Classes\\AppUserModelId\\{AUMID}"));
-            let mut key = HKEY_CURRENT_USER;
-            let opened = unsafe {
-                RegCreateKeyExW(
-                    HKEY_CURRENT_USER,
-                    PCWSTR(subkey.as_ptr()),
-                    None,
-                    None,
-                    REG_OPTION_NON_VOLATILE,
-                    KEY_SET_VALUE,
-                    None,
-                    &mut key,
-                    None,
-                )
-            };
-            if opened != windows::Win32::Foundation::ERROR_SUCCESS {
-                tracing::debug!(
-                    code = opened.0,
-                    "the dev AUMID registry key could not be opened"
-                );
-                return;
-            }
-            let name = wide("Tidemark (dev)");
-            // REG_SZ = 1u32. The slice must include the terminating NUL.
-            unsafe {
-                let _ = RegSetValueExW(
-                    key,
-                    PCWSTR(wide("DisplayName").as_ptr()),
-                    None,
-                    windows::Win32::System::Registry::REG_VALUE_TYPE(1),
-                    Some(std::slice::from_raw_parts(
-                        name.as_ptr().cast::<u8>(),
-                        name.len() * 2,
-                    )),
-                );
-            }
-            unsafe {
-                let _ = RegCloseKey(key);
-            }
         }
     }
 }
@@ -839,7 +773,7 @@ mod tests {
     /// raises the real thing on this machine.
     #[cfg(windows)]
     #[test]
-    #[ignore = "raises a real Windows toast; run with `cargo test -p tidemarkd --features dev-toast-aumid -- --ignored`"]
+    #[ignore = "raises a real Windows toast; requires the AUMID registered by the NSIS installer's Start-menu shortcut (todo 21) — or a manual HKCU AppUserModelId key — to attribute it"]
     fn a_real_toast_is_raised_and_its_successor_files_the_same_tag() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let transport = transport::Transport;

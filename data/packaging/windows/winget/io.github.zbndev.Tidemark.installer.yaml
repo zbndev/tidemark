@@ -1,0 +1,20 @@
+# Winget manifest submission template for Tidemark (todo 21 — manifest only;
+# submission to microsoft/winget-pkgs is the user's call). To submit, copy the
+# three files under manifests/i/io.github.zbndev/Tidemark/<version>/ into a
+# fork of microsoft/winget-pkgs, update InstallerUrl to the released
+# tidemark-installer.exe asset, and open a PR against microsoft/winget-pkgs.
+PackageIdentifier: io.github.zbndev.Tidemark
+PackageVersion: 0.3.1
+Installers:
+  - InstallerLocale: en-US
+    Architecture: x64
+    InstallerType: nullsoft
+    InstallerUrl: https://github.com/zbndev/tidemark/releases/download/v0.3.1/tidemark-installer.exe
+    InstallerSha256: <sha256 of tidemark-installer.exe, filled at release time>
+    Scope: user
+    InstallerSwitches:
+      Silent: /S
+      SilentWithProgress: /S
+    UpgradeBehavior: install
+ManifestType: installer
+ManifestVersion: 1.9.0
