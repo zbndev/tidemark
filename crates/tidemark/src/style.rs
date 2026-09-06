@@ -53,17 +53,28 @@ const PLATFORM_STYLE: &str = "
 .quota-card .quota-footer {
     font-size: 1em;
 }
+
+/* GskCairoRenderer leaks one Win32 memory DC and bitmap for each intermediate
+   box-shadow frame. Keep the lift animated, but change its shadow in one frame.
+   The leak is in GTK's Windows cairo path rather than this widget: the same
+   transition on an otherwise empty box grows the process GDI count linearly. */
+.quota-card {
+    transition: transform 150ms ease-out;
+}
 ";
 
 #[cfg(not(windows))]
-const PLATFORM_STYLE: &str = "";
+const PLATFORM_STYLE: &str = "
+.quota-card {
+    transition: transform 150ms ease-out, box-shadow 150ms ease-out;
+}
+";
 
 pub(crate) const STYLE: &str = "
 .quota-card {
     /* Less room under the footer than over the title: the last line sits low in the card,
        where a timestamp belongs, rather than floating in the middle of its own margin. */
     padding: 16px 16px 10px;
-    transition: transform 150ms ease-out, box-shadow 150ms ease-out;
 }
 
 .nested-account-connector {
@@ -222,4 +233,14 @@ pub fn load() {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn windows_does_not_animate_card_shadows() {
+        assert!(!super::STYLE.contains("box-shadow 150ms"));
+        assert!(!super::PLATFORM_STYLE.contains("box-shadow 150ms"));
+        assert!(super::PLATFORM_STYLE.contains("transition: transform 150ms ease-out;"));
+    }
 }
