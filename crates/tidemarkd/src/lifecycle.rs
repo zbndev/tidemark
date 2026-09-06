@@ -16,6 +16,10 @@
 //!   COM accepts it with no elevation, no machine-level access and no helper
 //!   process. Enable/disable both map to `RegisterTaskDefinition` with
 //!   `TASK_CREATE_OR_UPDATE`: an overwrite, so re-registering is idempotent.
+//!   The task's settings are set explicitly rather than defaulted: the Task
+//!   Scheduler's defaults refuse to start on battery, stop the task when the
+//!   machine goes onto battery, and kill it after 72 hours — none of which the
+//!   Linux user unit does, and all of which silently end monitoring.
 //! - The singleton is a **session-local named mutex** (`Local\` prefix). Sessions on
 //!   Windows are per-user logons, so the `Local\` namespace is already per-user and
 //!   the machine-wide `Global\` namespace is deliberately avoided; the user SID in
@@ -29,6 +33,7 @@
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
+use windows::Win32::Foundation::{VARIANT_FALSE, VARIANT_TRUE};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
@@ -67,6 +72,10 @@ pub const UI_RUN_VALUE_NAME: &str = "Tidemark";
 
 /// The registry path of the per-user Run key.
 const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// The Task Scheduler's spelling of "run for as long as you like". Left unset, a task
+/// inherits the `PT72H` default and is terminated after three days.
+const TASK_NO_TIME_LIMIT: &str = "PT0S";
 
 /// The named mutex that makes this user's daemon single-instance.
 const SINGLETON_MUTEX: &str = r"Local\io.github.zbndev.Tidemark.Daemon";
@@ -302,6 +311,33 @@ fn daemon_task_com(enabled: bool, exe: &Path) -> Result<(), String> {
             .map_err(|error| format!("could not create the exec action: {error}"))?;
         exec.SetPath(&BSTR::from(exe.to_string_lossy().as_ref()))
             .map_err(|error| format!("could not point the task at {}: {error}", exe.display()))?;
+        // A new task definition arrives with the Task Scheduler's own defaults, and three
+        // of them are wrong for a monitoring daemon: it refuses to start on battery,
+        // stops when the machine goes onto battery, and is killed after `PT72H`. The
+        // Linux arm's user unit has no equivalent of any of them, and in daemon-only mode
+        // there is no UI to notice the daemon is gone and start it again, so each is
+        // turned off explicitly rather than left to the default.
+        let settings = definition
+            .Settings()
+            .map_err(|error| format!("could not open the task settings: {error}"))?;
+        settings
+            .SetDisallowStartIfOnBatteries(VARIANT_FALSE)
+            .map_err(|error| format!("could not allow starting on battery: {error}"))?;
+        settings
+            .SetStopIfGoingOnBatteries(VARIANT_FALSE)
+            .map_err(|error| format!("could not keep the task running on battery: {error}"))?;
+        // `PT0S` is the Task Scheduler's spelling of "no limit"; the default is `PT72H`,
+        // after which a daemon that had been running for three days is simply killed.
+        settings
+            .SetExecutionTimeLimit(&BSTR::from(TASK_NO_TIME_LIMIT))
+            .map_err(|error| format!("could not lift the execution time limit: {error}"))?;
+        // A logon-triggered task whose logon was missed — the daemon crashed, or was
+        // registered after logon — starts as soon as the scheduler can, rather than
+        // waiting for the next logon.
+        settings
+            .SetStartWhenAvailable(VARIANT_TRUE)
+            .map_err(|error| format!("could not make the task start when available: {error}"))?;
+        drop(settings);
 
         root.RegisterTaskDefinition(
             &name,
@@ -483,6 +519,87 @@ mod tests {
         set_daemon_task(true).expect("re-registering over it is an overwrite");
         set_daemon_task(false).expect("the task unregisters");
         set_daemon_task(false).expect("unregistering an absent task is a success");
+    }
+
+    /// Manual QA (run with `-- --ignored`): the settings are the half a default would
+    /// get wrong, so they are read back off the registered task rather than trusted.
+    /// Registers and unregisters, like its neighbour.
+    #[test]
+    #[ignore = "manual QA: registers and unregisters a real per-user Scheduled Task"]
+    fn the_registered_task_runs_on_battery_and_for_as_long_as_it_likes() {
+        set_daemon_task(true).expect("the task registers");
+        let settings = registered_task_settings();
+        set_daemon_task(false).expect("the task unregisters");
+
+        let (disallow_on_batteries, stop_on_batteries, time_limit) =
+            settings.expect("the task was readable");
+        assert!(
+            !disallow_on_batteries,
+            "an unplugged laptop must still start the daemon"
+        );
+        assert!(
+            !stop_on_batteries,
+            "unplugging must not stop the daemon mid-poll"
+        );
+        assert_eq!(
+            time_limit, TASK_NO_TIME_LIMIT,
+            "the default PT72H would kill a daemon that had been up three days"
+        );
+    }
+
+    /// The three settings off the live registered task, through the same COM interface
+    /// the registration uses.
+    #[cfg(test)]
+    fn registered_task_settings() -> Result<(bool, bool, String), String> {
+        use windows::Win32::System::TaskScheduler::IRegisteredTask;
+
+        // SAFETY: the apartment is initialized for the duration and every interface is
+        // released before it is torn down.
+        unsafe {
+            CoInitializeEx(None, COINIT_MULTITHREADED)
+                .ok()
+                .map_err(|error| format!("COM: {error}"))?;
+            let read = || -> Result<(bool, bool, String), String> {
+                let service: ITaskService =
+                    CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|error| format!("service: {error}"))?;
+                let empty = VARIANT::default();
+                service
+                    .Connect(&empty, &empty, &empty, &empty)
+                    .map_err(|error| format!("connect: {error}"))?;
+                let root = service
+                    .GetFolder(&BSTR::from("\\"))
+                    .map_err(|error| format!("folder: {error}"))?;
+                let task: IRegisteredTask = root
+                    .GetTask(&BSTR::from(DAEMON_TASK_NAME))
+                    .map_err(|error| format!("task: {error}"))?;
+                let settings = task
+                    .Definition()
+                    .and_then(|definition| definition.Settings())
+                    .map_err(|error| format!("settings: {error}"))?;
+                // These three are out-parameter getters, not returning ones.
+                let mut disallow_start = VARIANT_FALSE;
+                settings
+                    .DisallowStartIfOnBatteries(&mut disallow_start)
+                    .map_err(|error| format!("battery start: {error}"))?;
+                let mut stop_on_batteries = VARIANT_FALSE;
+                settings
+                    .StopIfGoingOnBatteries(&mut stop_on_batteries)
+                    .map_err(|error| format!("battery stop: {error}"))?;
+                let mut time_limit = BSTR::new();
+                settings
+                    .ExecutionTimeLimit(&mut time_limit)
+                    .map_err(|error| format!("time limit: {error}"))?;
+                Ok((
+                    disallow_start.as_bool(),
+                    stop_on_batteries.as_bool(),
+                    time_limit.to_string(),
+                ))
+            };
+            let result = read();
+            CoUninitialize();
+            result
+        }
     }
 
     #[test]
