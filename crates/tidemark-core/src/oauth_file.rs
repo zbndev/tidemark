@@ -141,12 +141,20 @@ impl LockedCredentialFile {
     /// would be denied with `ERROR_LOCK_VIOLATION` even in the locking process itself, so
     /// the locked target handle is the reader. Unix locks are advisory, where the plain
     /// path read stays exactly as it was.
+    ///
+    /// One lock is read from repeatedly — the caller reads the document, preflights it,
+    /// backs it up and rereads it before publishing — and a handle carries its own
+    /// position, so the Windows arm rewinds first. Without that, every read after the
+    /// first starts at end of file and hands back nothing, which surfaces as a JSON
+    /// "EOF while parsing a value" and leaves an expired token unrefreshed.
     fn read_current(&self) -> std::io::Result<Vec<u8>> {
         #[cfg(windows)]
         {
-            use std::io::Read;
+            use std::io::{Read, Seek, SeekFrom};
+            let mut handle = &self.target_lock;
+            handle.seek(SeekFrom::Start(0))?;
             let mut bytes = Vec::new();
-            (&self.target_lock).read_to_end(&mut bytes)?;
+            handle.read_to_end(&mut bytes)?;
             Ok(bytes)
         }
         #[cfg(unix)]
@@ -1291,6 +1299,67 @@ mod tests {
 
         assert_eq!(document["tokens"]["access_token"], "live");
         fs::remove_dir_all(directory).expect("test cleanup");
+    }
+
+    /// A rotation reads the locked document more than once: once to find the token, once
+    /// to preflight the fields it is about to replace, once for the backup, and once more
+    /// under the publish. On Windows the reader is the locked handle itself, which carries
+    /// a position, so a read that did not rewind returned nothing the second time and the
+    /// refresh died with a JSON end-of-input error.
+    #[test]
+    fn every_read_under_one_lock_sees_the_whole_document() {
+        let dir = std::env::temp_dir().join(format!(
+            "tidemark-repeat-read-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).expect("test directory");
+        let path = dir.join("auth.json");
+        fs::write(
+            &path,
+            r#"{"tokens":{"access_token":"live","refresh_token":"r"}}"#,
+        )
+        .expect("write credentials");
+
+        let locked = CredentialFile::new(path.clone(), path.clone())
+            .lock()
+            .expect("lock acquired");
+        for _ in 0..3 {
+            let document = locked.read_json().expect("the whole document, every time");
+            assert_eq!(document["tokens"]["access_token"], "live");
+            locked
+                .preflight_unique_fields(
+                    "tokens",
+                    &[Field::Subtree("access_token"), Field::Root("tokens")],
+                )
+                .expect("the preflight reads the same document");
+        }
+        // Read through the lock, not the path: the Windows region lock is mandatory, so a
+        // plain path read of the source would be denied while the lock is held.
+        let backup = locked.backup().expect("the backup reads it too");
+        assert_eq!(
+            fs::read(&backup).expect("backup bytes"),
+            locked.read_current().expect("source bytes")
+        );
+        let outcome = locked
+            .update_top_level(
+                "tokens",
+                ("access_token", "live"),
+                &[(
+                    Field::Subtree("access_token"),
+                    serde_json::Value::from("rotated"),
+                )],
+            )
+            .expect("the publish reads it too");
+        assert_eq!(outcome, UpdateOutcome::Published);
+        drop(locked);
+
+        let updated: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("reread")).expect("JSON");
+        assert_eq!(updated["tokens"]["access_token"], "rotated");
+        assert_eq!(updated["tokens"]["refresh_token"], "r");
+        fs::remove_dir_all(&dir).expect("test cleanup");
     }
 
     #[test]
