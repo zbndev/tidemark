@@ -107,6 +107,21 @@ cp -r "$PREFIX/share/icons/Adwaita" "$DST/share/icons/"
 cp -r "$PREFIX/share/icons/hicolor" "$DST/share/icons/"
 cp -r "$PREFIX/share/fontconfig" "$DST/share/"
 
+# fontconfig's configuration, which the client now depends on rather than merely
+# links: it selects Pango's FreeType back end at startup (crates/tidemark/src/font.rs),
+# and that back end asks fontconfig for every substitution. On Windows fontconfig reads
+# its configuration from etc/fonts beside the directory its own DLL sits in, and expands
+# WINDOWSFONTDIR there to the system font directory.
+#
+# Without this the program still runs — fontconfig's built-in Windows fallback finds the
+# installed families anyway — but conf.d is what chooses among them: measured on a cold
+# cache, the glyphs Rubik lacks came from Verdana and Arial with the configuration staged
+# and from MingLiU-ExtB without it, and the hinting and antialias defaults live in the
+# same directory.
+mkdir -p "$DST/etc"
+cp -r "$PREFIX/etc/fonts" "$DST/etc/"
+test -f "$DST/etc/fonts/fonts.conf" || { echo "fontconfig configuration not staged" >&2; exit 1; }
+
 # Tidemark's own artwork rides the prefix-relative lookup GTK already uses for the
 # staged sets above: the provider marks merge into hicolor (see
 # crates/tidemark/src/mark.rs — the theme lookup is what recolours them), and the

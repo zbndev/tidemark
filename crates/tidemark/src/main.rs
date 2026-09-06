@@ -59,6 +59,11 @@ where
 }
 
 fn main() -> glib::ExitCode {
+    // Before GTK exists, because it replaces the font map every later Pango
+    // context is made from. See `font` for what the Windows default gets wrong.
+    #[cfg(windows)]
+    font::use_freetype_rasterizer();
+
     #[cfg(windows)]
     let sink = file_log::init()
         .map(file_log::Sink::File)
