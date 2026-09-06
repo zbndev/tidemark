@@ -38,6 +38,8 @@ windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     # SECURITY_ATTRIBUTES on the mutex signature.
     "Win32_Security",
+    # The kill-on-close job that ties a client-spawned daemon to this process.
+    "Win32_System_JobObjects",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
