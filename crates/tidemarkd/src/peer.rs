@@ -262,6 +262,62 @@ fn endpoint_path() -> std::io::Result<PathBuf> {
         .join("d.sock"))
 }
 
+/// Binds the endpoint, clearing whatever a killed daemon left on it.
+///
+/// A socket file outlives the process that bound it — Windows unlinks it no more than
+/// Unix does — and `bind` over one that is still on disk fails, so a daemon killed
+/// outright would otherwise be the last one this user ever starts.
+///
+/// The leftover cannot be recognised by asking the filesystem about it. `Path::exists`
+/// opens the file to answer, and an `AF_UNIX` socket refuses to be opened: on a machine
+/// whose socket namespace has been disturbed the open fails outright (`ERROR_CANT_ACCESS_FILE`,
+/// os error 1920) and `exists()` reports `false` about a socket plainly listed in its own
+/// directory. Gating the cleanup on that answer is what left this daemon binding over a
+/// file it had just been told was not there, to fail with a bare `os error 10022` in
+/// `daemon.log` and a client waiting forever.
+///
+/// So the question is put to the socket rather than to the filesystem, and only the one
+/// answer that means "live daemon" is honoured: a connection that is *accepted*. Every
+/// other outcome — a refusal, a socket whose file is unopenable, no file at all (Windows
+/// answers `ConnectionRefused` for a path that does not exist, not `NotFound`) — is a
+/// leftover or nothing, and the path is cleared unconditionally before the bind. Removing
+/// what is not there is not an error; failing to remove what is there is not fatal on its
+/// own, because the bind that follows is the one that decides, but it is the likeliest
+/// reason that bind fails and so it is carried into the message.
+#[cfg(windows)]
+fn take_endpoint(endpoint: &std::path::Path) -> std::io::Result<UnixListener> {
+    if UnixStream::connect(endpoint).is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!(
+                "another tidemarkd already answers at {}; this one is not needed",
+                endpoint.display()
+            ),
+        ));
+    }
+    let unremoved = match fs::remove_file(endpoint) {
+        Ok(()) => {
+            tracing::info!(
+                endpoint = %endpoint.display(),
+                "cleared the socket a previous daemon left behind"
+            );
+            None
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(error),
+    };
+    UnixListener::bind(endpoint).map_err(|error| {
+        let reason = match unremoved {
+            Some(unremoved) => format!(
+                "cannot serve {}: {error}; the socket left there could not be removed either: {unremoved}",
+                endpoint.display()
+            ),
+            None => format!("cannot serve {}: {error}", endpoint.display()),
+        };
+        std::io::Error::new(error.kind(), reason)
+    })
+}
+
 /// Accepts p2p peers forever, one zbus connection per peer.
 ///
 /// Returns the accept task's handle so shutdown can stop handing out new connections.
@@ -276,26 +332,7 @@ pub(crate) async fn listen(
     if let Some(parent) = endpoint.parent() {
         fs::create_dir_all(parent)?;
     }
-    // A previous daemon killed outright leaves its socket file behind. Only a file that
-    // refuses a connection is stale: one that accepts belongs to a live daemon, and
-    // binding over it would be a hostile takeover.
-    if endpoint.exists() {
-        match UnixStream::connect(&endpoint) {
-            Ok(_stream) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AddrInUse,
-                    format!(
-                        "another tidemarkd already answers at {}; this one is not needed",
-                        endpoint.display()
-                    ),
-                ));
-            }
-            Err(_) => {
-                fs::remove_file(&endpoint)?;
-            }
-        }
-    }
-    let listener = UnixListener::bind(&endpoint)?;
+    let listener = take_endpoint(&endpoint)?;
 
     let (accepted, mut incoming) = mpsc::unbounded_channel();
     thread::Builder::new()
@@ -324,6 +361,95 @@ pub(crate) async fn listen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory of this test's own under the temp dir, named for the test and the
+    /// process, so a parallel run and a leftover from a previous one cannot collide.
+    #[cfg(windows)]
+    fn a_directory_for(test: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tidemark-endpoint-{test}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a directory under the temp dir");
+        dir
+    }
+
+    /// Whether the directory still lists the file — the one question about a socket the
+    /// filesystem answers reliably, and the reason [`take_endpoint`] does not ask
+    /// `Path::exists`, which opens the file to answer and can be refused.
+    #[cfg(windows)]
+    fn listed(path: &std::path::Path) -> bool {
+        fs::read_dir(path.parent().expect("the endpoint has a directory"))
+            .expect("the directory is readable")
+            .flatten()
+            .any(|entry| entry.file_name() == path.file_name().expect("the endpoint is a file"))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_socket_a_killed_daemon_left_behind_does_not_stop_the_next_one() {
+        let endpoint = a_directory_for("killed").join("d.sock");
+        drop(UnixListener::bind(&endpoint).expect("the first daemon binds"));
+        assert!(
+            listed(&endpoint),
+            "a closed socket still occupies its path; without that this test proves nothing"
+        );
+
+        let listener = take_endpoint(&endpoint).expect("the next daemon takes the endpoint over");
+        assert!(
+            UnixStream::connect(&endpoint).is_ok(),
+            "the endpoint the next daemon bound is the one clients reach"
+        );
+        drop(listener);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_endpoint_a_live_daemon_answers_is_left_to_it() {
+        let endpoint = a_directory_for("live").join("d.sock");
+        let live = UnixListener::bind(&endpoint).expect("the running daemon binds");
+
+        let refused = take_endpoint(&endpoint).expect_err("a second daemon must not take it over");
+        assert_eq!(refused.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(
+            UnixStream::connect(&endpoint).is_ok(),
+            "the running daemon still answers on the endpoint it owns"
+        );
+        drop(live);
+    }
+
+    /// The real blocker is a socket the filesystem will not let go of, which cannot be
+    /// manufactured in a test; a directory in the endpoint's place is the same shape —
+    /// something that cannot be removed and cannot be bound over — and it is what the
+    /// message has to survive. `daemon.log` used to carry the bare errno and nothing else,
+    /// which is a fatal error with no way to act on it.
+    #[cfg(windows)]
+    #[test]
+    fn an_endpoint_that_cannot_be_taken_says_which_one_and_why() {
+        let endpoint = a_directory_for("blocked").join("d.sock");
+        fs::create_dir(&endpoint).expect("something in the endpoint's place");
+
+        let refused = take_endpoint(&endpoint).expect_err("nothing can be bound there");
+        let reason = refused.to_string();
+        assert!(
+            reason.contains(&endpoint.display().to_string()),
+            "the failure must name the endpoint, got {reason}"
+        );
+        assert!(
+            reason.contains("could not be removed"),
+            "the failure must say what is in the way, got {reason}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_first_run_binds_an_endpoint_nothing_has_ever_used() {
+        let endpoint = a_directory_for("first-run").join("d.sock");
+        assert!(!listed(&endpoint));
+
+        let listener = take_endpoint(&endpoint).expect("the first daemon of a fresh install binds");
+        assert!(UnixStream::connect(&endpoint).is_ok());
+        drop(listener);
+    }
 
     /// Whether the announcement would be recognisable to a test, without demanding full
     /// wire equality in the queue-level tests.
