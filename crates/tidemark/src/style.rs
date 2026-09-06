@@ -50,6 +50,13 @@ const PLATFORM_STYLE: &str = "
     font-size: 0.9em;
 }
 
+/* libadwaita defines its display title in points, outside the base font it
+   inherits. It is the card percentage and the waiting-page title, so carry
+   the same 9pt-to-10pt correction through that otherwise fixed 20pt size. */
+.title-1 {
+    font-size: 22pt;
+}
+
 .quota-card .quota-footer {
     font-size: 1em;
 }
