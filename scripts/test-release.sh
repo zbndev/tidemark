@@ -168,6 +168,11 @@ printf '0.1.10 is newer than 0.1.9, numerically\n'
 make_fixture
 sed -i "/^\[workspace\.package\]/,/^\[/ s/^version = \"\(.*\)\"\$/version = \"0.1.9\"/" \
     "$fixture/Cargo.toml"
+# Backdating the manifest without backdating the release history leaves release.sh
+# inserting 0.1.10 above the real newest entry, and appstreamcli --pedantic rejects that
+# as out of order. It is an artifact of pretending the fixture is older than it is; a real
+# release only ever prepends something newer.
+sed -i '/^    <release version=/d' "$fixture/$metainfo"
 git -C "$fixture" commit -qam 'fixture at 0.1.9'
 git -C "$fixture" push -q origin main
 (cd "$fixture" && scripts/release.sh 0.1.10) >/dev/null 2>&1
