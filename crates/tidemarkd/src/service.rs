@@ -1332,6 +1332,22 @@ impl Daemon {
         self.publish_preferences(&emitter, preferences).await
     }
 
+    /// Chooses whether the client follows the system appearance or forces a theme.
+    async fn set_theme(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        theme: &str,
+    ) -> fdo::Result<()> {
+        if !Preferences::valid_theme(theme) {
+            return Err(fdo::Error::InvalidArgs(format!("unknown theme {theme:?}")));
+        }
+        let _guard = self.preference_mutation.lock().await;
+        let preferences = self
+            .preference_request(Preference::Theme(theme.into()))
+            .await?;
+        self.publish_preferences(&emitter, preferences).await
+    }
+
     /// Chooses the one coherent login-start mode: app, daemon only, or off.
     async fn set_startup_mode(
         &self,
@@ -4436,6 +4452,37 @@ mod tests {
             panic!("unexpected command");
         };
         assert!(matches!(preference, Preference::RefreshMinutes(30)));
+        reply
+            .send(Ok(Preferences::default()))
+            .expect("caller waits for reply");
+        changing
+            .await
+            .expect("task did not panic")
+            .expect("accepted");
+    }
+
+    #[tokio::test]
+    async fn a_theme_change_reaches_the_engine_and_publishes_the_dict() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let daemon = Arc::new(daemon);
+        let Ok(connection) = zbus::Connection::session().await else {
+            eprintln!("skipped: no session bus reachable");
+            return;
+        };
+        let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH).expect("a valid path");
+
+        let changing = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { daemon.set_theme(emitter, "dark").await })
+        };
+        let Command::SetPreference { preference, reply } = commands
+            .recv()
+            .await
+            .expect("the change reaches the engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert!(matches!(preference, Preference::Theme(theme) if theme == "dark"));
         reply
             .send(Ok(Preferences::default()))
             .expect("caller waits for reply");

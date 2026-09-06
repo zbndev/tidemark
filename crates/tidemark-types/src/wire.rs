@@ -460,6 +460,9 @@ pub struct Preferences {
     pub release_check: bool,
     /// Whether the window's close button hides it when a tray icon can bring it back.
     pub minimize_on_close: bool,
+    /// `system`, `light`, or `dark`: whether the client follows the desktop or forces a theme.
+    /// Absent means system, so a newer client can still read an older daemon's dictionary.
+    pub theme: Option<String>,
     /// `app`, `daemon`, or `off`: the one coherent login-start behavior.
     pub startup_mode: String,
     /// `forever`, `six-months`, or `one-year`.
@@ -488,6 +491,10 @@ impl Preferences {
     pub const STARTUP_DAEMON: &'static str = "daemon";
     pub const STARTUP_OFF: &'static str = "off";
 
+    pub const THEME_SYSTEM: &'static str = "system";
+    pub const THEME_LIGHT: &'static str = "light";
+    pub const THEME_DARK: &'static str = "dark";
+
     pub const RETENTION_FOREVER: &'static str = "forever";
     pub const RETENTION_SIX_MONTHS: &'static str = "six-months";
     pub const RETENTION_ONE_YEAR: &'static str = "one-year";
@@ -505,6 +512,14 @@ impl Preferences {
         matches!(
             value,
             Self::STARTUP_APP | Self::STARTUP_DAEMON | Self::STARTUP_OFF
+        )
+    }
+
+    /// Whether this build knows the named appearance choice.
+    pub fn valid_theme(value: &str) -> bool {
+        matches!(
+            value,
+            Self::THEME_SYSTEM | Self::THEME_LIGHT | Self::THEME_DARK
         )
     }
 
@@ -542,6 +557,7 @@ impl Default for Preferences {
         Self {
             release_check: true,
             minimize_on_close: true,
+            theme: Some(Self::THEME_SYSTEM.into()),
             startup_mode: Self::STARTUP_APP.into(),
             history_retention: Self::RETENTION_FOREVER.into(),
             proxy_mode: Self::PROXY_OFF.into(),
@@ -1190,6 +1206,7 @@ mod tests {
         let original = Preferences {
             release_check: false,
             minimize_on_close: false,
+            theme: Some("dark".into()),
             startup_mode: "daemon".into(),
             history_retention: "one-year".into(),
             proxy_mode: "socks5".into(),
@@ -1202,6 +1219,20 @@ mod tests {
         let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
         let (decoded, _): (Preferences, _) = encoded.deserialize().expect("decodes again");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn an_older_preferences_dictionary_without_theme_still_decodes() {
+        let encoded = to_bytes(Context::new_dbus(LE, 0), &Preferences::default())
+            .expect("the current dictionary encodes");
+        let (mut old_dict, _): (HashMap<String, OwnedValue>, _) =
+            encoded.deserialize().expect("decodes as a dictionary");
+        assert!(old_dict.remove("theme").is_some());
+        let old_encoded =
+            to_bytes(Context::new_dbus(LE, 0), &old_dict).expect("the old dictionary encodes");
+
+        let (decoded, _): (Preferences, _) = old_encoded.deserialize().expect("still decodes");
+        assert_eq!(decoded.theme, None);
     }
 
     #[test]
@@ -1229,5 +1260,19 @@ mod tests {
         }
         assert!(!Preferences::valid_proxy_mode("socks4"));
         assert!(!Preferences::valid_proxy_mode(""));
+    }
+
+    #[test]
+    fn only_system_light_and_dark_themes_are_known() {
+        for theme in [
+            Preferences::THEME_SYSTEM,
+            Preferences::THEME_LIGHT,
+            Preferences::THEME_DARK,
+        ] {
+            assert!(Preferences::valid_theme(theme), "{theme}");
+        }
+        assert!(!Preferences::valid_theme("night"));
+        assert!(!Preferences::valid_theme(""));
+        assert_eq!(Preferences::default().theme.as_deref(), Some("system"));
     }
 }

@@ -656,6 +656,12 @@ impl MainWindow {
 
     fn apply_preferences(&self, preferences: AppPreferences) {
         self.minimize_on_close.set(preferences.minimize_on_close);
+        crate::theme::apply(
+            preferences
+                .theme
+                .as_deref()
+                .unwrap_or(AppPreferences::THEME_SYSTEM),
+        );
         *self.preferences.borrow_mut() = preferences;
         if let Some(dialog) = self.preferences_dialog.get() {
             dialog.apply(&self.preferences.borrow(), &self.data_info.borrow());

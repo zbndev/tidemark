@@ -61,6 +61,7 @@ pub enum Publication {
 pub enum Preference {
     ReleaseCheck(bool),
     MinimizeOnClose(bool),
+    Theme(String),
     StartupMode(String),
     HistoryRetention(String),
     RefreshMode(String),
@@ -1270,6 +1271,7 @@ impl Engine {
         match preference {
             Preference::ReleaseCheck(enabled) => config.set_release_check(enabled),
             Preference::MinimizeOnClose(enabled) => config.set_minimize_on_close(enabled),
+            Preference::Theme(theme) => config.set_theme(&theme),
             Preference::StartupMode(mode) => config.set_startup_mode(&mode),
             Preference::HistoryRetention(retention) => config.set_history_retention(&retention),
             Preference::RefreshMode(mode) => config.set_refresh_mode(&mode),
@@ -4806,6 +4808,7 @@ mod tests {
             Preferences {
                 release_check: false,
                 minimize_on_close: false,
+                theme: Some(Preferences::THEME_SYSTEM.into()),
                 startup_mode: Preferences::STARTUP_DAEMON.into(),
                 history_retention: Preferences::RETENTION_SIX_MONTHS.into(),
                 proxy_mode: Preferences::PROXY_OFF.into(),
@@ -4821,6 +4824,28 @@ mod tests {
                 .preferences()
                 .expect("readable"),
             preferences
+        );
+    }
+
+    #[tokio::test]
+    async fn a_theme_change_is_serialized_through_the_engine() {
+        let mut harness = Harness::empty("application-theme").await;
+
+        let preferences = harness
+            .engine
+            .set_preference(Preference::Theme(Preferences::THEME_DARK.into()))
+            .await
+            .expect("theme changed");
+
+        assert_eq!(preferences.theme.as_deref(), Some("dark"));
+        assert_eq!(
+            Config::at(harness.config_path)
+                .expect("reloaded")
+                .preferences()
+                .expect("readable")
+                .theme
+                .as_deref(),
+            Some("dark")
         );
     }
 
