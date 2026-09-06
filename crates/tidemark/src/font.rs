@@ -126,6 +126,53 @@ pub(crate) fn use_automatic_font_rendering() {
     settings.set_gtk_font_rendering(gtk::FontRendering::Automatic);
 }
 
+/// Lifts Windows' 9pt GTK base to the 10pt baseline used by the Linux builds.
+///
+/// Libadwaita derives ordinary labels, preference rows, dialog prose and its relative
+/// typography classes from `gtk-font-name`. Changing it in this process leaves the
+/// desktop's own setting alone, while carrying the same base size through every Tidemark
+/// surface — including the dialogs that are attached to the main window. The stylesheet
+/// still selects the bundled Rubik, so this adjusts the size without changing its family.
+pub(crate) fn use_linux_sized_ui_font() {
+    let Some(settings) = gtk::Settings::default() else {
+        tracing::warn!(
+            "no GTK settings on this display; Windows text keeps its smaller platform base size"
+        );
+        return;
+    };
+    let Some(font) = settings.gtk_font_name() else {
+        tracing::warn!("GTK did not report a base font; Windows text keeps its platform size");
+        return;
+    };
+    let Some(promoted) = promoted_font_name(&font) else {
+        tracing::warn!(%font, "GTK's base font has no size; Windows text keeps its platform size");
+        return;
+    };
+    settings.set_gtk_font_name(Some(&promoted));
+}
+
+/// The one-step 9pt-to-10pt adjustment, retaining the user's own family and style.
+///
+/// GTK for Windows uses exactly 9pt by default. Any other configured size is an
+/// explicit desktop choice and must remain untouched.
+fn promoted_font_name(font: &str) -> Option<String> {
+    let mut description = pango::FontDescription::from_string(font);
+    let size = description.size();
+    if size == 0 {
+        return None;
+    }
+    if size != 9 * pango::SCALE {
+        return Some(description.to_string());
+    }
+    let promoted = 10 * pango::SCALE;
+    if description.is_size_absolute() {
+        description.set_absolute_size(f64::from(promoted));
+    } else {
+        description.set_size(promoted);
+    }
+    Some(description.to_string())
+}
+
 /// Adds the installed Rubik to GTK's display-wide Pango font map.
 ///
 /// This must run during application startup, before the first window builds
@@ -168,6 +215,24 @@ pub(crate) fn register(font_map: &pango::FontMap, font: &Path) -> Result<(), gtk
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_nine_point_windows_font_is_promoted_to_ten_points() {
+        assert_eq!(promoted_font_name("Segoe UI 9"), Some("Segoe UI 10".into()));
+    }
+
+    #[test]
+    fn a_user_configured_font_size_is_left_alone() {
+        assert_eq!(
+            promoted_font_name("Segoe UI 11"),
+            Some("Segoe UI 11".into())
+        );
+    }
+
+    #[test]
+    fn a_font_without_a_size_is_not_promoted() {
+        assert_eq!(promoted_font_name("Segoe UI"), None);
+    }
 
     /// The font this interface is typeset in, from the tree rather than an install.
     fn rubik() -> PathBuf {

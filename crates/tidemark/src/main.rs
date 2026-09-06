@@ -127,6 +127,7 @@ fn main() -> glib::ExitCode {
         #[cfg(windows)]
         {
             font::use_automatic_font_rendering();
+            font::use_linux_sized_ui_font();
             font::configure();
         }
         style::load();
