@@ -121,10 +121,14 @@ fn main() -> glib::ExitCode {
         .build();
 
     app.connect_startup(|_| {
-        // GTK has created its display-wide Pango map, but no application
-        // widgets exist yet. Register the packaged font before CSS selects it.
+        // GTK has created its display-wide Pango map and the settings that go with
+        // it, but no application widgets exist yet: the last moment to say how text
+        // is rendered, and to register the packaged font before CSS selects it.
         #[cfg(windows)]
-        font::configure();
+        {
+            font::use_automatic_font_rendering();
+            font::configure();
+        }
         style::load();
     });
     app.connect_activate(move |app| {
