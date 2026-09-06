@@ -21,6 +21,8 @@ mod bar;
 mod bus;
 mod card;
 mod chart;
+#[cfg(windows)]
+mod daemon_job;
 mod detail;
 #[cfg(windows)]
 mod file_log;

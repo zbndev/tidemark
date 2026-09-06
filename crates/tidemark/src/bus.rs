@@ -558,6 +558,10 @@ mod reconnect {
 
     /// Brings `tidemarkd.exe` up: the sibling of this program, found by its own location
     /// — never a `PATH` search — with no arguments and no environment overrides.
+    ///
+    /// The daemon started here is this client's to end. Nothing else will: it has no
+    /// window, no icon and no service manager behind it, so it joins the kill-on-close job
+    /// and dies when this process does. See `daemon_job`.
     #[cfg(windows)]
     fn spawn_daemon() {
         let spawned = std::env::current_exe()
@@ -572,10 +576,11 @@ mod reconnect {
             .and_then(|path| {
                 let mut command = std::process::Command::new(path);
                 command.creation_flags(CREATE_NO_WINDOW);
-                command.spawn().map(|_child| ())
+                command.spawn()
             });
-        if let Err(error) = spawned {
-            tracing::warn!(%error, "could not spawn tidemarkd.exe");
+        match spawned {
+            Ok(child) => crate::daemon_job::adopt(&child),
+            Err(error) => tracing::warn!(%error, "could not spawn tidemarkd.exe"),
         }
     }
 
