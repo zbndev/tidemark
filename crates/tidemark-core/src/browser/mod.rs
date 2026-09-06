@@ -622,9 +622,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 mod storage {
     use std::path::{Path, PathBuf};
 
-    use super::{Browser, CookieError};
-    #[cfg(unix)]
-    use super::{SNAPSHOT_DATABASE, with_suffix};
+    use super::{Browser, CookieError, SNAPSHOT_DATABASE, with_suffix};
 
     /// The absolute directories one browser keeps its profiles under on this machine,
     /// in scan order. Linux resolves a browser's roots against `$HOME`: distribution
@@ -736,11 +734,42 @@ mod storage {
     }
 
     /// [`copy_snapshot`], for Windows, where the private-copy discipline needs the
-    /// platform's own share-mode open. Declared for todo 17 of the Windows port; until
-    /// then this platform answers that its half is missing.
+    /// platform's own share-mode open.
+    ///
+    /// The set of files copied is the same as the Unix arm's, and for the same reason: a
+    /// running browser keeps its database in WAL mode, so the newest cookies live in the
+    /// `-wal` sidecar and not in the main file at all. Copying the main file alone hands
+    /// back whatever was last checkpointed, which is how a session the user just started
+    /// goes missing and a replaced one still reads as the old account.
+    #[cfg(windows)]
+    pub(crate) fn copy_snapshot(source: &Path, directory: &Path) -> Result<(), CookieError> {
+        let unreadable = |error: std::io::Error| CookieError::Unreadable {
+            // The browser's own database is the path an error carries — not the copy's,
+            // which is Tidemark's private business.
+            path: source.to_path_buf(),
+            source: error,
+        };
+        std::fs::create_dir(directory).map_err(unreadable)?;
+        let database = directory.join(SNAPSHOT_DATABASE);
+        share_mode_copy(source, &database).map_err(unreadable)?;
+        for sidecar in ["-wal", "-shm"] {
+            let sidecar_source = with_suffix(source, sidecar);
+            if sidecar_source.is_file() {
+                share_mode_copy(&sidecar_source, &with_suffix(&database, sidecar))
+                    .map_err(unreadable)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies one file that a live browser may hold open.
+    ///
+    /// `std::fs::copy` opens the source with no sharing and would be denied against a
+    /// running browser, so the source is opened first asking for read access only and
+    /// granting every share mode; the handle stays alive across the copy.
     #[cfg(windows)]
     #[allow(unsafe_code)]
-    pub(crate) fn copy_snapshot(source: &Path, directory: &Path) -> Result<(), CookieError> {
+    fn share_mode_copy(source: &Path, destination: &Path) -> std::io::Result<()> {
         use std::os::windows::ffi::OsStrExt as _;
         use std::os::windows::fs::OpenOptionsExt as _;
         use windows::Win32::Storage::FileSystem::{
@@ -748,19 +777,10 @@ mod storage {
         };
         use windows::core::PCWSTR;
 
-        let unreadable = |error: std::io::Error| CookieError::Unreadable {
-            path: source.to_path_buf(),
-            source: error,
-        };
-        std::fs::create_dir(directory).map_err(unreadable)?;
-        // Keep a share-mode read handle open while CopyFileW takes the snapshot. This asks
-        // for no write access and remains compatible with a live browser's SQLite handle.
         let _source_handle = std::fs::OpenOptions::new()
             .read(true)
             .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
-            .open(source)
-            .map_err(unreadable)?;
-        let destination = directory.join(super::SNAPSHOT_DATABASE);
+            .open(source)?;
         let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
         let destination_wide: Vec<u16> = destination
             .as_os_str()
@@ -775,8 +795,7 @@ mod storage {
                 true,
             )
         }
-        .map_err(|error| unreadable(std::io::Error::other(error)))?;
-        Ok(())
+        .map_err(std::io::Error::other)
     }
 }
 
@@ -1092,17 +1111,21 @@ pub(crate) mod tests {
         );
     }
 
+    /// The share-mode copy is the Windows half of the private-copy discipline: it must
+    /// still work against a database another process is holding open, which is the normal
+    /// case — the browser is running.
     #[cfg(windows)]
     #[test]
-    fn windows_snapshot_is_a_private_copy_without_unix_sidecars() {
+    fn a_windows_snapshot_copies_a_database_a_live_process_holds_open() {
         let home = TestHome::new();
         let path = home.profile("chromium/Default", "Cookies");
-        std::fs::write(with_suffix(&path, "-wal"), b"must not be copied").expect("writes");
+        std::fs::write(&path, b"main").expect("writes");
+        let held = std::fs::File::open(&path).expect("a live reader");
 
         let snapshot = Snapshot::of(&path).expect("copies");
 
-        assert_eq!(std::fs::read(snapshot.database()).expect("reads"), b"");
-        assert!(!with_suffix(&snapshot.database(), "-wal").exists());
+        assert_eq!(std::fs::read(snapshot.database()).expect("reads"), b"main");
+        drop(held);
     }
 
     #[cfg(unix)]
@@ -1121,7 +1144,41 @@ pub(crate) mod tests {
         assert_eq!(mode & 0o777, 0o700);
     }
 
-    #[cfg(unix)]
+    /// The scenario the sidecars exist for, end to end: a live browser holds its newest
+    /// writes in the `-wal` sidecar, so a snapshot of the main database alone reads back
+    /// the last checkpoint. That is not a stale-by-a-moment answer — it is the previous
+    /// account's session, long after the user replaced it.
+    #[test]
+    fn a_snapshot_reads_the_row_that_is_still_only_in_the_wal() {
+        let home = TestHome::new();
+        let path = home.profile("chromium/Default", "Cookies");
+        let live = rusqlite::Connection::open(&path).expect("opens");
+        live.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE accounts (name TEXT);
+             INSERT INTO accounts (name) VALUES ('old-account');",
+        )
+        .expect("seeds the database");
+        // Checkpointed, so 'old-account' is what the main file itself holds.
+        live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("checkpoints");
+        live.execute("UPDATE accounts SET name = 'new-account'", [])
+            .expect("replaces the session");
+
+        let snapshot = Snapshot::of(&path).expect("copies");
+
+        let copy = rusqlite::Connection::open(snapshot.database()).expect("opens the copy");
+        let name: String = copy
+            .query_row("SELECT name FROM accounts", [], |row| row.get(0))
+            .expect("reads the copy");
+        assert_eq!(
+            name, "new-account",
+            "the copy must see what the browser sees"
+        );
+        drop(live);
+    }
+
     #[test]
     fn both_sidecars_are_copied_when_both_exist() {
         let home = TestHome::new();
@@ -1161,10 +1218,6 @@ pub(crate) mod tests {
         }
     }
 
-    // -wal/-shm sidecar copying is the unix snapshot discipline; the windows
-    // snapshot (todo 17) copies the database alone because Windows SQLite lock
-    // semantics differ.
-    #[cfg(unix)]
     #[test]
     fn a_snapshot_copies_the_sidecars_and_takes_the_copy_with_it() {
         let home = TestHome::new();

@@ -1576,7 +1576,6 @@ mod tests {
             .expect("inserts the access token");
     }
 
-    #[cfg(unix)]
     fn cursor_state_in_wal(
         home: &crate::browser::tests::TestHome,
         access_token: &str,
@@ -2039,9 +2038,9 @@ mod tests {
         assert_eq!(header_of(&provider), None);
     }
 
-    // WAL-committed sqlite reads and Secret Service keyring states are the
-    // unix backends; the windows backend surfaces are todo 10/17 territory.
-    #[cfg(unix)]
+    /// The session Cursor wrote most recently is the one in the `-wal` sidecar, on every
+    /// platform: a snapshot that copied the main database alone would answer with the
+    /// last checkpoint and miss a session the user just started.
     #[test]
     fn a_cursor_desktop_session_committed_only_to_wal_is_found() {
         let home = crate::browser::tests::TestHome::new();
