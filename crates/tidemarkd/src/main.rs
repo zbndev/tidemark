@@ -10,13 +10,25 @@
 //! next poll is, and `service` is the D-Bus interface. This file wires them together and
 //! handles shutdown.
 
+// A background service must not keep a console window: on Windows the GUI subsystem
+// detaches it at link time. Gated off tests so failures still print. The file log
+// stays the eyes (see file_log).
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 mod engine;
+#[cfg(windows)]
+mod file_log;
 mod keyring;
+#[cfg(windows)]
+mod lifecycle;
 mod notify;
+mod peer;
 mod registry;
 mod scheduler;
 mod service;
 mod startup;
+#[cfg(windows)]
+mod supervisor;
 #[cfg(feature = "update-check")]
 mod update;
 
@@ -29,12 +41,15 @@ use tidemark_core::paths;
 use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::secrets::Secrets;
 use tidemark_core::storage::History;
-use tidemark_types::ids;
-use tokio::signal::unix::{SignalKind, signal};
+use tidemark_types::{ProviderStatus, ids};
 use tokio::sync::{mpsc, watch};
+
+#[cfg(unix)]
 use zbus::object_server::SignalEmitter;
 
 use crate::engine::{Command, Engine, Publication};
+#[cfg(windows)]
+use crate::peer::{Announcement, PeerHub};
 use crate::service::{Daemon, Published, PublishedUpdate};
 
 /// Commands from D-Bus clients. Small: a burst of refreshes is a user hammering a button,
@@ -87,13 +102,149 @@ async fn publish_result(
     Ok(published.publish(result?).await)
 }
 
+/// Spawns the watcher that turns the platform's "stop now" notice into
+/// [`Command::Shutdown`], so the engine stops cleanly instead of being killed mid-poll.
+/// The streams are registered before the spawn: a daemon that cannot arrange to hear
+/// its own stop signal is a startup failure, never a runtime surprise.
+#[cfg(unix)]
+fn shutdown_signals(
+    commands: mpsc::Sender<Command>,
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut term = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(tokio::spawn(async move {
+        let reason = tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = interrupt.recv() => "SIGINT",
+        };
+        tracing::info!(reason, "tidemarkd stopping");
+        let _ = commands.send(Command::Shutdown).await;
+    }))
+}
+
+/// The same contract on Windows: there is no SIGTERM for a console application, the OS
+/// asks to be let go with console control events. tokio's signal feature — already
+/// linked — registers the one `SetConsoleCtrlHandler` a process may install and hands
+/// back every event a daemon can receive as streams, waited on exactly like the Unix
+/// arm's signal pair.
+///
+/// The `windows` crate is deliberately not used for this: its `SetConsoleCtrlHandler`
+/// is an `unsafe fn` taking an `unsafe extern "system" fn` handler, and this workspace
+/// forbids `unsafe`. tokio covers the same events through a safe API, so tidemarkd
+/// needs no `[target.'cfg(windows)'.dependencies]` entry here.
+#[cfg(windows)]
+fn shutdown_signals(
+    commands: mpsc::Sender<Command>,
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    let mut term = tokio::signal::windows::ctrl_break()?;
+    let mut interrupt = tokio::signal::windows::ctrl_c()?;
+    let mut close = tokio::signal::windows::ctrl_close()?;
+    let mut logoff = tokio::signal::windows::ctrl_logoff()?;
+    let mut system = tokio::signal::windows::ctrl_shutdown()?;
+    Ok(tokio::spawn(async move {
+        let reason = tokio::select! {
+            _ = term.recv() => "Ctrl+Break",
+            _ = interrupt.recv() => "Ctrl+C",
+            _ = close.recv() => "Ctrl+Close",
+            _ = logoff.recv() => "Ctrl+Logoff",
+            _ = system.recv() => "Ctrl+Shutdown",
+        };
+        tracing::info!(reason, "tidemarkd stopping");
+        let _ = commands.send(Command::Shutdown).await;
+    }))
+}
+
+/// Where finished announcements go: the session-bus emitter on Linux, byte-for-byte the
+/// old path, or the p2p peer hub on Windows, which fans out to every connected client.
+#[derive(Clone)]
+enum Announcer {
+    #[cfg(unix)]
+    Session(SignalEmitter<'static>),
+    #[cfg(windows)]
+    Peers(Arc<PeerHub>),
+}
+
+impl Announcer {
+    async fn provider_changed(&self, status: ProviderStatus) {
+        match self {
+            #[cfg(unix)]
+            Self::Session(emitter) => {
+                if let Err(error) = Daemon::provider_changed(emitter, status).await {
+                    tracing::warn!(%error, "could not announce a change");
+                }
+            }
+            #[cfg(windows)]
+            Self::Peers(hub) => {
+                hub.publish(Announcement::ProviderChanged(status)).await;
+            }
+        }
+    }
+
+    async fn provider_removed(&self, provider: String, account: String) {
+        match self {
+            #[cfg(unix)]
+            Self::Session(emitter) => {
+                if let Err(error) = Daemon::provider_removed(emitter, &provider, &account).await {
+                    tracing::warn!(%error, "could not announce a removal");
+                }
+            }
+            #[cfg(windows)]
+            Self::Peers(hub) => {
+                hub.publish(Announcement::ProviderRemoved { provider, account })
+                    .await;
+            }
+        }
+    }
+
+    async fn order_changed(&self, providers: Vec<String>) {
+        match self {
+            #[cfg(unix)]
+            Self::Session(emitter) => {
+                if let Err(error) = Daemon::order_changed(emitter, providers).await {
+                    tracing::warn!(%error, "could not announce a reorder");
+                }
+            }
+            #[cfg(windows)]
+            Self::Peers(hub) => {
+                hub.publish(Announcement::OrderChanged(providers)).await;
+            }
+        }
+    }
+
+    #[cfg(feature = "update-check")]
+    async fn update_changed(&self, version: &str) {
+        match self {
+            #[cfg(unix)]
+            Self::Session(emitter) => {
+                if let Err(error) = Daemon::update_changed(emitter, version).await {
+                    tracing::warn!(%error, "could not announce update availability");
+                }
+            }
+            #[cfg(windows)]
+            Self::Peers(hub) => {
+                hub.publish(Announcement::UpdateChanged(version.to_owned()))
+                    .await;
+            }
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "tidemarkd=info".into()),
-        )
-        .init();
+    #[cfg(windows)]
+    let sink = file_log::init()
+        .map(file_log::Sink::File)
+        .unwrap_or(file_log::Sink::Stderr);
+    let subscriber = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            // Core included: the credential backends live there, and a daemon log
+            // that cannot show them is blind to exactly the failures that matter.
+            .unwrap_or_else(|_| "tidemarkd=info,tidemark_core=info".into()),
+    );
+    #[cfg(windows)]
+    let subscriber = subscriber.with_writer(sink).with_ansi(false);
+    subscriber.init();
 
     if std::env::args().any(|a| a == "--version") {
         println!("tidemarkd {}", env!("CARGO_PKG_VERSION"));
@@ -121,6 +272,23 @@ fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
+    // The single-instance lock comes before any shared state is opened: the history
+    // database is the first of it, and a second daemon must never get as far as
+    // opening it. Windows has no D-Bus name to race for, so this mutex is the whole
+    // arbitration; a duplicate exits 0 quietly because a running daemon is exactly
+    // the outcome a duplicate was started to provide.
+    #[cfg(windows)]
+    let _singleton = match lifecycle::Singleton::acquire() {
+        Ok(Some(singleton)) => Some(singleton),
+        Ok(None) => {
+            tracing::info!("another tidemarkd already runs for this user; this one is not needed");
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(format!("could not take the single-instance mutex: {error}").into());
+        }
+    };
+
     let history_path = paths::history_path()?;
     let history = History::open(&history_path)?;
     let config_path = paths::config_path()?;
@@ -181,6 +349,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(not(feature = "update-check"))]
     let _release_check_changes = release_check_changes;
 
+    #[cfg(unix)]
     let connection = zbus::connection::Builder::session()?
         .name(ids::DAEMON_BUS_NAME)?
         .serve_at(
@@ -212,28 +381,51 @@ async fn run() -> Result<(), Box<dyn Error>> {
             other => Box::<dyn Error>::from(other),
         })?;
 
+    #[cfg(unix)]
+    let announcer = Announcer::Session(SignalEmitter::new(&connection, ids::OBJECT_PATH)?);
+
+    // Windows has no session bus to serve the interface on: the p2p endpoint is the
+    // service. The hub is the fan-out point for everything the daemon announces, and
+    // every accepted peer gets its own connection serving this same shared state.
+    #[cfg(windows)]
+    let (announcer, accept_task) = {
+        let hub = Arc::new(PeerHub::default());
+        let daemon = Daemon::new(
+            published.clone(),
+            published_update.clone(),
+            catalog,
+            configured,
+            commands.clone(),
+            Arc::clone(&secrets),
+        )
+        .with_preferences(
+            config_path.clone(),
+            history_path.clone(),
+            Arc::new(startup::System),
+            release_checks.clone(),
+            cfg!(feature = "update-check"),
+        )
+        .with_hub(Arc::clone(&hub));
+        let accept_task = peer::listen(daemon, Arc::clone(&hub)).await?;
+        (Announcer::Peers(hub), accept_task)
+    };
+
     // Publishing is one task so that the shared state is always written before the signal
     // that announces it: a client woken by `ProviderChanged` and calling `GetStatus`
     // straight away must never see the older value.
-    let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH)?;
     let publisher = tokio::spawn({
         let published = published.clone();
+        let announcer = announcer.clone();
         async move {
             while let Some(publication) = update_queue.recv().await {
                 match publication {
                     Publication::Changed(status) => {
                         published.upsert(status.clone()).await;
-                        if let Err(error) = Daemon::provider_changed(&emitter, status).await {
-                            tracing::warn!(%error, "could not announce a change");
-                        }
+                        announcer.provider_changed(status).await;
                     }
                     Publication::Removed { provider, account } => {
                         let _ = published.remove(&provider, &account).await;
-                        if let Err(error) =
-                            Daemon::provider_removed(&emitter, &provider, &account).await
-                        {
-                            tracing::warn!(%error, "could not announce a removal");
-                        }
+                        announcer.provider_removed(provider, account).await;
                     }
                     Publication::Reordered(accounts) => {
                         published.reorder(&accounts).await;
@@ -243,9 +435,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                                 providers.push(provider.clone());
                             }
                         }
-                        if let Err(error) = Daemon::order_changed(&emitter, providers).await {
-                            tracing::warn!(%error, "could not announce a reorder");
-                        }
+                        announcer.order_changed(providers).await;
                     }
                 }
             }
@@ -256,7 +446,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let release_checker = match update::Checker::production() {
         Ok(checker) => {
             let published_update = published_update.clone();
-            let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH)?;
+            let announcer = announcer.clone();
             Some(tokio::spawn(async move {
                 let mut delay = update::INITIAL_DELAY;
                 loop {
@@ -268,9 +458,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     let result = checker.check().await;
                     match publish_result(&published_update, result).await {
                         Ok(Some(version)) => {
-                            if let Err(error) = Daemon::update_changed(&emitter, &version).await {
-                                tracing::warn!(%error, "could not announce update availability");
-                            }
+                            announcer.update_changed(&version).await;
                         }
                         Ok(None) => {}
                         Err(error) => tracing::info!(%error, "release check failed"),
@@ -287,23 +475,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(not(feature = "update-check"))]
     let release_checker: Option<tokio::task::JoinHandle<()>> = None;
 
-    let mut term = signal(SignalKind::terminate())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let signals = tokio::spawn({
-        let commands = commands.clone();
-        async move {
-            let reason = tokio::select! {
-                _ = term.recv() => "SIGTERM",
-                _ = interrupt.recv() => "SIGINT",
-            };
-            tracing::info!(reason, "tidemarkd stopping");
-            let _ = commands.send(Command::Shutdown).await;
-        }
-    });
+    let signals = shutdown_signals(commands.clone())?;
 
-    // The daemon's own session-bus connection carries the notifications too: it is already
+    // The daemon's own connection carries the notifications on Linux: it is already
     // open, and org.freedesktop.Notifications is on the same bus as everything else here.
+    // Windows has no session bus, and the toast transport (todo 16) needs none.
+    #[cfg(unix)]
     let notifier = Arc::new(notify::Desktop::new(connection.clone()));
+    #[cfg(windows)]
+    let notifier = Arc::new(notify::Desktop::new());
     let mut engine = Engine::new(
         accounts,
         history,
@@ -327,6 +507,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         release_checker.abort();
     }
     signals.abort();
+    #[cfg(windows)]
+    accept_task.abort();
     Ok(())
 }
 
@@ -406,5 +588,39 @@ mod tests {
             None
         );
         assert_eq!(published.get().await, "");
+    }
+}
+
+/// The signal wiring has no feature gate of its own; this module keeps it pinned
+/// separately so it runs in every configuration the daemon can be built in.
+#[cfg(all(test, unix))]
+mod signal_tests {
+    use super::*;
+
+    /// Pins the shutdown wiring end to end: once this process is told to terminate,
+    /// `Command::Shutdown` must reach the engine's command queue. The signal is real —
+    /// `kill(1)` stands in for the signal-raising API std does not have, the
+    /// alternative being a libc dependency just for this test — and it travels the
+    /// helper's whole path: registration, stream, select, channel send.
+    #[tokio::test]
+    async fn a_termination_signal_reaches_the_command_queue() {
+        let (commands, mut queue) = mpsc::channel(COMMAND_QUEUE);
+        shutdown_signals(commands).expect("the SIGTERM and SIGINT streams register");
+
+        let delivered = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(std::process::id().to_string())
+            .status()
+            .expect("kill(1) is on the test host");
+        assert!(
+            delivered.success(),
+            "the signal was delivered to this process"
+        );
+
+        let command = tokio::time::timeout(std::time::Duration::from_secs(5), queue.recv())
+            .await
+            .expect("the watcher wakes on its own")
+            .expect("the watcher keeps the queue open until it is aborted");
+        assert!(matches!(command, Command::Shutdown));
     }
 }

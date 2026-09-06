@@ -1,7 +1,9 @@
 //! Qoder credits, read from the browser session that signs in to its dashboard.
 
 use super::{HandSpec, Options, ProviderError, http, redact_query, session};
-use crate::browser::{self, Keyring, SafeStorage, auth::Selection};
+#[cfg(test)]
+use crate::browser::auth::Selection;
+use crate::browser::{self, Keyring, SafeStorage};
 use crate::providers::{BoxFuture, Credential, Provider};
 use serde_json::Value;
 use std::fmt;
@@ -38,35 +40,52 @@ pub static SPEC: HandSpec = HandSpec {
 
 fn build(
     account: AccountId,
-    _credential: Credential,
+    credential: Credential,
     options: &Options,
 ) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Qoder::new_for_account(account, options)?))
+    Ok(Arc::new(Qoder::new_for_account(
+        account,
+        &credential,
+        options,
+    )?))
 }
 
 /// One Qoder account, authenticated by one explicitly chosen browser profile.
 pub struct Qoder {
     tidemark_account: AccountId,
     client: reqwest::Client,
-    home: Option<PathBuf>,
+    /// The root the browser scan is taken under, and a test fixture in every build that
+    /// states one: production leaves it unset so that each platform's own browser layout
+    /// decides where profiles live. A browser home is not a vendor home — Windows keeps
+    /// browser profiles under `%LOCALAPPDATA%`/`%APPDATA%`, never under the user's own
+    /// profile directory — so rooting the scan at one would find no browser there at all.
+    browser_home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
-    selection: Option<Selection>,
+    source: Option<session::Source>,
     #[cfg(test)]
     urls: Option<(String, String)>,
 }
 
 impl Qoder {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
-        Self::new_for_account(AccountId::default(), options)
+        Self::new_for_account(
+            AccountId::default(),
+            &Credential::new(String::new()),
+            options,
+        )
     }
 
-    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
+    fn new_for_account(
+        account_id: AccountId,
+        credential: &Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
             tidemark_account: account_id.clone(),
             client: http::client()?,
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            browser_home: None,
             storage: Arc::new(Keyring),
-            selection: session::selection(options),
+            source: session::source(credential, options),
             #[cfg(test)]
             urls: None,
         })
@@ -82,12 +101,12 @@ impl Qoder {
         Ok(Self {
             tidemark_account: AccountId::default(),
             client: http::client()?,
-            home: Some(home.to_path_buf()),
+            browser_home: Some(home.to_path_buf()),
             storage,
-            selection: Some(Selection {
+            source: Some(session::Source::Browser(Selection {
                 browser: "firefox".into(),
                 profile: None,
-            }),
+            })),
             urls: Some((
                 format!(
                     "{}/api/v2/me/usages/big_model_credits",
@@ -136,11 +155,11 @@ impl Qoder {
     }
 
     async fn session(&self, url: &str) -> Result<String, ProviderError> {
-        let selection = self.selection.as_ref().ok_or(ProviderError::NoCredential)?;
+        let source = self.source.as_ref().ok_or(ProviderError::NoCredential)?;
         session::session(
-            self.home.as_deref(),
+            self.browser_home.as_deref(),
             self.storage.as_ref(),
-            selection,
+            source,
             &[],
             &cookie_query(),
             url,
@@ -202,7 +221,7 @@ impl Qoder {
 
     async fn inspect_sources(&self) -> Vec<AuthCandidate> {
         let international = session::inspect_sources(
-            self.home.as_deref(),
+            self.browser_home.as_deref(),
             self.storage.as_ref(),
             &[],
             &cookie_query(),
@@ -211,7 +230,7 @@ impl Qoder {
         )
         .await;
         let china = session::inspect_sources(
-            self.home.as_deref(),
+            self.browser_home.as_deref(),
             self.storage.as_ref(),
             &[],
             &cookie_query(),
@@ -219,7 +238,22 @@ impl Qoder {
             |credential| async move { self.validate_header(credential.header(), true).await },
         )
         .await;
-        merge_sources(international, china)
+        let browsers = merge_sources(international, china);
+        session::modes(
+            browsers,
+            self.source.as_ref().and_then(session::Source::pasted),
+            // A pasted header names no site, so it is proved in the order the fetch takes
+            // it: the international dashboard first, the China one only if that refuses.
+            |header| async move {
+                match self.validate_header(&header, false).await {
+                    crate::browser::auth::Validation::Ready => {
+                        crate::browser::auth::Validation::Ready
+                    }
+                    _ => self.validate_header(&header, true).await,
+                }
+            },
+        )
+        .await
     }
 }
 
@@ -487,7 +521,7 @@ fn number_text(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Qoder, parse};
+    use super::{Qoder, parse, session};
     use crate::browser::SafeStorage;
     use crate::providers::{Provider, ProviderError};
     use crate::secrets::SecretError;
@@ -748,11 +782,14 @@ mod tests {
             .expect("inspects sources");
         server.join().expect("server exits");
 
-        assert_eq!(sources[0].children[0].id, "firefox/Default");
-        assert_eq!(
-            sources[0].children[0].state,
-            AuthCandidateState::Ready.as_wire()
-        );
+        // The report is modes first: browser profiles under the browser mode, and the
+        // paste mode beside it with nothing stored under it.
+        assert_eq!(sources[0].id, session::BROWSER_SOURCE);
+        let profile = &sources[0].children[0].children[0];
+        assert_eq!(profile.id, "firefox/Default");
+        assert_eq!(profile.state, AuthCandidateState::Ready.as_wire());
+        assert_eq!(sources[1].id, session::PASTE_SOURCE);
+        assert_eq!(sources[1].state, AuthCandidateState::Missing.as_wire());
     }
 
     #[test]

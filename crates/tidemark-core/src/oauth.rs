@@ -392,10 +392,20 @@ pub fn client() -> Result<reqwest::Client, ProviderError> {
 /// generator: this is the value that stops another process on the machine from completing
 /// a login it did not start.
 fn random_token() -> String {
-    let mut buffer = [const { std::mem::MaybeUninit::<u8>::uninit() }; 32];
-    let (filled, _) = rustix::rand::getrandom(&mut buffer, rustix::rand::GetRandomFlags::empty())
-        .expect("getrandom cannot fail for a 32-byte buffer with no flags");
-    BASE64URL.encode(filled)
+    #[cfg(unix)]
+    {
+        let mut buffer = [const { std::mem::MaybeUninit::<u8>::uninit() }; 32];
+        let (filled, _) =
+            rustix::rand::getrandom(&mut buffer, rustix::rand::GetRandomFlags::empty())
+                .expect("getrandom cannot fail for a 32-byte buffer with no flags");
+        BASE64URL.encode(filled)
+    }
+    #[cfg(windows)]
+    {
+        let mut buffer = [0u8; 32];
+        getrandom::fill(&mut buffer).expect("the Windows system RNG is available");
+        BASE64URL.encode(buffer)
+    }
 }
 
 /// The S256 PKCE challenge for a verifier.

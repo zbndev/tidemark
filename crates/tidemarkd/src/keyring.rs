@@ -40,9 +40,9 @@ impl Keyring {
 
     /// Runs one operation against a connected store, connecting first if needed.
     ///
-    /// Written as a combinator because the reconnect rule is the interesting part: a D-Bus
-    /// failure drops the held connection so the *next* call builds a new one, and a call
-    /// that merely found nothing does not.
+    /// Written as a combinator because the reconnect rule is the interesting part: an
+    /// unavailable store drops the held connection so the *next* call builds a new one, and
+    /// a call that merely found nothing does not.
     async fn with_store<T>(
         &self,
         operation: impl AsyncFnOnce(&Store) -> Result<T, SecretError>,
@@ -57,7 +57,7 @@ impl Keyring {
         };
 
         let result = operation(&store).await;
-        if matches!(result, Err(SecretError::Dbus(_))) {
+        if matches!(result, Err(SecretError::Unavailable(_))) {
             // The connection is the likeliest casualty; the next call builds a new one
             // rather than reusing a socket the bus has already forgotten about.
             let mut held = self.store.lock().await;

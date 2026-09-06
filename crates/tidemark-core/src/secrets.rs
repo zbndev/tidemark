@@ -1,6 +1,6 @@
 //! Secret Service access for the credentials Tidemark owns.
 //!
-//! Two kinds, under two schemas, and the split is not cosmetic.
+//! Three kinds, under three schemas, and the split is not cosmetic.
 //!
 //! * **Keys** — Z.ai and Kimi are plain API keys the user types in, filed under
 //!   `io.github.zbndev.Tidemark.ProviderKey`.
@@ -9,11 +9,16 @@
 //!   files owned by their own CLIs and refresh them in place per ADR 0001; a token here is
 //!   the other case, an account the user signed into *from Tidemark*, which is stored here
 //!   precisely so that no vendor credential file has to be created or replaced to hold it.
+//! * **Sessions** — a browser session cookie the user pasted in, filed under
+//!   `io.github.zbndev.Tidemark.ProviderSession`. Providers that authenticate with a
+//!   browser session normally read that cookie out of the browser's own cookie store; a
+//!   session here is the fallback for when the platform will not let any process but the
+//!   browser read it, which since Chrome M127 is every Chromium profile on Windows.
 //!
-//! The two schemas are separate so that a lookup for one can never return the other. They
-//! could not have been one schema with an extra attribute: `search_items` matches on the
-//! whole attribute set, so adding a discriminator to the key schema would have made every
-//! key already in a user's keyring invisible.
+//! The schemas are separate so that a lookup for one can never return another. They could
+//! not have been one schema with an extra attribute: `search_items` matches on the whole
+//! attribute set, so adding a discriminator to the key schema would have made every key
+//! already in a user's keyring invisible.
 //!
 //! # The trap this module exists to avoid
 //!
@@ -26,6 +31,7 @@
 //! dialog popping up from an unattended background process. Locked is a state for the
 //! caller to wait out, not an error to log and not a crash.
 
+#[cfg(unix)]
 use oo7::dbus::{Collection, Service};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as SyncMutex};
@@ -46,8 +52,14 @@ pub use tidemark_types::ids::SECRET_SCHEMA as SCHEMA;
 /// The separate schema a Tidemark-owned OAuth credential is filed under.
 pub use tidemark_types::ids::TOKEN_SCHEMA;
 
+/// The separate schema a browser session the user pasted in is filed under.
+pub use tidemark_types::ids::SESSION_SCHEMA;
+
+#[cfg(unix)]
 const ATTR_SCHEMA: &str = "xdg:schema";
+#[cfg(unix)]
 const ATTR_PROVIDER: &str = "provider";
+#[cfg(unix)]
 const ATTR_ACCOUNT: &str = "account";
 
 /// Why a Secret Service operation did not produce a value.
@@ -55,45 +67,62 @@ const ATTR_ACCOUNT: &str = "account";
 pub enum SecretError {
     /// The collection is locked. Not a failure — see the module docs. The caller should
     /// surface a "waiting for keyring" state and try again later rather than treat this as
-    /// a credential problem or a crash.
+    /// a credential problem or a crash. A Windows backend never returns this variant.
     #[error("the keyring is locked")]
     Locked,
     /// The stored secret is not valid UTF-8. Nothing we write can produce this; it means
     /// something else wrote to our schema.
     #[error("stored secret is not valid UTF-8")]
     NotUtf8,
-    /// Talking to `org.freedesktop.secrets` failed outright: no provider is running, the
-    /// bus is unreachable, or the call errored.
-    #[error("secret service unavailable: {0}")]
-    Dbus(#[from] oo7::dbus::Error),
+    /// The secret store cannot be reached or complete the requested operation.
+    #[error("secret store unavailable: {0}")]
+    Unavailable(String),
 }
 
-/// Which of the two things stored under `(provider, account)` a call means.
+#[cfg(unix)]
+impl From<oo7::dbus::Error> for SecretError {
+    fn from(error: oo7::dbus::Error) -> Self {
+        Self::Unavailable(error.to_string())
+    }
+}
+
+/// Which of the things stored under `(provider, account)` a call means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// An API key the user pasted in.
     Key,
     /// An OAuth credential a Tidemark login obtained, as the provider's own document.
     Token,
+    /// A browser session cookie the user pasted in, as its bare cookie value.
+    Session,
 }
 
 impl Kind {
+    /// Every kind, for the callers that must act on an account's whole keyring footprint —
+    /// renaming an account, deleting one, migrating a provider id. Adding a variant without
+    /// adding it here would strand secrets under the old name.
+    pub const ALL: [Self; 3] = [Self::Key, Self::Token, Self::Session];
+
     /// The schema this kind is filed under.
     pub const fn schema(self) -> &'static str {
         match self {
             Self::Key => SCHEMA,
             Self::Token => TOKEN_SCHEMA,
+            Self::Session => SESSION_SCHEMA,
         }
     }
 
+    #[cfg(unix)]
     const fn noun(self) -> &'static str {
         match self {
             Self::Key => "key",
             Self::Token => "login",
+            Self::Session => "session",
         }
     }
 }
 
+#[cfg(unix)]
 fn attributes(
     kind: Kind,
     provider: &ProviderId,
@@ -205,13 +234,22 @@ impl Secrets for Store {
     }
 }
 
+#[cfg(any(windows, test))]
+mod protocol;
+#[cfg(windows)]
+mod windows_store;
+#[cfg(windows)]
+pub use windows_store::Store;
+
 /// A connection to the freedesktop Secret Service, scoped to Tidemark's own secrets.
+#[cfg(unix)]
 #[derive(Debug)]
 pub struct Store {
     service: Service,
     mutations: MutationMap,
 }
 
+#[cfg(unix)]
 impl Store {
     /// Connects to `org.freedesktop.secrets`. Cheap, and safe to call again if a prior
     /// connection was lost — it does not itself touch a collection, so it never blocks on
@@ -372,7 +410,7 @@ impl Store {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     //! These tests talk to a real `org.freedesktop.secrets` implementation over the
     //! session bus — there is no mock in the loop, on the same principle as the corpus
@@ -391,6 +429,17 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_service_error_maps_to_an_unavailable_store() {
+        let error = oo7::dbus::Error::Deleted;
+
+        assert_eq!(
+            SecretError::from(error).to_string(),
+            "secret store unavailable: Item/Collection was deleted, can no longer be used"
+        );
     }
 
     #[tokio::test]

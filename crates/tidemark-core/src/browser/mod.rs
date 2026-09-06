@@ -410,6 +410,11 @@ pub enum CookieError {
     /// Nothing answered on the bus, so the browser's key cannot be reached at all.
     #[error("the keyring is unavailable: {0}")]
     KeyringUnavailable(String),
+    /// The platform can identify the store but cannot decrypt its cookie format. On
+    /// Windows this includes Chromium App-Bound `v20`: a state to report, never a panic
+    /// and never a faked answer.
+    #[error("browser cookies cannot be read on this platform: {0}")]
+    PlatformUnavailable(&'static str),
 }
 
 impl Store {
@@ -426,13 +431,24 @@ impl Store {
         match self.browser.family {
             Family::Gecko => gecko::read(&snapshot.database(), query),
             Family::Chromium => {
-                let password = storage.password(self.browser.application).await.map_err(
-                    |error| match error {
-                        crate::secrets::SecretError::Locked => CookieError::KeyringLocked,
-                        other => CookieError::KeyringUnavailable(other.to_string()),
-                    },
-                )?;
-                chromium::read(&snapshot.database(), query, password.as_deref())
+                #[cfg(unix)]
+                {
+                    let password =
+                        storage
+                            .password(self.browser.application)
+                            .await
+                            .map_err(|error| match error {
+                                crate::secrets::SecretError::Locked => CookieError::KeyringLocked,
+                                other => CookieError::KeyringUnavailable(other.to_string()),
+                            })?;
+                    chromium::read(&snapshot.database(), query, password.as_deref())
+                }
+                #[cfg(windows)]
+                {
+                    let _ = storage;
+                    let key = safe_storage::key_for(&self.path)?;
+                    chromium::read_windows(&snapshot.database(), query, &key)
+                }
             }
         }
     }
@@ -443,10 +459,16 @@ impl Store {
 /// Cheap: it stats directories and never opens a database, so a caller may call it on
 /// every poll rather than caching a list that a newly created profile would make stale.
 pub fn stores() -> Vec<Store> {
-    match std::env::var_os("HOME") {
-        Some(home) => stores_in(Path::new(&home)),
-        None => Vec::new(),
+    let mut stores = Vec::new();
+    for browser in BROWSERS {
+        // Missing environment roots and absent browser installations are both an empty
+        // answer; the scan has no error channel because discovery is absence-tolerant.
+        let Ok(roots) = storage::profile_roots(browser) else {
+            return Vec::new();
+        };
+        stores.extend(scan_roots(browser, &roots));
     }
+    stores
 }
 
 /// [`stores`], against a stated home directory, so the scan is testable against a fixture
@@ -454,31 +476,39 @@ pub fn stores() -> Vec<Store> {
 pub fn stores_in(home: &Path) -> Vec<Store> {
     let mut stores = Vec::new();
     for browser in BROWSERS {
-        for root in browser.roots {
-            let root = home.join(root);
-            let Ok(entries) = std::fs::read_dir(&root) else {
+        let roots: Vec<PathBuf> = browser.roots.iter().map(|root| home.join(root)).collect();
+        stores.extend(scan_roots(browser, &roots));
+    }
+    stores
+}
+
+/// The stores under one browser's profile roots: profiles in name order, roots in the
+/// order the browser table states them.
+fn scan_roots(browser: &Browser, roots: &[PathBuf]) -> Vec<Store> {
+    let mut stores = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        let mut profiles: Vec<_> = entries
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        // Read order from a directory is whatever the filesystem says; a stable scan
+        // order is what keeps "the first store that has the session" from meaning a
+        // different profile on every poll.
+        profiles.sort();
+        for profile in profiles {
+            let directory = root.join(&profile);
+            let Some(path) = database(browser.family, &directory) else {
                 continue;
             };
-            let mut profiles: Vec<_> = entries
-                .flatten()
-                .filter(|entry| entry.path().is_dir())
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect();
-            // Read order from a directory is whatever the filesystem says; a stable scan
-            // order is what keeps "the first store that has the session" from meaning a
-            // different profile on every poll.
-            profiles.sort();
-            for profile in profiles {
-                let directory = root.join(&profile);
-                let Some(path) = database(browser.family, &directory) else {
-                    continue;
-                };
-                stores.push(Store {
-                    browser: *browser,
-                    profile,
-                    path,
-                });
-            }
+            stores.push(Store {
+                browser: *browser,
+                profile,
+                path,
+            });
         }
     }
     stores
@@ -509,39 +539,63 @@ struct Snapshot {
     directory: PathBuf,
 }
 
+/// The name a snapshot's database copy goes by, whatever the browser called the
+/// original: the snapshot is Tidemark's, so its layout is too.
+const SNAPSHOT_DATABASE: &str = "cookies";
+
+/// Copies one SQLite database through the browser platform's read-only snapshot primitive.
+/// The caller owns `directory` and its cleanup; `name` is the private copy's filename.
+pub(crate) fn copy_private_database(
+    source: &Path,
+    directory: &Path,
+    name: &str,
+) -> Result<(), CookieError> {
+    storage::copy_snapshot(source, directory)?;
+    if name != SNAPSHOT_DATABASE {
+        let from = directory.join(SNAPSHOT_DATABASE);
+        let to = directory.join(name);
+        std::fs::rename(&from, &to).map_err(|source_error| CookieError::Unreadable {
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = with_suffix(&from, suffix);
+            if sidecar.is_file() {
+                std::fs::rename(sidecar, with_suffix(&to, suffix)).map_err(|source_error| {
+                    CookieError::Unreadable {
+                        path: source.to_path_buf(),
+                        source: source_error,
+                    }
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Snapshot {
     fn of(path: &Path) -> Result<Self, CookieError> {
-        use std::os::unix::fs::DirBuilderExt;
-
         static SERIAL: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
             "tidemark-cookies-{}-{}",
             std::process::id(),
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
-        let unreadable = |source| CookieError::Unreadable {
-            path: path.to_path_buf(),
-            source,
-        };
-        // Owner-only, because what lands in it is a set of live sessions.
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&directory)
-            .map_err(unreadable)?;
-        let snapshot = Self { directory };
-        std::fs::copy(path, snapshot.database()).map_err(unreadable)?;
-        for sidecar in ["-wal", "-shm"] {
-            let source = with_suffix(path, sidecar);
-            if source.is_file() {
-                std::fs::copy(&source, with_suffix(&snapshot.database(), sidecar))
-                    .map_err(unreadable)?;
+        // The copy itself is the platform's half; the name and the cleanup are every
+        // platform's.
+        match copy_private_database(path, &directory, SNAPSHOT_DATABASE) {
+            Ok(()) => Ok(Self { directory }),
+            Err(error) => {
+                // A half-made copy is a set of live sessions in the temp directory; it
+                // goes the moment the copy fails, exactly as it goes on drop.
+                let _ = std::fs::remove_dir_all(&directory);
+                Err(error)
             }
         }
-        Ok(snapshot)
     }
 
     fn database(&self) -> PathBuf {
-        self.directory.join("cookies")
+        self.directory.join(SNAPSHOT_DATABASE)
     }
 }
 
@@ -557,6 +611,192 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+/// The platform's half of reading a browser's cookies — where profiles live, and how a
+/// private copy of a cookie database is taken. Everything around it (the browser table,
+/// the profile scan, the queries, the reading of a copy) is the same on every platform.
+///
+/// Windows resolves vendor roots from AppData and takes a no-write, share-mode-compatible
+/// copy. Linux retains its HOME roots and owner-only copy with SQLite sidecars.
+mod storage {
+    use std::path::{Path, PathBuf};
+
+    use super::{Browser, CookieError, SNAPSHOT_DATABASE, with_suffix};
+
+    /// The absolute directories one browser keeps its profiles under on this machine,
+    /// in scan order. Linux resolves a browser's roots against `$HOME`: distribution
+    /// packages under `.config`, Flatpaks under `.var/app`, Snaps under `snap`.
+    ///
+    /// Absence is an empty answer rather than an error: a root that does not exist is a
+    /// browser that is not installed.
+    #[cfg(unix)]
+    pub(crate) fn profile_roots(browser: &Browser) -> Result<Vec<PathBuf>, CookieError> {
+        match std::env::var_os("HOME") {
+            Some(home) => Ok(browser
+                .roots
+                .iter()
+                .map(|root| Path::new(&home).join(root))
+                .collect()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// [`profile_roots`], for Windows: vendor directories under `%LOCALAPPDATA%` and
+    /// `%APPDATA%`. Either environment root may be absent without failing discovery.
+    #[cfg(windows)]
+    pub(crate) fn profile_roots(browser: &Browser) -> Result<Vec<PathBuf>, CookieError> {
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
+        Ok(match (local, roaming) {
+            (Some(local), Some(roaming)) => profile_roots_in(browser, &local, &roaming),
+            (Some(local), None) => profile_roots_in(browser, &local, Path::new("")),
+            (None, Some(roaming)) => profile_roots_in(browser, Path::new(""), &roaming),
+            (None, None) => Vec::new(),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn profile_roots_in(
+        browser: &Browser,
+        local: &Path,
+        roaming: &Path,
+    ) -> Vec<PathBuf> {
+        let (base, roots): (&Path, &[&str]) = match browser.slug {
+            "chrome" => (
+                local,
+                &[
+                    "Google/Chrome/User Data",
+                    "Google/Chrome Beta/User Data",
+                    "Google/Chrome Dev/User Data",
+                    "Google/Chrome SxS/User Data",
+                ],
+            ),
+            "chromium" => (local, &["Chromium/User Data"]),
+            "brave" => (
+                local,
+                &[
+                    "BraveSoftware/Brave-Browser/User Data",
+                    "BraveSoftware/Brave-Browser-Beta/User Data",
+                    "BraveSoftware/Brave-Browser-Nightly/User Data",
+                ],
+            ),
+            "edge" => (
+                local,
+                &[
+                    "Microsoft/Edge/User Data",
+                    "Microsoft/Edge Beta/User Data",
+                    "Microsoft/Edge Dev/User Data",
+                    "Microsoft/Edge SxS/User Data",
+                ],
+            ),
+            "vivaldi" => (local, &["Vivaldi/User Data"]),
+            "opera" => (roaming, &["Opera Software"]),
+            "firefox" => (roaming, &["Mozilla/Firefox/Profiles"]),
+            "zen" => (roaming, &["zen/Profiles"]),
+            "librewolf" => (roaming, &["librewolf/Profiles"]),
+            _ => return Vec::new(),
+        };
+        if base.as_os_str().is_empty() {
+            return Vec::new();
+        }
+        roots.iter().map(|root| base.join(root)).collect()
+    }
+
+    /// Takes the private copy of one cookie database into `directory`: the directory is
+    /// created owner-only, because what lands in it is a set of live sessions, and the
+    /// database plus any `-wal`/`-shm` sidecars beside it are copied in — copying the
+    /// sidecars is what makes the copy show the same cookies the browser itself sees.
+    #[cfg(unix)]
+    pub(crate) fn copy_snapshot(source: &Path, directory: &Path) -> Result<(), CookieError> {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let unreadable = |error: std::io::Error| CookieError::Unreadable {
+            // The browser's own database is the path an error carries — not the copy's,
+            // which is Tidemark's private business.
+            path: source.to_path_buf(),
+            source: error,
+        };
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(directory)
+            .map_err(unreadable)?;
+        let database = directory.join(SNAPSHOT_DATABASE);
+        std::fs::copy(source, &database).map_err(unreadable)?;
+        for sidecar in ["-wal", "-shm"] {
+            let sidecar_source = with_suffix(source, sidecar);
+            if sidecar_source.is_file() {
+                std::fs::copy(&sidecar_source, with_suffix(&database, sidecar))
+                    .map_err(unreadable)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`copy_snapshot`], for Windows, where the private-copy discipline needs the
+    /// platform's own share-mode open.
+    ///
+    /// The set of files copied is the same as the Unix arm's, and for the same reason: a
+    /// running browser keeps its database in WAL mode, so the newest cookies live in the
+    /// `-wal` sidecar and not in the main file at all. Copying the main file alone hands
+    /// back whatever was last checkpointed, which is how a session the user just started
+    /// goes missing and a replaced one still reads as the old account.
+    #[cfg(windows)]
+    pub(crate) fn copy_snapshot(source: &Path, directory: &Path) -> Result<(), CookieError> {
+        let unreadable = |error: std::io::Error| CookieError::Unreadable {
+            // The browser's own database is the path an error carries — not the copy's,
+            // which is Tidemark's private business.
+            path: source.to_path_buf(),
+            source: error,
+        };
+        std::fs::create_dir(directory).map_err(unreadable)?;
+        let database = directory.join(SNAPSHOT_DATABASE);
+        share_mode_copy(source, &database).map_err(unreadable)?;
+        for sidecar in ["-wal", "-shm"] {
+            let sidecar_source = with_suffix(source, sidecar);
+            if sidecar_source.is_file() {
+                share_mode_copy(&sidecar_source, &with_suffix(&database, sidecar))
+                    .map_err(unreadable)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies one file that a live browser may hold open.
+    ///
+    /// `std::fs::copy` opens the source with no sharing and would be denied against a
+    /// running browser, so the source is opened first asking for read access only and
+    /// granting every share mode; the handle stays alive across the copy.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn share_mode_copy(source: &Path, destination: &Path) -> std::io::Result<()> {
+        use std::os::windows::ffi::OsStrExt as _;
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows::Win32::Storage::FileSystem::{
+            CopyFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        use windows::core::PCWSTR;
+
+        let _source_handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+            .open(source)?;
+        let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination_wide: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: both arguments are live, NUL-terminated UTF-16 paths for this call.
+        unsafe {
+            CopyFileW(
+                PCWSTR(source_wide.as_ptr()),
+                PCWSTR(destination_wide.as_ptr()),
+                true,
+            )
+        }
+        .map_err(std::io::Error::other)
+    }
 }
 
 #[cfg(test)]
@@ -661,6 +901,321 @@ pub(crate) mod tests {
         assert!(stores.iter().any(|store| {
             store.browser.slug == "firefox" && store.profile == "j7aiac5u.default-release"
         }));
+    }
+
+    /// Plants a cookie database at `home/root/profile/database`, the way an installed
+    /// browser would have left it.
+    fn plant(home: &Path, root: &str, profile: &str, database: &str) {
+        let path = home.join(root).join(profile).join(database);
+        std::fs::create_dir_all(path.parent().expect("has a parent")).expect("creates");
+        std::fs::write(&path, b"").expect("writes");
+    }
+
+    // `stores()` is rooted at $HOME only on unix; the windows arm roots at the
+    // LOCALAPPDATA vendor directories (todo 17), so this wiring pin is unix-only.
+    #[cfg(unix)]
+    #[test]
+    fn the_machine_scan_is_the_scan_of_the_home_directory() {
+        // `stores()` is `stores_in($HOME)`: the only thing the machine scan knows that a
+        // stated-home scan does not is where the home directory is.
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+
+        assert_eq!(stores(), stores_in(Path::new(&home)));
+    }
+
+    #[test]
+    fn flatpak_and_snap_roots_are_scanned_like_packaged_ones() {
+        let home = TestHome::new();
+        plant(
+            home.path(),
+            ".var/app/com.google.Chrome/config/google-chrome",
+            "Default",
+            "Cookies",
+        );
+        plant(
+            home.path(),
+            "snap/chromium/common/chromium",
+            "Default",
+            "Cookies",
+        );
+        plant(
+            home.path(),
+            "snap/firefox/common/.mozilla/firefox",
+            "xyz42.default",
+            "cookies.sqlite",
+        );
+
+        let stores = stores_in(home.path());
+
+        let found: Vec<(&str, &str)> = stores
+            .iter()
+            .map(|store| (store.browser.slug, store.profile.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("chrome", "Default"),
+                ("chromium", "Default"),
+                ("firefox", "xyz42.default"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_profile_holding_both_cookie_locations_reads_the_network_one() {
+        let home = TestHome::new();
+        // Chromium moved cookies under `Network/` in M96 and kept the old location for
+        // profiles that predate it; a profile holding both answers through the new one.
+        plant(home.path(), ".config/google-chrome", "Default", "Cookies");
+        plant(
+            home.path(),
+            ".config/google-chrome",
+            "Default",
+            "Network/Cookies",
+        );
+
+        let stores = stores_in(home.path());
+
+        assert_eq!(stores.len(), 1);
+        assert!(stores[0].path.ends_with("Default/Network/Cookies"));
+    }
+
+    #[test]
+    fn a_profile_is_a_store_only_through_its_own_familys_database_name() {
+        let home = TestHome::new();
+        // A Gecko database inside a Chromium profile, and a Chromium database inside a
+        // Gecko one, are both just files with the wrong names for their browser.
+        plant(home.path(), ".config/chromium", "Default", "cookies.sqlite");
+        plant(home.path(), ".mozilla/firefox", "abcd.default", "Cookies");
+
+        let stores = stores_in(home.path());
+
+        assert!(stores.is_empty());
+    }
+
+    #[test]
+    fn the_same_profile_name_under_two_roots_is_found_twice_in_root_order() {
+        let home = TestHome::new();
+        plant(home.path(), ".config/google-chrome", "Default", "Cookies");
+        plant(
+            home.path(),
+            ".var/app/com.google.Chrome/config/google-chrome",
+            "Default",
+            "Cookies",
+        );
+
+        let stores = stores_in(home.path());
+        let chrome: Vec<&Store> = stores
+            .iter()
+            .filter(|store| store.browser.slug == "chrome")
+            .collect();
+
+        assert_eq!(chrome.len(), 2);
+        assert_eq!(chrome[0].profile, "Default");
+        assert!(
+            chrome[0]
+                .path
+                .starts_with(home.path().join(".config/google-chrome"))
+        );
+        assert!(
+            chrome[1].path.starts_with(
+                home.path()
+                    .join(".var/app/com.google.Chrome/config/google-chrome")
+            )
+        );
+    }
+
+    #[test]
+    fn a_scan_of_a_home_with_garbage_in_it_skips_the_garbage() {
+        let home = TestHome::new();
+        std::fs::create_dir_all(home.path().join(".config")).expect("creates");
+        // A root that is a file, a profile that is a file, a database that is a
+        // directory: none of it is this scan's business to report, and none of it stops
+        // the scan from finding what is real.
+        std::fs::write(home.path().join(".config/vivaldi"), b"not a directory").expect("writes");
+        std::fs::create_dir_all(home.path().join(".config/opera")).expect("creates");
+        std::fs::write(home.path().join(".config/opera/Default"), b"not a profile")
+            .expect("writes");
+        std::fs::create_dir_all(
+            home.path()
+                .join(".config/BraveSoftware/Brave-Browser/Default/Network/Cookies"),
+        )
+        .expect("creates a directory where the database would be");
+        plant(home.path(), ".config/google-chrome", "Default", "Cookies");
+
+        let stores = stores_in(home.path());
+
+        assert_eq!(stores.len(), 1);
+        assert_eq!(stores[0].browser.slug, "chrome");
+    }
+
+    #[test]
+    fn a_home_without_browser_roots_answers_no_stores() {
+        let home = TestHome::new();
+
+        assert!(stores_in(home.path()).is_empty());
+        assert!(stores_in(&home.path().join("nowhere")).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_vendor_roots_are_discovered_from_real_profile_trees() {
+        let fixture = TestHome::new();
+        let local = fixture.path().join("Local");
+        let roaming = fixture.path().join("Roaming");
+        plant(
+            &local,
+            "Google/Chrome/User Data",
+            "Default",
+            "Network/Cookies",
+        );
+        plant(
+            &local,
+            "Microsoft/Edge/User Data",
+            "Profile 2",
+            "Network/Cookies",
+        );
+        plant(
+            &local,
+            "BraveSoftware/Brave-Browser/User Data",
+            "Default",
+            "Cookies",
+        );
+        plant(
+            &roaming,
+            "Opera Software",
+            "Opera Stable",
+            "Network/Cookies",
+        );
+
+        let found: Vec<(&str, String)> = BROWSERS
+            .iter()
+            .flat_map(|browser| {
+                storage::profile_roots_in(browser, &local, &roaming)
+                    .into_iter()
+                    .flat_map(|root| scan_roots(browser, &[root]))
+            })
+            .map(|store| (store.browser.slug, store.profile))
+            .collect();
+
+        assert_eq!(
+            found,
+            [
+                ("chrome", "Default".to_owned()),
+                ("brave", "Default".to_owned()),
+                ("edge", "Profile 2".to_owned()),
+                ("opera", "Opera Stable".to_owned()),
+            ]
+        );
+    }
+
+    /// The share-mode copy is the Windows half of the private-copy discipline: it must
+    /// still work against a database another process is holding open, which is the normal
+    /// case — the browser is running.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_snapshot_copies_a_database_a_live_process_holds_open() {
+        let home = TestHome::new();
+        let path = home.profile("chromium/Default", "Cookies");
+        std::fs::write(&path, b"main").expect("writes");
+        let held = std::fs::File::open(&path).expect("a live reader");
+
+        let snapshot = Snapshot::of(&path).expect("copies");
+
+        assert_eq!(std::fs::read(snapshot.database()).expect("reads"), b"main");
+        drop(held);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_snapshot_directory_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = TestHome::new();
+        let path = home.profile("chromium/Default", "Cookies");
+        let snapshot = Snapshot::of(&path).expect("copies");
+
+        let mode = std::fs::metadata(&snapshot.directory)
+            .expect("the directory exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    /// The scenario the sidecars exist for, end to end: a live browser holds its newest
+    /// writes in the `-wal` sidecar, so a snapshot of the main database alone reads back
+    /// the last checkpoint. That is not a stale-by-a-moment answer — it is the previous
+    /// account's session, long after the user replaced it.
+    #[test]
+    fn a_snapshot_reads_the_row_that_is_still_only_in_the_wal() {
+        let home = TestHome::new();
+        let path = home.profile("chromium/Default", "Cookies");
+        let live = rusqlite::Connection::open(&path).expect("opens");
+        live.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE accounts (name TEXT);
+             INSERT INTO accounts (name) VALUES ('old-account');",
+        )
+        .expect("seeds the database");
+        // Checkpointed, so 'old-account' is what the main file itself holds.
+        live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("checkpoints");
+        live.execute("UPDATE accounts SET name = 'new-account'", [])
+            .expect("replaces the session");
+
+        let snapshot = Snapshot::of(&path).expect("copies");
+
+        let copy = rusqlite::Connection::open(snapshot.database()).expect("opens the copy");
+        let name: String = copy
+            .query_row("SELECT name FROM accounts", [], |row| row.get(0))
+            .expect("reads the copy");
+        assert_eq!(
+            name, "new-account",
+            "the copy must see what the browser sees"
+        );
+        drop(live);
+    }
+
+    #[test]
+    fn both_sidecars_are_copied_when_both_exist() {
+        let home = TestHome::new();
+        let path = home.profile("chromium/Default", "Cookies");
+        std::fs::write(with_suffix(&path, "-wal"), b"wal").expect("writes");
+        std::fs::write(with_suffix(&path, "-shm"), b"shm").expect("writes");
+
+        let snapshot = Snapshot::of(&path).expect("copies");
+
+        assert!(with_suffix(&snapshot.database(), "-wal").is_file());
+        assert!(with_suffix(&snapshot.database(), "-shm").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_source_that_cannot_be_read_is_a_typed_error() {
+        let home = TestHome::new();
+        let absent = home.path().join(".config/chromium/Default/Cookies");
+
+        match Snapshot::of(&absent) {
+            Err(CookieError::Unreadable { path, .. }) => assert_eq!(path, absent),
+            other => panic!("an absent source is an Unreadable error, not {other:?}"),
+        }
+
+        // And a file this environment genuinely cannot read answers the same way.
+        let locked = home.profile("chromium/Default", "Cookies");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+                .expect("locks");
+        }
+        if std::fs::read(&locked).is_err() {
+            assert!(matches!(
+                Snapshot::of(&locked),
+                Err(CookieError::Unreadable { .. })
+            ));
+        }
     }
 
     #[test]

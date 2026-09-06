@@ -108,12 +108,31 @@ sed -i "/^  <releases>$/a\\$entry" \
 # bumped alongside it.
 sed -i "s/^pkgver=.*/pkgver=$new/; s/^pkgrel=.*/pkgrel=1/" PKGBUILD
 
+# The winget manifests are a submission template: nothing in CI builds them, so nothing
+# else would notice them going stale, and a manifest whose PackageVersion or InstallerUrl
+# still names the previous release installs the wrong thing. The URL is matched on its
+# version shape rather than on $current, so a manifest that has already drifted is
+# corrected here rather than skipped.
+winget=data/packaging/windows/winget
+winget_installer=$winget/io.github.zbndev.Tidemark.installer.yaml
+for manifest in "$winget"/io.github.zbndev.Tidemark*.yaml; do
+    sed -i "s/^PackageVersion: .*/PackageVersion: $new/" "$manifest"
+done
+sed -i "/^ *InstallerUrl: /{
+    s|/v[0-9][0-9.]*/|/v$new/|
+    s|Tidemark-v[0-9][0-9.]*-setup\.exe|Tidemark-v$new-setup.exe|
+}" "$winget_installer"
+
 # A sed that matched nothing becomes a loud failure here, not a broken release.
 grep -q "^version = \"$new\"\$" Cargo.toml
 grep -q "^tidemark-types = { version = \"$new\"" crates/tidemark-core/Cargo.toml
 grep -q "^tidemark-core = { version = \"$new\"" crates/tidemarkd/Cargo.toml
 grep -q "<release version=\"$new\" date=" data/metainfo/io.github.zbndev.Tidemark.metainfo.xml
 grep -q "^pkgver=$new\$" PKGBUILD
+for manifest in "$winget"/io.github.zbndev.Tidemark*.yaml; do
+    grep -q "^PackageVersion: $new\$" "$manifest"
+done
+grep -q "InstallerUrl: .*/v$new/Tidemark-v$new-setup\.exe\$" "$winget_installer"
 
 # The exact contract the tag push is about to be judged by in CI.
 scripts/check-tag-version.sh "v$new"
@@ -123,7 +142,7 @@ if command -v appstreamcli >/dev/null 2>&1; then
 fi
 
 git add Cargo.toml Cargo.lock crates/tidemark-core/Cargo.toml crates/tidemarkd/Cargo.toml \
-    data/metainfo/io.github.zbndev.Tidemark.metainfo.xml PKGBUILD
+    data/metainfo/io.github.zbndev.Tidemark.metainfo.xml PKGBUILD "$winget"
 git commit -m "chore: bump to v$new"
 git tag -a "v$new" -m "Tidemark v$new"
 committed=1

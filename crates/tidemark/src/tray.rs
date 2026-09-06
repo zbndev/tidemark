@@ -30,16 +30,10 @@
 //! than by opening a menu and looking at it.
 
 use gtk::glib;
-use ksni::TrayMethods;
-use tidemark_types::{DANGER_AT, ProviderStatus, ids, present};
+use tidemark_types::{DANGER_AT, ProviderStatus, present};
 
 use crate::format;
 use crate::model;
-
-/// The icon the panel shows. It deliberately uses the same full-colour icon name as the
-/// application: `data/icons` supplies native small sizes so a panel never has to enlarge a
-/// tiny fallback pixmap, and the `PKGBUILD` installs them all.
-const ICON: &str = ids::APP_ID;
 
 /// What a menu row asks the interface to do.
 ///
@@ -190,29 +184,6 @@ impl Model {
         }
     }
 
-    /// A row that says something rather than doing something.
-    fn caption(label: &str) -> ksni::MenuItem<Self> {
-        ksni::menu::StandardItem {
-            label: mnemonics(label),
-            enabled: false,
-            ..Default::default()
-        }
-        .into()
-    }
-
-    /// A row that sends `command` and returns immediately, as ksni asks: this runs on the
-    /// tray's own thread, and everything it could actually do lives on the GTK one.
-    fn action(label: &str, icon: &str, enabled: bool, command: Command) -> ksni::MenuItem<Self> {
-        ksni::menu::StandardItem {
-            label: mnemonics(label),
-            icon_name: icon.to_owned(),
-            enabled,
-            activate: Box::new(move |this: &mut Self| this.send(command)),
-            ..Default::default()
-        }
-        .into()
-    }
-
     /// Hands a command to the interface. Never blocks and never panics: the channel is
     /// unbounded, and a closed one means the window is already going away.
     fn send(&self, command: Command) {
@@ -222,55 +193,51 @@ impl Model {
     }
 }
 
-impl ksni::Tray for Model {
-    fn id(&self) -> String {
-        ids::APP_ID.to_owned()
+/// The platform-neutral representation of the panel icon's menu.
+#[derive(Debug)]
+enum MenuItem {
+    Caption(String),
+    Action {
+        label: String,
+        // Only the ksni backend resolves these freedesktop icon names; muda on Windows
+        // would not, so it never reads the field. Inert on Linux.
+        #[cfg_attr(windows, allow(dead_code))]
+        icon: String,
+        enabled: bool,
+        command: Command,
+    },
+    Separator,
+}
+
+/// What a native tray backend needs from the shared model.
+///
+/// Todo 15 implements this contract with `tray-icon` on Windows. Keeping it free of native
+/// tray types lets the channel bridge and state updates remain common to both backends.
+trait Backend {
+    fn set_icon(&self) -> bool;
+    fn set_tooltip(&self) -> String;
+    fn set_menu(&self) -> Vec<MenuItem>;
+    // Only the ksni backend has a status-notifier watcher to go offline; tray-icon has
+    // none, so the Windows build has no caller. The surface stays shared (todo 9).
+    #[cfg_attr(windows, allow(dead_code))]
+    fn handle_watcher_offline(&self) -> bool;
+}
+
+impl Backend for Model {
+    fn set_icon(&self) -> bool {
+        self.state.attention
     }
 
-    fn title(&self) -> String {
-        "Tidemark".to_owned()
-    }
-
-    fn icon_name(&self) -> String {
-        ICON.to_owned()
-    }
-
-    fn attention_icon_name(&self) -> String {
-        ICON.to_owned()
-    }
-
-    fn status(&self) -> ksni::Status {
-        if self.state.attention {
-            ksni::Status::NeedsAttention
-        } else {
-            ksni::Status::Active
-        }
-    }
-
-    /// A left click shows the window. That is the whole of what a tray icon is for here,
-    /// and the menu is the right button, which is where a panel puts it anyway.
-    fn activate(&mut self, _x: i32, _y: i32) {
-        self.send(Command::Present);
-    }
-
-    /// The one line a panel shows on hover: the account nearest its limit, which is the
-    /// first row for the same reason it is the first card.
-    fn tool_tip(&self) -> ksni::ToolTip {
-        let description = match self.placeholder() {
+    fn set_tooltip(&self) -> String {
+        match self.placeholder() {
             Some(reason) => reason.to_owned(),
             None => self.state.entries[0].line(),
-        };
-        ksni::ToolTip {
-            icon_name: ICON.to_owned(),
-            title: "Tidemark".to_owned(),
-            description,
-            ..Default::default()
         }
     }
 
-    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+    fn set_menu(&self) -> Vec<MenuItem> {
         let mut items = match self.placeholder() {
-            Some(reason) => vec![Self::caption(reason)],
+            Some(reason) => vec![MenuItem::Caption(reason.to_owned())],
             None => self
                 .state
                 .entries
@@ -278,55 +245,586 @@ impl ksni::Tray for Model {
                 // An account row shows the window rather than being dead text: the panel
                 // is where the user noticed the number, and the window is where they can
                 // do anything about it.
-                .map(|entry| Self::action(&entry.line(), "", true, Command::Present))
+                .map(|entry| MenuItem::Action {
+                    label: entry.line(),
+                    icon: String::new(),
+                    enabled: true,
+                    command: Command::Present,
+                })
                 .collect(),
         };
 
-        items.push(ksni::MenuItem::Separator);
-        items.push(Self::action(
-            "Open Tidemark",
-            "window-new-symbolic",
-            true,
-            Command::Present,
-        ));
-        items.push(Self::action(
-            "Refresh now",
-            "view-refresh-symbolic",
-            self.state.connected,
-            Command::Refresh,
-        ));
-        items.push(ksni::MenuItem::Separator);
-        items.push(Self::action(
-            "Quit",
-            "application-exit-symbolic",
-            true,
-            Command::Quit,
-        ));
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Action {
+            label: "Open Tidemark".to_owned(),
+            icon: "window-new-symbolic".to_owned(),
+            enabled: true,
+            command: Command::Present,
+        });
+        items.push(MenuItem::Action {
+            label: "Refresh now".to_owned(),
+            icon: "view-refresh-symbolic".to_owned(),
+            enabled: self.state.connected,
+            command: Command::Refresh,
+        });
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Action {
+            label: "Quit".to_owned(),
+            icon: "application-exit-symbolic".to_owned(),
+            enabled: true,
+            command: Command::Quit,
+        });
         items
     }
 
-    fn watcher_online(&self) {
-        tracing::info!("a status-notifier watcher is on the bus");
-    }
-
-    /// Keep the item alive and wait: a shell being restarted takes its watcher with it, and
-    /// giving up would leave a window that can only be closed, never reopened.
-    fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
-        tracing::info!(
-            ?reason,
-            "the status-notifier watcher went away; waiting for it"
-        );
+    fn handle_watcher_offline(&self) -> bool {
         true
     }
 }
 
-/// Escapes a label for `com.canonical.dbusmenu`, which reads a single underscore as the
-/// marker before an access key and swallows it.
-///
-/// Not hypothetical: account slugs come from the user's `config.toml`, so an account called
-/// `work_key` would otherwise appear in the panel as `workkey` with a mnemonic on the `k`.
-fn mnemonics(label: &str) -> String {
-    label.replace('_', "__")
+#[cfg(unix)]
+mod backend {
+    use super::*;
+    use ksni::TrayMethods;
+    use tidemark_types::ids;
+
+    /// The icon the panel shows. It deliberately uses the same full-colour icon name as the
+    /// application: `data/icons` supplies native small sizes so a panel never has to enlarge a
+    /// tiny fallback pixmap, and the `PKGBUILD` installs them all.
+    const ICON: &str = ids::APP_ID;
+
+    pub type Error = ksni::Error;
+
+    pub struct Handle(ksni::Handle<Model>);
+
+    pub async fn spawn(model: Model) -> Result<Handle, Error> {
+        Ok(Handle(model.spawn().await?))
+    }
+
+    impl Handle {
+        pub async fn update(&self, state: State) -> bool {
+            self.0
+                .update(|model: &mut Model| model.state = state)
+                .await
+                .is_some()
+        }
+    }
+
+    impl ksni::Tray for Model {
+        fn id(&self) -> String {
+            ids::APP_ID.to_owned()
+        }
+
+        fn title(&self) -> String {
+            "Tidemark".to_owned()
+        }
+
+        fn icon_name(&self) -> String {
+            ICON.to_owned()
+        }
+
+        fn attention_icon_name(&self) -> String {
+            ICON.to_owned()
+        }
+
+        fn status(&self) -> ksni::Status {
+            if self.set_icon() {
+                ksni::Status::NeedsAttention
+            } else {
+                ksni::Status::Active
+            }
+        }
+
+        /// A left click shows the window. That is the whole of what a tray icon is for here,
+        /// and the menu is the right button, which is where a panel puts it anyway.
+        fn activate(&mut self, _x: i32, _y: i32) {
+            self.send(Command::Present);
+        }
+
+        /// The one line a panel shows on hover: the account nearest its limit, which is the
+        /// first row for the same reason it is the first card.
+        fn tool_tip(&self) -> ksni::ToolTip {
+            ksni::ToolTip {
+                icon_name: ICON.to_owned(),
+                title: "Tidemark".to_owned(),
+                description: self.set_tooltip(),
+                ..Default::default()
+            }
+        }
+
+        fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+            self.set_menu().into_iter().map(menu_item).collect()
+        }
+
+        fn watcher_online(&self) {
+            tracing::info!("a status-notifier watcher is on the bus");
+        }
+
+        /// Keep the item alive and wait: a shell being restarted takes its watcher with it, and
+        /// giving up would leave a window that can only be closed, never reopened.
+        fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
+            tracing::info!(
+                ?reason,
+                "the status-notifier watcher went away; waiting for it"
+            );
+            self.handle_watcher_offline()
+        }
+    }
+
+    fn menu_item(item: MenuItem) -> ksni::MenuItem<Model> {
+        match item {
+            MenuItem::Caption(label) => ksni::menu::StandardItem {
+                label: mnemonics(&label),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Action {
+                label,
+                icon,
+                enabled,
+                command,
+            } => ksni::menu::StandardItem {
+                label: mnemonics(&label),
+                icon_name: icon,
+                enabled,
+                activate: Box::new(move |model: &mut Model| model.send(command)),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator => ksni::MenuItem::Separator,
+        }
+    }
+
+    /// Escapes a label for `com.canonical.dbusmenu`, which reads a single underscore as the
+    /// marker before an access key and swallows it.
+    ///
+    /// Not hypothetical: account slugs come from the user's `config.toml`, so an account called
+    /// `work_key` would otherwise appear in the panel as `workkey` with a mnemonic on the `k`.
+    fn mnemonics(label: &str) -> String {
+        label.replace('_', "__")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_panel_receives_the_same_full_colour_icon_as_the_application() {
+            let (commands, _inbox) = async_channel::unbounded();
+            let tray = Model {
+                state: State::default(),
+                commands,
+            };
+
+            assert_eq!(ksni::Tray::icon_name(&tray), ids::APP_ID);
+            assert_eq!(ksni::Tray::attention_icon_name(&tray), ids::APP_ID);
+        }
+    }
+}
+
+#[cfg(windows)]
+mod backend {
+    //! The Windows tray: `tray-icon` on a thread of its own, speaking to the GTK main
+    //! context over the same [`Command`] channel the ksni backend uses. tray-icon is not
+    //! GTK-integrated and Windows delivers its menu and click events only through a win32
+    //! message loop running on the thread that created the icon, so this thread owns the
+    //! icon, the menu and the pump, and nothing here ever touches a widget: a click puts
+    //! a [`Command`] on the channel and [`Tray::spawn`]'s task on the main context acts
+    //! on it, exactly as on Linux.
+    //
+    // The win32 message pump (GetMessageW/DispatchMessageW/PostThreadMessageW) that
+    // tray-icon's Windows backend requires is unsafe FFI; the workspace-wide deny is
+    // lifted for this module only, as documented for the plan's §15 dependency list.
+    #![allow(unsafe_code)]
+
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    // The shared menu model's own `MenuItem` keeps its name; muda's is spelled out at
+    // its uses so the two never blur.
+    use tray_icon::menu::{Menu, MenuEvent, MenuId, PredefinedMenuItem};
+    use tray_icon::{
+        Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    };
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, MSG, PostThreadMessageW, TranslateMessage, WM_QUIT,
+    };
+
+    use crate::tray_icon_rgba as icon_rgba;
+
+    /// A thread message no window here uses, posted only to wake the pump so an update
+    /// sitting in the channel is drained without waiting for real input.
+    const WAKE: u32 = 0x8000; // WM_APP
+
+    /// What went wrong putting the icon up.
+    #[derive(Debug)]
+    pub struct Error(String);
+
+    impl std::fmt::Display for Error {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(&self.0)
+        }
+    }
+
+    impl std::error::Error for Error {}
+
+    /// What the thread needs to hear about, from the interface's side.
+    enum Message {
+        Update(State),
+        Shutdown,
+    }
+
+    /// The icon and menu, from outside the tray thread.
+    ///
+    /// Dropping it takes the icon down: the shutdown message wakes the pump, the thread
+    /// drops the `TrayIcon` and joins, and the window can close knowing nothing of its
+    /// is left behind.
+    #[derive(Debug)]
+    pub struct Handle {
+        thread_id: u32,
+        outbox: Sender<Message>,
+        join: Mutex<Option<std::thread::JoinHandle<()>>>,
+    }
+
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            let _ = self.outbox.send(Message::Shutdown);
+            stop_pump(self.thread_id);
+            if let Some(join) = self.join.lock().expect("poisoned").take() {
+                let _ = join.join();
+            }
+        }
+    }
+
+    pub async fn spawn(model: Model) -> Result<Handle, Error> {
+        let (outbox, inbox) = channel::<Message>();
+        let (thread_id_tx, thread_id_rx) = channel();
+        let (ready_tx, ready_rx) = channel::<Result<(), Error>>();
+
+        let join = std::thread::Builder::new()
+            .name("tray-icon".to_owned())
+            .spawn(move || {
+                // SAFETY: GetCurrentThreadId is a plain id read.
+                let thread_id = unsafe { GetCurrentThreadId() };
+                if thread_id_tx.send(thread_id).is_err() {
+                    return; // the spawner is gone; nothing here is worth putting up.
+                }
+                run(model, inbox, ready_tx).ok();
+            })
+            .map_err(|error| Error(error.to_string()))?;
+
+        let thread_id = thread_id_rx
+            .recv()
+            .map_err(|_| Error("the tray thread exited before it started".to_owned()))?;
+        ready_rx
+            .recv()
+            .map_err(|_| Error("the tray thread died while building the tray".to_owned()))??;
+
+        Ok(Handle {
+            thread_id,
+            outbox,
+            join: Mutex::new(Some(join)),
+        })
+    }
+
+    impl Handle {
+        pub async fn update(&self, state: State) -> bool {
+            if self.outbox.send(Message::Update(state)).is_err() {
+                return false;
+            }
+            wake_pump(self.thread_id);
+            true
+        }
+    }
+
+    /// Builds the tray, then runs the win32 message pump until told to stop.
+    fn run(
+        mut model: Model,
+        inbox: Receiver<Message>,
+        ready: Sender<Result<(), Error>>,
+    ) -> Result<(), Error> {
+        let tooltip = model.set_tooltip();
+        let (menu, mut ids) = build_menu(&model)?;
+
+        let tray = TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_icon(icon())
+            .with_tooltip(tooltip)
+            // A left click shows the window, as the ksni backend's activate does; the
+            // menu is the right button.
+            .with_menu_on_left_click(false)
+            .build()
+            .map_err(|error| Error(error.to_string()))?;
+
+        // Only now is the icon actually up, and the spawner may tell the interface.
+        let _ = ready.send(Ok(()));
+
+        let tray = {
+            let mut owned = Some(tray);
+            loop {
+                // Events arrive on muda's own channel and are drained here, on the thread
+                // that owns the menu, so `Model::send` stays the one way to the interface.
+                while let Ok(event) = MenuEvent::receiver().try_recv() {
+                    if let Some(command) = ids.get(&event.id.0) {
+                        model.send(*command);
+                    }
+                }
+                // Windows reports both halves of a click; the release is the one that
+                // shows the window, so activate fires once per click as on Linux.
+                while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        model.send(Command::Present);
+                    }
+                }
+                while let Ok(message) = inbox.try_recv() {
+                    match message {
+                        Message::Update(state) => {
+                            model.state = state;
+                            apply(owned.as_ref(), &model, &mut ids);
+                        }
+                        Message::Shutdown => owned = None,
+                    }
+                }
+                if owned.is_none() {
+                    break; // dropping the TrayIcon removes the icon.
+                }
+
+                let mut message = MSG::default();
+                // SAFETY: the message pump of the thread that owns the tray window, which
+                // is what tray-icon's docs require on Windows. <= 0 is WM_QUIT or error.
+                let received = unsafe { GetMessageW(&mut message, Some(HWND::default()), 0, 0) };
+                if received.0 <= 0 {
+                    break;
+                }
+                // SAFETY: the pumped message, translated and dispatched as win32 requires.
+                unsafe {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+            owned
+        };
+
+        drop(tray);
+        Ok(())
+    }
+
+    /// Re-applies everything the new state changes, on the tray thread.
+    ///
+    /// The icon pixels do not differ between ordinary and attention, matching the ksni
+    /// backend where `attention_icon_name` is the same icon; the flag is still read so a
+    /// future attention icon has one place to land.
+    fn apply(tray: Option<&TrayIcon>, model: &Model, ids: &mut HashMap<String, Command>) {
+        let Some(tray) = tray else { return };
+        let _attention = model.set_icon();
+        let (menu, new_ids) = build_menu(model).expect("the menu was built once already");
+        *ids = new_ids;
+        let _ = tray.set_tooltip(Some(model.set_tooltip()));
+        let _ = tray.set_icon(Some(icon()));
+        tray.set_menu(Some(Box::new(menu)));
+    }
+
+    /// The shared model's menu as muda items, plus the id → command table the drained
+    /// events read. Pure, so the mapping is testable without a tray.
+    fn build_menu(model: &Model) -> Result<(Menu, HashMap<String, Command>), Error> {
+        let menu = Menu::new();
+        let mut ids = HashMap::new();
+        for (index, item) in model.set_menu().into_iter().enumerate() {
+            match item {
+                MenuItem::Caption(label) => menu
+                    .append(&tray_icon::menu::MenuItem::new(escape(&label), false, None))
+                    .map_err(|error| Error(error.to_string()))?,
+                MenuItem::Action {
+                    label,
+                    enabled,
+                    command,
+                    ..
+                } => {
+                    let id = index.to_string();
+                    menu.append(&tray_icon::menu::MenuItem::with_id(
+                        MenuId(id.clone()),
+                        escape(&label),
+                        enabled,
+                        None,
+                    ))
+                    .map_err(|error| Error(error.to_string()))?;
+                    ids.insert(id, command);
+                }
+                MenuItem::Separator => menu
+                    .append(&PredefinedMenuItem::separator())
+                    .map_err(|error| Error(error.to_string()))?,
+            }
+        }
+        Ok((menu, ids))
+    }
+
+    /// The application icon, embedded rather than read from a theme: Windows tray icons
+    /// take raw pixels, and no icon theme is guaranteed to be installed.
+    fn icon() -> Icon {
+        Icon::from_rgba(icon_rgba::ICON_RGBA.to_vec(), 32, 32).expect("the embedded icon is 32x32")
+    }
+
+    /// Escapes a label for win32 menus, which read a single `&` as the marker before an
+    /// access key, the way the ksni backend escapes `_`.
+    fn escape(label: &str) -> String {
+        label.replace('&', "&&")
+    }
+
+    /// Wakes the pump so a queued update is seen without waiting for real input.
+    fn wake_pump(thread_id: u32) {
+        // SAFETY: posting a thread message to our own tray thread. It may already be
+        // gone, which is fine and ignored.
+        unsafe {
+            let _ = PostThreadMessageW(thread_id, WAKE, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    /// Asks the pump to end via WM_QUIT, the one message that survives its blocking wait.
+    fn stop_pump(thread_id: u32) {
+        // SAFETY: as wake_pump; ignored when the thread is already gone.
+        unsafe {
+            let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn model(state: State) -> Model {
+            let (commands, _inbox) = async_channel::unbounded();
+            Model { state, commands }
+        }
+
+        fn labels(model: &Model) -> Vec<String> {
+            model
+                .set_menu()
+                .into_iter()
+                .map(|item| match item {
+                    super::MenuItem::Caption(label) => format!("caption: {label}"),
+                    super::MenuItem::Action { label, .. } => format!("action: {label}"),
+                    super::MenuItem::Separator => "separator".to_owned(),
+                })
+                .collect()
+        }
+
+        #[test]
+        fn the_windows_menu_is_the_shared_model_unchanged() {
+            let state = State {
+                entries: vec![Entry {
+                    label: "Claude".to_owned(),
+                    value: "12%".to_owned(),
+                }],
+                attention: false,
+                connected: true,
+            };
+            assert_eq!(
+                labels(&model(state)),
+                [
+                    "action: Claude — 12%",
+                    "separator",
+                    "action: Open Tidemark",
+                    "action: Refresh now",
+                    "separator",
+                    "action: Quit",
+                ]
+            );
+        }
+
+        #[test]
+        fn a_disconnected_daemon_disables_refresh_and_replaces_the_accounts() {
+            let state = State {
+                entries: vec![Entry {
+                    label: "Claude".to_owned(),
+                    value: "12%".to_owned(),
+                }],
+                attention: false,
+                connected: false,
+            };
+            assert_eq!(
+                labels(&model(state)),
+                [
+                    "caption: Waiting for Tidemark…",
+                    "separator",
+                    "action: Open Tidemark",
+                    "action: Refresh now",
+                    "separator",
+                    "action: Quit",
+                ]
+            );
+        }
+
+        #[test]
+        fn every_action_gets_an_id_that_marshals_to_its_command() {
+            let tray = model(State::default());
+            let (_, ids) = build_menu(&tray).expect("the menu builds");
+            let actions: Vec<Option<Command>> = tray
+                .set_menu()
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| match item {
+                    super::MenuItem::Action { command, .. } => {
+                        assert!(
+                            ids.contains_key(&index.to_string()),
+                            "every action has an id"
+                        );
+                        Some(command)
+                    }
+                    _ => {
+                        assert!(
+                            !ids.contains_key(&index.to_string()),
+                            "only actions have ids"
+                        );
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                actions.iter().flatten().count(),
+                ids.len(),
+                "one id per action, none shared"
+            );
+            for (index, command) in actions
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, command)| command.map(|command| (index, command)))
+            {
+                assert_eq!(ids[&index.to_string()], command);
+            }
+        }
+
+        #[test]
+        fn a_menu_event_marshals_to_the_command_its_item_was_built_with() {
+            let tray = model(State::default());
+            let (_, ids) = build_menu(&tray).expect("the menu builds");
+            let quit = ids
+                .iter()
+                .find(|(_, command)| **command == Command::Quit)
+                .expect("the menu has a quit");
+            let event = tray_icon::menu::MenuEvent {
+                id: MenuId(quit.0.clone()),
+            };
+            assert_eq!(
+                ids.get(&event.id.0),
+                Some(&Command::Quit),
+                "what the handler looks up"
+            );
+        }
+
+        #[test]
+        fn the_embedded_icon_is_whole() {
+            assert_eq!(icon_rgba::ICON_RGBA.len(), 32 * 32 * 4);
+        }
+    }
 }
 
 /// The tray, from the interface's side.
@@ -347,12 +845,11 @@ impl Tray {
     /// the one outcome worse than having no tray.
     ///
     /// `commands` receives what the user picked; it is drained on the GTK main context.
-    pub async fn spawn(commands: async_channel::Sender<Command>) -> Result<Self, ksni::Error> {
-        let handle = Model {
+    pub async fn spawn(commands: async_channel::Sender<Command>) -> Result<Self, backend::Error> {
+        let handle = backend::spawn(Model {
             state: State::default(),
             commands,
-        }
-        .spawn()
+        })
         .await?;
 
         // Updates go through one task rather than being spawned per change. `Handle::update`
@@ -362,11 +859,7 @@ impl Tray {
         let (outbox, inbox) = async_channel::unbounded::<State>();
         glib::spawn_future_local(async move {
             while let Ok(state) = inbox.recv().await {
-                if handle
-                    .update(|model: &mut Model| model.state = state)
-                    .await
-                    .is_none()
-                {
+                if !handle.update(state).await {
                     tracing::warn!("the tray service is gone; stopping updates");
                     return;
                 }
@@ -555,17 +1048,5 @@ mod tests {
             vec![window(18_000, 3.0), window(604_800, 99.0)],
         );
         assert!(needs_attention(&[status]));
-    }
-
-    #[test]
-    fn the_panel_receives_the_same_full_colour_icon_as_the_application() {
-        let (commands, _inbox) = async_channel::unbounded();
-        let tray = Model {
-            state: State::default(),
-            commands,
-        };
-
-        assert_eq!(ksni::Tray::icon_name(&tray), ids::APP_ID);
-        assert_eq!(ksni::Tray::attention_icon_name(&tray), ids::APP_ID);
     }
 }

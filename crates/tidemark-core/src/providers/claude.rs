@@ -29,7 +29,7 @@ use crate::oauth_file::{
 };
 use crate::secrets::{self, Secrets};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tidemark_types::{
@@ -151,8 +151,8 @@ pub struct Claude {
 /// Free-standing rather than a method so that a caller can ask whether the CLI's login
 /// exists on this machine without building the provider.
 pub fn cli_credentials_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").filter(|home| Path::new(home).is_absolute())?;
-    Some(Path::new(&home).join(".claude/.credentials.json"))
+    let home = crate::paths::home()?;
+    Some(home.join(".claude/.credentials.json"))
 }
 
 fn credentials_for(
@@ -950,6 +950,7 @@ mod tests {
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -1178,6 +1179,10 @@ mod tests {
         assert!(credentials.is_expired_at(1_787_200_000_000));
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn an_expired_token_is_rotated_persisted_and_then_used_for_quota() {
         const REFRESH: &str = r#"{
@@ -1279,6 +1284,7 @@ mod tests {
             .path
             .with_file_name(".credentials.json.tidemark-backup");
         assert_eq!(fs::read(&backup).expect("backup readable"), before_bytes);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(backup)
                 .expect("backup metadata")
@@ -1335,6 +1341,10 @@ mod tests {
         );
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn cli_source_reads_the_cli_file_even_when_a_login_is_stored() {
         const USAGE: &str = r#"{

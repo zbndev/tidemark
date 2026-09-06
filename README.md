@@ -50,6 +50,13 @@ Install from AUR with yay/paru
 yay -S tidemark-git
 ```
 
+### Windows
+
+Experimental. Download the setup executable from the
+[latest release](https://github.com/zbndev/tidemark/releases/latest). It installs for the
+current user only and needs no administrator rights. The installer is not code-signed, so
+SmartScreen stops the first run — More info → Run anyway.
+
 ### Nix
 
 Install Tidemark directly from this repository:

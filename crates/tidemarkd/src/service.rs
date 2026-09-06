@@ -38,6 +38,7 @@ use std::sync::Arc;
 use tidemark_core::config::Config;
 use tidemark_core::oauth::Login;
 use tidemark_core::providers::Credential;
+use tidemark_core::providers::keyed::session;
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_types::{
     AccountId, AuthCandidate, AuthSelection, CredentialKind, DataInfo, HistoryPoint, Preferences,
@@ -49,6 +50,7 @@ use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
 
 use crate::engine::{Command, Preference, stored_kind};
+use crate::peer::{Announcement, PeerHub};
 use crate::registry;
 use crate::startup::Startup;
 
@@ -195,23 +197,138 @@ struct PreferencesRuntime {
 }
 
 /// The object served at `/io/github/zbndev/Tidemark`.
+///
+/// Arc-shared so every p2p peer connection on Windows serves the *same* state — one
+/// login table, one mutation map — while the interface stays on the concrete [`Daemon`]
+/// value each connection gets (there is no `Arc<I>` blanket interface).
 #[derive(Debug)]
-pub struct Daemon {
+pub struct DaemonState {
     statuses: Published,
     update: PublishedUpdate,
     catalog: Vec<ProviderDefinition>,
     configured: RwLock<HashSet<AccountKey>>,
     commands: mpsc::Sender<Command>,
+    /// The daemon runtime, retained because zbus executes p2p method callbacks on
+    /// its own executor rather than inside Tokio's reactor.
+    runtime: tokio::runtime::Handle,
     secrets: Arc<dyn Secrets>,
     logins: Mutex<HashMap<AccountKey, Pending>>,
     mutations: Mutex<HashMap<AccountKey, AccountMutation>>,
     preferences: Option<PreferencesRuntime>,
     preference_mutation: Mutex<()>,
+    /// The p2p fan-out, present only where the daemon serves peers directly (Windows).
+    /// `None` keeps the session-bus emitters exactly as they were.
+    hub: Option<Arc<PeerHub>>,
+}
+
+/// The D-Bus interface handle: cloneable, and shared by every p2p peer connection.
+///
+/// The interface itself is implemented on this concrete type — zbus needs a concrete
+/// `Interface`, and the `Arc` inside is what makes per-peer clones one service.
+#[derive(Debug, Clone)]
+pub struct Daemon(Arc<DaemonState>);
+
+impl std::ops::Deref for Daemon {
+    type Target = DaemonState;
+
+    fn deref(&self) -> &DaemonState {
+        &self.0
+    }
 }
 
 impl Daemon {
     /// Wires the interface to the published state, the poll loop and the keyring.
     pub fn new(
+        statuses: Published,
+        update: PublishedUpdate,
+        catalog: Vec<ProviderDefinition>,
+        configured: Vec<AccountKey>,
+        commands: mpsc::Sender<Command>,
+        secrets: Arc<dyn Secrets>,
+    ) -> Self {
+        Self(Arc::new(DaemonState::new(
+            statuses, update, catalog, configured, commands, secrets,
+        )))
+    }
+
+    /// Adds the paths and system integrations behind the application preferences API.
+    /// Builders run before the handle is cloned to any peer, while the `Arc` is unique.
+    pub fn with_preferences(
+        self,
+        config_path: PathBuf,
+        history_path: PathBuf,
+        startup: Arc<dyn Startup>,
+        release_checks: watch::Sender<bool>,
+        release_check_available: bool,
+    ) -> Self {
+        let mut this = self;
+        Arc::get_mut(&mut this.0)
+            .expect("the daemon is not shared while it is being built")
+            .preferences = Some(PreferencesRuntime {
+            config_path,
+            history_path,
+            startup,
+            release_checks,
+            release_check_available,
+        });
+        this
+    }
+
+    /// Routes announcements through the p2p fan-out instead of a session bus.
+    #[cfg(any(windows, test))]
+    pub fn with_hub(self, hub: Arc<PeerHub>) -> Self {
+        let mut this = self;
+        Arc::get_mut(&mut this.0)
+            .expect("the daemon is not shared while it is being built")
+            .hub = Some(hub);
+        this
+    }
+
+    async fn publish_preferences(
+        &self,
+        emitter: &SignalEmitter<'_>,
+        preferences: Preferences,
+    ) -> fdo::Result<()> {
+        match &self.0.hub {
+            // A p2p peer's own emitter only reaches that peer; the hub reaches all of
+            // them, including the caller.
+            Some(hub) => {
+                hub.publish(Announcement::PreferencesChanged(preferences))
+                    .await;
+            }
+            None => Self::preferences_changed(emitter, preferences).await?,
+        }
+        Ok(())
+    }
+
+    /// Announces the empty update after a disable, on the hub or the session bus.
+    async fn announce_update_removal(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
+        match &self.0.hub {
+            Some(hub) => {
+                hub.publish(Announcement::UpdateChanged(String::new()))
+                    .await;
+            }
+            None => Self::update_changed(emitter, "").await?,
+        }
+        Ok(())
+    }
+
+    /// Announces fresh storage facts, on the hub or the session bus.
+    async fn announce_data(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
+        let data = self.get_data_info().await?;
+        match &self.0.hub {
+            Some(hub) => {
+                hub.publish(Announcement::DataChanged(data)).await;
+            }
+            None => Self::data_changed(emitter, data).await?,
+        }
+        Ok(())
+    }
+}
+
+impl DaemonState {
+    /// Wires the state to the published values, the poll loop and the keyring.
+    fn new(
         statuses: Published,
         update: PublishedUpdate,
         catalog: Vec<ProviderDefinition>,
@@ -225,31 +342,14 @@ impl Daemon {
             catalog,
             configured: RwLock::new(configured.into_iter().collect()),
             commands,
+            runtime: tokio::runtime::Handle::current(),
             secrets,
             logins: Mutex::new(HashMap::new()),
             mutations: Mutex::new(HashMap::new()),
             preferences: None,
             preference_mutation: Mutex::new(()),
+            hub: None,
         }
-    }
-
-    /// Adds the paths and system integrations behind the application preferences API.
-    pub fn with_preferences(
-        mut self,
-        config_path: PathBuf,
-        history_path: PathBuf,
-        startup: Arc<dyn Startup>,
-        release_checks: watch::Sender<bool>,
-        release_check_available: bool,
-    ) -> Self {
-        self.preferences = Some(PreferencesRuntime {
-            config_path,
-            history_path,
-            startup,
-            release_checks,
-            release_check_available,
-        });
-        self
     }
 
     fn preferences_runtime(&self) -> fdo::Result<&PreferencesRuntime> {
@@ -268,15 +368,6 @@ impl Daemon {
             .await
             .map_err(|_| fdo::Error::Failed("the poll loop dropped the request".into()))?
             .map_err(fdo::Error::Failed)
-    }
-
-    async fn publish_preferences(
-        &self,
-        emitter: &SignalEmitter<'_>,
-        preferences: Preferences,
-    ) -> fdo::Result<()> {
-        Self::preferences_changed(emitter, preferences).await?;
-        Ok(())
     }
 
     async fn change_startup_mode(&self, mode: &str) -> fdo::Result<Preferences> {
@@ -487,7 +578,7 @@ impl Daemon {
 /// rebuilt from that answer rather than guessed at, because the published copy is
 /// updated asynchronously.
 struct IdentityMigration<'a> {
-    daemon: &'a Daemon,
+    daemon: &'a DaemonState,
     provider: &'a str,
     /// The ids the guards cover, in the sorted order their locks were taken in.
     ids: Vec<String>,
@@ -633,15 +724,15 @@ impl Daemon {
 
         // Only now that the removal is durable, and only for an id nothing moved into: a
         // promotion leaves the survivor living under `default`, and deleting there would
-        // take its credential. Both kinds are attempted so one locked keyring leaves at
-        // most one residue rather than skipping the second kind.
+        // take its credential. Every kind is attempted so one locked keyring leaves at
+        // most one residue rather than skipping the kinds behind it.
         let provider_id = ProviderId::new(provider);
         let account_id = AccountId::new(account);
         let promoted = account == AccountId::default().as_str()
             && topology.iter().any(|(held, _)| held == provider);
         let mut cleanup = None;
         if !promoted {
-            for kind in [Kind::Key, Kind::Token] {
+            for kind in Kind::ALL {
                 if let Err(error) = self.secrets.delete(kind, &provider_id, &account_id).await {
                     cleanup.get_or_insert(keyring_error(error));
                 }
@@ -869,12 +960,26 @@ impl Daemon {
             .map_err(|_| fdo::Error::Failed("the poll loop has stopped".into()))
     }
 
+    /// Brings the running window forward: files `ActivateRequested` with the peer
+    /// fan-out, so the visible client presents itself. The caller — a second UI
+    /// instance — exits straight after this call. Without a fan-out (the session-bus
+    /// platforms, where the toolkit already single-instances) there is nobody to
+    /// tell, and success is still the honest answer: activation is best-effort.
+    async fn request_activate(&self) -> fdo::Result<()> {
+        #[cfg(any(windows, test))]
+        if let Some(hub) = &self.hub {
+            hub.publish(Announcement::ActivateRequested).await;
+        }
+        Ok(())
+    }
+
     /// Stores an API key for an account, and polls it straight away.
     ///
     /// The key is not validated here beyond being non-blank: the only authority on whether
     /// a key works is the provider, and the poll this triggers is what asks it. A bad key
     /// arrives back as `credential-rejected`, which is a state the interface already draws.
     async fn set_key(&self, provider: &str, account: &str, key: &str) -> fdo::Result<()> {
+        tracing::info!(provider, account, "set_key called");
         let mutation = self.mutation(provider, account).await;
         let _guard = mutation.lock().await;
         let status = self.account(provider, account).await?;
@@ -900,6 +1005,54 @@ impl Daemon {
             .map_err(keyring_error)?;
         tracing::info!(provider, account, "stored an API key");
         self.reload(provider).await
+    }
+
+    /// Stores a browser session the person pasted in, and puts the account on it.
+    ///
+    /// The fallback for a browser profile this machine will not let Tidemark open — since
+    /// Chrome M127, every Chromium profile on Windows. Like `SetKey`, the header is not
+    /// validated here beyond being non-blank: the provider is the only authority on
+    /// whether a session works, and the poll this triggers is what asks it. An expired
+    /// paste arrives back as `credential-rejected`, which the interface already draws.
+    async fn set_session(&self, provider: &str, account: &str, session: &str) -> fdo::Result<()> {
+        tracing::info!(provider, account, "set_session called");
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
+        self.account(provider, account).await?;
+        if !registry::has_pasted_session_auth(provider) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "{provider} does not take a pasted browser session"
+            )));
+        }
+        let session = session.trim();
+        if session.is_empty() {
+            return Err(fdo::Error::InvalidArgs(
+                "an empty session is not a session; select another source to stop using one".into(),
+            ));
+        }
+        self.secrets
+            .set(
+                Kind::Session,
+                &ProviderId::new(provider),
+                &AccountId::new(account),
+                &Credential::new(session),
+            )
+            .await
+            .map_err(keyring_error)?;
+        tracing::info!(provider, account, "stored a pasted browser session");
+        // Storing it is only half the change: an account still pointing at a browser would
+        // go on reading that browser. The selection write is what puts it on the paste, and
+        // it clears the browser fields on its way in.
+        self.config_request(|reply| Command::SelectAuthSource {
+            provider: provider.to_owned(),
+            account: account.to_owned(),
+            selection: AuthSelection {
+                mode: session::PASTE_SOURCE.to_owned(),
+                candidate: None,
+            },
+            reply,
+        })
+        .await
     }
 
     /// Removes whatever credential Tidemark holds for an account.
@@ -945,8 +1098,14 @@ impl Daemon {
 
         self.cancel_pending_login(provider, account).await;
 
-        let login = Login::begin(client)
+        // The zbus p2p executor that calls this method is not a Tokio runtime. The
+        // loopback listener is Tokio I/O, so create it on the daemon's runtime before
+        // replying with the browser URL.
+        let login = self
+            .runtime
+            .spawn(Login::begin(client))
             .await
+            .map_err(|error| fdo::Error::Failed(format!("OAuth login task stopped: {error}")))?
             .map_err(|error| fdo::Error::Failed(error.to_string()))?;
         let url = login.url().to_owned();
 
@@ -955,7 +1114,7 @@ impl Daemon {
         let provider_name = provider.to_owned();
         let account_name = account.to_owned();
         let credential_mutation = Arc::clone(&mutation);
-        let task = tokio::spawn(async move {
+        let task = self.runtime.spawn(async move {
             let http = tidemark_core::oauth::client().map_err(|error| error.to_string())?;
             let response = login
                 .finish(&http)
@@ -1155,7 +1314,7 @@ impl Daemon {
         let release_forgotten = self.update.set_enabled(enabled).await;
         runtime.release_checks.send_replace(enabled);
         if release_forgotten {
-            Self::update_changed(&emitter, "").await?;
+            self.announce_update_removal(&emitter).await?;
         }
         self.publish_preferences(&emitter, preferences).await
     }
@@ -1276,7 +1435,7 @@ impl Daemon {
     ) -> fdo::Result<()> {
         self.config_request(|reply| Command::ClearHistory { reply })
             .await?;
-        Self::data_changed(&emitter, self.get_data_info().await?).await?;
+        self.announce_data(&emitter).await?;
         Ok(())
     }
 
@@ -1371,6 +1530,12 @@ impl Daemon {
     /// Availability of a newer published release changed; empty means there is none.
     #[zbus(signal)]
     pub async fn update_changed(emitter: &SignalEmitter<'_>, version: &str) -> zbus::Result<()>;
+
+    /// Another client asks the visible one to come forward. A second UI instance on a
+    /// platform without session-bus uniqueness calls `RequestActivate` and exits;
+    /// this is how the running window hears about it.
+    #[zbus(signal)]
+    pub async fn activate_requested(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
 fn file_size(path: impl AsRef<std::path::Path>) -> u64 {
@@ -1460,6 +1625,7 @@ mod tests {
         let kind = match kind {
             Kind::Key => "key",
             Kind::Token => "token",
+            Kind::Session => "session",
         };
         (
             kind.to_owned(),
@@ -2103,7 +2269,7 @@ mod tests {
     async fn a_removal_deletes_its_credentials_only_after_the_engine_persisted_it() {
         let (daemon, secrets, mut commands) =
             daemon_over_catalog(vec![key_account("zai")], catalog()).await;
-        for kind in [Kind::Key, Kind::Token] {
+        for kind in Kind::ALL {
             secrets
                 .set(
                     kind,
@@ -2115,7 +2281,7 @@ mod tests {
                 .expect("seeded");
         }
         let seeded = secrets.held();
-        assert_eq!(seeded.len(), 2, "both owned kinds are seeded");
+        assert_eq!(seeded.len(), Kind::ALL.len(), "every owned kind is seeded");
         let observed = Arc::clone(&secrets);
         let responder = tokio::spawn(async move {
             match commands.recv().await.expect("command") {
@@ -4277,5 +4443,18 @@ mod tests {
             .await
             .expect("task did not panic")
             .expect("accepted");
+    }
+
+    #[tokio::test]
+    async fn a_daemon_uses_its_captured_runtime_for_oauth_callbacks() {
+        let (daemon, _secrets, _commands) = daemon_over(Vec::new()).await;
+        let expected = tokio::runtime::Handle::current().id();
+        let actual = daemon
+            .runtime
+            .spawn(async { tokio::runtime::Handle::current().id() })
+            .await
+            .expect("the captured runtime is still running");
+
+        assert_eq!(actual, expected);
     }
 }

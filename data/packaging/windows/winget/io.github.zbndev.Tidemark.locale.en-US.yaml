@@ -1,0 +1,14 @@
+PackageIdentifier: io.github.zbndev.Tidemark
+PackageVersion: 0.3.1
+PackageLocale: en-US
+Publisher: zbndev
+PackageName: Tidemark
+License: LicenseRef-LICENSE
+ShortDescription: Usage-limit tracker with provider dashboards, tray and toasts.
+Moniker: tidemark
+Tags:
+  - monitoring
+  - tray
+  - gtk
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

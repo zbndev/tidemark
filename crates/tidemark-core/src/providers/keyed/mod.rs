@@ -83,6 +83,9 @@ pub mod session;
 pub mod stepfun;
 pub mod sub2api;
 pub mod synthetic;
+// t3chat is Unix-only for now: its HTTP stack wreq depends unconditionally on boring2
+// (BoringSSL), which does not build on Windows yet — reversible once boring-sys2 does.
+#[cfg(not(target_os = "windows"))]
 pub mod t3chat;
 pub mod venice;
 pub mod warp;

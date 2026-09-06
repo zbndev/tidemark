@@ -232,14 +232,22 @@ pub type Factory = Box<
         + Sync,
 >;
 
-/// Rebuilds a provider client that finds its own credential, from its settings alone.
+/// Rebuilds a provider client that finds its own credential, from its settings.
 ///
 /// The counterpart of [`Factory`] for a provider registered with [`Account::with_client`].
 /// Such a provider has no stored key for the engine to hand it, but it can still have
 /// settings — and a setting that never reached the built client would take effect only on
 /// the next daemon restart.
+///
+/// The credential is empty for all but one case: a browser-session account the person put
+/// on a pasted session, whose header is the one thing its settings cannot hold, because a
+/// live session does not belong in a config file. See [`Engine::pasted_session`].
 pub type Rebuild = Box<
-    dyn Fn(&AccountId, &BTreeMap<String, String>) -> Result<Arc<dyn Provider>, ProviderError>
+    dyn Fn(
+            &AccountId,
+            Credential,
+            &BTreeMap<String, String>,
+        ) -> Result<Arc<dyn Provider>, ProviderError>
         + Send
         + Sync,
 >;
@@ -728,7 +736,7 @@ impl Engine {
     /// error returned here would tell the caller the rename or promotion failed when
     /// the file says it did not.
     async fn forget_secret_slots(secrets: &Arc<dyn Secrets>, provider: &str, account: &str) {
-        for kind in [Kind::Key, Kind::Token] {
+        for kind in Kind::ALL {
             if let Err(error) = secrets
                 .delete(kind, &ProviderId::new(provider), &AccountId::new(account))
                 .await
@@ -821,7 +829,7 @@ impl Engine {
         if let Some(old) = promote_from.as_ref() {
             Self::forget_secret_slots(&self.secrets, provider, old).await;
             let provider_id = ProviderId::new(provider);
-            for kind in [Kind::Key, Kind::Token] {
+            for kind in Kind::ALL {
                 if Some(kind) == promoted_kind {
                     continue;
                 }
@@ -1181,7 +1189,7 @@ impl Engine {
             .inspect_auth_sources()
             .await
             .map_err(|error| error.to_string())?;
-        Ok(browser_mode_report(provider, sources))
+        Ok(sources)
     }
 
     /// Revalidates, then atomically persists one selected dynamic local source.
@@ -1196,9 +1204,23 @@ impl Engine {
         }) else {
             return Err(format!("account {provider}/{account} is not configured"));
         };
-        let sources = self.inspect_auth_sources(provider, account).await?;
-        let Some(selection) = resolvable_auth_selection(&sources, &selection) else {
-            return Err("the selected authentication source is not ready".into());
+        // A pasted session is stored, not discovered: there are no candidates to resolve
+        // it against, and nothing can prove it until the client is rebuilt around it. The
+        // poll this schedules is what asks — the same contract `SetKey` has.
+        let selection = if selection.mode == session::PASTE_SOURCE {
+            if !crate::registry::has_pasted_session_auth(provider) {
+                return Err(format!("{provider} does not take a pasted browser session"));
+            }
+            AuthSelection {
+                mode: selection.mode,
+                candidate: None,
+            }
+        } else {
+            let sources = self.inspect_auth_sources(provider, account).await?;
+            let Some(resolved) = resolvable_auth_selection(&sources, &selection) else {
+                return Err("the selected authentication source is not ready".into());
+            };
+            resolved
         };
 
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
@@ -1489,17 +1511,67 @@ impl Engine {
         }
     }
 
+    /// The pasted session one account was rebuilt from, if that is what it runs on.
+    ///
+    /// The slot is read only for an account whose selected mode *is* the pasted session.
+    /// An account reading its own browser profile never touches it — the common case
+    /// everywhere a browser jar is readable, which is every Linux profile and, until
+    /// Chrome M127, was every profile anywhere. Reading it anyway would put that account
+    /// one locked keyring away from `waiting for keyring` over a credential it does not
+    /// use, and would spend a Secret Service round trip per rebuild to learn nothing.
+    ///
+    /// Takes `&mut self` for the same reason every other awaiting method here does: the
+    /// engine owns a SQLite connection and is not `Sync`, so a future holding a shared
+    /// borrow of it could not be spawned.
+    async fn pasted_session(
+        &mut self,
+        index: usize,
+    ) -> Result<Credential, (ProviderState, Option<String>)> {
+        let on_a_paste = self.accounts[index]
+            .status
+            .auth_selection
+            .as_ref()
+            .is_some_and(|selection| selection.mode == session::PASTE_SOURCE);
+        if !on_a_paste {
+            return Ok(Credential::new(String::new()));
+        }
+        let provider = self.accounts[index].provider.clone();
+        let account = self.accounts[index].account.clone();
+        let secrets = Arc::clone(&self.secrets);
+        match secrets.get(Kind::Session, &provider, &account).await {
+            Ok(Some(credential)) => Ok(credential),
+            // Selected the mode, stored nothing under it: the provider is handed an empty
+            // credential and says `NoCredential`, which is what the settings dialog draws
+            // an empty paste field for.
+            Ok(None) => Ok(Credential::new(String::new())),
+            Err(SecretError::Locked) => Err((ProviderState::WaitingForKeyring, None)),
+            Err(error) => Err((ProviderState::KeyringUnavailable, Some(error.to_string()))),
+        }
+    }
+
     /// Loads the credential and builds the client, unless one is already in hand.
     async fn ensure_client(&mut self, index: usize) {
         if self.accounts[index].client.is_some() {
             return;
         }
-        if let Some(rebuild) = self.accounts[index].rebuild.as_ref() {
+        if self.accounts[index].rebuild.is_some() {
             // Owns its credential discovery: there is no stored key to read, so the
-            // settings are the whole of what the replacement is built from.
+            // settings — plus a pasted session where the account runs on one — are the
+            // whole of what the replacement is built from.
             let account = self.accounts[index].account.clone();
+            let pasted = match self.pasted_session(index).await {
+                Ok(credential) => credential,
+                Err((state, detail)) => {
+                    self.accounts[index].set_state(state, detail);
+                    return;
+                }
+            };
             let options = self.accounts[index].option_values();
-            match rebuild(&account, &options) {
+            let rebuild = self.accounts[index]
+                .rebuild
+                .as_ref()
+                .expect("checked just above");
+            match rebuild(&account, pasted, &options) {
                 Ok(client) => self.accounts[index].client = Some(client),
                 Err(error) => {
                     self.accounts[index].failures = self.accounts[index].failures.saturating_add(1);
@@ -1551,7 +1623,7 @@ impl Engine {
             Err(error @ SecretError::NotUtf8) => {
                 Loaded::State(ProviderState::NoCredential, Some(error.to_string()))
             }
-            Err(error @ SecretError::Dbus(_)) => {
+            Err(error @ SecretError::Unavailable(_)) => {
                 Loaded::State(ProviderState::KeyringUnavailable, Some(error.to_string()))
             }
         };
@@ -1583,6 +1655,7 @@ impl Engine {
                     provider = %self.accounts[index].provider,
                     state = %state,
                     %error,
+                    error_debug = ?error,
                     "poll failed"
                 );
                 let account = &mut self.accounts[index];
@@ -1932,18 +2005,6 @@ impl Engine {
     }
 }
 
-/// Gives browser-profile candidates the mode body the settings protocol renders.
-fn browser_mode_report(provider: &str, sources: Vec<AuthCandidate>) -> Vec<AuthCandidate> {
-    if crate::registry::has_browser_session_auth(provider)
-        && !sources
-            .iter()
-            .any(|candidate| candidate.id == session::BROWSER_SOURCE)
-    {
-        return session::browser_sources(sources);
-    }
-    sources
-}
-
 /// Which schema a credential of this kind is stored under, or `None` where Tidemark stores
 /// nothing of its own.
 pub fn stored_kind(credential: CredentialKind) -> Option<Kind> {
@@ -2082,22 +2143,19 @@ mod tests {
     fn a_browser_only_provider_wraps_its_profile_report_in_the_browser_mode() {
         // BrowserAuth renders by mode id. Handing it a Firefox root directly makes the
         // selected Browser half look unavailable even when the profile was discovered.
-        let report = browser_mode_report(
-            "t3chat",
-            vec![AuthCandidate {
-                id: "firefox".into(),
-                title: "Firefox".into(),
+        let report = session::browser_sources(vec![AuthCandidate {
+            id: "firefox".into(),
+            title: "Firefox".into(),
+            subtitle: None,
+            state: "ready".into(),
+            children: vec![AuthCandidate {
+                id: "firefox/Default".into(),
+                title: "Default".into(),
                 subtitle: None,
                 state: "ready".into(),
-                children: vec![AuthCandidate {
-                    id: "firefox/Default".into(),
-                    title: "Default".into(),
-                    subtitle: None,
-                    state: "ready".into(),
-                    children: Vec::new(),
-                }],
+                children: Vec::new(),
             }],
-        );
+        }]);
 
         assert_eq!(report[0].id, "browser");
         assert_eq!(report[0].children[0].id, "firefox");
@@ -2120,22 +2178,19 @@ mod tests {
     fn a_challenged_browser_choice_is_persisted_as_its_challenged_profile() {
         // An edge challenge refuses the proof, not the session: the recorded profile
         // starts working the moment the edge lets polls through.
-        let report = browser_mode_report(
-            "t3chat",
-            vec![AuthCandidate {
-                id: "firefox".into(),
-                title: "Firefox".into(),
+        let report = session::browser_sources(vec![AuthCandidate {
+            id: "firefox".into(),
+            title: "Firefox".into(),
+            subtitle: None,
+            state: "challenged".into(),
+            children: vec![AuthCandidate {
+                id: "firefox/Default".into(),
+                title: "Default".into(),
                 subtitle: None,
                 state: "challenged".into(),
-                children: vec![AuthCandidate {
-                    id: "firefox/Default".into(),
-                    title: "Default".into(),
-                    subtitle: None,
-                    state: "challenged".into(),
-                    children: Vec::new(),
-                }],
+                children: Vec::new(),
             }],
-        );
+        }]);
 
         assert_eq!(
             resolvable_auth_selection(
@@ -2154,16 +2209,13 @@ mod tests {
 
     #[test]
     fn an_unanswered_browser_choice_is_still_refused() {
-        let report = browser_mode_report(
-            "t3chat",
-            vec![AuthCandidate {
-                id: "firefox".into(),
-                title: "Firefox".into(),
-                subtitle: None,
-                state: "unreachable".into(),
-                children: Vec::new(),
-            }],
-        );
+        let report = session::browser_sources(vec![AuthCandidate {
+            id: "firefox".into(),
+            title: "Firefox".into(),
+            subtitle: None,
+            state: "unreachable".into(),
+            children: Vec::new(),
+        }]);
 
         assert_eq!(
             resolvable_auth_selection(
@@ -2309,6 +2361,7 @@ mod tests {
                         match kind {
                             Kind::Key => "key",
                             Kind::Token => "token",
+                            Kind::Session => "session",
                         }
                         .to_owned(),
                         provider.clone(),
@@ -2773,8 +2826,14 @@ mod tests {
 
     /// A directory that hands a config inside it back its writer when it goes, and
     /// nothing else — the test that owns the directory removes it.
+    ///
+    /// Unix refuses through the directory's write mode. Windows has no directory
+    /// write mode, so the refusal pins `config.toml` itself read-only instead: the
+    /// staged write still succeeds, and the rename over the read-only target is
+    /// refused — the same durability point, one step later in the same write.
     struct ReadOnlyDir(std::path::PathBuf);
 
+    #[cfg(unix)]
     impl ReadOnlyDir {
         fn refuse_writes(path: &std::path::Path) -> Self {
             use std::os::unix::fs::PermissionsExt;
@@ -2784,10 +2843,40 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    impl ReadOnlyDir {
+        fn refuse_writes(path: &std::path::Path) -> Self {
+            let config = path.join("config.toml");
+            let mut permissions = std::fs::metadata(&config)
+                .expect("config exists")
+                .permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&config, permissions).expect("config made read-only");
+            Self(config)
+        }
+    }
+
+    #[cfg(unix)]
     impl Drop for ReadOnlyDir {
         fn drop(&mut self) {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for ReadOnlyDir {
+        fn drop(&mut self) {
+            let mut permissions = std::fs::metadata(&self.0)
+                .expect("config exists")
+                .permissions();
+            // Not clippy::permissions_set_readonly_false: that lint warns about
+            // this call's world-writable consequence on Unix, but this arm is
+            // cfg(windows)-only, where it clears FILE_ATTRIBUTE_READONLY — the
+            // exact inverse of refuse_writes' set_readonly(true) above.
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(&self.0, permissions);
         }
     }
 
@@ -3702,6 +3791,10 @@ mod tests {
         let _ = std::fs::remove_file(history_path);
     }
 
+    // The Windows build deliberately excludes the local agy source (gated on G2, see
+    // ANTIGRAVITY_LOCAL_SOURCE_AVAILABLE), so "cli" is not a settable source value there
+    // and the rebuild-on-change behaviour under test cannot be exercised.
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn changing_antigravity_usage_source_rebuilds_its_client() {
         // Antigravity owns its credential discovery, so it is registered with a client
@@ -3810,7 +3903,7 @@ mod tests {
         let account = Account::keyless(
             ProviderId::new("cursor"),
             AccountId::default(),
-            Box::new(move |_, _| {
+            Box::new(move |_, _, _| {
                 Ok(Arc::new(AuthFake {
                     sources: source_copy.clone(),
                 }) as Arc<dyn Provider>)
@@ -4200,6 +4293,72 @@ mod tests {
         let status = harness.published().pop().expect("published");
         assert_eq!(status.state(), Some(ProviderState::RateLimited));
         assert_eq!(harness.wait_secs(), 2400);
+    }
+
+    #[tokio::test]
+    async fn only_an_account_on_a_pasted_session_reads_the_slot_one_lives_in() {
+        // Every browser jar on Linux is readable, so an account there is on its browser and
+        // never needed a paste. Reading the session slot for it anyway would leave it one
+        // locked keyring away from waiting on a credential it does not use — which is what
+        // a keyring answering nothing but `Locked` proves either way here.
+        let handed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let account = |selection: AuthSelection, handed: Arc<Mutex<Vec<String>>>| {
+            Account::keyless(
+                ProviderId::new("cursor"),
+                AccountId::default(),
+                Box::new(move |_, credential: Credential, _| {
+                    handed
+                        .lock()
+                        .expect("no test panics here")
+                        .push(credential.expose().to_owned());
+                    Ok(Fake::new(vec![Ok(snapshot(1.0, 3600))]) as Arc<dyn Provider>)
+                }),
+            )
+            .with_auth_selection(Some(selection))
+        };
+
+        let mut on_browser = Harness::new(
+            vec![account(
+                AuthSelection {
+                    mode: session::BROWSER_SOURCE.into(),
+                    candidate: Some("firefox".into()),
+                },
+                Arc::clone(&handed),
+            )],
+            Arc::new(Keyring(|| Err(SecretError::Locked))),
+        );
+        on_browser.engine.ensure_client(0).await;
+
+        assert!(
+            on_browser.engine.accounts[0].client.is_some(),
+            "a locked keyring is nothing to do with an account reading its own browser"
+        );
+        assert_eq!(
+            handed.lock().expect("no test panics here").as_slice(),
+            [String::new()],
+            "and nothing is handed to it: the jar is the credential"
+        );
+
+        let mut on_a_paste = Harness::new(
+            vec![account(
+                AuthSelection {
+                    mode: session::PASTE_SOURCE.into(),
+                    candidate: None,
+                },
+                Arc::clone(&handed),
+            )],
+            Arc::new(Keyring(|| Err(SecretError::Locked))),
+        );
+        on_a_paste.engine.ensure_client(0).await;
+
+        assert!(
+            on_a_paste.engine.accounts[0].client.is_none(),
+            "an account whose credential is in the keyring waits for the keyring"
+        );
+        assert_eq!(
+            on_a_paste.engine.accounts[0].status.state(),
+            Some(ProviderState::WaitingForKeyring)
+        );
     }
 
     #[tokio::test]
@@ -4673,7 +4832,7 @@ mod tests {
         let mut harness = harness_with_config(
             vec![
                 Account::with_client(Fake::new(vec![Ok(reading(0, 42.0, 3600))])).with_rebuild(
-                    Box::new(|_, _| {
+                    Box::new(|_, _, _| {
                         Ok(Fake::new(vec![Ok(reading(0, 42.0, 3600))]) as Arc<dyn Provider>)
                     }),
                 ),

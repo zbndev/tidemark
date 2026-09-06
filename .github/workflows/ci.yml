@@ -2,7 +2,6 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
     paths-ignore:
       # '**/*.md' does not match repository-root files (README, CONTEXT, AGENTS) — the
       # root-level '*.md' entry is what closes that gap.
@@ -10,7 +9,9 @@ on:
       - '**/*.md'
       - 'docs/**'
   push:
-    branches: [main]
+    # Every branch, and tags excluded by saying so: a tag push belongs to the release
+    # workflow, which runs this same Linux gate itself before it builds anything.
+    branches: ['**']
     paths-ignore:
       - '*.md'
       - '**/*.md'
@@ -81,3 +82,80 @@ jobs:
         run: |
           shellcheck scripts/*.sh data/restart-user-daemon \
             data/packaging/deb/postinst data/packaging/rpm/post-install.sh
+
+  # The same gate on Windows: fmt, clippy and the whole suite, on MSYS2 UCRT64. The
+  # MSVC target has never linked this dependency set (link.exe 1181) and is not what
+  # the project ships, so the GNU toolchain is the one thing this job insists on.
+  # Unix-only tests cfg-gate themselves out at their seams, and the GTK widget tests
+  # skip on a runner with no display, so a red run here is a real regression.
+  windows-tests:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # RUSTUP_TOOLCHAIN outranks both `rustup default` and the repo's
+      # rust-toolchain.toml (which pins only channel=stable, i.e. the runner's
+      # MSVC host); without it the toolchain file would silently flip every
+      # cargo invocation back to MSVC.
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+      # gtk-rs MinGW recipe: the UCRT64 pkgconfig trees backing the system
+      # GTK/libadwaita/SQLite that the workspace links.
+      PKG_CONFIG_PATH: /ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: msys2/setup-msys2@v2.27.0
+        with:
+          msystem: UCRT64
+          update: true
+          # path-type: inherit keeps the runner's PATH (notably ~/.cargo/bin)
+          # inside the msys2 shell; the default "minimal" rebuilds PATH from
+          # /etc/profile alone and drops it, which would kill every cargo step.
+          # /etc/profile still puts /ucrt64/bin first, so pkg-config/gcc/cmake
+          # keep winning. sqlite3: rusqlite links the SYSTEM SQLite. clang and
+          # cmake build BoringSSL behind wreq (bindgen at build time).
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-go
+
+      # Before any cargo step: prove the MSYS2 environment resolved. The
+      # gtk4/libadwaita-1/sqlite3 modversions MUST appear in the log (this step
+      # fails if any is missing).
+      - name: Confirm the MSYS2 environment
+        shell: msys2 {0}
+        run: |
+          pkg-config --modversion gtk4 libadwaita-1 sqlite3
+          command -v gcc g++ clang cmake cargo rustup
+
+      # A full GNU-host toolchain, not just target std: build scripts and proc
+      # macros link for the HOST too. Host==target==GNU, so the verbatim cargo
+      # commands build GNU throughout and link with gcc from /ucrt64.
+      - name: Default a GNU-host Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+          # minimal profile ships no rustfmt/clippy; the gate below needs both.
+          rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ucrt64-tests
+
+      # NO continue-on-error anywhere: a failure fails the job.
+      - name: Format
+        shell: msys2 {0}
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        shell: msys2 {0}
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        shell: msys2 {0}
+        run: cargo test --workspace

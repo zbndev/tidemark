@@ -16,7 +16,10 @@ repository = "https://github.com/zbndev/tidemark"
 authors = ["zbndev"]
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Unsafe stays denied workspace-wide. Win32 FFI needs locally-audited `unsafe`, confined
+# to `cfg(windows)` modules (Linux builds contain none) — `forbid` cannot be locally
+# overridden, hence `deny`.
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]

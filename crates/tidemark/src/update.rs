@@ -1,6 +1,5 @@
 use std::ffi::OsStr;
 use std::io;
-use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 use semver::{Error, Version};
@@ -55,12 +54,61 @@ where
     Some(command)
 }
 
-/// Replaces this process with the same command, avoiding a race with GTK's single instance.
+/// Replaces this process with the same command, avoiding a race with GTK's single
+/// instance. Returns only when the restart did not happen; the caller turns the error
+/// into the "could not restart" dialog.
 pub fn restart() -> io::Error {
-    let Some(mut command) = restart_command(std::env::args_os()) else {
+    let Some(command) = restart_command(std::env::args_os()) else {
         return io::Error::new(io::ErrorKind::NotFound, "the program name is unavailable");
     };
+    restart_process(command)
+}
+
+/// Unix can swap the program in place: the exec keeps the process identity, so GTK's
+/// single-instance lock never sees two holders, and argv[0] is resolved exactly as it
+/// was for this invocation.
+#[cfg(unix)]
+fn restart_process(mut command: Command) -> io::Error {
+    use std::os::unix::process::CommandExt;
+
     command.exec()
+}
+
+/// Windows has no exec, so the successor is spawned first and this process exits only
+/// once it exists: there is never a moment without a process, the brief overlap of the
+/// two instances is what the platform offers instead. The successor's executable is
+/// [`restart_sibling`]'s resolution of the original program argument — never a PATH
+/// search.
+#[cfg(windows)]
+fn restart_process(command: Command) -> io::Error {
+    match restart_sibling(&command) {
+        Ok(mut sibling) => match sibling.spawn() {
+            Ok(_child) => std::process::exit(0),
+            Err(error) => error,
+        },
+        Err(error) => error,
+    }
+}
+
+/// Resolves the next instance's executable the way the Unix arm's exec() does — from
+/// the original program argument — but anchored to this process's own directory on
+/// disk rather than a PATH search. A bare or relative argv[0] keeps its name and is
+/// looked up next to `current_exe()`, mirroring the Unix arm's reuse of the original
+/// program; an absolute argv[0] names where this instance happened to be started from
+/// rather than where the updater just wrote, so the successor is this process's own
+/// file instead. (When no program argument exists at all, [`restart`] has already
+/// answered with the same NotFound error on every platform.)
+#[cfg(windows)]
+fn restart_sibling(command: &Command) -> io::Result<Command> {
+    let exe = std::env::current_exe()?;
+    let original = std::path::Path::new(command.get_program());
+    let program = match exe.parent() {
+        Some(dir) if !original.is_absolute() => dir.join(original),
+        _ => exe,
+    };
+    let mut sibling = Command::new(program);
+    sibling.args(command.get_args());
+    Ok(sibling)
 }
 
 #[cfg(test)]
@@ -114,6 +162,45 @@ mod tests {
         assert_eq!(command.get_program(), OsStr::new("tidemark"));
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("--background")]
+        );
+    }
+}
+
+/// The Windows restart resolves its successor from the original program argument,
+/// anchored to this executable's own directory; this pins that resolution without
+/// spawning anything.
+#[cfg(all(test, windows))]
+mod restart_tests {
+    use std::ffi::OsStr;
+
+    use super::{restart_command, restart_sibling};
+
+    #[test]
+    fn a_bare_program_name_is_anchored_to_this_executables_directory() {
+        let original = restart_command(["tidemark", "--background"]).unwrap();
+        let sibling = restart_sibling(&original).unwrap();
+
+        let expected = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tidemark");
+        assert_eq!(sibling.get_program(), expected);
+        assert_eq!(
+            sibling.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("--background")]
+        );
+    }
+
+    #[test]
+    fn an_absolute_program_name_falls_back_to_this_executable() {
+        let original = restart_command([r"C:\elsewhere\tidemark.exe", "--background"]).unwrap();
+        let sibling = restart_sibling(&original).unwrap();
+
+        assert_eq!(sibling.get_program(), std::env::current_exe().unwrap());
+        assert_eq!(
+            sibling.get_args().collect::<Vec<_>>(),
             vec![OsStr::new("--background")]
         );
     }

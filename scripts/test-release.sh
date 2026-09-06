@@ -13,6 +13,8 @@ current_version=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$
     "$project_root/Cargo.toml")
 next_version=${current_version%.*}.$(( ${current_version##*.} + 1 ))
 
+winget=data/packaging/windows/winget
+
 fixture=
 cleanup() {
     [ -n "$fixture" ] && rm -rf "$fixture" "$fixture.origin.git"
@@ -25,9 +27,9 @@ trap cleanup EXIT
 make_fixture() {
     fixture=$(mktemp -d "${TMPDIR:-/tmp}/tidemark-release-test.XXXXXX")
 
-    mkdir -p "$fixture/scripts" "$fixture/data/metainfo" "$fixture/crates/tidemark-types/src" \
-        "$fixture/crates/tidemark-core/src" "$fixture/crates/tidemarkd/src" \
-        "$fixture/crates/tidemark/src"
+    mkdir -p "$fixture/scripts" "$fixture/data/metainfo" "$fixture/$winget" \
+        "$fixture/crates/tidemark-types/src" "$fixture/crates/tidemark-core/src" \
+        "$fixture/crates/tidemarkd/src" "$fixture/crates/tidemark/src"
     cp "$project_root/Cargo.toml" "$project_root/Cargo.lock" \
         "$project_root/rust-toolchain.toml" "$project_root/PKGBUILD" "$fixture/"
     cp "$project_root/crates/tidemark-types/Cargo.toml" "$fixture/crates/tidemark-types/"
@@ -36,6 +38,7 @@ make_fixture() {
     cp "$project_root/crates/tidemark/Cargo.toml" "$fixture/crates/tidemark/"
     cp "$project_root/data/metainfo/io.github.zbndev.Tidemark.metainfo.xml" \
         "$fixture/data/metainfo/"
+    cp "$project_root/$winget"/io.github.zbndev.Tidemark*.yaml "$fixture/$winget/"
     cp "$project_root/scripts/release.sh" "$project_root/scripts/check-tag-version.sh" \
         "$fixture/scripts/"
 
@@ -139,11 +142,21 @@ p
 [ "$release_line" = "    <release version=\"$next_version\" date=\"$(date +%F)\" />" ]
 grep -q "^pkgver=$next_version\$" "$fixture/PKGBUILD"
 grep -q '^pkgrel=1$' "$fixture/PKGBUILD"
+# All three winget manifests carry the version, and the installer one carries it twice
+# more inside the release asset URL.
+for manifest in "$fixture/$winget"/io.github.zbndev.Tidemark*.yaml; do
+    grep -q "^PackageVersion: $next_version\$" "$manifest"
+done
+grep -q "InstallerUrl: .*/v$next_version/Tidemark-v$next_version-setup\.exe\$" \
+    "$fixture/$winget/io.github.zbndev.Tidemark.installer.yaml"
 
 [ "$(git -C "$fixture" log -1 --format=%s)" = "chore: bump to v$next_version" ]
 [ "$(git -C "$fixture" diff --name-only HEAD~1 HEAD | sort)" = "$(printf '%s\n' \
     Cargo.lock Cargo.toml PKGBUILD \
     crates/tidemark-core/Cargo.toml crates/tidemarkd/Cargo.toml \
+    "$winget/io.github.zbndev.Tidemark.installer.yaml" \
+    "$winget/io.github.zbndev.Tidemark.locale.en-US.yaml" \
+    "$winget/io.github.zbndev.Tidemark.yaml" \
     "$metainfo" | sort)" ]
 [ "$(git -C "$fixture" for-each-ref "refs/tags/v$next_version" \
     --format='%(objecttype)')" = tag ]
@@ -155,6 +168,11 @@ printf '0.1.10 is newer than 0.1.9, numerically\n'
 make_fixture
 sed -i "/^\[workspace\.package\]/,/^\[/ s/^version = \"\(.*\)\"\$/version = \"0.1.9\"/" \
     "$fixture/Cargo.toml"
+# Backdating the manifest without backdating the release history leaves release.sh
+# inserting 0.1.10 above the real newest entry, and appstreamcli --pedantic rejects that
+# as out of order. It is an artifact of pretending the fixture is older than it is; a real
+# release only ever prepends something newer.
+sed -i '/^    <release version=/d' "$fixture/$metainfo"
 git -C "$fixture" commit -qam 'fixture at 0.1.9'
 git -C "$fixture" push -q origin main
 (cd "$fixture" && scripts/release.sh 0.1.10) >/dev/null 2>&1

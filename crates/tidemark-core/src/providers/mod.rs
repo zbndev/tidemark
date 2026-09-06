@@ -352,7 +352,7 @@ impl ProviderError {
         match error {
             SecretError::Locked => Self::KeyringLocked,
             SecretError::NotUtf8 => Self::malformed("the stored credential is not text"),
-            SecretError::Dbus(error) => Self::KeyringUnavailable(error.to_string()),
+            SecretError::Unavailable(error) => Self::KeyringUnavailable(error),
         }
     }
 }

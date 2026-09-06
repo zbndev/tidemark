@@ -309,16 +309,26 @@ impl Codex {
         now: i64,
         force: bool,
     ) -> Result<CodexCredentials, ProviderError> {
-        let credentials = self.credentials.as_ref().ok_or_else(|| {
+        let file = self.credentials.as_ref().ok_or_else(|| {
             ProviderError::Local("Codex CLI credentials are unavailable for this account".into())
         })?;
-        let locked = credentials.lock().map_err(map_file_error)?;
+        let document = file.read_json().map_err(map_file_error)?;
+        let credentials = CodexCredentials::from_document(&document)?;
+        if !force && !credentials.is_expired_at(now) {
+            return Ok(credentials);
+        }
+
+        // A live CLI may keep its credential file under an exclusive update lock.
+        // Reading above needs no mutation and must not contend with that lock; only a
+        // refresh must take it. Re-read after acquiring it so a CLI rotation between
+        // the two operations cannot be refreshed from stale token material.
+        let locked = file.lock().map_err(map_file_error)?;
         let document = locked.read_json().map_err(map_file_error)?;
         let credentials = CodexCredentials::from_document(&document)?;
-        if force || credentials.is_expired_at(now) {
-            return self.refresh(&locked, credentials).await;
+        if !force && !credentials.is_expired_at(now) {
+            return Ok(credentials);
         }
-        Ok(credentials)
+        self.refresh(&locked, credentials).await
     }
 
     /// The document of a login performed from Tidemark, if there is one.
@@ -499,8 +509,8 @@ pub fn cli_credentials_path() -> Option<PathBuf> {
     {
         return Some(Path::new(&home).join("auth.json"));
     }
-    let home = std::env::var_os("HOME").filter(|home| Path::new(home).is_absolute())?;
-    Some(Path::new(&home).join(".codex/auth.json"))
+    let home = crate::paths::home()?;
+    Some(home.join(".codex/auth.json"))
 }
 
 /// Turns a usage response into a snapshot.
@@ -987,6 +997,7 @@ mod tests {
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
@@ -1038,6 +1049,7 @@ mod tests {
             .expect("provider builds")
         }
 
+        #[cfg(unix)]
         fn document(&self) -> serde_json::Value {
             serde_json::from_slice(&fs::read(&self.path).expect("auth readable"))
                 .expect("auth is JSON")
@@ -1173,6 +1185,7 @@ mod tests {
         (format!("http://{address}"), requests_rx, handle)
     }
 
+    #[cfg(unix)]
     const REFRESH: (u16, &str) = (
         200,
         r#"{"access_token":"new-access","refresh_token":"new-refresh",
@@ -1190,6 +1203,10 @@ mod tests {
             .block_on(future)
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn an_expired_token_is_rotated_persisted_and_then_used_for_quota() {
         let home = TestHome::expired();
@@ -1250,6 +1267,7 @@ mod tests {
 
         let backup = home.path.with_file_name("auth.json.tidemark-backup");
         assert_eq!(fs::read(&backup).expect("backup readable"), before);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(backup)
                 .expect("backup metadata")
@@ -1260,6 +1278,10 @@ mod tests {
         );
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn a_token_the_provider_rejects_is_refreshed_once_and_the_request_retried() {
         // The access token's own claims can be unreadable — an opaque token, or claims we
@@ -1300,6 +1322,10 @@ mod tests {
         server.join().expect("server stopped");
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn a_second_rejection_is_the_users_to_fix_rather_than_an_endless_retry() {
         let home = TestHome::expired();
@@ -1433,6 +1459,10 @@ mod tests {
         );
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn cli_source_reads_the_file_even_when_a_login_is_stored() {
         // Both credentials are live and carry different tokens and account ids: the
@@ -1536,6 +1566,10 @@ mod tests {
         assert!(matches!(error, ProviderError::NoCredential), "{error:?}");
     }
 
+    // The fixture/rotation path pins the unix advisory-lock credential-file
+    // discipline; Windows mandatory file locks change the mechanism (todo 18
+    // owns the windows mirror semantics).
+    #[cfg(unix)]
     #[test]
     fn cli_source_refreshes_the_file_without_reading_the_stored_login() {
         const ROTATION: (u16, &str) = (

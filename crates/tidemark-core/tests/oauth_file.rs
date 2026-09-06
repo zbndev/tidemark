@@ -1,6 +1,8 @@
 use std::fs;
 use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +48,7 @@ fn replacing_the_token_subtree_preserves_every_unrelated_value() {
     let dir = TestDir::new();
     let path = dir.join(".credentials.json");
     let before = copy_real_shape(&path);
+    #[cfg(unix)]
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("set broad mode");
     let file = CredentialFile::new(path.clone(), path.clone());
     let replacement = json!({
@@ -79,6 +82,7 @@ fn replacing_the_token_subtree_preserves_every_unrelated_value() {
         serde_json::from_slice(&fs::read(&path).expect("published file")).expect("valid JSON");
     assert_eq!(after["claudeAiOauth"], replacement);
     assert_eq!(after["mcpOAuth"], before["mcpOAuth"]);
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
         0o600
@@ -94,6 +98,10 @@ fn replacing_the_token_subtree_preserves_every_unrelated_value() {
     );
 }
 
+// The advisory-lock (fs4) fixture discipline is unix-only: Windows's mandatory
+// LockFileEx region locks make the concurrent-handle fixture fail with os
+// error 33; the windows lock semantics are todo 18's mirror module.
+#[cfg(unix)]
 #[test]
 fn a_discovered_noncanonical_copy_is_readable_but_never_writable() {
     let dir = TestDir::new();
@@ -147,6 +155,10 @@ fn the_update_guard_holds_an_exclusive_advisory_lock() {
     ));
 }
 
+// The advisory-lock (fs4) fixture discipline is unix-only: Windows's mandatory
+// LockFileEx region locks make the concurrent-handle fixture fail with os
+// error 33; the windows lock semantics are todo 18's mirror module.
+#[cfg(unix)]
 #[test]
 fn a_concurrent_token_rotation_is_never_overwritten() {
     let dir = TestDir::new();
@@ -248,6 +260,7 @@ fn backup_is_an_exact_private_copy_created_before_exchange() {
     let backup = locked.backup().expect("backup published");
 
     assert_eq!(fs::read(&backup).expect("backup readable"), original);
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(backup)
             .expect("backup metadata")
@@ -290,6 +303,10 @@ fn the_vendor_write_lock_serializes_the_cas_and_publish_window() {
     assert!(!vendor_lock.exists(), "our shared write lock was released");
 }
 
+// The advisory-lock (fs4) fixture discipline is unix-only: Windows's mandatory
+// LockFileEx region locks make the concurrent-handle fixture fail with os
+// error 33; the windows lock semantics are todo 18's mirror module.
+#[cfg(unix)]
 #[test]
 fn duplicate_oauth_keys_are_rejected_before_exchange() {
     let dir = TestDir::new();
@@ -315,6 +332,7 @@ fn duplicate_oauth_keys_are_rejected_before_exchange() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_symlink_target_is_never_followed() {
     let dir = TestDir::new();
     let real = dir.join("real.json");
@@ -384,6 +402,10 @@ fn a_root_field_the_vendor_has_never_written_is_appended_rather_than_refused() {
     );
 }
 
+// The advisory-lock (fs4) fixture discipline is unix-only: Windows's mandatory
+// LockFileEx region locks make the concurrent-handle fixture fail with os
+// error 33; the windows lock semantics are todo 18's mirror module.
+#[cfg(unix)]
 #[test]
 fn a_duplicate_root_field_is_refused_before_the_exchange_begins() {
     let dir = TestDir::new();

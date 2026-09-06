@@ -81,14 +81,25 @@ pub const AUTH_PROFILE: &str = "auth-profile";
 pub const CURSOR_APP_SOURCE: &str = "cursor-app";
 /// A browser-cookie source.
 pub const BROWSER_SOURCE: &str = "browser";
+/// A session the person pasted in, for a browser whose jar this machine will not open.
+pub use super::session::PASTE_SOURCE;
 
 const USAGE_SUMMARY_URL: &str = "https://cursor.com/api/usage-summary";
 const AUTH_ME_URL: &str = "https://cursor.com/api/auth/me";
 const REQUEST_USAGE_URL: &str = "https://cursor.com/api/usage";
 const SAND_USAGE_URL: &str = "https://cursor.com/api/dashboard/get-sand-usage-status";
 
-/// Cursor's standalone desktop app keeps its sign-in token in this VS Code-style state store.
+/// Cursor's standalone desktop app keeps its sign-in token in this VS Code-style state
+/// store, under the vendor directory its platform files application data in: XDG's
+/// `.config` on Linux, `AppData/Roaming` on Windows. Relative to the home in both cases,
+/// so the tests state one fixture root and every platform reads inside it.
+#[cfg(not(windows))]
 const STATE_DATABASE: &str = ".config/Cursor/User/globalStorage/state.vscdb";
+
+/// [`STATE_DATABASE`], where Windows keeps it: `%APPDATA%` is `AppData/Roaming` under the
+/// user's profile, which is the home this provider resolves.
+#[cfg(windows)]
+const STATE_DATABASE: &str = "AppData/Roaming/Cursor/User/globalStorage/state.vscdb";
 
 /// The key Cursor uses for the raw JWT in [`STATE_DATABASE`].
 const ACCESS_TOKEN_KEY: &str = "cursorAuth/accessToken";
@@ -96,10 +107,12 @@ const ACCESS_TOKEN_KEY: &str = "cursorAuth/accessToken";
 /// What the dashboard POST must be sent from. Cursor refuses the Bot endpoint without it.
 const ORIGIN: &str = "https://cursor.com";
 
-/// The cookie names Cursor has carried its session in, newest scheme first. WorkOS is the
-/// current one; the Auth.js (`next-auth`/`authjs`) names are what older sessions were filed
+/// The cookie names Cursor has carried its session in, newest scheme first. Better Auth is
+/// current; WorkOS and Auth.js (`next-auth`/`authjs`) names are what older sessions were filed
 /// under. Presence of any one of them is what makes a browser's cookies worth trying.
 const SESSION_COOKIE_NAMES: &[&str] = &[
+    "__Secure-better-auth.session_token",
+    "better-auth.session_token",
     "WorkosCursorSessionToken",
     "__Secure-next-auth.session-token",
     "next-auth.session-token",
@@ -149,6 +162,7 @@ pub static SPEC: HandSpec = HandSpec {
             choices: &[
                 (CURSOR_APP_SOURCE, "Cursor App"),
                 (BROWSER_SOURCE, "Browser"),
+                (PASTE_SOURCE, "Paste session"),
             ],
             required: false,
         },
@@ -174,26 +188,53 @@ pub static SPEC: HandSpec = HandSpec {
 
 fn build(
     account: AccountId,
-    _credential: Credential,
+    credential: Credential,
     options: &Options,
 ) -> Result<Arc<dyn Provider>, ProviderError> {
-    Ok(Arc::new(Cursor::new_for_account(account, options)?))
+    Ok(Arc::new(Cursor::new_for_account(
+        account,
+        &credential,
+        options,
+    )?))
 }
 
 /// The one local Cursor session a provider instance may read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Source {
     CursorApp,
     Browser {
         browser: String,
         profile: Option<String>,
     },
+    /// A `Cookie:` header the person pasted in, for a browser profile this machine will
+    /// not let Tidemark open. See [`super::session::Source::Pasted`].
+    Pasted(String),
+}
+
+// Never derived: the pasted variant holds a live session, and a `Debug` that printed it
+// would put one in a log the moment an account is traced.
+impl fmt::Debug for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CursorApp => f.write_str("CursorApp"),
+            Self::Browser { browser, profile } => f
+                .debug_struct("Browser")
+                .field("browser", browser)
+                .field("profile", profile)
+                .finish(),
+            Self::Pasted(_) => f.debug_tuple("Pasted").field(&"<redacted>").finish(),
+        }
+    }
 }
 
 impl Source {
-    fn from_options(options: &Options) -> Option<Self> {
+    fn from_credential(credential: &Credential, options: &Options) -> Option<Self> {
         match options.get(AUTH_SOURCE).map(String::as_str) {
             Some(CURSOR_APP_SOURCE) => Some(Self::CursorApp),
+            Some(PASTE_SOURCE) => {
+                let pasted = credential.expose().trim();
+                (!pasted.is_empty()).then(|| Self::Pasted(pasted.to_owned()))
+            }
             Some(BROWSER_SOURCE) => {
                 let browser = options
                     .get(AUTH_BROWSER)
@@ -220,6 +261,12 @@ pub struct Cursor {
     tidemark_account: AccountId,
     client: reqwest::Client,
     home: Option<PathBuf>,
+    /// The root the browser scan is taken under, and a test fixture in every build that
+    /// states one: production leaves it unset so that each platform's own browser layout
+    /// decides where profiles live. Separate from `home` because a browser home is not a
+    /// vendor home — Windows keeps browser profiles under `%LOCALAPPDATA%`/`%APPDATA%`,
+    /// never under the user's own profile directory, which is where Cursor's app lives.
+    browser_home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
     source: Option<Source>,
     #[cfg(test)]
@@ -228,16 +275,25 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn new(options: &Options) -> Result<Self, ProviderError> {
-        Self::new_for_account(AccountId::default(), options)
+        Self::new_for_account(
+            AccountId::default(),
+            &Credential::new(String::new()),
+            options,
+        )
     }
 
-    fn new_for_account(account_id: AccountId, options: &Options) -> Result<Self, ProviderError> {
+    fn new_for_account(
+        account_id: AccountId,
+        credential: &Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
             tidemark_account: account_id.clone(),
             client: http::client()?,
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: crate::paths::home(),
+            browser_home: None,
             storage: Arc::new(Keyring),
-            source: Source::from_options(options),
+            source: Source::from_credential(credential, options),
             #[cfg(test)]
             base_url: None,
         })
@@ -254,6 +310,7 @@ impl Cursor {
             tidemark_account: AccountId::default(),
             client: http::client()?,
             home: Some(home.to_path_buf()),
+            browser_home: Some(home.to_path_buf()),
             storage,
             source: None,
             base_url: None,
@@ -268,7 +325,7 @@ impl Cursor {
 
     #[cfg(test)]
     fn with_options(mut self, options: Options) -> Self {
-        self.source = Source::from_options(&options);
+        self.source = Source::from_credential(&Credential::new(String::new()), &options);
         self
     }
 
@@ -330,6 +387,7 @@ impl Cursor {
             Source::Browser { browser, profile } => {
                 self.browser_session_header(browser, profile).await
             }
+            Source::Pasted(header) => self.read(&session::Source::Pasted(header.clone())).await,
         }
     }
 
@@ -339,14 +397,19 @@ impl Cursor {
         browser: &str,
         profile: &Option<String>,
     ) -> Result<Option<String>, ProviderError> {
-        let selection = crate::browser::auth::Selection {
+        self.read(&session::Source::Browser(crate::browser::auth::Selection {
             browser: browser.to_owned(),
             profile: profile.clone(),
-        };
+        }))
+        .await
+    }
+
+    /// The Cookie header one session source still holds, if it holds one.
+    async fn read(&self, source: &session::Source) -> Result<Option<String>, ProviderError> {
         session::session(
-            self.home.as_deref(),
+            self.browser_home.as_deref(),
             self.storage.as_ref(),
-            &selection,
+            source,
             SESSION_COOKIE_NAMES,
             &cookie_query(),
             USAGE_SUMMARY_URL,
@@ -385,7 +448,7 @@ impl Cursor {
             None => AuthCandidateState::Missing,
         };
         let browsers = session::inspect_sources(
-            self.home.as_deref(),
+            self.browser_home.as_deref(),
             self.storage.as_ref(),
             SESSION_COOKIE_NAMES,
             &session_query(),
@@ -394,6 +457,14 @@ impl Cursor {
         )
         .await;
         let browser_state = candidate_state(&browsers);
+        let pasted = match &self.source {
+            Some(Source::Pasted(header)) => Some(header.as_str()),
+            _ => None,
+        };
+        let paste = session::paste_source(pasted, |header| async move {
+            self.validate_header(&header).await
+        })
+        .await;
 
         Ok(vec![
             AuthCandidate {
@@ -410,6 +481,7 @@ impl Cursor {
                 state: browser_state.as_wire().into(),
                 children: browsers,
             },
+            paste,
         ])
     }
 
@@ -551,23 +623,15 @@ struct StateSnapshot {
 
 impl StateSnapshot {
     fn of(path: &Path) -> std::io::Result<Self> {
-        use std::os::unix::fs::DirBuilderExt;
-
         static SERIAL: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
             "tidemark-cursor-state-{}-{}",
             std::process::id(),
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         let snapshot = Self { directory };
-        std::fs::copy(path, snapshot.database())?;
-        for sidecar in ["-wal", "-shm"] {
-            let source = with_suffix(path, sidecar);
-            if source.is_file() {
-                std::fs::copy(source, with_suffix(&snapshot.database(), sidecar))?;
-            }
-        }
+        crate::browser::copy_private_database(path, &snapshot.directory, "state.vscdb")
+            .map_err(std::io::Error::other)?;
         Ok(snapshot)
     }
 
@@ -581,12 +645,6 @@ impl Drop for StateSnapshot {
         // Best effort: the private copy has mode 0700, and a failed cleanup cannot be fixed.
         let _ = std::fs::remove_dir_all(&self.directory);
     }
-}
-
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    PathBuf::from(name)
 }
 
 impl fmt::Debug for Cursor {
@@ -1043,7 +1101,7 @@ fn parse_for_account(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, Options, SPEC, parse};
+    use super::{Cursor, Options, SPEC, STATE_DATABASE, parse};
     use crate::providers::{Credential, Provider, ProviderError};
     use tidemark_types::{AccountId, AuthCandidateState, CredentialKind, DetailSection, Timestamp};
 
@@ -1445,8 +1503,10 @@ mod tests {
 
     /// A keyring that is locked, for the waiting-state test.
     #[derive(Debug)]
+    #[cfg(unix)]
     struct LockedKeyring;
 
+    #[cfg(unix)]
     impl SafeStorage for LockedKeyring {
         fn password(
             &self,
@@ -1498,9 +1558,9 @@ mod tests {
     fn cursor_state(home: &crate::browser::tests::TestHome, access_token: &str) {
         use rusqlite::Connection;
 
-        let path = home
-            .path()
-            .join(".config/Cursor/User/globalStorage/state.vscdb");
+        // The constant, not a spelling of it: the fixture must land where the platform
+        // being tested actually looks, or the Windows arm tests a path nothing reads.
+        let path = home.path().join(STATE_DATABASE);
         std::fs::create_dir_all(path.parent().expect("has parent")).expect("creates");
         let connection = Connection::open(path).expect("opens");
         connection
@@ -1520,9 +1580,9 @@ mod tests {
         home: &crate::browser::tests::TestHome,
         access_token: &str,
     ) -> rusqlite::Connection {
-        let path = home
-            .path()
-            .join(".config/Cursor/User/globalStorage/state.vscdb");
+        // The constant, not a spelling of it: the fixture must land where the platform
+        // being tested actually looks, or the Windows arm tests a path nothing reads.
+        let path = home.path().join(STATE_DATABASE);
         std::fs::create_dir_all(path.parent().expect("has parent")).expect("creates");
         let connection = rusqlite::Connection::open(path).expect("opens");
         connection
@@ -1978,6 +2038,9 @@ mod tests {
         assert_eq!(header_of(&provider), None);
     }
 
+    /// The session Cursor wrote most recently is the one in the `-wal` sidecar, on every
+    /// platform: a snapshot that copied the main database alone would answer with the
+    /// last checkpoint and miss a session the user just started.
     #[test]
     fn a_cursor_desktop_session_committed_only_to_wal_is_found() {
         let home = crate::browser::tests::TestHome::new();
@@ -2046,6 +2109,31 @@ mod tests {
     }
 
     #[test]
+    fn current_better_auth_browser_sessions_are_credentials() {
+        let home = gecko_home(&[
+            (
+                ".cursor.com",
+                "better-auth.session_token",
+                "current-session",
+                0,
+            ),
+            (
+                ".cursor.com",
+                "__Secure-better-auth.session_token",
+                "secure-current-session",
+                0,
+            ),
+        ]);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("browser", Some("zen"), None));
+
+        let header = header_of(&provider).expect("a current browser session");
+        assert!(header.contains("better-auth.session_token=current-session"));
+        assert!(header.contains("__Secure-better-auth.session_token=secure-current-session"));
+    }
+
+    #[test]
     fn a_dead_session_cookie_is_not_a_session() {
         let home = gecko_home(&[(
             ".cursor.com",
@@ -2070,6 +2158,9 @@ mod tests {
         assert_eq!(header_of(&provider), None);
     }
 
+    // WAL-committed sqlite reads and Secret Service keyring states are the
+    // unix backends; the windows backend surfaces are todo 10/17 territory.
+    #[cfg(unix)]
     #[test]
     fn a_locked_keyring_is_a_state_to_wait_out_not_a_missing_session() {
         let home = crate::browser::tests::TestHome::new();
