@@ -41,6 +41,30 @@
 //! for, which is why small text stops looking washed. One call at startup buys all
 //! three, and the price is the fontconfig configuration in `etc/fonts` that
 //! `data/packaging/windows/stage-gtk-runtime.sh` now stages beside the DLLs.
+//!
+//! # Why the metrics are left unhinted
+//!
+//! Which rasterizer draws is half of it; what GTK asks that rasterizer for is the other
+//! half, and it comes from `gtk-font-rendering`. Upstream that setting is `automatic`.
+//! MSYS2's gtk4 package patches the default to `manual`
+//! (`mingw-w64-gtk4/001-fix-font-rendering.patch`), which is the right patch for the GDI
+//! back end it was written against and the wrong one for this process.
+//!
+//! `manual` is GTK honouring the low-level settings, and one of them —
+//! `gtk-hint-font-metrics` — defaults to true. It rounds every glyph advance to a whole
+//! pixel while leaving the outline the advance belongs to exactly where the font put it,
+//! and it turns subpixel positioning off with it. The two then disagree, by up to a whole
+//! pixel, at the sizes the smallest labels are drawn: a card footer and a preference row's
+//! subtitle land near 12px on a 96 dpi display, and measured over "checked 4 minutes ago"
+//! and "io.github.zbndev.Tidemark.ProviderKey" at 12px, 7 of 60 glyphs inked past the
+//! advance they were given. Ink that runs past its own advance is ink in the next
+//! letter's space; the rounding that put it there is also why one line's word gaps come
+//! out uneven. Left alone, no glyph in that sample overruns at any size from 10 to 14px.
+//!
+//! Asking for `automatic` by name at startup undoes the packaging patch for this process
+//! and no other. It is one setting rather than four because it pins the four together —
+//! grayscale antialiasing, slight hinting, unhinted metrics, subpixel positions — and
+//! that set is the configuration the Linux build has always run under.
 
 use std::path::{Path, PathBuf};
 
@@ -76,6 +100,30 @@ fn freetype_font_map() -> Option<pangocairo::FontMap> {
         // pango_cairo_font_map_new_for_font_type returns a PangoCairoFontMap or nothing.
         .downcast::<pangocairo::FontMap>()
         .ok()
+}
+
+/// Asks GTK for the font rendering it chooses everywhere else.
+///
+/// Needs a display, because `GtkSettings` belongs to one, and has to run before the first
+/// widget builds its Pango context — so `startup`, not beside `use_freetype_rasterizer`.
+/// Every context GTK makes afterwards is measured with unhinted metrics and positioned at
+/// subpixel offsets, which is what keeps the smallest labels off each other. Measured on
+/// the packaged runtime: a fresh `gtk::Label` reports `is_round_glyph_positions()` true
+/// before this call and false after it. That assertion is not a test here, because it
+/// needs a display, and a third test in this binary that initializes GTK collides with
+/// the two that already do — `gtk::init` belongs to one thread and the harness gives
+/// every test its own.
+///
+/// A failure here is the crowded small text described above rather than no interface.
+pub(crate) fn use_automatic_font_rendering() {
+    let Some(settings) = gtk::Settings::default() else {
+        tracing::warn!(
+            "no GTK settings on this display; small text keeps the packaged runtime's \
+             hinted metrics, which round each advance off its own glyph"
+        );
+        return;
+    };
+    settings.set_gtk_font_rendering(gtk::FontRendering::Automatic);
 }
 
 /// Adds the installed Rubik to GTK's display-wide Pango font map.
@@ -238,6 +286,62 @@ mod tests {
             }
             if !runs.next_run() {
                 break;
+            }
+        }
+    }
+
+    /// The size the small labels are actually drawn at, and the room each glyph is given
+    /// there. Metric hinting rounds an advance to a whole pixel and leaves the outline it
+    /// belongs to where the font put it, so the ink of a letter ends up in the next
+    /// letter's space: measured over these two strings at 12px, 7 of their 60 glyphs
+    /// overran their own advance, by up to a full pixel, under the packaged runtime's
+    /// `manual` default. Under the rendering `use_automatic_font_rendering` asks for, none
+    /// do, at any size the interface draws small text at.
+    #[test]
+    fn small_text_is_given_room_for_its_own_ink() {
+        let Some(context) = typeset() else {
+            eprintln!("skipped: cairo has no FreeType back end");
+            return;
+        };
+        let mut options = gtk::cairo::FontOptions::new().expect("cairo font options");
+        options.set_antialias(gtk::cairo::Antialias::Gray);
+        options.set_hint_style(gtk::cairo::HintStyle::Slight);
+        options.set_hint_metrics(gtk::cairo::HintMetrics::Off);
+        pangocairo::functions::context_set_font_options(&context, Some(&options));
+        context.set_round_glyph_positions(false);
+
+        // A card footer and a preference row's subtitle land in this range on a 96 dpi
+        // display, whichever way the user has scaled the system font.
+        for size in 10..=14 {
+            let mut description = pango::FontDescription::from_string("Rubik");
+            description.set_absolute_size(f64::from(size) * f64::from(pango::SCALE));
+            context.set_font_description(&description);
+
+            for text in [
+                "checked 4 minutes ago",
+                "io.github.zbndev.Tidemark.ProviderKey",
+            ] {
+                let layout = pango::Layout::new(&context);
+                layout.set_text(text);
+
+                let mut runs = layout.iter();
+                loop {
+                    if let Some(run) = runs.run_readonly() {
+                        let font = run.item().analysis().font();
+                        for glyph in run.glyph_string().glyph_info() {
+                            let (ink, _) = font.glyph_extents(glyph.glyph());
+                            assert!(
+                                ink.width() <= glyph.geometry().width(),
+                                "at {size}px {text:?} inks {} into an advance of {}",
+                                ink.width(),
+                                glyph.geometry().width()
+                            );
+                        }
+                    }
+                    if !runs.next_run() {
+                        break;
+                    }
+                }
             }
         }
     }

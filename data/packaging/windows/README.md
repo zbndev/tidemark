@@ -19,8 +19,12 @@ shortcut, and every installed file. Nothing machine-wide, no elevation.
   and icon themes. It also places the pinned Rubik font beside the runtime.
   Tidemark registers it privately at launch, never as a Windows system font,
   and draws through Pango's FreeType back end rather than the GDI one — which
-  is why `etc/fonts` is staged and not only `share/fontconfig`. See
-  `crates/tidemark/src/font.rs` for what the GDI back end gets wrong.
+  is why `etc/fonts` is staged and not only `share/fontconfig`. The staged
+  gtk4 also carries MSYS2's `001-fix-font-rendering.patch`, which defaults
+  `gtk-font-rendering` to `manual`; the client asks for `automatic` back at
+  startup, because the hinted metrics that patch turns on are written for the
+  GDI back end and crowd small text on the FreeType one. See
+  `crates/tidemark/src/font.rs` for both.
 - `msys2-runtime-packages.txt` — exact package versions and package-archive
   SHA-256 hashes for every staged DLL/data owner. The release workflow
   downloads and verifies these archives before it builds, so linked and
