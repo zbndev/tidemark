@@ -30,6 +30,11 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zbus = { version = "5.13.2", features = ["p2p"] }
 
 [target.'cfg(windows)'.dependencies]
+# The FreeType/fontconfig Pango backend, selected over Windows' GDI default at
+# startup. `pango_cairo_font_map_new_for_font_type` is the documented way to ask
+# for it from inside the program rather than through PANGOCAIRO_BACKEND in the
+# environment; see crates/tidemark/src/font.rs for why the default will not do.
+pangocairo = "0.22.9"
 # The Windows tray backend (todo 15). tray-icon drives Win32 tray APIs on its own
 # event-loop thread; `windows` supplies only the message pump that thread must run for
 # menu events to be delivered. Current version pinned per plan §15 via `cargo search`.

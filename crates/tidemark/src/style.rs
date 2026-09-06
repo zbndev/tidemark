@@ -3,10 +3,11 @@
 //! Everything that libadwaita already names is used by name — `card`, `title-1`, `heading`,
 //! `caption`, `dim-label`, `warning`, `error` — so the window follows the system's accent
 //! colour, dark mode and font scaling without being told to. On Windows only, the bundled
-//! Rubik is selected after it has been registered with Pango for this process. What is left is the three
-//! things Adwaita has no class for: the pill around a state chip, the padding inside a
-//! card, which `.card` deliberately does not set because it does not know what is going in
-//! it, and the padding around the credential pill, for the same reason.
+//! Rubik is selected after `font` has put Pango on a back end that can read it and
+//! registered it for this process. What is left is the three things Adwaita has no class
+//! for: the pill around a state chip, the padding inside a card, which `.card`
+//! deliberately does not set because it does not know what is going in it, and the
+//! padding around the credential pill, for the same reason.
 //!
 //! # The hover, and the lift
 //!
@@ -40,9 +41,11 @@ const PLATFORM_STYLE: &str = "
     font-family: Rubik;
 }
 
-/* GTK's Windows text rasterizer is softer than the Linux FreeType path at
-   caption sizes. Keep captions one logical step larger everywhere, so GDK
-   still applies each display's own DPI and scale. */
+/* Windows' system font is 9pt where the desktops libadwaita is designed
+   against use 10 or 11, and `.caption` takes 0.8em of it. Keep captions one
+   logical step larger everywhere, so GDK still applies each display's own DPI
+   and scale. (The rasterizer is no longer part of this: `font` puts Windows on
+   the same FreeType path Linux uses.) */
 .caption {
     font-size: 0.9em;
 }

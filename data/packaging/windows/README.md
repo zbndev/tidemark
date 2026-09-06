@@ -15,9 +15,12 @@ shortcut, and every installed file. Nothing machine-wide, no elevation.
 - `stage-gtk-runtime.sh` — walks the full PE import closure of both release
   executables and all MSYS2 gdk-pixbuf loaders, then assembles
   `build/nsis-staging/gtk/` with those UCRT64 DLLs, a relative-path
-  `loaders.cache`, compiled GLib schemas, fontconfig data and icon themes. It
-  also places the pinned Rubik font beside the runtime. Tidemark registers
-  it privately at launch, never as a Windows system font.
+  `loaders.cache`, compiled GLib schemas, fontconfig data and configuration,
+  and icon themes. It also places the pinned Rubik font beside the runtime.
+  Tidemark registers it privately at launch, never as a Windows system font,
+  and draws through Pango's FreeType back end rather than the GDI one — which
+  is why `etc/fonts` is staged and not only `share/fontconfig`. See
+  `crates/tidemark/src/font.rs` for what the GDI back end gets wrong.
 - `msys2-runtime-packages.txt` — exact package versions and package-archive
   SHA-256 hashes for every staged DLL/data owner. The release workflow
   downloads and verifies these archives before it builds, so linked and
