@@ -446,17 +446,29 @@ fn unknown_method(error: &zbus::Error) -> bool {
 }
 
 /// The Windows reconnect protocol: probe the daemon's p2p endpoint, spawn `tidemarkd.exe`
-/// when it is genuinely absent, and retry on the frozen schedule until the 15-second
-/// outage deadline. The pure decision pieces (the retry table, the endpoint-error
-/// classification, the spawn throttle) are compiled wherever tests run, so their
-/// table-driven unit tests run in Linux CI too; only the transport itself is Windows-only.
+/// when nothing is serving it, and retry on the frozen schedule until the 15-second outage
+/// deadline. The pure decision pieces (the retry table, the endpoint path and its
+/// directory, the spawn throttle) are compiled wherever tests run, so their unit tests run
+/// in Linux CI too; only the transport itself is Windows-only.
+///
+/// # Why a failed probe always spawns
+///
+/// It did not always. The gate used to read the `io::ErrorKind` of the failed connect and
+/// spawn only for `NotFound` or `ConnectionRefused`, on the reasoning that anything else
+/// was a state a second daemon could not improve. That reasoning is Unix's: Windows
+/// AF_UNIX never answers `NotFound`, and it answers `WSAENETDOWN` when the endpoint's
+/// directory is missing — which, on a machine the daemon has never run on, it always is.
+/// The client would therefore probe, decide the situation was hopeless, and wait out every
+/// outage without ever bringing the daemon up. The directory is now the client's to create
+/// and the gate no longer guesses: a connect that fails means nothing is listening, and a
+/// throttled spawn is the answer to that regardless of which errno said so.
 #[cfg(any(windows, test))]
 mod reconnect {
+    use std::fs;
     use std::io;
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
-    #[cfg(windows)]
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     #[cfg(windows)]
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -488,51 +500,34 @@ mod reconnect {
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    /// The endpoint the daemon serves. Must stay in step with `tidemarkd::peer`.
+    /// The endpoint the daemon serves, under a given `%LOCALAPPDATA%`, with the directory
+    /// it lives in made to exist. Must stay in step with `tidemarkd::peer`.
+    ///
+    /// Creating `run\` is the client's job as much as the daemon's, and on a machine where
+    /// the daemon has never run it is *only* the client's: the installer does not create it,
+    /// the uninstaller does not remove it, and the GUI is what the Start menu launches. An
+    /// AF_UNIX connect whose parent directory is missing does not fail like a missing
+    /// socket — Windows answers `WSAENETDOWN`, not `WSAECONNREFUSED` — so a client that
+    /// leaves the directory to the daemon spends every probe on an error shaped like
+    /// something other than "no daemon here".
+    fn endpoint_under(local: &Path) -> io::Result<PathBuf> {
+        let endpoint = local.join("tidemark").join("run").join("d.sock");
+        if let Some(parent) = endpoint.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        Ok(endpoint)
+    }
+
+    /// The endpoint under this user's `%LOCALAPPDATA%`.
     #[cfg(windows)]
     fn endpoint_path() -> io::Result<PathBuf> {
-        std::env::var_os("LOCALAPPDATA")
-            .map(|local| {
-                PathBuf::from(local)
-                    .join("tidemark")
-                    .join("run")
-                    .join("d.sock")
-            })
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "LOCALAPPDATA is not set; the daemon endpoint has nowhere to live",
-                )
-            })
-    }
-
-    /// What a failed endpoint probe says about the daemon.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum EndpointState {
-        /// No endpoint file: no daemon is running, and none has been asked to.
-        Absent,
-        /// The endpoint file is there but nothing answers: a daemon was killed outright
-        /// and left its socket behind.
-        Refused,
-        /// Anything else — permission trouble, a socket that never answers — is not a
-        /// state spawning on top of could fix.
-        Unreachable,
-    }
-
-    impl EndpointState {
-        fn classify(kind: io::ErrorKind) -> Self {
-            match kind {
-                io::ErrorKind::NotFound => Self::Absent,
-                io::ErrorKind::ConnectionRefused => Self::Refused,
-                _ => Self::Unreachable,
-            }
-        }
-
-        /// Only these two mean "there is no daemon, bring one up". A `PermissionDenied`
-        /// or a malformed handshake is a problem spawning cannot solve.
-        fn spawns(self) -> bool {
-            matches!(self, Self::Absent | Self::Refused)
-        }
+        let local = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "LOCALAPPDATA is not set; the daemon endpoint has nowhere to live",
+            )
+        })?;
+        endpoint_under(Path::new(&local))
     }
 
     /// Advances through the frozen table, holding at its cap.
@@ -626,6 +621,7 @@ mod reconnect {
         let deadline = Instant::now() + OUTAGE_DEADLINE;
         let mut schedule = RetrySchedule::default();
         let mut spawned_this_outage = false;
+        let mut refusal = String::new();
 
         loop {
             match UnixStream::connect(&endpoint) {
@@ -637,28 +633,40 @@ mod reconnect {
                         return Ok(connection);
                     }
                 }
+                // Nothing accepted, so nothing is serving the endpoint: bring a daemon
+                // up, whatever shape the refusal took. The throttle below bounds this to
+                // one spawn per outage, the daemon's own mutex makes a redundant one
+                // harmless, and a daemon that cannot bind writes the real reason to
+                // daemon.log — all of which beats a client that decides on an errno it
+                // has never seen that the situation is hopeless, and waits forever.
                 Err(error) => {
-                    let state = EndpointState::classify(error.kind());
-                    if state.spawns() {
-                        let now = Instant::now();
-                        let mut last = LAST_SPAWN.lock().expect("no code panics holding this");
-                        if spawn_allowed(now, *last, spawned_this_outage) {
-                            spawned_this_outage = true;
-                            *last = Some(now);
-                            drop(last);
-                            tracing::info!(
-                                state = ?state,
-                                "the daemon endpoint is absent; spawning tidemarkd.exe"
-                            );
-                            spawn_daemon();
-                        }
+                    refusal = error.to_string();
+                    let now = Instant::now();
+                    let mut last = LAST_SPAWN.lock().expect("no code panics holding this");
+                    if spawn_allowed(now, *last, spawned_this_outage) {
+                        spawned_this_outage = true;
+                        *last = Some(now);
+                        drop(last);
+                        tracing::info!(
+                            %error,
+                            "nothing is serving the daemon endpoint; spawning tidemarkd.exe"
+                        );
+                        spawn_daemon();
                     } else {
-                        tracing::debug!(%error, "the daemon endpoint is unreachable");
+                        tracing::debug!(%error, "still nothing serving the daemon endpoint");
                     }
                 }
             }
             if Instant::now() >= deadline {
                 let message = "The daemon did not come up. Waiting for it.";
+                // The screen gets the sentence; the log gets the errno. An outage that
+                // never ends used to leave no shipped record of why: the reason went to
+                // debug, and the only line in ui.log was this deadline with no cause on it.
+                tracing::warn!(
+                    endpoint = %endpoint.display(),
+                    refusal = %refusal,
+                    "gave up waiting for the daemon endpoint"
+                );
                 on(Update::Waiting(message.into()));
                 return Err(zbus::Error::InputOutput(std::sync::Arc::new(
                     io::Error::new(io::ErrorKind::TimedOut, message),
@@ -682,27 +690,92 @@ mod reconnect {
             assert_eq!(delays, vec![50, 100, 200, 400, 800, 1000, 1000, 1000]);
         }
 
-        #[test]
-        fn only_an_absent_or_refused_endpoint_justifies_a_spawn() {
-            let table = [
-                (io::ErrorKind::NotFound, EndpointState::Absent, true),
-                (
-                    io::ErrorKind::ConnectionRefused,
-                    EndpointState::Refused,
-                    true,
-                ),
-                (
-                    io::ErrorKind::PermissionDenied,
-                    EndpointState::Unreachable,
-                    false,
-                ),
-                (io::ErrorKind::TimedOut, EndpointState::Unreachable, false),
-                (io::ErrorKind::AddrInUse, EndpointState::Unreachable, false),
-            ];
-            for (kind, state, spawns) in table {
-                assert_eq!(EndpointState::classify(kind), state, "{kind:?}");
-                assert_eq!(state.spawns(), spawns, "{kind:?}");
+        /// A temporary `%LOCALAPPDATA%` that has never held a daemon: no `tidemark\`,
+        /// and certainly no `run\`. What a fresh install looks like.
+        struct UntouchedLocalAppData(PathBuf);
+
+        impl UntouchedLocalAppData {
+            fn new(label: &str) -> Self {
+                static SERIAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "tidemark-endpoint-{label}-{}-{serial}",
+                    std::process::id()
+                ));
+                let _ = fs::remove_dir_all(&path);
+                fs::create_dir_all(&path).expect("a temporary LOCALAPPDATA");
+                Self(path)
             }
+
+            fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+
+        impl Drop for UntouchedLocalAppData {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// The client is what the Start menu launches, so on a machine the daemon has
+        /// never run on the client is the only thing that can create `run\`. Leaving it
+        /// to the daemon is what shipped, and it is why a first launch never ended.
+        #[test]
+        fn the_endpoint_directory_exists_before_anything_probes_it() {
+            let local = UntouchedLocalAppData::new("fresh");
+            assert!(!local.path().join("tidemark").exists());
+
+            let endpoint = endpoint_under(local.path()).expect("the endpoint path");
+
+            assert!(
+                endpoint.parent().expect("run/").is_dir(),
+                "the run directory has to be there before the first connect"
+            );
+            assert!(!endpoint.exists(), "but the socket itself is the daemon's");
+        }
+
+        /// Asking twice is what every retry does.
+        #[test]
+        fn preparing_an_endpoint_directory_that_is_already_there_is_fine() {
+            let local = UntouchedLocalAppData::new("twice");
+            let first = endpoint_under(local.path()).expect("the first time");
+            let second = endpoint_under(local.path()).expect("the second time");
+            assert_eq!(first, second);
+        }
+
+        /// The bug, pinned to the errno that caused it.
+        ///
+        /// The old gate spawned on `NotFound` or `ConnectionRefused` and treated
+        /// everything else as a state no daemon could fix. On Windows an absent endpoint
+        /// never answers `NotFound` — AF_UNIX gives `WSAECONNREFUSED` for that too — and
+        /// an endpoint whose *directory* is missing answers `WSAENETDOWN`, which fell
+        /// through to "do not spawn". A fresh install has no `run\`, so the client sat on
+        /// that one error for the whole outage, every outage, and never brought the daemon
+        /// up. Both shapes have to reach the spawn now.
+        #[cfg(windows)]
+        #[test]
+        fn a_windows_endpoint_no_daemon_is_serving_never_reports_itself_as_missing() {
+            use uds_windows::UnixStream;
+
+            let local = UntouchedLocalAppData::new("errno");
+            let unprepared = local.path().join("tidemark").join("run").join("d.sock");
+            let missing_directory = UnixStream::connect(&unprepared)
+                .expect_err("nothing can be serving a socket in a directory that is not there");
+            assert_ne!(
+                missing_directory.kind(),
+                io::ErrorKind::NotFound,
+                "the Unix shape of this error is not the one Windows gives"
+            );
+
+            let prepared = endpoint_under(local.path()).expect("the endpoint path");
+            let no_daemon =
+                UnixStream::connect(&prepared).expect_err("no daemon has bound this endpoint");
+            assert_eq!(
+                no_daemon.kind(),
+                io::ErrorKind::ConnectionRefused,
+                "an absent Windows endpoint refuses; it is never NotFound"
+            );
         }
 
         #[test]
