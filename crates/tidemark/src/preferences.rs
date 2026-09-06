@@ -27,6 +27,15 @@ const STARTUP_VALUES: [&str; 3] = [
 /// What the startup values above are called on screen, in the same order.
 const STARTUP_LABELS: [&str; 3] = ["App and tray", "Daemon only", "Off"];
 
+const THEME_VALUES: [&str; 3] = [
+    Preferences::THEME_SYSTEM,
+    Preferences::THEME_LIGHT,
+    Preferences::THEME_DARK,
+];
+
+/// What the appearance choices above are called on screen, in the same order.
+const THEME_LABELS: [&str; 3] = ["System", "Light", "Dark"];
+
 const PROXY_VALUES: [&str; 4] = [
     Preferences::PROXY_OFF,
     Preferences::PROXY_HTTP,
@@ -62,6 +71,7 @@ pub struct PreferencesDialog {
     minimize_on_close: adw::SwitchRow,
     refresh_auto: adw::SwitchRow,
     refresh_minutes: adw::SpinRow,
+    theme: adw::ComboRow,
     startup: adw::ComboRow,
     retention: adw::ComboRow,
     proxy_mode: adw::ComboRow,
@@ -107,10 +117,24 @@ impl PreferencesDialog {
             .use_subtitle(true)
             .build();
 
+        let theme = adw::ComboRow::builder()
+            .title("Theme")
+            .subtitle("Choose whether Tidemark follows your system appearance.")
+            .model(&gtk::StringList::new(&THEME_LABELS))
+            .expression(gtk::PropertyExpression::new(
+                gtk::StringObject::static_type(),
+                None::<gtk::Expression>,
+                "string",
+            ))
+            .use_subtitle(true)
+            .build();
+
         let behavior = adw::PreferencesGroup::builder().title("Behavior").build();
         behavior.add(&minimize_on_close);
         let startup = adw::PreferencesGroup::builder().title("Startup").build();
         startup.add(&startup_mode);
+        let theme_group = adw::PreferencesGroup::builder().title("Theme").build();
+        theme_group.add(&theme);
         // The subtitle stays vague on purpose: which zone buys which pace is the daemon's
         // business, and a number here would be a second truth to keep in step with
         // `CONTEXT.md`.
@@ -136,6 +160,7 @@ impl PreferencesDialog {
             .build();
         general.add(&behavior);
         general.add(&startup);
+        general.add(&theme_group);
         general.add(&refresh_group);
         dialog.add(&general);
 
@@ -252,6 +277,7 @@ impl PreferencesDialog {
             minimize_on_close,
             refresh_auto,
             refresh_minutes,
+            theme,
             startup: startup_mode,
             retention,
             proxy_mode,
@@ -270,6 +296,7 @@ impl PreferencesDialog {
         settings.connect_switch(&settings.release_check, SwitchKind::ReleaseCheck);
         settings.connect_switch(&settings.minimize_on_close, SwitchKind::MinimizeOnClose);
         settings.connect_switch(&settings.refresh_auto, SwitchKind::RefreshAuto);
+        settings.connect_theme();
         settings.connect_startup();
         settings.connect_retention();
         settings.connect_proxy();
@@ -301,6 +328,20 @@ impl PreferencesDialog {
             .set_active(preferences.refresh_mode == Preferences::REFRESH_AUTO);
         self.refresh_minutes
             .set_value(f64::from(preferences.refresh_minutes));
+        apply_named_choice(
+            &self.theme,
+            &THEME_LABELS,
+            theme_index(
+                preferences
+                    .theme
+                    .as_deref()
+                    .unwrap_or(Preferences::THEME_SYSTEM),
+            ),
+            preferences
+                .theme
+                .as_deref()
+                .unwrap_or(Preferences::THEME_SYSTEM),
+        );
         apply_named_choice(
             &self.startup,
             &STARTUP_LABELS,
@@ -479,6 +520,37 @@ impl PreferencesDialog {
                         settings.toast(&error.to_string());
                     } else {
                         settings.preferences.borrow_mut().startup_mode = mode;
+                    }
+                    row.set_sensitive(true);
+                });
+            }
+        });
+    }
+
+    fn connect_theme(self: &Rc<Self>) {
+        self.theme.connect_selected_notify({
+            let weak = Rc::downgrade(self);
+            move |row| {
+                let Some(settings) = weak.upgrade() else {
+                    return;
+                };
+                if settings.suppress.get() {
+                    return;
+                }
+                let Some(theme) = THEME_VALUES.get(row.selected() as usize) else {
+                    return;
+                };
+                let theme = (*theme).to_owned();
+                row.set_sensitive(false);
+                let row = row.clone();
+                glib::spawn_future_local(async move {
+                    if let Err(error) = settings.proxy.set_theme(&theme).await {
+                        let preferences = settings.preferences.borrow().clone();
+                        let data = settings.data.borrow().clone();
+                        settings.apply(&preferences, &data);
+                        settings.toast(&error.to_string());
+                    } else {
+                        settings.preferences.borrow_mut().theme = Some(theme);
                     }
                     row.set_sensitive(true);
                 });
@@ -747,6 +819,13 @@ fn startup_index(value: &str) -> Option<u32> {
         .map(|index| index as u32)
 }
 
+fn theme_index(value: &str) -> Option<u32> {
+    THEME_VALUES
+        .iter()
+        .position(|candidate| *candidate == value)
+        .map(|index| index as u32)
+}
+
 fn proxy_index(value: &str) -> Option<u32> {
     PROXY_VALUES
         .iter()
@@ -808,6 +887,14 @@ mod tests {
         assert_eq!(startup_index(Preferences::STARTUP_DAEMON), Some(1));
         assert_eq!(startup_index(Preferences::STARTUP_OFF), Some(2));
         assert_eq!(startup_index("everything"), None);
+    }
+
+    #[test]
+    fn every_theme_selects_its_named_row() {
+        assert_eq!(theme_index(Preferences::THEME_SYSTEM), Some(0));
+        assert_eq!(theme_index(Preferences::THEME_LIGHT), Some(1));
+        assert_eq!(theme_index(Preferences::THEME_DARK), Some(2));
+        assert_eq!(theme_index("night"), None);
     }
 
     #[test]

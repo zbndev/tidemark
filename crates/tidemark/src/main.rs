@@ -37,6 +37,7 @@ mod provider_settings;
 #[cfg(windows)]
 mod single_instance;
 mod style;
+mod theme;
 mod tray;
 #[cfg(windows)]
 mod tray_icon_rgba;
@@ -164,6 +165,22 @@ mod tests {
     #[test]
     fn ordinary_launch_requests_a_visible_start() {
         assert!(!background_requested(["tidemark"]));
+    }
+
+    #[test]
+    fn every_theme_choice_maps_to_its_libadwaita_scheme() {
+        assert_eq!(
+            crate::theme::color_scheme("system"),
+            adw::ColorScheme::Default
+        );
+        assert_eq!(
+            crate::theme::color_scheme("light"),
+            adw::ColorScheme::ForceLight
+        );
+        assert_eq!(
+            crate::theme::color_scheme("dark"),
+            adw::ColorScheme::ForceDark
+        );
     }
 
     #[cfg(windows)]

@@ -46,6 +46,7 @@ const NOTIFY_WINDOWS_KEY: &str = "windows";
 
 const GENERAL_TABLE: &str = "general";
 const MINIMIZE_ON_CLOSE_KEY: &str = "minimize_on_close";
+const THEME_KEY: &str = "theme";
 const STARTUP_KEY: &str = "startup";
 const UPDATES_TABLE: &str = "updates";
 const RELEASE_CHECK_KEY: &str = "check";
@@ -208,6 +209,17 @@ impl Config {
                 format!("has unknown value {startup_mode:?}"),
             ));
         }
+        let theme = self
+            .preference_string(GENERAL_TABLE, THEME_KEY)?
+            .unwrap_or(Preferences::THEME_SYSTEM)
+            .to_owned();
+        if !Preferences::valid_theme(&theme) {
+            return Err(self.invalid_preference(
+                GENERAL_TABLE,
+                THEME_KEY,
+                format!("has unknown value {theme:?}"),
+            ));
+        }
         let proxy_mode = self
             .preference_string(PROXY_TABLE, PROXY_MODE_KEY)?
             .unwrap_or(defaults.proxy_mode.as_str())
@@ -254,6 +266,7 @@ impl Config {
             minimize_on_close: self
                 .preference_bool(GENERAL_TABLE, MINIMIZE_ON_CLOSE_KEY)?
                 .unwrap_or(defaults.minimize_on_close),
+            theme: Some(theme),
             startup_mode,
             history_retention,
             proxy_mode,
@@ -284,6 +297,17 @@ impl Config {
 
     pub fn set_minimize_on_close(&mut self, enabled: bool) -> Result<(), ConfigError> {
         self.set_preference(GENERAL_TABLE, MINIMIZE_ON_CLOSE_KEY, value(enabled))
+    }
+
+    pub fn set_theme(&mut self, theme: &str) -> Result<(), ConfigError> {
+        if !Preferences::valid_theme(theme) {
+            return Err(self.invalid_preference(
+                GENERAL_TABLE,
+                THEME_KEY,
+                format!("has unknown value {theme:?}"),
+            ));
+        }
+        self.set_preference(GENERAL_TABLE, THEME_KEY, value(theme))
     }
 
     pub fn set_startup_mode(&mut self, mode: &str) -> Result<(), ConfigError> {
@@ -1726,6 +1750,35 @@ mod tests {
     }
 
     #[test]
+    fn a_theme_choice_round_trips_without_changing_an_unset_config() {
+        let path = scratch("preferences-theme");
+        std::fs::write(&path, "# stays intact\n[general]\nstartup = \"app\"\n").expect("seeded");
+        let mut config = Config::at(path.clone()).expect("loaded");
+
+        assert_eq!(
+            config
+                .preferences()
+                .expect("default theme")
+                .theme
+                .as_deref(),
+            Some("system")
+        );
+        config.set_theme("light").expect("light theme");
+
+        let reread = Config::at(path.clone()).expect("reloaded");
+        assert_eq!(
+            reread.preferences().expect("stored theme").theme.as_deref(),
+            Some("light")
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("read back")
+                .contains("# stays intact")
+        );
+        assert!(config.set_theme("night").is_err());
+    }
+
+    #[test]
     fn application_preferences_survive_a_round_trip_without_rewriting_the_file() {
         let path = scratch("preferences-roundtrip");
         std::fs::write(&path, "# belongs to the user\nproviders = []\n").expect("seeded");
@@ -1733,6 +1786,7 @@ mod tests {
         let preferences = tidemark_types::Preferences {
             release_check: false,
             minimize_on_close: false,
+            theme: Some("light".into()),
             startup_mode: "daemon".into(),
             history_retention: "six-months".into(),
             proxy_mode: "socks5".into(),
@@ -1744,6 +1798,7 @@ mod tests {
 
         config.set_release_check(false).expect("release setting");
         config.set_minimize_on_close(false).expect("close setting");
+        config.set_theme("light").expect("theme setting");
         config.set_startup_mode("daemon").expect("startup mode");
         config
             .set_history_retention("six-months")

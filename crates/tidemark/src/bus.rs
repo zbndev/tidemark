@@ -130,6 +130,7 @@ pub trait Daemon {
 
     fn set_release_check(&self, enabled: bool) -> zbus::Result<()>;
     fn set_minimize_on_close(&self, enabled: bool) -> zbus::Result<()>;
+    fn set_theme(&self, theme: &str) -> zbus::Result<()>;
     fn set_startup_mode(&self, mode: &str) -> zbus::Result<()>;
     fn set_history_retention(&self, retention: &str) -> zbus::Result<()>;
 
