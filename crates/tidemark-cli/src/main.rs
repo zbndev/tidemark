@@ -8,6 +8,7 @@
 mod cli;
 mod connect;
 mod exit;
+mod format;
 
 use std::process::ExitCode;
 
@@ -32,6 +33,19 @@ async fn run(cli: cli::Cli) -> Result<Exit, Failure> {
             let proxy = connect::daemon().await?;
             println!("tidemarkctl {}", env!("CARGO_PKG_VERSION"));
             println!("tidemarkd {}", proxy.version().await?);
+            Ok(Exit::Ok)
+        }
+        cli::Command::Usage(args) => {
+            let proxy = connect::daemon().await?;
+            let statuses = proxy.get_status().await?;
+            let selected =
+                format::select(&statuses, args.provider.as_deref(), args.account.as_deref());
+            match args.format {
+                cli::Format::Text => print!(
+                    "{}",
+                    format::text::render(&selected, tidemark_types::Timestamp::now())
+                ),
+            }
             Ok(Exit::Ok)
         }
     }

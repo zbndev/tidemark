@@ -16,6 +16,28 @@ pub struct Cli {
 pub enum Command {
     /// This client's version, and the daemon's.
     Version,
+    /// What every configured account currently reports.
+    Usage(Usage),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct Usage {
+    /// Only this provider slug.
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Only this account of that provider.
+    #[arg(long, requires = "provider")]
+    pub account: Option<String>,
+    /// How to print it.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+/// The output shapes. `json` and `waybar` are contracts other programs parse; `text` is
+/// for a person and may be reworded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Format {
+    Text,
 }
 
 #[cfg(test)]
