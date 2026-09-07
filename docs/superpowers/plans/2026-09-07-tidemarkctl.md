@@ -283,7 +283,7 @@ git commit -m "refactor(ipc): share the daemon proxy between the window and a CL
 - Produces: `connect::daemon() -> zbus::Result<DaemonProxy<'static>>`.
 - Produces: `cli::Cli` with `cli::Command`, extended by every later task.
 
-- [ ] **Step 1: Create the crate**
+- [x] **Step 1: Create the crate**
 
 Add `"crates/tidemark-cli"` to the root `Cargo.toml`'s `members` — Task 1 deferred it, so
 it is this task's line to write — and create `crates/tidemark-cli/Cargo.toml`:
@@ -322,7 +322,7 @@ cargo add -p tidemark-cli serde --features derive
 
 Note the absent `p2p`: the CLI only ever talks to a session bus.
 
-- [ ] **Step 2: Write the exit codes**
+- [x] **Step 2: Write the exit codes**
 
 `crates/tidemark-cli/src/exit.rs`:
 
@@ -400,7 +400,12 @@ impl From<serde_json::Error> for Failure {
 }
 ```
 
-- [ ] **Step 3: Write the connection**
+Until a later task constructs them, `Exit::Below`, `Exit::Usage`, `Failure::usage` and
+`Failure::unavailable` are dead code, and the gate denies warnings. Each carries
+`#[expect(dead_code, reason = "…")]`, not `allow`: `expect` warns once the item *is* used,
+so the task that reaches for it is told to delete the marker.
+
+- [x] **Step 3: Write the connection**
 
 `crates/tidemark-cli/src/connect.rs`:
 
@@ -418,7 +423,7 @@ pub async fn daemon() -> zbus::Result<DaemonProxy<'static>> {
 }
 ```
 
-- [ ] **Step 4: Write the failing grammar test**
+- [x] **Step 4: Write the failing grammar test**
 
 `crates/tidemark-cli/src/cli.rs`:
 
@@ -464,12 +469,12 @@ mod tests {
 `debug_assert()` is clap's own grammar validator — it catches a `requires` naming a
 non-existent argument, which is the mistake this grammar will make most often as it grows.
 
-- [ ] **Step 5: Run it and watch it fail**
+- [x] **Step 5: Run it and watch it fail**
 
 Run: `cargo test -p tidemark-cli`
 Expected: FAIL — `main.rs` does not exist yet, so the crate does not build.
 
-- [ ] **Step 6: Write main**
+- [x] **Step 6: Write main**
 
 `crates/tidemark-cli/src/main.rs`:
 
@@ -514,12 +519,12 @@ async fn run(cli: cli::Cli) -> Result<Exit, Failure> {
 }
 ```
 
-- [ ] **Step 7: Run the tests**
+- [x] **Step 7: Run the tests**
 
 Run: `cargo test -p tidemark-cli`
 Expected: PASS.
 
-- [ ] **Step 8: Smoke it against the live daemon**
+- [x] **Step 8: Smoke it against the live daemon**
 
 Run: `cargo run -p tidemark-cli -- version`
 Expected: two lines, the second being the running daemon's version.
@@ -527,7 +532,7 @@ Expected: two lines, the second being the running daemon's version.
 Run: `env DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent cargo run -p tidemark-cli -- version; echo $?`
 Expected: a message on stderr and `69`.
 
-- [ ] **Step 9: Add the CLI to the layering check**
+- [x] **Step 9: Add the CLI to the layering check**
 
 In `scripts/check-layering.sh`, after the `tidemark-ipc` block:
 
@@ -539,7 +544,7 @@ forbid tidemark-cli 'the CLI prints what the daemon publishes and nothing else' 
 Run: `./scripts/check-layering.sh`
 Expected: `layering ok`.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock crates/tidemark-cli scripts/check-layering.sh
