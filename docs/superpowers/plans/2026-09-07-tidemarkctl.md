@@ -565,7 +565,7 @@ git commit -m "feat(cli): tidemarkctl skeleton and version"
 - Produces: `format::text::render(&[&ProviderStatus], Timestamp) -> String`.
 - Produces: `cli::Usage { provider, account, format }` and `cli::Format` (variants added per format task).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/tidemark-cli/src/format/text.rs`:
 
@@ -650,16 +650,17 @@ mod tests {
 
 The pace assertion is real arithmetic, not a guess: the window is five hours long and
 resets in one, so four fifths of it have elapsed, and 72% consumed is behind that — the
-window is *not* outpacing. **Verify this when the test runs**: if `outpacing` is the wrong
-word for `is_outpacing() == Some(false)`, the test says `on pace` instead. Fix the test to
-match `Window::is_outpacing`'s meaning, never the other way round.
+window is *not* outpacing. **Resolved when the test ran:** the assertion on `outpacing`
+failed against `on pace  (72 / 100 prompts)`, confirming `is_outpacing() == Some(false)`,
+so the test now asserts `on pace` and a second one — same window, 95% consumed — covers
+the `Some(true)` wording.
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 Run: `cargo test -p tidemark-cli format::text`
 Expected: FAIL — `render` is not defined.
 
-- [ ] **Step 3: Write the renderer**
+- [x] **Step 3: Write the renderer**
 
 Append to `crates/tidemark-cli/src/format/text.rs`, above the test module:
 
@@ -722,7 +723,10 @@ fn line(status: &WindowStatus, now: Timestamp) -> String {
 }
 ```
 
-- [ ] **Step 4: Write the selection helpers**
+- [x] **Step 4: Write the selection helpers**
+
+`format::dominant` has no caller until the waybar and guard tasks, so it carries
+`#[expect(dead_code, reason = …)]`; the task that first calls it deletes the marker.
 
 `crates/tidemark-cli/src/format/mod.rs`:
 
@@ -803,7 +807,7 @@ mod tests {
 tests call them both ways. `is_none_or` is stable in Rust 1.92 and reads better here than
 `map_or(true, …)`, which clippy rejects.
 
-- [ ] **Step 5: Extend the grammar and wire the command**
+- [x] **Step 5: Extend the grammar and wire the command**
 
 In `cli.rs`, add to `Command`:
 
@@ -853,12 +857,12 @@ In `main.rs`, add `mod format;` and the arm:
         }
 ```
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `cargo test -p tidemark-cli`
 Expected: PASS.
 
-- [ ] **Step 7: Smoke it**
+- [x] **Step 7: Smoke it**
 
 Run: `cargo run -p tidemark-cli -- usage`
 Expected: one block per configured account, matching what the window shows.
@@ -871,7 +875,7 @@ Expected: exit 2 from clap, complaining that `--account` requires `--provider`. 
 usage error is code 2, not 64; that is clap's contract and is left alone — `Exit::Usage` is
 for arguments this program rejects itself.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/tidemark-cli
