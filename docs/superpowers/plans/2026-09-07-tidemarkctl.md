@@ -1571,7 +1571,7 @@ git commit -m "feat(cli): guard a long run behind an exit code"
 - Produces: `watch::Event<'a>` serializing as `{"event":"<kind>", …}`, and `watch::line(&Event) -> Result<String, serde_json::Error>`.
 - Produces: `watch::mirror::Change { Upsert(ProviderStatus), Remove { provider, account }, Order(Vec<String>) }` and `watch::mirror::apply(&mut Vec<ProviderStatus>, Change)`.
 
-- [ ] **Step 1: Write the failing mirror tests**
+- [x] **Step 1: Write the failing mirror tests**
 
 `crates/tidemark-cli/src/watch/mirror.rs`:
 
@@ -1651,12 +1651,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 Run: `cargo test -p tidemark-cli watch::mirror`
 Expected: FAIL — `apply` and `Change` are not defined.
 
-- [ ] **Step 3: Write the mirror**
+- [x] **Step 3: Write the mirror**
 
 Above the test module:
 
@@ -1696,7 +1696,7 @@ pub fn apply(statuses: &mut Vec<ProviderStatus>, change: Change) {
 }
 ```
 
-- [ ] **Step 4: Write the failing event-line tests**
+- [x] **Step 4: Write the failing event-line tests**
 
 `crates/tidemark-cli/src/watch/mod.rs`:
 
@@ -1774,12 +1774,28 @@ mod tests {
 }
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p tidemark-cli watch`
 Expected: PASS. `main.rs` needs `mod watch;` for the module to be compiled at all.
 
-- [ ] **Step 6: Commit**
+**Two things this step found:**
+
+1. `a_snapshot_names_itself_and_carries_every_account` failed the same way Task 4's tests
+did — `accounts[0].provider` came out as `{"signature":"s","value":"zai"}`. The event lines
+publish the same wire types, so `payload` moved from `format::json` up to `format` and
+`watch::line` serializes through it: `serde_json::to_string(&format::payload(to_value(event)?))`.
+One peeling rule, one place, and the stream and the snapshot parse alike.
+2. `Event`, `line`, `Change` and `apply` have no caller until Task 8. `Event` takes a plain
+`#[expect(dead_code, …)]` — the whole enum is unused in the binary and five variants are
+unconstructed in the test build, so the expectation is fulfilled either way. The other
+three *are* used by their own tests, where a plain `expect` would itself be an unfulfilled
+expectation and fail `-D warnings`; they take
+`#[cfg_attr(not(test), expect(dead_code, …))]`. `Change` also carries a documented
+`clippy::large_enum_variant` expectation: one status per signal, consumed immediately, so
+boxing buys an allocation and nothing else.
+
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/tidemark-cli
