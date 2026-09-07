@@ -1995,7 +1995,10 @@ mod tests {
         let path = scratch("account-cli-home");
         std::fs::write(
             &path,
-            "[provider.codex.account.work]\ncli-home = "/tmp/codex-work"\nsource = "cli"\n",
+            r#"[provider.codex.account.work]
+cli-home = "/tmp/codex-work"
+source = "cli"
+"#,
         )
         .expect("seed");
         let config = Config::at(path.clone()).expect("parses");
@@ -2014,7 +2017,8 @@ mod tests {
     #[test]
     fn set_account_option_round_trips_cli_home() {
         let path = scratch("set-account-cli-home");
-        std::fs::write(&path, "providers = ["codex"]\n").expect("seed");
+        std::fs::write(&path, r#"providers = ["codex"]
+"#).expect("seed");
         let mut config = Config::at(path.clone()).expect("parses");
         config
             .set_account_option("codex", "work", "cli-home", "/var/codex-work")
