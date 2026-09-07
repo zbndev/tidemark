@@ -1027,7 +1027,7 @@ git commit -m "feat(cli): usage as json"
 **Interfaces:**
 - Produces: `format::waybar::render(&[&ProviderStatus], Timestamp) -> Result<String, serde_json::Error>` emitting `{"text","tooltip","class","percentage"}` with `class` always an array.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/tidemark-cli/src/format/waybar.rs`:
 
@@ -1120,12 +1120,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 Run: `cargo test -p tidemark-cli format::waybar`
 Expected: FAIL — `render` is not defined.
 
-- [ ] **Step 3: Write the renderer**
+- [x] **Step 3: Write the renderer**
 
 Above the test module:
 
@@ -1244,7 +1244,11 @@ fn escape(text: &str) -> String {
 }
 ```
 
-- [ ] **Step 4: Wire it up**
+- [x] **Step 4: Wire it up**
+
+`format::dominant` now has callers, so its `#[expect(dead_code, …)]` from Task 3 is
+deleted here — `expect` reports an unfulfilled expectation, which is what makes the marker
+self-removing.
 
 `format/mod.rs` gains `pub mod waybar;`. `cli::Format` gains `Waybar`. `main.rs`'s match
 gains:
@@ -1256,17 +1260,17 @@ gains:
                 ),
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p tidemark-cli`
 Expected: PASS.
 
-- [ ] **Step 6: Smoke it**
+- [x] **Step 6: Smoke it**
 
 Run: `cargo run -p tidemark-cli -- usage --format waybar | jq .`
 Expected: four keys, `class` an array, `percentage` an integer matching `text`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/tidemark-cli
