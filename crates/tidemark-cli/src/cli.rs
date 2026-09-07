@@ -70,6 +70,11 @@ pub enum Command {
     Data,
     /// A newer published release, if the daemon knows of one.
     Update,
+    /// Print a shell completion script on stdout.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 /// `on` and `off` rather than `true` and `false`: the settings pages call these switches,

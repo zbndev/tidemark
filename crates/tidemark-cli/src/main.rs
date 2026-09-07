@@ -6,6 +6,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
+use clap_complete::Generator;
 
 use tidemark_cli::exit::{Exit, Failure};
 use tidemark_cli::titles::Titles;
@@ -167,6 +168,17 @@ async fn run(cli: cli::Cli) -> Result<Exit, Failure> {
                 println!("{version}");
             }
             Ok(Exit::Ok)
+        }
+        cli::Command::Completions { shell } => {
+            let mut command = <cli::Cli as clap::CommandFactory>::command();
+            command.set_bin_name("tidemarkctl");
+            command.build();
+            let mut stdout = std::io::stdout().lock();
+            match shell.try_generate(&command, &mut stdout) {
+                Ok(()) => Ok(Exit::Ok),
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(Exit::Ok),
+                Err(error) => Err(error.into()),
+            }
         }
     }
 }

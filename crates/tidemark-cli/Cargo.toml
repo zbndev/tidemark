@@ -28,6 +28,7 @@ path = "src/main.rs"
 [dependencies]
 async-io = "2.6.0"
 clap = { version = "4.6.6", features = ["derive"] }
+clap_complete = "4.6.9"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tidemark-ipc = { path = "../tidemark-ipc" }

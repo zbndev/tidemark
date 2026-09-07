@@ -55,6 +55,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   postInstall = ''
     install -Dm755 target/*/release/tidemark -t "$out/bin"
     install -Dm755 target/*/release/tidemarkd -t "$out/bin"
+    install -Dm755 target/*/release/tidemarkctl -t "$out/bin"
     install -Dm644 data/applications/io.github.zbndev.Tidemark.desktop -t "$out/share/applications"
     install -Dm644 data/metainfo/io.github.zbndev.Tidemark.metainfo.xml -t "$out/share/metainfo"
     install -d "$out/share/icons"
