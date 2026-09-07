@@ -891,7 +891,7 @@ git commit -m "feat(cli): usage in text form"
 **Interfaces:**
 - Produces: `format::json::render(&[&ProviderStatus]) -> Result<String, serde_json::Error>` emitting `{"accounts": [...]}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/tidemark-cli/src/format/json.rs`:
 
@@ -955,19 +955,28 @@ mod tests {
 }
 ```
 
-These two tests **pin a published contract**, which is their whole point. If a key comes
-out under another spelling than the field name — the shape is `zvariant`'s
-`SerializeDict` derive, not ours — then that spelling *is* the contract: record it in the
-test and in the README. Do not add a `rename` to `tidemark-types` to make this test pretty;
-the D-Bus dictionary keys and the JSON keys are the same names, and renaming one changes
-both.
+These two tests **pin a published contract**, which is their whole point.
 
-- [ ] **Step 2: Run and watch it fail**
+**What running them found, and the one deviation in this task:** the key *spellings* are
+the field names, as expected — but `SerializeDict` exists to encode `a{sv}`, so under
+`serde_json` every value arrives inside its D-Bus envelope:
+`"provider": {"signature": "s", "value": "claude"}`, and `details` nests three levels of
+them. Publishing that would make a plugin unwrap every scalar. The plan's instruction —
+record the shape, never `rename` `tidemark-types` — still holds for spellings, and adding a
+second `Serialize` to the wire types is impossible anyway (one `impl` per type) while
+mirroring `ProviderStatus` in the CLI would be the duplicated wire model
+`crates/tidemark-types/AGENTS.md` forbids. So `format::json::payload` peels the envelope
+recursively after `serde_json::to_value`: one wire model, one set of key names, and no
+`{"signature","value"}` in what a plugin reads. Absent still stays absent — the derive
+omits `None` before the peeling ever sees it. A third test,
+`details_arrive_as_plain_objects_all_the_way_down`, pins the deepest published structure.
+
+- [x] **Step 2: Run and watch it fail**
 
 Run: `cargo test -p tidemark-cli format::json`
 Expected: FAIL — `render` is not defined.
 
-- [ ] **Step 3: Write the renderer**
+- [x] **Step 3: Write the renderer**
 
 Above the test module:
 
@@ -979,11 +988,12 @@ struct Document<'a> {
 }
 
 pub fn render(statuses: &[&ProviderStatus]) -> Result<String, serde_json::Error> {
-    serde_json::to_string_pretty(&Document { accounts: statuses })
+    let document = serde_json::to_value(Document { accounts: statuses })?;
+    serde_json::to_string_pretty(&payload(document))
 }
 ```
 
-- [ ] **Step 4: Wire it up**
+- [x] **Step 4: Wire it up**
 
 `format/mod.rs` gains `pub mod json;`. `cli::Format` gains `Json`. `main.rs`'s match gains:
 
@@ -991,17 +1001,17 @@ pub fn render(statuses: &[&ProviderStatus]) -> Result<String, serde_json::Error>
                 cli::Format::Json => println!("{}", format::json::render(&selected)?),
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p tidemark-cli`
 Expected: PASS.
 
-- [ ] **Step 6: Smoke it**
+- [x] **Step 6: Smoke it**
 
 Run: `cargo run -p tidemark-cli -- usage --format json | jq '.accounts[0] | {provider, state, windows}'`
 Expected: real values; no `null` where the provider said nothing.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/tidemark-cli
