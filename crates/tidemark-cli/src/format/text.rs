@@ -5,10 +5,12 @@
 //! provider's own text, printed as it arrived.
 
 use tidemark_types::present::{duration, percent};
-use tidemark_types::{ProviderStatus, Timestamp, WindowStatus, provider_label};
+use tidemark_types::{ProviderStatus, Timestamp, WindowStatus};
+
+use crate::titles::Titles;
 
 /// Every selected account, one block each, in the order the daemon published them.
-pub fn render(statuses: &[&ProviderStatus], now: Timestamp) -> String {
+pub fn render(statuses: &[&ProviderStatus], titles: &Titles, now: Timestamp) -> String {
     let mut out = String::new();
     for status in statuses {
         let label = status
@@ -17,7 +19,7 @@ pub fn render(statuses: &[&ProviderStatus], now: Timestamp) -> String {
             .unwrap_or(status.account.as_str());
         out.push_str(&format!(
             "{} · {}  [{}]\n",
-            provider_label(&status.provider),
+            titles.name(&status.provider),
             label,
             status.state
         ));
@@ -67,7 +69,7 @@ fn line(status: &WindowStatus, now: Timestamp) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidemark_types::{AccountId, ProviderId, ProviderState};
+    use tidemark_types::{AccountId, ProviderDefinition, ProviderId, ProviderState};
 
     fn status(state: ProviderState, windows: Vec<WindowStatus>) -> ProviderStatus {
         let mut status =
@@ -99,7 +101,7 @@ mod tests {
     #[test]
     fn a_window_without_a_reset_time_says_nothing_about_one() {
         let status = status(ProviderState::Ok, vec![window(None, 72.0)]);
-        let out = render(&[&status], now());
+        let out = render(&[&status], &Titles::default(), now());
         assert!(out.contains("72%"), "{out}");
         assert!(!out.contains("resets in"), "{out}");
         assert!(!out.contains("pace"), "{out}");
@@ -111,7 +113,7 @@ mod tests {
     #[test]
     fn a_reset_time_brings_the_span_and_the_pace() {
         let status = status(ProviderState::Ok, vec![window(Some(NOW + 3_600), 72.0)]);
-        let out = render(&[&status], now());
+        let out = render(&[&status], &Titles::default(), now());
         assert!(out.contains("resets in 1 h"), "{out}");
         assert!(out.contains("on pace"), "{out}");
     }
@@ -120,7 +122,7 @@ mod tests {
     #[test]
     fn a_window_ahead_of_its_elapsed_fraction_is_outpacing() {
         let status = status(ProviderState::Ok, vec![window(Some(NOW + 3_600), 95.0)]);
-        let out = render(&[&status], now());
+        let out = render(&[&status], &Titles::default(), now());
         assert!(out.contains("outpacing"), "{out}");
     }
 
@@ -128,7 +130,7 @@ mod tests {
     fn a_failed_poll_keeps_the_last_reading_under_its_state() {
         let mut status = status(ProviderState::Unreachable, vec![window(None, 72.0)]);
         status.message = Some("connection timed out".to_owned());
-        let out = render(&[&status], now());
+        let out = render(&[&status], &Titles::default(), now());
         assert!(out.contains("unreachable"), "{out}");
         assert!(out.contains("connection timed out"), "{out}");
         assert!(out.contains("72%"), "{out}");
@@ -137,6 +139,25 @@ mod tests {
     #[test]
     fn a_barely_touched_window_never_reads_as_untouched() {
         let status = status(ProviderState::Ok, vec![window(None, 0.2)]);
-        assert!(render(&[&status], now()).contains("<1%"));
+        assert!(render(&[&status], &Titles::default(), now()).contains("<1%"));
+    }
+
+    /// The catalog's own spelling, not the capitalised slug: a person reading this and a
+    /// person reading the card must see the same provider name. `provider_label` would say
+    /// "Claude" here, so a title the label cannot produce is what proves which one won.
+    #[test]
+    fn a_provider_is_named_the_way_the_catalog_spells_it() {
+        let status = status(ProviderState::Ok, vec![window(None, 10.0)]);
+        let titles = Titles::index(&[ProviderDefinition {
+            provider: "claude".to_owned(),
+            title: "Claude Code".to_owned(),
+            credential: "oauth".to_owned(),
+            credential_hint: String::new(),
+            external: None,
+            browser_auth: None,
+            options: Vec::new(),
+        }]);
+        let out = render(&[&status], &titles, now());
+        assert!(out.starts_with("Claude Code · default"), "{out}");
     }
 }

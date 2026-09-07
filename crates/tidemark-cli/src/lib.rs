@@ -11,8 +11,10 @@
 //! over.
 
 pub mod cli;
+pub mod commands;
 pub mod connect;
 pub mod exit;
 pub mod format;
 pub mod guard;
+pub mod titles;
 pub mod watch;

@@ -8,7 +8,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use tidemark_cli::exit::{Exit, Failure};
-use tidemark_cli::{cli, connect, format, guard, watch};
+use tidemark_cli::titles::Titles;
+use tidemark_cli::{cli, commands, connect, format, guard, watch};
 
 fn main() -> ExitCode {
     let parsed = cli::Cli::parse();
@@ -37,12 +38,20 @@ async fn run(cli: cli::Cli) -> Result<Exit, Failure> {
             match args.format {
                 cli::Format::Text => print!(
                     "{}",
-                    format::text::render(&selected, tidemark_types::Timestamp::now())
+                    format::text::render(
+                        &selected,
+                        &Titles::fetch(&proxy).await?,
+                        tidemark_types::Timestamp::now()
+                    )
                 ),
                 cli::Format::Json => println!("{}", format::json::render(&selected)?),
                 cli::Format::Waybar => println!(
                     "{}",
-                    format::waybar::render(&selected, tidemark_types::Timestamp::now())?
+                    format::waybar::render(
+                        &selected,
+                        &Titles::fetch(&proxy).await?,
+                        tidemark_types::Timestamp::now()
+                    )?
                 ),
             }
             Ok(Exit::Ok)
@@ -72,6 +81,19 @@ async fn run(cli: cli::Cli) -> Result<Exit, Failure> {
                 cli::StreamFormat::Waybar => watch::Sink::Waybar,
             };
             watch::run(sink, args.provider).await
+        }
+        cli::Command::Provider { command } => {
+            let proxy = connect::daemon().await?;
+            commands::provider::run(&proxy, command).await
+        }
+        cli::Command::Account { command } => {
+            let proxy = connect::daemon().await?;
+            commands::account::run(&proxy, command).await
+        }
+        cli::Command::Refresh { provider } => {
+            let proxy = connect::daemon().await?;
+            proxy.refresh(provider.as_deref().unwrap_or("")).await?;
+            Ok(Exit::Ok)
         }
     }
 }

@@ -22,6 +22,7 @@ use tidemark_types::{DataInfo, Preferences, ProviderStatus, Timestamp};
 use zbus::export::futures_core::Stream;
 
 use crate::exit::{Exit, Failure};
+use crate::titles::Titles;
 use crate::{connect, format};
 
 /// How long to wait before trying the bus again. Only reached when the *bus* is
@@ -95,11 +96,18 @@ pub async fn pump(
     let mut preferences = pin!(proxy.receive_preferences_changed().await?);
     let mut data = pin!(proxy.receive_data_changed().await?);
 
+    // A tooltip names providers the way the catalog spells them; the event stream names
+    // them by slug and would be paying for this round trip with nothing to show.
+    let titles = match sink {
+        Sink::Waybar => Titles::index(&proxy.list_providers().await?),
+        Sink::Events => Titles::default(),
+    };
     let mut statuses = proxy.get_status().await?;
     publish(
         out,
         sink,
         provider,
+        &titles,
         &statuses,
         &Event::Snapshot {
             accounts: &statuses,
@@ -142,24 +150,28 @@ pub async fn pump(
                     out,
                     sink,
                     provider,
+                    &titles,
                     &statuses,
                     &Event::Snapshot {
                         accounts: &statuses,
                     },
                 )?;
             }
-            Signal::Owner(Some(None)) => publish(out, sink, provider, &statuses, &Event::Waiting)?,
+            Signal::Owner(Some(None)) => {
+                publish(out, sink, provider, &titles, &statuses, &Event::Waiting)?
+            }
             Signal::Changed(Some(signal)) => {
                 let status = signal.args()?.status;
                 publish(
                     out,
                     sink,
                     provider,
+                    &titles,
                     &statuses,
                     &Event::Changed { account: &status },
                 )?;
                 mirror::apply(&mut statuses, mirror::Change::Upsert(status));
-                republish(out, sink, provider, &statuses)?;
+                republish(out, sink, provider, &titles, &statuses)?;
             }
             Signal::Removed(Some(signal)) => {
                 let args = signal.args()?;
@@ -167,6 +179,7 @@ pub async fn pump(
                     out,
                     sink,
                     provider,
+                    &titles,
                     &statuses,
                     &Event::Removed {
                         provider: args.provider,
@@ -180,7 +193,7 @@ pub async fn pump(
                         account: args.account.to_owned(),
                     },
                 );
-                republish(out, sink, provider, &statuses)?;
+                republish(out, sink, provider, &titles, &statuses)?;
             }
             Signal::Order(Some(signal)) => {
                 let providers = signal.args()?.providers;
@@ -188,18 +201,20 @@ pub async fn pump(
                     out,
                     sink,
                     provider,
+                    &titles,
                     &statuses,
                     &Event::Order {
                         providers: &providers,
                     },
                 )?;
                 mirror::apply(&mut statuses, mirror::Change::Order(providers));
-                republish(out, sink, provider, &statuses)?;
+                republish(out, sink, provider, &titles, &statuses)?;
             }
             Signal::Update(Some(signal)) => publish(
                 out,
                 sink,
                 provider,
+                &titles,
                 &statuses,
                 &Event::Update {
                     version: signal.args()?.version,
@@ -211,6 +226,7 @@ pub async fn pump(
                     out,
                     sink,
                     provider,
+                    &titles,
                     &statuses,
                     &Event::Preferences {
                         preferences: &args.preferences,
@@ -223,6 +239,7 @@ pub async fn pump(
                     out,
                     sink,
                     provider,
+                    &titles,
                     &statuses,
                     &Event::Data { data: &args.data },
                 )?;
@@ -256,13 +273,14 @@ fn publish(
     out: &mut impl Write,
     sink: Sink,
     provider: Option<&str>,
+    titles: &Titles,
     statuses: &[ProviderStatus],
     event: &Event<'_>,
 ) -> Result<(), std::io::Error> {
     match sink {
         Sink::Events => emit(out, event),
         Sink::Waybar => match event {
-            Event::Snapshot { .. } | Event::Waiting => card(out, provider, statuses),
+            Event::Snapshot { .. } | Event::Waiting => card(out, provider, titles, statuses),
             _ => Ok(()),
         },
     }
@@ -274,22 +292,24 @@ fn republish(
     out: &mut impl Write,
     sink: Sink,
     provider: Option<&str>,
+    titles: &Titles,
     statuses: &[ProviderStatus],
 ) -> Result<(), std::io::Error> {
     match sink {
         Sink::Events => Ok(()),
-        Sink::Waybar => card(out, provider, statuses),
+        Sink::Waybar => card(out, provider, titles, statuses),
     }
 }
 
 fn card(
     out: &mut impl Write,
     provider: Option<&str>,
+    titles: &Titles,
     statuses: &[ProviderStatus],
 ) -> Result<(), std::io::Error> {
     let selected = format::select(statuses, provider, None);
-    let rendered =
-        format::waybar::render(&selected, Timestamp::now()).map_err(std::io::Error::other)?;
+    let rendered = format::waybar::render(&selected, titles, Timestamp::now())
+        .map_err(std::io::Error::other)?;
     writeln!(out, "{rendered}")?;
     out.flush()
 }

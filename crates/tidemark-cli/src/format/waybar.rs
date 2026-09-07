@@ -7,9 +7,9 @@
 
 use serde::Serialize;
 use tidemark_types::present::{duration, percent};
-use tidemark_types::{
-    DANGER_AT, ProviderState, ProviderStatus, Timestamp, WARNING_AT, provider_label,
-};
+use tidemark_types::{DANGER_AT, ProviderState, ProviderStatus, Timestamp, WARNING_AT};
+
+use crate::titles::Titles;
 
 /// What a Waybar custom module reads.
 #[derive(Debug, Serialize)]
@@ -20,7 +20,11 @@ struct Card {
     percentage: u8,
 }
 
-pub fn render(statuses: &[&ProviderStatus], now: Timestamp) -> Result<String, serde_json::Error> {
+pub fn render(
+    statuses: &[&ProviderStatus],
+    titles: &Titles,
+    now: Timestamp,
+) -> Result<String, serde_json::Error> {
     let worst = statuses
         .iter()
         .filter_map(|status| super::dominant(status))
@@ -35,7 +39,7 @@ pub fn render(statuses: &[&ProviderStatus], now: Timestamp) -> Result<String, se
     let card = match worst {
         Some(used) => Card {
             text: percent(used),
-            tooltip: tooltip(statuses, now),
+            tooltip: tooltip(statuses, titles, now),
             class: classes(Some(used), stale),
             percentage: used.clamp(0.0, 100.0).round() as u8,
         },
@@ -73,13 +77,13 @@ fn classes(used: Option<f64>, stale: bool) -> Vec<String> {
     classes
 }
 
-fn tooltip(statuses: &[&ProviderStatus], now: Timestamp) -> String {
+fn tooltip(statuses: &[&ProviderStatus], titles: &Titles, now: Timestamp) -> String {
     statuses
         .iter()
         .map(|status| {
             let mut line = format!(
                 "{} · {}",
-                provider_label(&status.provider),
+                titles.name(&status.provider),
                 status
                     .account_label
                     .as_deref()
@@ -156,7 +160,7 @@ mod tests {
     fn the_worst_account_sets_the_number() {
         let low = status("claude", ProviderState::Ok, 12.0);
         let high = status("codex", ProviderState::Ok, 91.0);
-        let card = card(&render(&[&low, &high], now()).expect("serializes"));
+        let card = card(&render(&[&low, &high], &Titles::default(), now()).expect("serializes"));
         assert_eq!(card["text"], "91%");
         assert_eq!(card["percentage"], 91);
         assert_eq!(card["class"][0], "danger");
@@ -165,7 +169,7 @@ mod tests {
     #[test]
     fn a_stale_account_keeps_its_zone() {
         let status = status("claude", ProviderState::RateLimited, 95.0);
-        let card = card(&render(&[&status], now()).expect("serializes"));
+        let card = card(&render(&[&status], &Titles::default(), now()).expect("serializes"));
         assert_eq!(card["class"][0], "danger");
         assert_eq!(card["class"][1], "stale");
     }
@@ -174,7 +178,7 @@ mod tests {
     fn nothing_to_report_hides_the_module() {
         let pending =
             ProviderStatus::pending(&ProviderId::new("zai".to_owned()), &AccountId::default());
-        let card = card(&render(&[&pending], now()).expect("serializes"));
+        let card = card(&render(&[&pending], &Titles::default(), now()).expect("serializes"));
         assert_eq!(card["text"], "");
         assert_eq!(card["percentage"], 0);
         assert_eq!(card["class"][0], "stale");
@@ -184,7 +188,7 @@ mod tests {
     fn a_tooltip_escapes_the_provider_own_text() {
         let mut status = status("claude", ProviderState::Ok, 50.0);
         status.windows[0].title = "Session & overage".to_owned();
-        let card = card(&render(&[&status], now()).expect("serializes"));
+        let card = card(&render(&[&status], &Titles::default(), now()).expect("serializes"));
         let tooltip = card["tooltip"].as_str().expect("a string");
         assert!(tooltip.contains("&amp;"), "{tooltip}");
         assert!(!tooltip.contains("Session & overage"), "{tooltip}");

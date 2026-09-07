@@ -162,6 +162,11 @@ pub async fn serve(daemon: FakeDaemon) -> Option<(zbus::Connection, DaemonProxy<
 }
 
 /// Emits `ProviderChanged` from the served object, the way the real daemon does.
+///
+/// This module is compiled into every integration test binary and each one uses the part
+/// it needs, so an unused helper here is expected rather than dead — `expect` would itself
+/// go unfulfilled in the binary that does use it.
+#[allow(dead_code)]
 pub async fn emit_change(server: &zbus::Connection, status: ProviderStatus) {
     let emitter =
         zbus::object_server::SignalEmitter::new(server, ids::OBJECT_PATH).expect("valid emitter");

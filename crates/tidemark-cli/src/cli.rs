@@ -22,6 +22,54 @@ pub enum Command {
     Guard(Guard),
     /// Print the daemon's changes as they arrive, one JSON object per line.
     Watch(Watch),
+    /// The provider catalog, the configured set, and what is in it.
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommand,
+    },
+    /// The accounts one provider carries.
+    Account {
+        #[command(subcommand)]
+        command: AccountCommand,
+    },
+    /// Poll now: one provider, or everything.
+    Refresh {
+        /// A provider slug. Omitted, every configured account is polled.
+        provider: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProviderCommand {
+    /// Every provider this build knows how to configure.
+    Catalog,
+    /// Every configured account, with its state.
+    List,
+    /// Configure a provider, creating its default account.
+    Add { provider: String },
+    /// Remove one configured account, its credentials and its card.
+    Rm { provider: String, account: String },
+    /// Rewrite the order the cards go in. Must name every configured provider.
+    Order { providers: Vec<String> },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AccountCommand {
+    /// Add one more account to a provider the config already has.
+    Add { provider: String, account: String },
+    /// Remove one account. The same call as `provider rm`.
+    Rm { provider: String, account: String },
+    /// Rename an account, carrying its credential and history to the new id.
+    Rename {
+        provider: String,
+        account: String,
+        new: String,
+    },
+    /// Rewrite one provider's account order.
+    Order {
+        provider: String,
+        accounts: Vec<String>,
+    },
 }
 
 #[derive(Debug, clap::Args)]
