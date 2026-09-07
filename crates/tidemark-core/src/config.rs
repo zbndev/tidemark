@@ -30,6 +30,10 @@ const PROVIDER_TABLE: &str = "provider";
 const PROVIDERS_KEY: &str = "providers";
 /// The account ids configured for a provider.
 const ACCOUNTS_KEY: &str = "accounts";
+/// Nested table for per-account settings: `[provider.<slug>.account.<id>]`.
+const ACCOUNT_TABLE: &str = "account";
+/// Absolute `CODEX_HOME` (or Claude-equivalent home) for one account.
+pub const CLI_HOME_KEY: &str = "cli-home";
 /// The shared storage keys used by browser-cookie authentication providers.
 const AUTH_SOURCE_KEY: &str = "auth-source";
 const AUTH_BROWSER_KEY: &str = "auth-browser";
@@ -117,6 +121,20 @@ pub enum ConfigError {
         /// Whose list it is.
         provider: String,
         /// Why the account list is invalid.
+        reason: String,
+    },
+    /// A per-account setting was the wrong shape.
+    #[error("{path}: [{PROVIDER_TABLE}.{provider}.{ACCOUNT_TABLE}.{account}] {name} {reason}")]
+    InvalidAccountOption {
+        /// The file.
+        path: PathBuf,
+        /// Provider slug.
+        provider: String,
+        /// Account id.
+        account: String,
+        /// Setting name.
+        name: String,
+        /// Why it was refused.
         reason: String,
     },
     /// A provider's notification opt-in list is not an array of window keys.
@@ -493,6 +511,35 @@ impl Config {
             .as_str()
     }
 
+    /// One per-account setting, falling back to the provider-level key for `"default"`.
+    ///
+    /// Extra Codex accounts store their own `cli-home` / `source` here so a second CLI
+    /// install does not have to share `~/.codex` with the default account.
+    pub fn account_option(&self, provider: &str, account: &str, name: &str) -> Option<&str> {
+        self.document
+            .get(PROVIDER_TABLE)
+            .and_then(|table| table.get(provider))
+            .and_then(|table| table.get(ACCOUNT_TABLE))
+            .and_then(|table| table.get(account))
+            .and_then(|table| table.get(name))
+            .and_then(|item| item.as_str())
+            .or_else(|| {
+                if account == "default" {
+                    self.option(provider, name)
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Absolute CLI home directory for this account, when configured.
+    pub fn cli_home(&self, provider: &str, account: &str) -> Option<PathBuf> {
+        self.account_option(provider, account, CLI_HOME_KEY)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    }
+
     /// Returns configured providers in file order, with duplicates removed.
     pub fn providers(&self) -> Result<Vec<String>, ConfigError> {
         let Some(item) = self.document.get(PROVIDERS_KEY) else {
@@ -705,6 +752,63 @@ impl Config {
                 table: format!("{PROVIDER_TABLE}.{provider}"),
             })?;
         table.insert(name, value(setting));
+        self.write()
+    }
+
+    /// Sets one per-account setting under `[provider.<slug>.account.<id>]` and writes.
+    ///
+    /// An empty `setting` removes the key so clearing a CLI home returns the account to
+    /// Tidemark-login-only for extras.
+    pub fn set_account_option(
+        &mut self,
+        provider: &str,
+        account: &str,
+        name: &str,
+        setting: &str,
+    ) -> Result<(), ConfigError> {
+        self.normalize_providers(None)?;
+        let providers = self
+            .document
+            .entry(PROVIDER_TABLE)
+            .or_insert_with(|| Item::Table(implicit_table()));
+        let providers = providers
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: PROVIDER_TABLE.to_owned(),
+            })?;
+        let provider_table = providers
+            .entry(provider)
+            .or_insert_with(|| Item::Table(Table::new()));
+        let provider_table = provider_table
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: format!("{PROVIDER_TABLE}.{provider}"),
+            })?;
+        let accounts = provider_table
+            .entry(ACCOUNT_TABLE)
+            .or_insert_with(|| Item::Table(implicit_table()));
+        let accounts = accounts
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: format!("{PROVIDER_TABLE}.{provider}.{ACCOUNT_TABLE}"),
+            })?;
+        let account_table = accounts
+            .entry(account)
+            .or_insert_with(|| Item::Table(Table::new()));
+        let account_table = account_table
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: format!("{PROVIDER_TABLE}.{provider}.{ACCOUNT_TABLE}.{account}"),
+            })?;
+        if setting.is_empty() {
+            account_table.remove(name);
+        } else {
+            account_table.insert(name, value(setting));
+        }
         self.write()
     }
 
@@ -1883,5 +1987,43 @@ mod tests {
             );
             let _ = std::fs::remove_file(path);
         }
+    }
+
+
+    #[test]
+    fn account_cli_home_is_read_from_the_nested_table() {
+        let path = scratch("account-cli-home");
+        std::fs::write(
+            &path,
+            "[provider.codex.account.work]\ncli-home = "/tmp/codex-work"\nsource = "cli"\n",
+        )
+        .expect("seed");
+        let config = Config::at(path.clone()).expect("parses");
+        assert_eq!(
+            config.account_option("codex", "work", "cli-home"),
+            Some("/tmp/codex-work")
+        );
+        assert_eq!(
+            config.cli_home("codex", "work").as_deref(),
+            Some(std::path::Path::new("/tmp/codex-work"))
+        );
+        assert_eq!(config.account_option("codex", "work", "source"), Some("cli"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn set_account_option_round_trips_cli_home() {
+        let path = scratch("set-account-cli-home");
+        std::fs::write(&path, "providers = ["codex"]\n").expect("seed");
+        let mut config = Config::at(path.clone()).expect("parses");
+        config
+            .set_account_option("codex", "work", "cli-home", "/var/codex-work")
+            .expect("writes");
+        let reread = Config::at(path.clone()).expect("reparses");
+        assert_eq!(
+            reread.cli_home("codex", "work").as_deref(),
+            Some(std::path::Path::new("/var/codex-work"))
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

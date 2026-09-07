@@ -29,6 +29,7 @@ notifications stay current. Native GTK4 + libadwaita — no Electron, no embedde
   exposes, each with its own reset time.
 - **Several accounts per provider.** A work and a personal Claude, two Z.ai keys — grouped
   behind an expand toggle.
+  A second Codex CLI login needs its own CODEX_HOME; set **CLI home** on the extra account (see docs/codex-business-and-multi-cli.md).
 - **A pace mark on every bar.** Fill to the left of the mark means the quota likely lasts until
   the reset; fill to the right means it does not.
 - **Warnings at 70% and 90%,** plus a notification when a window resets. Off by default,

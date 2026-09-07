@@ -164,23 +164,48 @@ pub struct Codex {
 fn credentials_for(
     account: &AccountId,
     source: Source,
+    cli_home: Option<&Path>,
 ) -> Result<Option<CredentialFile>, ProviderError> {
-    if account.as_str() != "default" && source == Source::OAuth {
-        return Ok(None);
+    // Extra accounts only open a CLI file when they name one: otherwise they would share
+    // ~/.codex with the default account, which is the single-CLI trap this path exists to
+    // avoid. OAuth extras keep no file at all.
+    if account.as_str() != "default" && cli_home.is_none() {
+        return match source {
+            Source::Cli => Err(ProviderError::Local(
+                "extra Codex accounts need cli-home set to that install's CODEX_HOME".into(),
+            )),
+            Source::OAuth | Source::Auto => Ok(None),
+        };
     }
-    let path = cli_credentials_path()
-        .ok_or_else(|| ProviderError::Local("HOME does not name an absolute directory".into()))?;
+    let path = match cli_home {
+        Some(home) => {
+            if !home.is_absolute() {
+                return Err(ProviderError::Local(
+                    "Codex CLI home must be an absolute directory".into(),
+                ));
+            }
+            home.join("auth.json")
+        }
+        None => cli_credentials_path().ok_or_else(|| {
+            ProviderError::Local("HOME does not name an absolute directory".into())
+        })?,
+    };
     Ok(Some(CredentialFile::new(path.clone(), path)))
 }
 
 impl Codex {
     /// Builds the canonical Codex account when this account uses its vendor login.
+    ///
+    /// `cli_home` is an optional absolute `CODEX_HOME` for this account. The default account
+    /// falls back to `$CODEX_HOME` / `~/.codex`; an extra account needs one to read a second
+    /// CLI login instead of only the Tidemark keyring.
     pub fn new(
         account: AccountId,
         own: Option<Arc<dyn Secrets>>,
         source: Source,
+        cli_home: Option<PathBuf>,
     ) -> Result<Self, ProviderError> {
-        let credentials = credentials_for(&account, source)?;
+        let credentials = credentials_for(&account, source, cli_home.as_deref())?;
         let mut codex =
             Self::with_credentials(credentials, USAGE_URL.to_owned(), REFRESH_URL.to_owned())?;
         codex.own = own;
@@ -513,6 +538,59 @@ pub fn cli_credentials_path() -> Option<PathBuf> {
     Some(home.join(".codex/auth.json"))
 }
 
+/// Codex CLI homes on this machine that already hold an `auth.json`.
+///
+/// Includes the ambient `$CODEX_HOME` / `~/.codex` directory and every sibling under
+/// `~/.codex-profiles/*` that looks like a second install. Used to offer a menu of CLIs
+/// instead of forcing a second account onto Tidemark login.
+pub fn discover_cli_homes() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    let mut push = |home: PathBuf| {
+        if !home.is_absolute() {
+            return;
+        }
+        if !home.join("auth.json").is_file() {
+            return;
+        }
+        if !homes.iter().any(|seen| seen == &home) {
+            homes.push(home);
+        }
+    };
+    if let Some(path) = cli_credentials_path() {
+        if let Some(home) = path.parent() {
+            push(home.to_path_buf());
+        }
+    }
+    if let Some(user_home) = crate::paths::home() {
+        let profiles = user_home.join(".codex-profiles");
+        if let Ok(entries) = std::fs::read_dir(&profiles) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    push(path);
+                }
+            }
+        }
+    }
+    homes.sort();
+    homes
+}
+
+/// Wire `plan_type` as a person reads it, including OpenAI's Business seat spellings.
+fn plan_label(raw: &str) -> String {
+    match raw.trim() {
+        "business" => "Business".to_owned(),
+        "self_serve_business_usage_based" => "Business (usage-based)".to_owned(),
+        "self_serve_business_prolite" => "Business Standard".to_owned(),
+        "enterprise_cbp_usage_based" => "Enterprise (usage-based)".to_owned(),
+        "enterprise_cbp_automation" => "Enterprise (automation)".to_owned(),
+        "ent26" => "Enterprise".to_owned(),
+        "prolite" => "Pro Lite".to_owned(),
+        "free_workspace" => "Free Workspace".to_owned(),
+        other => title_case(other),
+    }
+}
+
 /// Turns a usage response into a snapshot.
 pub fn parse(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
     parse_for_account(body, captured_at, &AccountId::default())
@@ -591,12 +669,68 @@ fn parse_for_account(
         )?;
     }
 
+    // Business seats often report no rate_limit windows at all and put the only quota under
+    // spend_control.individual_limit. Without this, a working Business login looks empty.
+    if windows.is_empty() {
+        if let Some(window) = spend_window(envelope.spend_control.as_ref(), captured_at) {
+            windows.push(window);
+        }
+    }
+
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
         account: account.clone(),
         captured_at,
         windows,
         details: details(&envelope),
+    })
+}
+
+/// A spend-control allowance as a window, when it is the account's only quota signal.
+fn spend_window(control: Option<&SpendControl>, captured_at: Timestamp) -> Option<Window> {
+    let limit = control?.individual_limit.as_ref()?;
+    let used_percent = limit.used_percent?.clamp(0.0, 100.0);
+    let resets_at = limit
+        .reset_at
+        .and_then(|seconds| Timestamp::from_unix(seconds).ok())
+        .or_else(|| {
+            limit
+                .reset_after_seconds
+                .filter(|seconds| *seconds >= 0)
+                .map(|seconds| captured_at.saturating_add_seconds(seconds))
+        });
+    let length = limit
+        .reset_after_seconds
+        .filter(|seconds| *seconds > 0)
+        .and_then(|seconds| WindowLength::from_secs(seconds as u64))
+        .or_else(|| {
+            resets_at.and_then(|reset| {
+                let seconds = reset.as_unix().saturating_sub(captured_at.as_unix());
+                (seconds > 0)
+                    .then_some(seconds as u64)
+                    .and_then(WindowLength::from_secs)
+            })
+        });
+    let subtitle = match (limit.used.as_ref(), limit.limit.as_ref()) {
+        (Some(used), Some(cap)) => {
+            Some(format!("{} of {}", trim_number(used.0), trim_number(cap.0)))
+        }
+        _ => None,
+    };
+    let (key, title) = match length {
+        Some(length) => (
+            WindowKey::for_pool("spend", length),
+            format!("Spend · {}", length_title(length)),
+        ),
+        None => (WindowKey::named("spend"), "Spend".to_owned()),
+    };
+    Some(Window {
+        key,
+        title,
+        subtitle,
+        used_percent,
+        resets_at,
+        length,
     })
 }
 
@@ -721,12 +855,56 @@ struct SpendControl {
     individual_limit: Option<IndividualLimit>,
 }
 
+/// Business / workspace seats often put the only quota here. `limit` and `used` arrive as
+/// strings on some plan types and as numbers on others; either must parse.
 #[derive(Debug, Deserialize)]
 struct IndividualLimit {
     #[serde(default)]
-    limit: Option<f64>,
+    limit: Option<FlexNumber>,
     #[serde(default)]
-    used: Option<f64>,
+    used: Option<FlexNumber>,
+    #[serde(default)]
+    used_percent: Option<f64>,
+    #[serde(default)]
+    reset_after_seconds: Option<i64>,
+    #[serde(default)]
+    reset_at: Option<i64>,
+}
+
+/// A quantity that WHAM may send as a JSON number or as a decimal string.
+#[derive(Debug, Clone)]
+struct FlexNumber(f64);
+
+impl<'de> Deserialize<'de> for FlexNumber {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = FlexNumber;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a number or a decimal string")
+            }
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(FlexNumber(value))
+            }
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(FlexNumber(value as f64))
+            }
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(FlexNumber(value as f64))
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                value
+                    .trim()
+                    .parse()
+                    .map(FlexNumber)
+                    .map_err(E::custom)
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -740,7 +918,7 @@ struct ResetCredits {
 fn details(envelope: &Envelope) -> Vec<DetailSection> {
     let mut sections = Vec::new();
 
-    if let Some(plan) = envelope.plan_type.as_deref().map(title_case) {
+    if let Some(plan) = envelope.plan_type.as_deref().map(plan_label) {
         sections.push(DetailSection {
             title: DetailSection::PLAN.to_owned(),
             rows: vec![DetailRow {
@@ -792,19 +970,23 @@ fn details(envelope: &Envelope) -> Vec<DetailSection> {
         });
     }
 
-    if let Some((used, limit)) = envelope
+    // Absolute spend figures stay in details when present. The percentage is drawn as a
+    // window when rate_limit is empty (see spend_window); repeating it here would only
+    // duplicate the card.
+    if let Some(limit) = envelope
         .spend_control
         .as_ref()
         .and_then(|control| control.individual_limit.as_ref())
-        .and_then(|limit| Some((limit.used?, limit.limit?)))
     {
-        sections.push(DetailSection {
-            title: "Spend".to_owned(),
-            rows: vec![DetailRow {
-                label: "Used".to_owned(),
-                value: format!("{} of {}", trim_number(used), trim_number(limit)),
-            }],
-        });
+        if let (Some(used), Some(cap)) = (limit.used.as_ref(), limit.limit.as_ref()) {
+            sections.push(DetailSection {
+                title: "Spend".to_owned(),
+                rows: vec![DetailRow {
+                    label: "Used".to_owned(),
+                    value: format!("{} of {}", trim_number(used.0), trim_number(cap.0)),
+                }],
+            });
+        }
     }
 
     sections
@@ -1008,10 +1190,29 @@ mod tests {
     fn an_extra_oauth_account_skips_the_cli_credentials_path() {
         let account = AccountId::new("work");
         assert!(
-            credentials_for(&account, Source::OAuth)
+            credentials_for(&account, Source::OAuth, None)
                 .expect("OAuth-only accounts do not need a CLI path")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn an_extra_account_with_a_cli_home_reads_that_auth_file() {
+        let account = AccountId::new("work");
+        let home = std::env::temp_dir().join(format!(
+            "tidemark-codex-home-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir(&home).expect("home");
+        let file = credentials_for(&account, Source::Cli, Some(&home))
+            .expect("a configured CLI home is usable")
+            .expect("CLI source keeps a credential file");
+        // CredentialFile keeps path private; writing through the locked file proves the home.
+        fs::write(home.join("auth.json"), br#"{"tokens":{"access_token":"x"}}"#).expect("seed");
+        assert!(file.read_json().is_ok());
+        let _ = fs::remove_dir_all(&home);
     }
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);

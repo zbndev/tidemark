@@ -20,6 +20,7 @@
 //! clients what this build supports; an account exists only after its slug appears in
 //! `config.toml`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tidemark_core::config::Config;
@@ -51,6 +52,8 @@ use crate::engine::Account;
 /// alone when Antigravity was the only provider with two credentials, so a
 /// `[provider.antigravity] source = "…"` written then keeps working untouched.
 pub const AUTH_SOURCE: &str = "source";
+/// Per-account absolute CLI home (`CODEX_HOME`) for a second install on this machine.
+pub const CLI_HOME: &str = tidemark_core::config::CLI_HOME_KEY;
 
 /// One of the three OAuth providers: everything about it that varies, named. The same
 /// entry feeds the catalog, the settings schema and the account builders, and bare
@@ -299,6 +302,7 @@ pub fn account(
     secrets: &Arc<dyn Secrets>,
     config: &Config,
 ) -> Result<Option<Account>, ProviderError> {
+    let account_id_for_options = account.clone();
     let account = match provider {
         antigravity::PROVIDER_ID => Some(antigravity_account(account, secrets, config)?),
         claude::PROVIDER_ID => Some(claude_account(account, secrets, config)?),
@@ -316,7 +320,7 @@ pub fn account(
     };
     Ok(account.map(|account| {
         account
-            .with_options(options(provider, config))
+            .with_options(options_for_account(provider, account_id_for_options.as_str(), config))
             .with_auth_selection(browser_auth_selection(provider, config))
             .with_notify(notify(provider, config))
     }))
@@ -487,8 +491,17 @@ pub fn notify(provider: &str, config: &Config) -> Vec<String> {
 /// from `keyed::CATALOG`, or from the hand-written table for the providers that are not a
 /// `Spec`; either way the row is the same shape.
 pub fn options(provider: &str, config: &Config) -> Vec<ProviderOption> {
+    options_for_account(provider, "default", config)
+}
+
+/// Settings published on one account's status, including per-account CLI home for OAuth providers.
+pub fn options_for_account(provider: &str, account: &str, config: &Config) -> Vec<ProviderOption> {
     if let Some(entry) = oauth_entry(provider) {
-        return vec![auth_source_option(entry, config)];
+        let mut options = vec![auth_source_option_for(entry, account, config)];
+        if provider == codex::PROVIDER_ID {
+            options.push(cli_home_option(provider, account, config));
+        }
+        return options;
     }
     keyed::CATALOG
         .iter()
@@ -547,10 +560,18 @@ fn published_option(
 /// No description: the dialog draws this row itself, in the authentication group, with
 /// its own explanation, and a sentence here would be shown twice.
 fn auth_source_option(entry: &OAuthEntry, config: &Config) -> ProviderOption {
-    let available = local_source_available(entry.slug);
+    auth_source_option_for(entry, "default", config)
+}
+
+fn auth_source_option_for(entry: &OAuthEntry, account: &str, config: &Config) -> ProviderOption {
+    let available = if account == "default" {
+        local_source_available(entry.slug)
+    } else {
+        config.cli_home(entry.slug, account).is_some()
+    };
     let value = if available {
         config
-            .option(entry.slug, AUTH_SOURCE)
+            .account_option(entry.slug, account, AUTH_SOURCE)
             .unwrap_or(AUTO_SOURCE)
             .to_owned()
     } else {
@@ -575,6 +596,36 @@ fn auth_source_option(entry: &OAuthEntry, config: &Config) -> ProviderOption {
     }
 }
 
+fn cli_home_option(provider: &str, account: &str, config: &Config) -> ProviderOption {
+    let discovered = if provider == codex::PROVIDER_ID {
+        let homes: Vec<String> = codex::discover_cli_homes()
+            .into_iter()
+            .map(|home| home.to_string_lossy().into_owned())
+            .collect();
+        if homes.is_empty() {
+            String::new()
+        } else {
+            format!(" Discovered on this machine: {}.", homes.join(", "))
+        }
+    } else {
+        String::new()
+    };
+    ProviderOption {
+        name: CLI_HOME.to_owned(),
+        title: "CLI home".to_owned(),
+        description: Some(format!(
+            "Absolute CODEX_HOME for this account. Extra accounts need one to use a second CLI login instead of only Tidemark login.{discovered}"
+        )),
+        value: config
+            .account_option(provider, account, CLI_HOME)
+            .unwrap_or("")
+            .to_owned(),
+        // Free text so a home that does not yet contain auth.json can still be configured
+        // before codex login is run there.
+        choices: Vec::new(),
+    }
+}
+
 /// Which of a provider's two credentials its account reads, from the stored setting.
 /// Anything unrecognised — including the unset default — is [`Source::Auto`]: the Tidemark login when there
 /// is one, the vendor program's otherwise — the behaviour these accounts have always had.
@@ -582,13 +633,17 @@ fn source_value(provider: &str, config: &Config) -> Source {
     Source::from_value(config.option(provider, AUTH_SOURCE))
 }
 
-/// Extra configured accounts have no vendor CLI file, so they always use Tidemark's login.
+/// Extra configured accounts use Tidemark's login unless a per-account CLI home is set.
 pub(crate) fn source_for_account(provider: &str, account: &AccountId, config: &Config) -> Source {
     if account.as_str() == "default" {
-        supported_source(provider, source_value(provider, config))
-    } else {
-        Source::OAuth
+        return supported_source(provider, source_value(provider, config));
     }
+    // A second Codex/Claude CLI install is addressed by an absolute `cli-home`. Without one
+    // there is still only one vendor credential file on disk, so extras stay OAuth-only.
+    if config.cli_home(provider, account.as_str()).is_some() {
+        return Source::from_value(config.account_option(provider, account.as_str(), AUTH_SOURCE));
+    }
+    Source::OAuth
 }
 
 fn supported_source(provider: &str, source: Source) -> Source {
@@ -780,11 +835,13 @@ fn codex_account(
     config: &Config,
 ) -> Result<Account, ProviderError> {
     let source = source_for_account(codex::PROVIDER_ID, account, config);
+    let cli_home = config.cli_home(codex::PROVIDER_ID, account.as_str());
     let account_id = account.clone();
     Ok(Account::with_client(Arc::new(codex::Codex::new(
         account_id.clone(),
         Some(Arc::clone(secrets)),
         source,
+        cli_home.clone(),
     )?))
     .with_source(source)
     .with_rebuild({
@@ -792,13 +849,22 @@ fn codex_account(
         Box::new(move |account, _credential, options| {
             let source = if account.as_str() == "default" {
                 Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
+            } else if options.get(CLI_HOME).is_some_and(|home| !home.trim().is_empty()) {
+                Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
             } else {
                 Source::OAuth
             };
+            let cli_home = options
+                .get(CLI_HOME)
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|home| !home.is_empty())
+                .map(PathBuf::from);
             Ok(Arc::new(codex::Codex::new(
                 account.clone(),
                 Some(Arc::clone(&secrets)),
                 source,
+                cli_home,
             )?) as Arc<dyn Provider>)
         })
     })

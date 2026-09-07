@@ -1148,15 +1148,29 @@ impl Engine {
             .iter()
             .find(|option| option.name == name)
             .ok_or_else(|| format!("{provider} has no setting called {name}"))?;
-        if !option.choices.iter().any(|choice| choice.value == value) {
+        if !option.choices.is_empty()
+            && !value.is_empty()
+            && !option.choices.iter().any(|choice| choice.value == value)
+        {
             return Err(format!("{value} is not one of the values {name} can take"));
         }
 
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
-        config
-            .set_option(provider, name, value)
-            .map_err(|error| error.to_string())?;
-        self.accounts[index].status.options = crate::registry::options(provider, &config);
+        if name == crate::registry::CLI_HOME
+            || (account != "default"
+                && matches!(provider, "codex" | "claude")
+                && name == crate::registry::AUTH_SOURCE)
+        {
+            config
+                .set_account_option(provider, account, name, value)
+                .map_err(|error| error.to_string())?;
+        } else {
+            config
+                .set_option(provider, name, value)
+                .map_err(|error| error.to_string())?;
+        }
+        self.accounts[index].status.options =
+            crate::registry::options_for_account(provider, account, &config);
         let account_id = self.accounts[index].account.clone();
         self.accounts[index].source =
             crate::registry::source_for_account(provider, &account_id, &config);
@@ -1229,7 +1243,7 @@ impl Engine {
             .set_auth_selection(provider, &selection)
             .map_err(|error| error.to_string())?;
         let target = &mut self.accounts[index];
-        target.status.options = crate::registry::options(provider, &config);
+        target.status.options = crate::registry::options_for_account(provider, account, &config);
         target.status.auth_selection = crate::registry::browser_auth_selection(provider, &config);
         if target.rebuildable() {
             target.client = None;

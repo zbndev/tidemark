@@ -1182,6 +1182,14 @@ impl ProviderDetail {
         let options = model::settings_options(pill_excluded, &self.definition);
         group.set_visible(!options.is_empty());
         for option in options {
+            if option.choices.is_empty() {
+                let entry = self.build_free_text_option(option);
+                group.add(&entry);
+                if let Some(description) = &option.description {
+                    group.add(&caption(description));
+                }
+                continue;
+            }
             let row = self.build_option_row(option);
             group.add(&row.row);
             self.options
@@ -1191,6 +1199,37 @@ impl ProviderDetail {
                 group.add(&caption(description));
             }
         }
+    }
+
+    fn build_free_text_option(self: &Rc<Self>, option: &ProviderOption) -> adw::EntryRow {
+        let entry = adw::EntryRow::builder()
+            .title(&option.title)
+            .text(&option.value)
+            .show_apply_button(true)
+            .build();
+        let weak = Rc::downgrade(self);
+        let name = option.name.clone();
+        entry.connect_apply(move |entry| {
+            let Some(detail) = weak.upgrade() else {
+                return;
+            };
+            let status = detail.status.borrow();
+            let provider = status.provider.clone();
+            let account = status.account.clone();
+            drop(status);
+            let value = entry.text().to_string();
+            let name = name.clone();
+            glib::spawn_future_local(async move {
+                if let Err(error) = detail
+                    .proxy
+                    .set_option(&provider, &account, &name, &value)
+                    .await
+                {
+                    detail.toast(&reason(&error));
+                }
+            });
+        });
+        entry
     }
 
     fn build_option_row(self: &Rc<Self>, option: &ProviderOption) -> Rc<OptionRow> {

@@ -374,3 +374,86 @@ fn a_body_that_is_not_a_usage_response_at_all_is_malformed() {
         Err(ProviderError::Malformed { .. })
     ));
 }
+
+#[test]
+fn a_business_spend_control_with_string_amounts_becomes_a_window() {
+    // Live Business WHAM shape (Orca #8664): no rate_limit windows, quota only under
+    // spend_control.individual_limit, with limit/used as decimal strings.
+    let body = r#"{
+      "plan_type": "business",
+      "rate_limit": null,
+      "spend_control": {
+        "reached": false,
+        "individual_limit": {
+          "source": "group_based_spend_controls",
+          "limit": "11450",
+          "used": "4522.358407497406",
+          "remaining": "6927.641592502594",
+          "used_percent": 39,
+          "remaining_percent": 61,
+          "reset_after_seconds": 1539578,
+          "reset_at": 1785542400
+        }
+      }
+    }"#;
+    let snapshot = codex::parse(body, captured_at()).expect("business spend parses");
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].used_percent, 39.0);
+    assert!(snapshot.windows[0].key.as_str().starts_with("spend"));
+    assert_eq!(
+        snapshot.windows[0].subtitle.as_deref(),
+        Some("4522.36 of 11450")
+    );
+    assert_eq!(snapshot.details[0].rows[0].value, "Business");
+    assert_eq!(snapshot.details[1].title, "Spend");
+}
+
+#[test]
+fn a_business_spend_control_without_amounts_still_draws_the_percent() {
+    let body = r#"{
+      "plan_type": "business",
+      "spend_control": {
+        "individual_limit": { "used_percent": 39, "reset_at": 1785542400 }
+      }
+    }"#;
+    let snapshot = codex::parse(body, captured_at()).expect("parses");
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].used_percent, 39.0);
+    assert_eq!(snapshot.windows[0].subtitle, None);
+}
+
+
+#[test]
+fn business_spend_control_becomes_a_window_when_rate_limit_is_empty() {
+    // Business Standard/Premium seats have been observed with null rate_limit windows and
+    // the only quota under spend_control.individual_limit — including string balances.
+    let body = r#"{
+      "plan_type": "self_serve_business_prolite",
+      "rate_limit": null,
+      "spend_control": {
+        "reached": false,
+        "individual_limit": {
+          "limit": "100",
+          "used": "42.5",
+          "used_percent": 42.5,
+          "reset_after_seconds": 604800,
+          "reset_at": 1787855484
+        }
+      }
+    }"#;
+
+    let snapshot = codex::parse(body, captured_at()).expect("business spend parses");
+
+    assert_eq!(snapshot.windows.len(), 1);
+    assert_eq!(snapshot.windows[0].key.as_str(), "spend/w604800");
+    assert_eq!(snapshot.windows[0].used_percent, 42.5);
+    assert_eq!(snapshot.windows[0].subtitle.as_deref(), Some("42.5 of 100"));
+    assert_eq!(snapshot.details[0].rows[0].value, "Business Standard");
+}
+
+#[test]
+fn business_plan_wire_names_are_labelled_for_people() {
+    let body = r#"{"plan_type": "self_serve_business_usage_based", "rate_limit": null}"#;
+    let snapshot = codex::parse(body, captured_at()).expect("plan parses");
+    assert_eq!(snapshot.details[0].rows[0].value, "Business (usage-based)");
+}

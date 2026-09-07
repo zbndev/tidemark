@@ -1218,7 +1218,12 @@ impl Daemon {
             .ok_or_else(|| {
                 fdo::Error::InvalidArgs(format!("{provider} has no setting called {name}"))
             })?;
-        if !option.choices.iter().any(|choice| choice.value == value) {
+        // Empty choices mean free text (for example Codex `cli-home`); otherwise the
+        // value must be one of the published alternatives.
+        if !option.choices.is_empty()
+            && !value.is_empty()
+            && !option.choices.iter().any(|choice| choice.value == value)
+        {
             return Err(fdo::Error::InvalidArgs(format!(
                 "{value} is not one of the values {name} can take"
             )));
