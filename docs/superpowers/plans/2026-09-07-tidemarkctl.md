@@ -3173,7 +3173,16 @@ git commit -m "feat(cli): store credentials without putting them on a command li
 **Interfaces:**
 - Produces: `commands::config::run(&DaemonProxy<'_>, cli::ConfigCommand) -> Result<Exit, Failure>`.
 
-- [ ] **Step 1: Extend the grammar**
+- [x] **Step 1: Extend the grammar**
+
+**Deviation: `#[arg(value_parser = switch)] enabled: bool` does not compile as a grammar.**
+clap derives a *flag* from a `bool` positional, and `Cli::command().debug_assert()` — the
+grammar test from Task 2 — caught it: `Argument 'enabled' is positional and it must take a
+value but action is SetTrue`. Replaced with `pub enum Switch { On, Off }` deriving
+`clap::ValueEnum`, plus `impl From<Switch> for bool`. Better than forcing
+`action = ArgAction::Set` onto the `bool`: `--help` now lists
+`[possible values: on, off]`, and a wrong word is refused by clap with those values shown
+rather than by a hand-written message.
 
 `cli.rs` gains four commands:
 
@@ -3271,7 +3280,13 @@ pub enum HistoryCommand {
 }
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
+
+Plus an assertion the plan left off — `off` sends `SetProxy(off,,0)`, i.e. the empty host
+and the zero port, not the previous ones — and a second test for the ordering rule that
+`config.rs` states in a comment and nothing else checked: the interval is sent *before* the
+mode, because `SetRefreshMode` polls every account immediately, so the other order would
+poll once at the pace the user is leaving behind.
 
 Append to `crates/tidemark-cli/tests/managing_a_fake_daemon.rs`:
 
@@ -3329,12 +3344,22 @@ fn a_proxy_is_sent_as_one_setting_and_a_half_of_one_is_refused() {
 }
 ```
 
-- [ ] **Step 3: Run and watch it fail**
+- [x] **Step 3: Run and watch it fail**
+
+Failed as `cannot find `config` in `commands``, then a second time — after the command
+existed — as `Unknown method 'SetRefreshMinutes'`, which is the fake missing the two
+refresh methods. Added exactly those two: a test drives them.
 
 Run: `cargo test -p tidemark-cli --test managing_a_fake_daemon`
 Expected: FAIL — `commands::config` does not exist.
 
-- [ ] **Step 4: Write the command**
+- [x] **Step 4: Write the command**
+
+**Deviation: `show` prints switches as `on`/`off`, not `true`/`false`.** The plan printed
+the raw bools, which would have made `config show` output that no subcommand accepts —
+`config release-check true` is a clap error. Two unit tests hold that: a switch prints the
+word the subcommand takes, and an absent `theme` reads as `system` rather than as an empty
+column. `show` returns a `String` for the same reason `auth sources` does.
 
 `crates/tidemark-cli/src/commands/config.rs`:
 
@@ -3405,7 +3430,13 @@ Note the ordering in `Refresh`: the interval is sent before the mode, so switchi
 `manual` with a new interval polls at the interval the user asked for rather than at the
 old one. `set_refresh_mode` polls every account immediately — see `CONTEXT.md` § Polling.
 
-- [ ] **Step 5: Wire the remaining arms in `main.rs`**
+- [x] **Step 5: Wire the remaining arms in `main.rs`**
+
+**Deviation: `data`'s last row is `release-check-built`, not `release-check`.** The plan
+gave it the same name as the preference in `config show`, where it is a different thing:
+`config show`'s row is the user's switch, `data`'s is whether the build has the release
+checker at all. Two sibling commands printing one name for two facts is how somebody ends
+up scripting the wrong one.
 
 ```rust
         cli::Command::Option {
@@ -3479,27 +3510,56 @@ old one. `set_refresh_mode` polls every account immediately — see `CONTEXT.md`
 
 `commands/mod.rs` gains `pub mod config;`.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `cargo test -p tidemark-cli`
 Expected: PASS.
 
-- [ ] **Step 7: Smoke it**
+- [x] **Step 7: Smoke it**
 
-```bash
-cargo run -p tidemark-cli -- config show
-cargo run -p tidemark-cli -- data
-cargo run -p tidemark-cli -- update
-cargo run -p tidemark-cli -- config refresh manual --minutes 15
-cargo run -p tidemark-cli -- config show | grep refresh
-cargo run -p tidemark-cli -- config refresh auto
-cargo run -p tidemark-cli -- history segment claude default w18000 | tail -3
 ```
-Expected: `config show` reflects each change, the running Preferences dialog updates live
-(it listens to `PreferencesChanged`), and the segment prints timestamps with percentages.
-Put `refresh` back to whatever it was before.
+config show   →  release-check on / minimize-on-close on / theme dark / startup app /
+                 retention forever / refresh auto / refresh-minutes 1 /
+                 proxy http 127.0.0.1 10808
+data          →  config and history paths, history-bytes 1203760, both keyring schemas,
+                 release-check-built true
+update        →  0.4.1
+config refresh manual --minutes 15   →  config show says manual / 15
+config refresh auto --minutes 1      →  back to auto / 1
+history segment claude default w18000 | tail -3  →  1788810721 87% / 1788810752 88% /
+                                                    1788810985 92%
+history segment claude default w99999            →  no lines, exit 0: a window with no
+                                                    stored points is not an error
+```
 
-- [ ] **Step 8: Full gate and commit**
+All three refusal layers, on live data:
+
+- `config release-check maybe` → **2**, clap, `[possible values: on, off]`.
+- `config proxy socks5 127.0.0.1` → **64**, `the `socks5` proxy mode needs a host and a
+  port`. Never reached the bus.
+- `config theme neon` → **70**, `unknown theme "neon"`. The daemon's list, not ours.
+- `option antigravity default source nonsense` → **70**, `nonsense is not one of the values
+  source can take`.
+
+`notify claude default w604800 on` then `off`: the account's `notify` array went `[]` →
+`["w604800"]` → `[]`. `option antigravity default source cli` took effect and was visible
+in the published option value.
+
+**Two things the smoke wrote into the user's config, and how they were undone.** `option`
+pinned `[provider.antigravity] source = "cli"` where nothing had been pinned before (the
+published value was the `auto` sentinel, and `auto` is *not* one of the option's choices —
+there is no CLI way to unset it), and the `notify` round trip left an empty
+`[notify.claude] windows = []` section. Restored by stopping `tidemarkd`, deleting both
+stanzas from `config.toml`, and starting it again; verified afterwards that the option
+publishes `auto` with `auth_source` still `cli`, that claude's `notify` is `[]`, and that
+every other preference reads exactly as it did before. Worth knowing for later: `option`
+can pin a provider setting that no command can unpin.
+
+`history clear` was deliberately not run: it deletes every stored point, and this machine's
+history is 1.2 MB of the user's real readings. Its argument path is one proxy call with no
+arguments to get wrong.
+
+- [x] **Step 8: Full gate and commit**
 
 ```bash
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && ./scripts/check-layering.sh
