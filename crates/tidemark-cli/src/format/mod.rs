@@ -1,5 +1,6 @@
 //! Turning what the daemon published into what a caller asked for.
 
+pub mod json;
 pub mod text;
 
 use tidemark_types::{ProviderStatus, Window};

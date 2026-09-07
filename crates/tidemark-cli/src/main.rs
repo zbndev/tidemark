@@ -45,6 +45,7 @@ async fn run(cli: cli::Cli) -> Result<Exit, Failure> {
                     "{}",
                     format::text::render(&selected, tidemark_types::Timestamp::now())
                 ),
+                cli::Format::Json => println!("{}", format::json::render(&selected)?),
             }
             Ok(Exit::Ok)
         }

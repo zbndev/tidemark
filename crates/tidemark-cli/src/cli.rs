@@ -38,6 +38,7 @@ pub struct Usage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
     Text,
+    Json,
 }
 
 #[cfg(test)]
