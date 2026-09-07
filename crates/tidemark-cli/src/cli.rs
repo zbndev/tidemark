@@ -39,6 +39,7 @@ pub struct Usage {
 pub enum Format {
     Text,
     Json,
+    Waybar,
 }
 
 #[cfg(test)]

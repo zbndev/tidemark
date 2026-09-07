@@ -2,6 +2,7 @@
 
 pub mod json;
 pub mod text;
+pub mod waybar;
 
 use tidemark_types::{ProviderStatus, Window};
 
@@ -26,10 +27,6 @@ pub fn select<'a>(
 /// `Snapshot::dominant_window` is the shared rule — shortest window unless the provider
 /// names a lead one — and reusing it is what keeps the CLI, the card and the tray naming
 /// the same window.
-#[expect(
-    dead_code,
-    reason = "waybar and guard are its callers, in later commits"
-)]
 pub fn dominant(status: &ProviderStatus) -> Option<Window> {
     let snapshot = status.to_snapshot()?;
     snapshot.dominant_window().cloned()
