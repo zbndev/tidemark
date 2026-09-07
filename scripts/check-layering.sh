@@ -4,6 +4,8 @@
 #   tidemark-types  the shared vocabulary. Reaches nothing.
 #   tidemark-core   network, disk, secrets. Never the display.
 #   tidemarkd       the only process allowed to hold both.
+#   tidemark-ipc    the generated D-Bus proxy, shared by every client.
+#   tidemark-cli    tidemarkctl. Speaks D-Bus and prints; no runtime, no display.
 #   tidemark        the display. Never the network, never the database, never core —
 #                   it speaks D-Bus, which is what keeps a future CLI a third consumer
 #                   rather than a rewrite.
@@ -35,6 +37,12 @@ forbid() {
 # contract, opening a connection is an implementation.
 forbid tidemark-types 'it is the contract, not an implementation' \
     reqwest hyper rusqlite libsqlite3-sys tokio gtk4 gtk4-sys libadwaita zbus
+
+# The contract's client half: it may open a connection, and nothing else. tokio is on the
+# list because zbus can be built on either reactor, and a CLI whose value is starting fast
+# must not acquire a second runtime by accident.
+forbid tidemark-ipc 'the contract carries no implementation' \
+    tidemark-core reqwest hyper rusqlite libsqlite3-sys gtk4 gtk4-sys libadwaita tokio
 
 forbid tidemark-core 'core must build on a machine with no display stack' \
     gtk4 gtk4-sys gdk4-sys libadwaita libadwaita-sys

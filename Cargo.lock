@@ -3799,6 +3799,7 @@ dependencies = [
  "pango 0.22.8",
  "pangocairo",
  "semver",
+ "tidemark-ipc",
  "tidemark-types",
  "tracing",
  "tracing-subscriber",
@@ -3839,6 +3840,15 @@ dependencies = [
  "windows",
  "wreq",
  "wreq-util",
+]
+
+[[package]]
+name = "tidemark-ipc"
+version = "0.4.1"
+dependencies = [
+ "async-io",
+ "tidemark-types",
+ "zbus",
 ]
 
 [[package]]

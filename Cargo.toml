@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/tidemark-types",
+    "crates/tidemark-ipc",
     "crates/tidemark-core",
     "crates/tidemarkd",
     "crates/tidemark",
