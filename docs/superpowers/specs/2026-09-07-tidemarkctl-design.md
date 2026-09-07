@@ -70,7 +70,8 @@ refresh  [P]
 provider catalog | list | add P | rm P A | order P...
 account  add P A | rm P A | rename P A NEW | order P A...
 auth     set-key P A [--key-file PATH] | set-session P A [--key-file PATH]
-         sign-out P A | login P A | sources P A | select P A --source S [--browser B] [--profile F]
+         sign-out P A | login P A | cancel-login P A | sources P A
+         select P A --mode M [--candidate ID]
 option   set P A NAME VALUE
 notify   set P A WINDOW on|off
 config   show | proxy MODE [HOST PORT] | refresh auto|manual [--minutes N]
