@@ -1,0 +1,29 @@
+[package]
+name = "tidemark-cli"
+description = "Tidemark command-line client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tidemarkctl"
+path = "src/main.rs"
+
+# NOTE: this crate prints what the daemon publishes and nothing else: no provider I/O, no
+# database, no display, and no second async runtime — zbus's async-io backend drives the
+# one connection this program makes. scripts/check-layering.sh enforces this.
+# No `p2p`: the CLI only ever talks to a session bus.
+[dependencies]
+async-io = "2.6.0"
+clap = { version = "4.6.6", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tidemark-ipc = { path = "../tidemark-ipc" }
+tidemark-types = { path = "../tidemark-types" }
+zbus = "5.13.2"

@@ -44,6 +44,9 @@ forbid tidemark-types 'it is the contract, not an implementation' \
 forbid tidemark-ipc 'the contract carries no implementation' \
     tidemark-core reqwest hyper rusqlite libsqlite3-sys gtk4 gtk4-sys libadwaita tokio
 
+forbid tidemark-cli 'the CLI prints what the daemon publishes and nothing else' \
+    tidemark-core reqwest hyper rusqlite libsqlite3-sys gtk4 gtk4-sys libadwaita tokio
+
 forbid tidemark-core 'core must build on a machine with no display stack' \
     gtk4 gtk4-sys gdk4-sys libadwaita libadwaita-sys
 
