@@ -1286,7 +1286,7 @@ git commit -m "feat(cli): usage as a waybar card"
 **Interfaces:**
 - Produces: `guard::Selection { Dominant, Named(String), Any }`, `guard::Verdict { Safe { remaining }, Below { remaining }, Unavailable(String) }` with `fn exit(&self) -> Exit`, and `guard::decide(&[&ProviderStatus], &Selection, u8) -> Verdict`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/tidemark-cli/src/guard.rs`:
 
@@ -1382,12 +1382,16 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 Run: `cargo test -p tidemark-cli guard`
 Expected: FAIL — `decide`, `Selection` and `Verdict` are not defined.
 
-- [ ] **Step 3: Write the decision**
+- [x] **Step 3: Write the decision**
+
+`Exit::Below` now has a constructor, so its Task 2 `#[expect(dead_code, …)]` is deleted
+here. `Exit::Usage`, `Failure::usage` and `Failure::unavailable` keep theirs: `guard`
+rejects nothing itself, and clap's own usage errors exit 2.
 
 Above the test module:
 
@@ -1473,7 +1477,7 @@ pub fn decide(statuses: &[&ProviderStatus], selection: &Selection, min_remaining
 }
 ```
 
-- [ ] **Step 4: Extend the grammar**
+- [x] **Step 4: Extend the grammar**
 
 In `cli.rs`, add to `Command`:
 
@@ -1505,7 +1509,7 @@ pub struct Guard {
 }
 ```
 
-- [ ] **Step 5: Wire the command**
+- [x] **Step 5: Wire the command**
 
 `main.rs` gains `mod guard;` and:
 
@@ -1531,12 +1535,12 @@ pub struct Guard {
         }
 ```
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `cargo test -p tidemark-cli`
 Expected: PASS.
 
-- [ ] **Step 7: Smoke it**
+- [x] **Step 7: Smoke it**
 
 ```bash
 cargo run -p tidemark-cli -- guard --min-remaining 1 --provider claude; echo $?
@@ -1546,7 +1550,7 @@ cargo run -p tidemark-cli -- guard --min-remaining 900; echo $?
 ```
 Expected: `0`, `1`, `69`, and clap's own `2` for the out-of-range threshold.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/tidemark-cli
