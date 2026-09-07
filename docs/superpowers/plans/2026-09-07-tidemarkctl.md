@@ -3582,7 +3582,19 @@ git commit -m "feat(cli): options, notifications, preferences and history"
 **Interfaces:**
 - Produces: `tidemarkctl completions <bash|zsh|fish>` on stdout.
 
-- [ ] **Step 1: Add the completion generator**
+- [x] **Step 1: Add the completion generator**
+
+Added `clap_complete 4.6.9` with Cargo. A new process-level integration test asks all three
+shells for a script and checks each shell's own marker plus the `provider` subcommand. It
+failed first with `unrecognized subcommand 'completions'`.
+
+**Deviation: the plan's direct `clap_complete::generate(..., stdout())` panics on an early
+reader exit.** The plan's own `| head -5` reproduced it: clap_complete's infallible wrapper
+calls `.expect("failed to write completion file")` on `BrokenPipe`, and the process exited
+101. The command now uses `Generator::try_generate` after setting the binary name and
+building the clap command; `BrokenPipe` is a normal exit 0 and other I/O errors remain
+failures. A second integration test closes the child's stdout after one byte: it failed
+with the panic before the fix and passes afterwards.
 
 `cargo add -p tidemark-cli clap_complete`
 
@@ -3606,7 +3618,17 @@ git commit -m "feat(cli): options, notifications, preferences and history"
         }
 ```
 
-- [ ] **Step 2: Verify each shell**
+- [x] **Step 2: Verify each shell**
+
+All three scripts printed their expected markers:
+
+- bash: `_tidemarkctl()`
+- zsh: `#compdef tidemarkctl`
+- fish: `complete -c tidemarkctl`
+
+The bash script was sourced in a clean shell; `complete -p tidemarkctl` named
+`_tidemarkctl`, and invoking it for `tidemarkctl prov` produced `reply=provider`.
+`set -o pipefail; tidemarkctl completions bash | head -5` exits 0 after the pipe fix.
 
 ```bash
 cargo run -p tidemark-cli -- completions bash | head -5
@@ -3619,7 +3641,7 @@ Load one for real: `source <(cargo run -q -p tidemark-cli -- completions bash)` 
 `tidemarkctl prov<TAB>`.
 Expected: it completes to `provider`.
 
-- [ ] **Step 3: Add the binary to the Debian package**
+- [x] **Step 3: Add the binary to the Debian package**
 
 In `crates/tidemark/Cargo.toml`, in `[package.metadata.deb] assets`, after the `tidemarkd`
 line:
@@ -3628,7 +3650,7 @@ line:
     ["target/release/tidemarkctl", "usr/bin/", "755"],
 ```
 
-- [ ] **Step 4: Add it to the RPM**
+- [x] **Step 4: Add it to the RPM**
 
 In the same file, in `[package.metadata.generate-rpm] assets`:
 
@@ -3636,7 +3658,7 @@ In the same file, in `[package.metadata.generate-rpm] assets`:
     { source = "target/release/tidemarkctl", dest = "/usr/bin/tidemarkctl", mode = "755" },
 ```
 
-- [ ] **Step 5: Add it to the Arch package**
+- [x] **Step 5: Add it to the Arch package**
 
 In `PKGBUILD`, after the `tidemarkd` install line:
 
@@ -3644,7 +3666,7 @@ In `PKGBUILD`, after the `tidemarkd` install line:
     install -Dm755 "$bin/tidemarkctl" "$pkgdir/usr/bin/tidemarkctl"
 ```
 
-- [ ] **Step 6: Add it to the Nix package**
+- [x] **Step 6: Add it to the Nix package**
 
 In `nix/package.nix`, in `postInstall`, after the `tidemarkd` line:
 
@@ -3655,7 +3677,35 @@ In `nix/package.nix`, in `postInstall`, after the `tidemarkd` line:
 `cargoBuildFlags` is already `--workspace --bins`, so the binary is built; nothing else in
 the derivation changes. Do **not** wrap it with `wrapGAppsHook4`: it loads no GTK.
 
-- [ ] **Step 7: Prove the packages carry it**
+Also extended `scripts/test-nix-flake.sh` with
+`test -x "$output/bin/tidemarkctl"`. Without that assertion the repository's Nix package
+test would still pass after silently dropping the new binary.
+
+- [x] **Step 7: Prove the packages carry it**
+
+Built and inspected every Linux payload, not only the Debian example:
+
+- Debian on the Arch host: `usr/bin/tidemarkctl` was present, but the dependency scan
+  correctly failed because Arch's libraries have no Debian package metadata. Rebuilt in
+  the release job's `ubuntu:26.04` environment: the payload contained `tidemarkctl`, the
+  dependency scan reported 26 entries, `libgtk-4-1`, `libadwaita-1-0`, and passed.
+- RPM: `target/generate-rpm/tidemark-0.4.1-1.x86_64.rpm` contains `tidemark`,
+  `tidemarkctl`, and `tidemarkd`. Its dependency metadata was not treated as release proof:
+  the manifest explicitly requires building that scan on Fedora.
+- Arch: `makepkg --force --noconfirm` produced
+  `tidemark-0.4.1-1-x86_64.pkg.tar.zst`; `usr/bin` contains all three binaries.
+- Nix: the Docker-backed `scripts/test-nix-flake.sh` passed after 3m57s, including the new
+  executable assertion, flake evaluation, package build and daemon D-Bus smoke.
+
+**Deviation: `scripts/check-package-deps.sh` requires a package argument.** The command in
+the plan omitted it. Used `scripts/check-package-deps.sh target/debian/*.deb`, matching the
+script's usage and the release workflow.
+
+The first Nix Docker run was cancelled after ten minutes: inspection found its curl process
+idle for 9m21s on the `aws-lc-sys` crate URL. The same URL then completed from the same
+image in 0.55s; a supervised rerun stayed CPU-active and passed. Host Nix was installed via
+`yay` at the user's request, then removed by the user; the package proof is wholly in the
+repository's Docker test and does not depend on host Nix.
 
 ```bash
 cargo build --release --locked --workspace
@@ -3669,14 +3719,24 @@ Run: `./scripts/check-package-deps.sh`
 Expected: PASS. A third binary must not add a shared-library dependency the metadata does
 not declare; `tidemarkctl` links no GTK, so the set should be unchanged.
 
-- [ ] **Step 8: Confirm the Windows build still builds**
+- [x] **Step 8: Confirm the Windows build still builds**
+
+The target is installed, but the full workspace cross-check stops in `glib-sys`/`gio-sys`:
+this Arch host has no Windows GTK pkg-config sysroot. The contract changed here does compile:
+`cargo check -p tidemark-cli --target x86_64-pc-windows-gnu` passed. No file under
+`data/packaging/windows` or the NSIS inputs changed; the full GUI build remains covered by
+the repository's MSYS2 CI job. Recorded the local limitation in the implementation commit
+body.
 
 Run: `cargo check --workspace --target x86_64-pc-windows-gnu` if the target is installed;
 otherwise rely on CI and say so in the commit body.
 Expected: `tidemark-cli` compiles. It is not added to any Windows packaging list — check
 `data/packaging` and the NSIS inputs and leave them alone.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
+
+Committed as `03cc76d`. Before the commit: `cargo fmt --check`, workspace clippy with
+`-D warnings`, 1527 tests across 23 suites, and the layering check all passed.
 
 ```bash
 git add crates/tidemark-cli crates/tidemark/Cargo.toml PKGBUILD nix/package.nix Cargo.lock
