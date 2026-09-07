@@ -18,6 +18,27 @@ pub enum Command {
     Version,
     /// What every configured account currently reports.
     Usage(Usage),
+    /// Exit 0 when enough quota is left to start something, 1 when there is not.
+    Guard(Guard),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct Guard {
+    /// Fail when less than this percentage of the window is left.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub min_remaining: u8,
+    /// Judge this window key instead of the one a card leads with.
+    #[arg(long, conflicts_with = "any")]
+    pub window: Option<String>,
+    /// Judge every window, not just the leading one.
+    #[arg(long)]
+    pub any: bool,
+    /// Only this provider slug.
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Only this account of that provider.
+    #[arg(long, requires = "provider")]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

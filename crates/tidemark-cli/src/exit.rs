@@ -8,10 +8,6 @@ pub enum Exit {
     /// The command did what it was asked.
     Ok = 0,
     /// `guard` only: less quota is left than was asked for.
-    #[expect(
-        dead_code,
-        reason = "guard is the only caller, and it lands in a later commit"
-    )]
     Below = 1,
     /// The arguments do not name a command this build can run (`EX_USAGE`).
     #[expect(

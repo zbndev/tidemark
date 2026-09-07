@@ -9,6 +9,7 @@ mod cli;
 mod connect;
 mod exit;
 mod format;
+mod guard;
 
 use std::process::ExitCode;
 
@@ -52,6 +53,25 @@ async fn run(cli: cli::Cli) -> Result<Exit, Failure> {
                 ),
             }
             Ok(Exit::Ok)
+        }
+        cli::Command::Guard(args) => {
+            let proxy = connect::daemon().await?;
+            let statuses = proxy.get_status().await?;
+            let selected =
+                format::select(&statuses, args.provider.as_deref(), args.account.as_deref());
+            let selection = match (args.any, args.window) {
+                (true, _) => guard::Selection::Any,
+                (false, Some(key)) => guard::Selection::Named(key),
+                (false, None) => guard::Selection::Dominant,
+            };
+            let verdict = guard::decide(&selected, &selection, args.min_remaining);
+            match &verdict {
+                guard::Verdict::Safe { remaining } | guard::Verdict::Below { remaining } => {
+                    println!("{} left", tidemark_types::present::percent(*remaining));
+                }
+                guard::Verdict::Unavailable(reason) => eprintln!("{reason}"),
+            }
+            Ok(verdict.exit())
         }
     }
 }
