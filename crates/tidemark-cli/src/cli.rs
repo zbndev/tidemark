@@ -42,6 +42,97 @@ pub enum Command {
         /// A provider slug. Omitted, every configured account is polled.
         provider: Option<String>,
     },
+    /// One of a provider's own settings.
+    Option {
+        provider: String,
+        account: String,
+        name: String,
+        value: String,
+    },
+    /// Notifications for one window of one account.
+    Notify {
+        provider: String,
+        account: String,
+        window: String,
+        enabled: Switch,
+    },
+    /// Application preferences the daemon keeps in config.toml.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Stored history.
+    History {
+        #[command(subcommand)]
+        command: HistoryCommand,
+    },
+    /// Paths and storage facts.
+    Data,
+    /// A newer published release, if the daemon knows of one.
+    Update,
+}
+
+/// `on` and `off` rather than `true` and `false`: the settings pages call these switches,
+/// and `config show` prints the same two words, so its output feeds straight back in.
+///
+/// A `ValueEnum` rather than a parser onto `bool`: clap derives a flag from a `bool`
+/// positional and refuses to take a value for it, and this way `--help` lists the two
+/// words instead of leaving them to prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Switch {
+    On,
+    Off,
+}
+
+impl From<Switch> for bool {
+    fn from(switch: Switch) -> Self {
+        matches!(switch, Switch::On)
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Every preference, as the daemon holds it.
+    Show,
+    /// The one proxy every request and every child process goes through.
+    Proxy {
+        /// off, http, https or socks5.
+        mode: String,
+        /// Required by every mode but `off`.
+        host: Option<String>,
+        /// Required by every mode but `off`.
+        port: Option<u16>,
+    },
+    /// How healthy accounts are paced.
+    Refresh {
+        /// auto or manual.
+        mode: String,
+        /// Minutes between polls in manual mode, 1 to 120.
+        #[arg(long)]
+        minutes: Option<u32>,
+    },
+    /// forever, six-months or one-year.
+    Retention { retention: String },
+    /// system, light or dark.
+    Theme { theme: String },
+    /// app, daemon or off.
+    Startup { mode: String },
+    /// Whether the daemon may ask GitHub for the latest release.
+    ReleaseCheck { enabled: Switch },
+    /// Whether the window's close button hides it.
+    MinimizeOnClose { enabled: Switch },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HistoryCommand {
+    /// The stored points of one window's current segment, oldest first.
+    Segment {
+        provider: String,
+        account: String,
+        window: String,
+    },
+    /// Delete every stored point, segment and notification record.
+    Clear,
 }
 
 /// A secret is never a positional argument: `/proc/<pid>/cmdline` is readable by every

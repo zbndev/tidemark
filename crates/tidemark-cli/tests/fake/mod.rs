@@ -118,6 +118,14 @@ impl FakeDaemon {
         self.calls.record(format!("SetProxy({mode},{host},{port})"));
     }
 
+    async fn set_refresh_mode(&self, mode: &str) {
+        self.calls.record(format!("SetRefreshMode({mode})"));
+    }
+
+    async fn set_refresh_minutes(&self, minutes: u32) {
+        self.calls.record(format!("SetRefreshMinutes({minutes})"));
+    }
+
     #[zbus(signal)]
     async fn provider_changed(
         emitter: &zbus::object_server::SignalEmitter<'_>,

@@ -5,7 +5,7 @@
 
 mod fake;
 
-use tidemark_cli::cli::{AccountCommand, ProviderCommand};
+use tidemark_cli::cli::{AccountCommand, ConfigCommand, ProviderCommand};
 use tidemark_cli::commands;
 
 #[test]
@@ -158,6 +158,95 @@ fn an_account_order_with_no_accounts_is_refused_too() {
 
         assert_eq!(failure.exit, tidemark_cli::exit::Exit::Usage);
         assert!(calls.recorded().is_empty(), "{:?}", calls.recorded());
+        drop(server);
+    });
+}
+
+#[test]
+fn a_proxy_is_sent_as_one_setting_and_a_half_of_one_is_refused() {
+    async_io::block_on(async {
+        let Some((server, proxy, calls)) = fake::serve(fake::FakeDaemon::with_one_account()).await
+        else {
+            eprintln!("skipped: no session bus reachable");
+            return;
+        };
+
+        let failure = commands::config::run(
+            &proxy,
+            ConfigCommand::Proxy {
+                mode: "socks5".to_owned(),
+                host: Some("127.0.0.1".to_owned()),
+                port: None,
+            },
+        )
+        .await
+        .expect_err("half a proxy is not a proxy");
+        assert_eq!(failure.exit, tidemark_cli::exit::Exit::Usage);
+        assert!(calls.recorded().is_empty(), "{:?}", calls.recorded());
+
+        commands::config::run(
+            &proxy,
+            ConfigCommand::Proxy {
+                mode: "socks5".to_owned(),
+                host: Some("127.0.0.1".to_owned()),
+                port: Some(1080),
+            },
+        )
+        .await
+        .expect("a whole proxy is accepted");
+        assert_eq!(
+            calls.recorded(),
+            vec!["SetProxy(socks5,127.0.0.1,1080)".to_owned()]
+        );
+
+        commands::config::run(
+            &proxy,
+            ConfigCommand::Proxy {
+                mode: "off".to_owned(),
+                host: None,
+                port: None,
+            },
+        )
+        .await
+        .expect("off needs neither");
+        assert_eq!(
+            calls.recorded().last().map(String::as_str),
+            Some("SetProxy(off,,0)")
+        );
+
+        drop(server);
+    });
+}
+
+/// The interval must be sent *before* the mode, because `SetRefreshMode` polls every
+/// account immediately: the other order would poll once at the interval the user was
+/// leaving behind.
+#[test]
+fn a_manual_interval_is_sent_before_the_mode_that_starts_using_it() {
+    async_io::block_on(async {
+        let Some((server, proxy, calls)) = fake::serve(fake::FakeDaemon::with_one_account()).await
+        else {
+            eprintln!("skipped: no session bus reachable");
+            return;
+        };
+
+        commands::config::run(
+            &proxy,
+            ConfigCommand::Refresh {
+                mode: "manual".to_owned(),
+                minutes: Some(15),
+            },
+        )
+        .await
+        .expect("sets both");
+
+        assert_eq!(
+            calls.recorded(),
+            vec![
+                "SetRefreshMinutes(15)".to_owned(),
+                "SetRefreshMode(manual)".to_owned(),
+            ]
+        );
         drop(server);
     });
 }
