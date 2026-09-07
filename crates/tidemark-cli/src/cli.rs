@@ -20,6 +20,24 @@ pub enum Command {
     Usage(Usage),
     /// Exit 0 when enough quota is left to start something, 1 when there is not.
     Guard(Guard),
+    /// Print the daemon's changes as they arrive, one JSON object per line.
+    Watch(Watch),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct Watch {
+    /// Only this provider slug.
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// `json` prints one event per line; `waybar` prints a card after every change.
+    #[arg(long, value_enum, default_value_t = StreamFormat::Json)]
+    pub format: StreamFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum StreamFormat {
+    Json,
+    Waybar,
 }
 
 #[derive(Debug, clap::Args)]

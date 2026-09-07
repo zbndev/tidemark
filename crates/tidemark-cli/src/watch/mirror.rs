@@ -13,15 +13,6 @@ use tidemark_types::ProviderStatus;
 /// The size difference between the variants is deliberate: a change carries a whole status
 /// because that is what the signal delivers, and the value is constructed once per signal
 /// and consumed immediately, so boxing it would buy an allocation and nothing else.
-// The tests below are the only callers until `watch` lands, so the expectation holds for
-// the binary and would be unfulfilled — an error under `-D warnings` — in a test build.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the watch command builds these from signals, in the next commit"
-    )
-)]
 #[expect(
     clippy::large_enum_variant,
     reason = "one status per signal, consumed at once; see the doc comment"
@@ -33,13 +24,6 @@ pub enum Change {
     Order(Vec<String>),
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the watch command is the caller, in the next commit"
-    )
-)]
 pub fn apply(statuses: &mut Vec<ProviderStatus>, change: Change) {
     match change {
         Change::Upsert(status) => {

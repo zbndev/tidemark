@@ -1,22 +1,14 @@
-//! `tidemarkctl`: the third consumer of the daemon's interface, after the window and
-//! `busctl`.
+//! The `tidemarkctl` binary: parse, run one command, become its exit code.
 //!
-//! It performs no provider I/O — every number it prints came off the bus — and it holds no
-//! runtime: zbus's async-io backend drives its own connection thread, so one `block_on` at
-//! the top is the whole of this program's concurrency.
-
-mod cli;
-mod connect;
-mod exit;
-mod format;
-mod guard;
-mod watch;
+//! Everything it calls lives in the library beside it, where the integration tests can
+//! reach it. See `lib.rs` for why.
 
 use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::exit::{Exit, Failure};
+use tidemark_cli::exit::{Exit, Failure};
+use tidemark_cli::{cli, connect, format, guard, watch};
 
 fn main() -> ExitCode {
     let parsed = cli::Cli::parse();
@@ -73,6 +65,13 @@ async fn run(cli: cli::Cli) -> Result<Exit, Failure> {
                 guard::Verdict::Unavailable(reason) => eprintln!("{reason}"),
             }
             Ok(verdict.exit())
+        }
+        cli::Command::Watch(args) => {
+            let sink = match args.format {
+                cli::StreamFormat::Json => watch::Sink::Events,
+                cli::StreamFormat::Waybar => watch::Sink::Waybar,
+            };
+            watch::run(sink, args.provider).await
         }
     }
 }

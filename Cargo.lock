@@ -3930,6 +3930,7 @@ version = "0.4.1"
 dependencies = [
  "async-io",
  "clap",
+ "futures-lite",
  "serde",
  "serde_json",
  "tidemark-ipc",

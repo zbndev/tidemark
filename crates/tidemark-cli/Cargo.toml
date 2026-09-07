@@ -11,6 +11,12 @@ authors.workspace = true
 [lints]
 workspace = true
 
+# The library holds every command body; the binary is argument parsing and an exit code.
+# The integration tests link the library and drive those bodies against a fake daemon.
+[lib]
+name = "tidemark_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tidemarkctl"
 path = "src/main.rs"
@@ -27,3 +33,6 @@ serde_json = "1.0.151"
 tidemark-ipc = { path = "../tidemark-ipc" }
 tidemark-types = { path = "../tidemark-types" }
 zbus = "5.13.2"
+
+[dev-dependencies]
+futures-lite = "2.6.1"
