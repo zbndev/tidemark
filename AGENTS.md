@@ -1,236 +1,120 @@
-# Repository Guidelines
+# PROJECT KNOWLEDGE BASE
 
-## Project Overview
+**Generated:** 2026-09-07T19:52:14+03:00
+**Commit:** 90d4531
+**Branch:** main
 
-Tidemark shows how much AI-provider quota is left, on the Linux desktop. A background daemon
-(`tidemarkd`) polls providers, files readings into SQLite, and publishes them on the session
-bus; a GTK4 + libadwaita window (`tidemark`) renders one card per account. Native only — no
-Electron, no embedded webview.
+## OVERVIEW
+Tidemark tracks AI-provider quota windows and pace. Four Rust crates separate daemon state, provider I/O, shared vocabulary, and GTK presentation; Rust edition 2024, MSRV 1.92, GTK 4.22, libadwaita 1.9.
 
-Rust workspace, edition 2024, MSRV 1.92 (gtk4-rs 0.11 floor), MIT, `github.com/zbndev/tidemark`.
-Runtime floor is GTK 4.22 / libadwaita 1.9 → Fedora 44+, Ubuntu 26.04+, rolling distros.
-
-`CONTEXT.md` is the normative design record; `docs/adr/` holds binding decisions. Treat both as
-settled — do not relitigate them in code.
-
-## Architecture & Data Flow
-
-Four crates in a strictly enforced layering:
-
-```mermaid
-graph LR
-  T[tidemark-types<br/>wire vocabulary] --> C[tidemark-core<br/>net · disk · secrets]
-  C --> D[tidemarkd<br/>daemon]
-  T --> U[tidemark<br/>GTK window]
-  D -. D-Bus .-> U
+## STRUCTURE
+```text
+tidemark/
+|-- crates/
+|   |-- tidemark/        # GTK GUI; consumes IPC, never core
+|   |-- tidemarkd/       # Polling, history, secrets and IPC ownership
+|   |-- tidemark-core/   # External I/O and provider implementations
+|   `-- tidemark-types/  # Shared domain and wire vocabulary
+|-- data/               # Desktop assets, user service, packaging payloads
+|-- scripts/            # Layering, integration, packaging and release checks
+|-- nix/                # Package and NixOS module
+|-- docs/adr/           # Ownership and integration decisions
+|-- CONTEXT.md          # Architecture
+`-- PLAN.md             # Implementation log
 ```
 
-- `tidemark-types` reaches **nothing** — no network, disk, or display. Only `serde` + `zvariant`.
-- `tidemark-core` owns providers, HTTP, SQLite, keyring. **Never the display.**
-- `tidemarkd` is the only process allowed to hold both.
-- `tidemark` is display-only and speaks D-Bus. It may **not** depend on `tidemark-core`,
-  `reqwest`/`hyper`, or `rusqlite`/`libsqlite3-sys`.
+## WHERE TO LOOK
+| Task | Location | Notes |
+|------|----------|-------|
+| Add a provider | `crates/tidemark-core/src/providers/`, `crates/tidemarkd/src/registry.rs` | Core implementation plus daemon registration; simple catalog and hand-written descriptors coexist |
+| Change IPC vocabulary | `crates/tidemark-types/src/wire.rs` | Keep daemon and GUI compatible |
+| Polling or mutation ordering | `crates/tidemarkd/src/engine.rs`, `service.rs` | Owned state and published mirror |
+| GUI or daemon reconnect | `crates/tidemark/src/window.rs`, `bus.rs` | Presentation and IPC client |
+| Credentials or browser sources | `crates/tidemark-core/src/oauth_file.rs`, `secrets.rs`, `browser/` | Ownership and explicit source selection matter |
+| Charts or notice identity | `crates/tidemark-core/src/storage/` | Segmentation, retention and migrations |
+| Installation | `README.md`, `PKGBUILD`, `data/packaging/`, `nix/` | deb/rpm metadata also lives in GUI Cargo manifest |
+| Ownership rationale | `CONTEXT.md`, `docs/adr/` | Normative design and binding decisions; dated superpowers plans/specs are historical, not current-code proof |
+| Release and CI | `scripts/release.sh`, `.github/workflows/` | Release helper commits, tags and pushes |
 
-`scripts/check-layering.sh` enforces this in CI. It is an architecture contract, not a lint.
+## CODE MAP
+Declarations/import shapes are reported by subtree analysis; exact numeric reference counts are unmeasured.
 
-**Poll → pixel:** `tidemarkd::main::run` loads `Config`, opens `History`, creates `Keyring`, then
-`registry::accounts` → `Engine::poll_due` lazily builds `Arc<dyn Provider>` and awaits
-`Provider::fetch` concurrently → `Engine::apply` calls `History::ingest(&Snapshot)` and
-`ProviderStatus::set_reading` → publisher task runs `Published::upsert` then
-`Daemon::provider_changed`. On the UI side `bus::watch` drives `DaemonProxy` through
-`glib::spawn_future_local`; signals become `Update::Changed`; `MainWindow::handle` calls
-`show_all`/`show_one`; `Card::apply` converts back with `ProviderStatus::to_snapshot`;
-`QuotaBar::set` draws value and pace mark on a `gtk::DrawingArea` with Cairo.
+| Symbol | Type | Location | Refs | Role |
+|--------|------|----------|------|------|
+| `Engine` / `Command` / `Publication` | Runtime types | `crates/tidemarkd/src/engine.rs` | Unmeasured | State, serialized mutations, publication |
+| `Daemon` / `Published` | Service types | `crates/tidemarkd/src/service.rs` | Unmeasured | D-Bus interface and shared mirror |
+| `catalog` / `account` | Functions | `crates/tidemarkd/src/registry.rs` | Unmeasured | Definitions and configured clients |
+| `Provider` / `ProviderError` | Trait / error | `crates/tidemark-core/src/providers/mod.rs` | Unmeasured | Provider contract |
+| `Spec` / `HandSpec` / `CATALOG` | Descriptors / catalog | `crates/tidemark-core/src/providers/keyed/mod.rs` | Unmeasured | Simple and custom provider definitions |
+| `History` | Storage type | `crates/tidemark-core/src/storage/mod.rs` | Unmeasured | Persisted usage history |
+| `Config` / `CredentialFile` | Configuration / credential types | `crates/tidemark-core/src/{config,oauth_file}.rs` | Unmeasured | Preferences and vendor credential updates |
+| `ProviderStatus` / `Preferences` | Wire types | `crates/tidemark-types/src/wire.rs` | Unmeasured | Cross-process dictionary contract |
+| `ids` | Module | `crates/tidemark-types/src/lib.rs` | Unmeasured | Installed identity and schema constants |
+| `MainWindow` / `CardGrid` | GUI types | `crates/tidemark/src/{window,grid}.rs` | Unmeasured | Coordination and reorderable layout |
+| `DaemonProxy` / `Update` | Client / update types | `crates/tidemark/src/bus.rs` | Unmeasured | IPC client and reconnect stream |
 
-**D-Bus surface:** bus name `io.github.zbndev.Tidemark.Daemon`, object path
-`/io/github/zbndev/Tidemark`, interface `io.github.zbndev.Tidemark.Daemon1`, methods
-`GetStatus` / signal `ProviderChanged`. App ID is `io.github.zbndev.Tidemark`. The daemon is
-D-Bus-activated via `data/dbus-1/services/` → systemd **user** unit `tidemarkd.service`. It is a
-public contract — `busctl` and Waybar modules consume it:
+**Poll to pixel:** `tidemarkd::main::run` loads `Config`, `History`, and `Keyring`; `registry::accounts` supplies accounts. `Engine::poll_due` lazily constructs providers and fetches concurrently; `Engine::apply` calls `History::ingest(&Snapshot)` and `ProviderStatus::set_reading`. The publisher updates the mirror with `Published::upsert`, then emits `Daemon::provider_changed`.
+On the GUI side, `bus::watch` drives `DaemonProxy` on `glib::spawn_future_local`; signals become `Update::Changed`. `MainWindow::handle` calls `show_all`/`show_one`; `Card::apply` uses `ProviderStatus::to_snapshot`; `QuotaBar::set` draws value and pace on a Cairo-backed `gtk::DrawingArea`.
 
+**D-Bus contract:** name `io.github.zbndev.Tidemark.Daemon`, path `/io/github/zbndev/Tidemark`, interface `io.github.zbndev.Tidemark.Daemon1`; method `GetStatus`, signal `ProviderChanged`. App ID: `io.github.zbndev.Tidemark`. Activation uses `data/dbus-1/services/` and the systemd user unit `tidemarkd.service`. Published `a{sv}` dictionaries are extensible; absent values stay absent.
+
+## CONVENTIONS
+- Layering is enforced by `scripts/check-layering.sh`: types have no runtime I/O; core has no GTK/GDK/adwaita; GUI has no core/HTTP/SQLite. Types may use zvariant, not zbus.
+- Cargo sets `unsafe_code = "deny"`, not `forbid`; audited Windows exceptions exist. Clippy warns on `all`, `todo` and `dbg_macro`.
+- Missing provider values stay missing. Window identity is its length, not the vendor field name; slugs are persistent storage keys.
+- Config stores preferences, not secrets; preserve TOML decoration and reject present-but-invalid values. Provider/account array order determines UI order.
+- Shared proxy policy covers child processes and bypasses loopback; the off setting inherits environment behavior.
+- Errors use contextual `thiserror` enums, not `anyhow`. Daemon async runs on manually built multi-thread Tokio; GUI futures stay GLib-local. `async_channel` bridges only the ksni tray thread.
+- Cargo only; crates declare their own dependencies, without `[workspace.dependencies]`. Change committed `Cargo.lock` through Cargo, never by hand.
+- Provider fetch separates transport from pure parsing; a recognized malformed window fails the fetch, while genuinely unknown kinds may be skipped.
+- Tests use built-in `#[test]`/`#[tokio::test]`, mostly colocated; integration tests cover process-global behavior and cross-seam flows. Use recorded provider fixtures, deterministic timestamps, `History::in_memory()`, and `FakeSecrets`, not the real keyring.
+
+## ANTI-PATTERNS
+- Do not fabricate quota rows, reset timestamps or pace when a provider omits them.
+- Do not silently substitute a browser profile/account after a selected source fails, modify live browser databases, or expose credentials in diagnostics.
+- Do not create vendor-owned credential files that do not already exist; preserve their ownership boundary.
+- Do not configure cargo-deb system-scope `systemd-units` for the user daemon or restart it from RPM postun. Package greeting failure must not fail installation.
+- Never run `scripts/release.sh` as a validator: it changes versions and performs commit/tag/push. The core live probe reads a real key and calls Z.ai; exclude it from routine validation.
+- Never ship Windows system DLLs; the NSIS installer is per-user and unelevated.
+- No embedded webview or JS engine. Never rename shipped provider slugs, fabricate history points, or hide windows.
+- Root `src/` is ignored scratch, not a Cargo target; `pkg/`, `.worktrees/`, `target/`, and `*.pkg.tar.*` are build output, not editable source.
+
+## UNIQUE STYLES
+- Outbound application identity is `Tidemark/<version>`, not browser/executable impersonation; T3 Chat separately uses a browser-emulating transport stack.
+- Linux uses session D-Bus and systemd user services; Windows uses per-user zbus p2p AF_UNIX, Task Scheduler/HKCU Run, jobs and native tray/toasts.
+- Linux tray integration uses ksni, not libayatana-appindicator-glib. Bundled Rubik and icons are runtime assets.
+- Provider SVG marks use filled outlines rather than strokes; desktop integration checks enforce this.
+- UI construction is programmatic, styled through `style::STYLE`; state uses `Rc<RefCell<_>>`/`Cell`/`Weak`, with `CardGrid` the single custom GObject subclass. Card and notification thresholds share 70% / 90%.
+- Simple API-key providers register alphabetically in `keyed::CATALOG`; unusual auth/multi-request clients use `HandSpec` and daemon `HAND_WRITTEN`, not forced `Keyed` implementations. Provider additions also update README and `docs/TRADEMARKS.md`.
+
+## COMMANDS
 ```bash
-busctl --user introspect io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark
-busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark \
-    io.github.zbndev.Tidemark.Daemon1 GetStatus
-```
-
-Published shapes are extensible `a{sv}` dictionaries: **absent values must stay absent** — never
-substitute a default.
-
-## Key Directories
-
-| Path | Purpose |
-| --- | --- |
-| `crates/tidemark-types/src/` | `present`, `snapshot`, `time`, `window`, `wire`, `ids` (app/bus constants) |
-| `crates/tidemark-core/src/providers/` | `Provider` trait, shared transport, `keyed/`, `claude`, `codex`, `antigravity/` |
-| `crates/tidemark-core/src/storage/` | `mod.rs` (`History`), `schema.rs` (migrations), `segment.rs` (reset boundaries) |
-| `crates/tidemark-core/src/` | also `config` (TOML), `paths` (XDG), `oauth` (loopback PKCE), `oauth_file`, `secrets` |
-| `crates/tidemarkd/src/` | `engine`, `registry`, `service`, `keyring`, `scheduler`, `notify`, `startup`, `update` |
-| `crates/tidemark/src/` | `window`, `bus`, `card`, `bar`, `chart`, `detail`, `grid`, `model`, `tray`, `provider_settings/` |
-| `scripts/` | Layering, packaging, desktop-integration and release automation (all shellchecked) |
-| `data/` | systemd unit, D-Bus service, desktop/autostart entries, AppStream metainfo, icons, packaging hooks |
-| `docs/adr/`, `docs/superpowers/` | Binding decisions; dated design specs and implementation plans |
-
-Root `src/` is empty, gitignored dead scratch — not a Cargo target. `pkg/`, `.worktrees/`,
-`target/`, `*.pkg.tar.*` are build output: never edit or commit.
-
-## Development Commands
-
-```bash
-cargo build --workspace
+cargo run -p tidemarkd
 cargo run -p tidemark
-
-# The full local gate (from .superpowers/sdd/global-constraints.md)
-cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings \
-  && cargo test --workspace && ./scripts/check-layering.sh
-```
-
-CI (`.github/workflows/ci.yml`) runs on every push and every pull request. Its
-`checks` job (`ubuntu-26.04`) runs exactly:
-
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-scripts/check-layering.sh
+# Full local gate (plain workspace tests):
+cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && ./scripts/check-layering.sh
 scripts/check-desktop-integration.sh
+cargo build --release --locked --workspace
+# After building both binaries:
+cargo deb --no-build -p tidemark
+cargo generate-rpm -p crates/tidemark
+# Packaging/release helper tests:
+scripts/test-release.sh
 scripts/test-restart-user-daemon.sh
-shellcheck scripts/*.sh data/restart-user-daemon \
-  data/packaging/deb/postinst data/packaging/rpm/post-install.sh
+scripts/test-nix-flake.sh
+# Public session-bus probes:
+busctl --user introspect io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark
+busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark io.github.zbndev.Tidemark.Daemon1 GetStatus
 ```
 
-Its `windows-tests` job (`windows-latest`, MSYS2 UCRT64, `stable-x86_64-pc-windows-gnu`)
-runs the first three of those. The Windows installer is not built here: it is built from
-a `v*` tag by the `windows` job in `.github/workflows/release.yml`, which ships
-`Tidemark-v<version>-setup.exe` beside the `.deb` and the `.rpm`.
-
-Build prerequisites: `libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake g++
-libclang-dev` (Fedora: `gtk4-devel libadwaita-devel sqlite-devel pkgconf-pkg-config cmake
-gcc-c++ clang-devel`). Beyond the toolkit, `cmake`, a C++ compiler and `libclang` build
-the BoringSSL behind T3 Chat's emulating client — its bindings are generated by `bindgen`
-at build time. There are **no** `build.rs`
-files, no Blueprint, no gresource — nothing to pre-compile.
-
-Run-by-hand only (no workflow triggers them): `scripts/test-release.sh` and
-`scripts/test-package-upgrade.sh [workdir]` (needs Docker, privileged systemd containers).
-
-Release: `scripts/release.sh X.X.X` from clean, up-to-date `main`. It bumps the workspace
-version, inter-crate constraints, `Cargo.lock`, the AppStream `<release>` entry, and `PKGBUILD`
-`pkgver`/`pkgrel=1`; commits `chore: bump to vX.X.X`; tags and pushes. AppStream release prose is
-human work. Tag push starts the release workflow, so the script runs no tests.
-
-## Code Conventions & Common Patterns
-
-- **Errors:** contextual `thiserror` enums per domain — `ProviderError`, `StorageError`,
-  `ConfigError`, `SecretError`, `LoginError`, `NotifyError`. `anyhow` is not used anywhere; do
-  not introduce it. The UI maps async failures to `Update::Waiting` or logs them.
-- **Async:** daemon uses a manually built Tokio multi-thread runtime with channels, locks and
-  `JoinSet`, plus zbus. The UI is GLib-main-context local — `glib::spawn_future_local`, zbus
-  async-io cooperates with GLib so no bridging channel is needed. `async_channel` exists solely
-  to bridge the ksni tray thread.
-- **State:** UI state is `Rc<RefCell<_>>` / `Cell` / `Weak`; the single custom GObject subclass is
-  `grid::CardGrid`. Wiring is manual composition, trait objects and factory closures — no DI
-  framework.
-- **UI construction is programmatic.** There are no `.blp`, `.ui` or gresource files; widgets are
-  built with builders and styled through `style::STYLE`.
-- **Lints are hard:** `unsafe_code = "deny"` — `"forbid"` predates the Windows port
-  and cannot be locally overridden; Win32 FFI `unsafe` is confined to `cfg(windows)`
-  modules (Linux builds contain none). Plus `missing_debug_implementations`, clippy `all`,
-  `todo`, `dbg_macro`. Clippy runs with `-D warnings`.
-- **Provider invariants:** slugs are permanent storage keys (config, Secret Service, history,
-  D-Bus) — never rename a shipped one. `fetch` = transport plus a **pure** `parse`. A recognised
-  but malformed window fails the whole fetch; only genuinely unknown window kinds may be skipped.
-  Window keys derive from window *length*, never from the source field name.
-- **Credentials:** never log a `Credential`. Keyring-locked is a state, not a crash. Third-party
-  CLI credential files are field-merged atomically into their canonical vendor path only
-  (ADR-0001) — never created, reformatted, or written to discovered copies.
-- **Networking:** identify every request as `Tidemark/<version>`. Browser-transport emulation
-  is reserved for an edge that fingerprints clients — T3 Chat rides `wreq` (see
-  `CONTEXT.md` § Networking); embedding web (webview, JS engine) is forbidden outright.
-  One proxy configuration for every client and subprocess; never proxy loopback.
-- **Presentation:** never invent history points, quota lengths, reset times, or hide windows.
-  70% / 90% are the shared card and notification thresholds. Order is the `providers` array —
-  no urgency sorting, no separate order list. Config is edited in place; malformed config errors.
-- Commit messages predominantly follow Conventional Commits with scopes: `fix(card):`,
-  `feat(network):`, `docs:`, `ci:`, `chore:`.
-
-### Adding a provider
-
-1. Single-request API-key provider → `crates/tidemark-core/src/providers/keyed/<slug>.rs` with
-   `PROVIDER_ID`, a pure `parse(body, captured_at)`, and `pub static SPEC: Spec` (title, auth
-   placement, key hint, `OptionSchema`). Register with `pub mod <slug>` and `&<slug>::SPEC` in
-   `keyed/mod.rs::CATALOG` — **alphabetically**. `registry::catalog`/`registry::account`
-   enumerate `CATALOG`, so no daemon or UI change is required.
-2. Multi-request or unusual auth → expose a `HandSpec` plus your own `impl Provider`, declare the
-   module in `keyed/mod.rs`, and add it to `tidemarkd/src/registry.rs::HAND_WRITTEN`.
-3. OAuth → a core client plus `registry.rs` entries in `OAUTH`, `account`, `oauth_client`,
-   `login_document`; use `Account::with_client`/`with_rebuild` and `Source::{Auto,OAuth,Cli}`.
-   OAuth credentials are `Kind::Token`; API keys are `Kind::Key`. System browser via `xdg-open`
-   with a loopback callback (ADR-0002); the callback port is declared by the provider and closed
-   immediately after use (ADR-0003).
-4. Add a `provider_label` arm in `tidemark-types/src/snapshot.rs` if generic slug capitalisation
-   reads badly in notifications.
-5. Update the README provider list and add the trademark/icon row in `docs/TRADEMARKS.md`.
-   Symbolic marks must be filled outlines — `check-desktop-integration.sh` rejects SVG `stroke`.
-6. Refuse to force multi-request / cookie / browser / other-CLI providers into `Keyed`.
-
-## Important Files
-
-- `crates/tidemarkd/src/main.rs`, `crates/tidemark/src/main.rs` — the two binaries' entry points.
-- `crates/tidemark-core/src/providers/mod.rs` — the object-safe `Provider` trait (`id`, `account`,
-  `fetch -> BoxFuture<'_, Result<Snapshot, ProviderError>>`).
-- `crates/tidemark-core/src/providers/keyed/mod.rs` — `Spec`/`HandSpec` and the provider `CATALOG`.
-- `crates/tidemarkd/src/{engine,registry,service}.rs` — polling, catalog construction, D-Bus.
-- `crates/tidemark/src/{bus,window,card,bar}.rs` — the rendering path.
-- `CONTEXT.md`, `docs/adr/0001..0003` — invariants and binding decisions.
-- `scripts/check-layering.sh` — the machine-readable architecture rule.
-- `Cargo.toml`, `rust-toolchain.toml`, `PKGBUILD`, `data/tidemarkd.service`.
-
-## Runtime/Tooling Preferences
-
-- Rust stable via `rust-toolchain.toml` (`clippy`, `rustfmt`; no pinned targets); MSRV 1.92.
-- Cargo only. No `[workspace.dependencies]` — each crate declares its own deps.
-- `Cargo.lock` is committed and machine-generated; change it through `cargo`, never by hand.
-- TLS is rustls and secrets use `oo7` with `native_crypto` — deliberately no OpenSSL, no libsecret.
-- The only Cargo feature in the workspace is `tidemarkd`'s default-on
-  `update-check = ["dep:reqwest", "dep:semver"]`. Trademark-free builds are a packaging choice
-  (drop `data/icons` and their asset lines), not a feature flag.
-- Dependabot bumps Cargo weekly as one group.
-- Packages are built on their oldest target OS: `.deb` on Ubuntu 26.04 (`cargo deb`), `.rpm` in a
-  `fedora:44` container (`cargo generate-rpm`), Arch via `PKGBUILD`. Keep cargo-deb / RPM asset
-  lists and `PKGBUILD package()` in sync. `PKGBUILD` sets `options=(!debug !lto)` on purpose and
-  must not gain a `pkgver()`.
-
-## Testing & QA
-
-- Built-in `#[test]` and `#[tokio::test]` only. No `rstest`, `insta`, `mockito`, `wiremock`,
-  `serial_test`, `proptest`, or snapshot files — do not add one without a reason.
-- Tests are overwhelmingly colocated `#[cfg(test)] mod tests`: types 6, core 50, daemon 7, UI 16.
-  Integration targets exist only in `crates/tidemark-core/tests/`: `proxy.rs`, `codex_provider.rs`,
-  `claude_provider.rs`, `oauth_file.rs`, `provider_to_history.rs`, `corpus_replay.rs`. Reserve
-  them for process-global behaviour (proxy selection) and cross-seam flows.
-
-```bash
-cargo test --workspace          # exactly as CI runs it
-cargo test -p tidemark-core
-cargo test -p tidemark-core providers::antigravity::direct::tests -- --nocapture
-cargo test -p tidemark chart::tests -- --nocapture  # passes without a display server
-```
-
-- **Naming:** descriptive sentence-style snake_case starting `a_` / `an_` / `the_`, e.g.
-  `a_window_that_does_not_say_how_long_it_is_fails_rather_than_being_keyed_by_its_slot`.
-- **HTTP:** hand-rolled loopback `TcpListener` on port 0 in a spawned thread, request captured
-  over `mpsc`, literal HTTP response written back. Copy `providers/antigravity/direct.rs::tests::one_request_server`.
-- **Time:** inject deterministic `Timestamp::from_unix(...)` through small `at`/`now`/`captured_at`
-  helpers. There is no fake-clock crate and no Tokio time pausing.
-- **SQLite:** `History::in_memory()`. **Filesystem:** RAII wrappers over `std::env::temp_dir()`
-  with PID + atomic serial names and `Drop` cleanup (`oauth_file.rs::TestDir`,
-  `codex.rs::tests::TestHome`). **Keyring:** pass an in-memory `FakeSecrets` implementing
-  `crate::secrets::Secrets` — never touch the real Secret Service.
-- **Fixtures:** `crates/tidemark-core/tests/fixtures/*.json` are loaded with `include_str!` /
-  `include_bytes!` from the provider modules. Provider test bodies must come from recorded
-  responses, not invention.
-- Assert outcomes *and* stable window keys, lengths and reset instants; use
-  `matches!(..., Err(ProviderError::Malformed { .. }))` for malformed-provider contracts.
-- No coverage tooling or threshold is configured; "coverage" in the design docs means scenario
-  coverage.
+## NOTES
+- Commands above are documented entry points, not a claim they passed during knowledge-base generation.
+- Secret Service tests skip without a session bus; use plain `cargo test --workspace` for the local gate. Linux validation does not cover Windows-only branches; T3 Chat is Unix-only and Windows Antigravity local agy remains gated.
+- Build prerequisites (Debian/Ubuntu): `libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake g++ libclang-dev`; Fedora: `gtk4-devel libadwaita-devel sqlite-devel pkgconf-pkg-config cmake gcc-c++ clang-devel`.
+- T3 Chat's BoringSSL client needs CMake, a C++ compiler, and libclang; `bindgen` generates its bindings at build time. The repository has no `build.rs`, no Blueprint, and no gresource files to precompile.
+- Release only with `scripts/release.sh X.X.X` from clean, up-to-date `main`. It bumps workspace/dependency versions, lockfile, AppStream release entry, and PKGBUILD; commits, tags, and pushes without running tests. AppStream release prose is human work; tag push starts release CI.
+- SQLite is system-linked; TLS uses rustls. Arch packaging disables makepkg LTO for aws-lc-sys.
+- CI uses ubuntu-26.04 and Windows MSYS2 UCRT64 with `stable-x86_64-pc-windows-gnu`, not MSVC. Windows packaging documents pinned SHA-256 archives and PE import-closure staging.
+- Nix exports packages, apps, a NixOS module and a dev shell for x86_64-linux/aarch64-linux.
+- `scripts/test-package-upgrade.sh [workdir]` needs Docker/systemd; `scripts/check-tag-version.sh <tag>` validates release version alignment.
+- More specific AGENTS.md files cover each crate and core's providers, keyed providers, Antigravity, browser and storage domains; keep implementation details there.
