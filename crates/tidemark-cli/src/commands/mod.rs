@@ -2,4 +2,5 @@
 //! building one, which is what makes them testable against a fake daemon.
 
 pub mod account;
+pub mod auth;
 pub mod provider;

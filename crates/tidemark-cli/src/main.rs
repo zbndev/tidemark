@@ -90,6 +90,10 @@ async fn run(cli: cli::Cli) -> Result<Exit, Failure> {
             let proxy = connect::daemon().await?;
             commands::account::run(&proxy, command).await
         }
+        cli::Command::Auth { command } => {
+            let proxy = connect::daemon().await?;
+            commands::auth::run(&proxy, command).await
+        }
         cli::Command::Refresh { provider } => {
             let proxy = connect::daemon().await?;
             proxy.refresh(provider.as_deref().unwrap_or("")).await?;

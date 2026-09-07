@@ -32,10 +32,57 @@ pub enum Command {
         #[command(subcommand)]
         command: AccountCommand,
     },
+    /// Credentials: keys, pasted sessions, logins and local sources.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Poll now: one provider, or everything.
     Refresh {
         /// A provider slug. Omitted, every configured account is polled.
         provider: Option<String>,
+    },
+}
+
+/// A secret is never a positional argument: `/proc/<pid>/cmdline` is readable by every
+/// process of the same user, and a key typed once lands in shell history. There is
+/// deliberately no slot to put one in — see `secret.rs`.
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    /// Store an API key. The key is read from stdin, or from --key-file.
+    SetKey {
+        provider: String,
+        account: String,
+        /// Read the key from this file instead of stdin.
+        #[arg(long)]
+        key_file: Option<std::path::PathBuf>,
+    },
+    /// Store a browser session header. Read like a key.
+    SetSession {
+        provider: String,
+        account: String,
+        /// Read the session from this file instead of stdin.
+        #[arg(long)]
+        key_file: Option<std::path::PathBuf>,
+    },
+    /// Remove whatever credential Tidemark holds for an account.
+    SignOut { provider: String, account: String },
+    /// Print the authorize URL, then wait for the browser to come back.
+    Login { provider: String, account: String },
+    /// Abandon a login that is waiting.
+    CancelLogin { provider: String, account: String },
+    /// The local authentication sources the daemon can see, without their credentials.
+    Sources { provider: String, account: String },
+    /// Record which local source this account uses.
+    Select {
+        provider: String,
+        account: String,
+        /// The mode value from `auth sources`.
+        #[arg(long)]
+        mode: String,
+        /// The candidate id, for a mode that offers a choice.
+        #[arg(long)]
+        candidate: Option<String>,
     },
 }
 

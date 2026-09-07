@@ -16,5 +16,6 @@ pub mod connect;
 pub mod exit;
 pub mod format;
 pub mod guard;
+pub mod secret;
 pub mod titles;
 pub mod watch;
