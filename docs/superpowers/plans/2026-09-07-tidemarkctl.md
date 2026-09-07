@@ -47,10 +47,15 @@ clap_complete, serde_json, async-io for `block_on` and the retry timer.
 - Modify: `scripts/check-layering.sh`
 
 **Interfaces:**
-- Produces: `tidemark_ipc::Daemon` (the proxy trait) and `tidemark_ipc::DaemonProxy` (generated), with the same method, property and signal set the GUI has today. Every later task consumes `DaemonProxy`.
+- Produces: `tidemark_ipc::DaemonProxy` (generated) with the same method, property and
+signal set the GUI has today, plus one message struct per signal
+(`ProviderChanged`, `ProviderRemoved`, `OrderChanged`, `UpdateChanged`,
+`PreferencesChanged`, `DataChanged`, `ActivateRequested`). `#[zbus::proxy]` *consumes* the
+trait it is written on, so there is no `tidemark_ipc::Daemon` to re-export. Every later
+task consumes `DaemonProxy`.
 - Produces: `crate::bus::DaemonProxy` in the GUI keeps resolving, via `pub use`, so `detail.rs`, `preferences.rs`, `window.rs`, `provider_settings/mod.rs` and `provider_settings/detail.rs` are not edited at all.
 
-- [ ] **Step 1: Create the crate manifest**
+- [x] **Step 1: Create the crate manifest**
 
 `crates/tidemark-ipc/Cargo.toml`. Copy the `[package]`/`[lints]` shape from
 `crates/tidemark-types/Cargo.toml` so the workspace inheritance matches:
@@ -77,7 +82,7 @@ zbus = { version = "5.13.2", features = ["p2p"] }
 `p2p` is kept because the Windows GUI builds its connection that way and this crate is
 what it builds the proxy from.
 
-- [ ] **Step 2: Add the crate to the workspace**
+- [x] **Step 2: Add the crate to the workspace**
 
 In the root `Cargo.toml`, `members` becomes:
 
@@ -88,15 +93,12 @@ members = [
     "crates/tidemark-core",
     "crates/tidemarkd",
     "crates/tidemark",
-    "crates/tidemark-cli",
 ]
-```
 
-`crates/tidemark-cli` is listed now and created in Task 2; until then
-`cargo` commands must be run with `-p` on an existing crate. If that is inconvenient,
-add the `tidemark-cli` line in Task 2 instead — but do not forget it.
+`crates/tidemark-cli` is **not** listed here: a member that does not exist yet fails every
+`cargo` command in the workspace. Task 2 adds the line when it creates the crate.
 
-- [ ] **Step 3: Move the proxy**
+- [x] **Step 3: Move the proxy**
 
 `crates/tidemark-ipc/src/lib.rs` starts with this module documentation, then contains
 lines 38-186 of `crates/tidemark/src/bus.rs` **verbatim** — the whole `#[zbus::proxy]`
@@ -123,7 +125,7 @@ The trait body references `tidemark_types::HistoryPoint` by full path today
 (`current_segment`'s return type); with the import above, shorten it to `Vec<HistoryPoint>`.
 Nothing else changes.
 
-- [ ] **Step 4: Point the GUI at it**
+- [x] **Step 4: Point the GUI at it**
 
 In `crates/tidemark/Cargo.toml`, beside the other path dependency:
 
@@ -131,25 +133,34 @@ In `crates/tidemark/Cargo.toml`, beside the other path dependency:
 tidemark-ipc = { path = "../tidemark-ipc" }
 ```
 
-In `crates/tidemark/src/bus.rs`, replace lines 38-186 (the attribute and the trait) with:
+In `crates/tidemark/src/bus.rs`, replace lines 38-186 (the attribute and the trait) with a
+re-export of what the macro generated — the proxy and the signal message types `Event`
+matches on:
 
 ```rust
 /// The contract lives in `tidemark-ipc`, shared with `tidemarkctl`. Re-exported here so
 /// this module stays the one place the rest of the interface asks for the daemon.
-pub use tidemark_ipc::{Daemon, DaemonProxy};
+///
+/// `#[zbus::proxy]` consumes the trait it is written on and emits the proxy plus one
+/// message type per signal, so those names come from there too: [`Event`] below matches on
+/// them.
+pub use tidemark_ipc::{
+    ActivateRequested, DaemonProxy, DataChanged, OrderChanged, PreferencesChanged, ProviderChanged,
+    ProviderRemoved, UpdateChanged,
+};
 ```
 
 Keep the `use tidemark_types::{…}` list at the top of `bus.rs`: `Update` and `load` still
 name those types. Remove from it only what the compiler then reports as unused.
 
-- [ ] **Step 5: Build the GUI and run its tests**
+- [x] **Step 5: Build the GUI and run its tests**
 
 Run: `cargo test -p tidemark`
 Expected: PASS, including the five `bus.rs` reconnect tests that build a `DaemonProxy`
 through `DaemonProxy::builder(…)`. If a `cfg(windows)` block fails to resolve
 `DaemonProxy`, check that the `pub use` is outside every `cfg`.
 
-- [ ] **Step 6: Write the contract's own test**
+- [x] **Step 6: Write the contract's own test**
 
 At the end of `crates/tidemark-ipc/src/lib.rs`. This proves the moved proxy still names the
 right interface and path, and still decodes the published dictionaries:
@@ -216,12 +227,12 @@ mod tests {
 
 Add the dev-dependency this needs: `cargo add -p tidemark-ipc --dev async-io`.
 
-- [ ] **Step 7: Run it**
+- [x] **Step 7: Run it**
 
 Run: `cargo test -p tidemark-ipc`
 Expected: PASS (or the skip line on a machine with no session bus).
 
-- [ ] **Step 8: Teach the layering check about the new crate**
+- [x] **Step 8: Teach the layering check about the new crate**
 
 In `scripts/check-layering.sh`, after the `tidemark-types` block, insert:
 
@@ -241,12 +252,12 @@ four crates, with:
 #   tidemark-cli    tidemarkctl. Speaks D-Bus and prints; no runtime, no display.
 ```
 
-- [ ] **Step 9: Run the full gate**
+- [x] **Step 9: Run the full gate**
 
 Run: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && ./scripts/check-layering.sh`
 Expected: PASS, `layering ok`.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock crates/tidemark-ipc crates/tidemark/Cargo.toml crates/tidemark/src/bus.rs scripts/check-layering.sh
@@ -274,7 +285,8 @@ git commit -m "refactor(ipc): share the daemon proxy between the window and a CL
 
 - [ ] **Step 1: Create the crate**
 
-`crates/tidemark-cli/Cargo.toml`:
+Add `"crates/tidemark-cli"` to the root `Cargo.toml`'s `members` — Task 1 deferred it, so
+it is this task's line to write — and create `crates/tidemark-cli/Cargo.toml`:
 
 ```toml
 [package]
