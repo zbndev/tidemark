@@ -553,6 +553,10 @@ git commit -m "feat(cli): tidemarkctl skeleton and version"
 
 ### Task 3: `usage --format text`
 
+> Superseded in Task 9: `render` takes a `&Titles` and names providers the way the daemon's
+> catalog spells them, because `provider_label` alone says "Deepseek" where every other
+> surface says "DeepSeek". The signature below is one argument short.
+
 **Files:**
 - Create: `crates/tidemark-cli/src/format/mod.rs`
 - Create: `crates/tidemark-cli/src/format/text.rs`
@@ -1019,6 +1023,8 @@ git commit -m "feat(cli): usage as json"
 ```
 
 ### Task 5: `usage --format waybar`
+
+> Superseded in Task 9: the tooltip takes a `&Titles` too. See Task 9 Step 4.
 
 **Files:**
 - Create: `crates/tidemark-cli/src/format/waybar.rs`
@@ -2450,7 +2456,7 @@ git commit -m "feat(cli): watch the daemon as a stream"
 **Interfaces:**
 - Produces: `commands::provider::run(&DaemonProxy<'_>, cli::ProviderCommand) -> Result<Exit, Failure>` and `commands::account::run(&DaemonProxy<'_>, cli::AccountCommand) -> Result<Exit, Failure>`.
 
-- [ ] **Step 1: Extend the grammar**
+- [x] **Step 1: Extend the grammar**
 
 In `cli.rs`, add to `Command`:
 
@@ -2509,7 +2515,12 @@ pub enum AccountCommand {
 }
 ```
 
-- [ ] **Step 2: Write the failing integration test**
+- [x] **Step 2: Write the failing integration test**
+
+Two more tests than the plan asked for, both of a rule the code states and nothing else
+checked: `provider rm` and `account rm` are one daemon call (a drift between them would
+silently change what happens to the credential and the history), and an empty *account*
+order is refused for the same reason an empty provider order is.
 
 `crates/tidemark-cli/tests/managing_a_fake_daemon.rs`:
 
@@ -2594,12 +2605,33 @@ fn an_order_with_no_providers_is_refused_before_the_daemon_hears_it() {
 }
 ```
 
-- [ ] **Step 3: Run and watch it fail**
+- [x] **Step 3: Run and watch it fail**
 
 Run: `cargo test -p tidemark-cli --test managing_a_fake_daemon`
 Expected: FAIL — `commands` does not exist.
 
-- [ ] **Step 4: Write the commands**
+- [x] **Step 4: Write the commands**
+
+**Deviation: the plan's `provider_label` is the wrong half of a convention this repo
+already has.** The daemon's catalog spells each name — "DeepSeek", "OpenRouter",
+"ClinePass" — while `tidemark_types::provider_label` only capitalises the slug, so the
+plan's `provider list` would print "Deepseek" where the card
+(`crates/tidemark/src/model.rs:28`, catalog title first, label as fallback), the tray menu
+and the notification (`crates/tidemarkd/src/notify.rs:240`, the same rule again) all print
+"DeepSeek". Verified live: the catalog says `DeepSeek`, `OpenRouter`, `NanoGPT`, and
+`provider_label` answers `Deepseek`, `Openrouter`, `NanoGPT`.
+
+So `crates/tidemark-cli/src/titles.rs` holds that one rule for this client — catalog title,
+label fallback for a provider newer than this build — and `format::text::render`,
+`format::waybar::render` (the tooltip) and `provider list` take a `&Titles`. That is a
+change to Tasks 3 and 5 as well; the cost is one `ListProviders` call per command that
+prints a name. `--format json` names providers by slug and pays nothing, and `watch`
+fetches the catalog only for its Waybar sink, which is why its integration test still
+asserts `calls.recorded() == ["GetStatus"]`.
+
+`tests/fake/mod.rs` needed `#[allow(dead_code)]` on `emit_change`: a shared test module is
+compiled into *every* integration test binary and each uses the part it needs, so `expect`
+would go unfulfilled in the binary that does use it.
 
 `crates/tidemark-cli/src/commands/mod.rs`:
 
@@ -2716,31 +2748,28 @@ pub async fn run(proxy: &DaemonProxy<'_>, command: AccountCommand) -> Result<Exi
         }
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
-Run: `cargo test -p tidemark-cli`
-Expected: PASS.
+- [x] **Step 6: Smoke it**
 
-- [ ] **Step 6: Smoke it**
+58 catalog rows, 9 configured accounts, `refresh` accepted. The full mutation round trip on
+`wayfinder`, then put back exactly as found: `provider add wayfinder` → the row appears
+`unreachable` (no credential, as expected); `provider order wayfinder codex claude …` → the
+list comes back with wayfinder first; `provider rm wayfinder default` → gone, and the
+original order restored.
 
-```bash
-cargo run -p tidemark-cli -- provider catalog | head -5
-cargo run -p tidemark-cli -- provider list
-cargo run -p tidemark-cli -- refresh
-```
-Expected: the catalog, the configured set, and a poll that shows up in `watch`.
+The refusals are worth recording, because they are the exit-code split working on live
+data rather than on a fake:
 
-Then verify a real mutation round trip on a provider you do not mind touching:
+- `account add wayfinder second` → **70**, `provider wayfinder does not support multiple
+  accounts`. The daemon's rule, surfaced verbatim.
+- `account order zai tanya default` → **70**, `the default account must be first`. Also the
+  daemon's, and the config was left untouched.
+- `refresh nonesuch` → **70**, `no account is configured for provider nonesuch`.
+- `provider order` and `account order zai` with no names → **64**, refused by this client
+  before the bus heard anything.
 
-```bash
-cargo run -p tidemark-cli -- provider add wayfinder
-cargo run -p tidemark-cli -- provider list | grep wayfinder
-cargo run -p tidemark-cli -- provider rm wayfinder default
-```
-Expected: the card appears in the running window and then goes away. Wayfinder needs no
-credential, which is why it is the safe one to test with.
-
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/tidemark-cli Cargo.lock
