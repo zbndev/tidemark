@@ -2788,7 +2788,12 @@ git commit -m "feat(cli): manage providers and accounts"
 - Produces: `secret::Source { Stdin, File(PathBuf) }` and `secret::read(Source) -> Result<String, Failure>`.
 - Produces: `commands::auth::run(&DaemonProxy<'_>, cli::AuthCommand) -> Result<Exit, Failure>`.
 
-- [ ] **Step 1: Write the failing secret-input tests**
+- [x] **Step 1: Write the failing secret-input tests**
+
+Two tests beyond the plan's three, both of a rule the code makes and nothing else checked:
+a CRLF file is a Windows file whose carriage return is the line ending rather than part of
+the key, and an unreadable file names itself in the message, because the usual cause is a
+typo in the path.
 
 `crates/tidemark-cli/src/secret.rs`:
 
@@ -2881,13 +2886,17 @@ An empty value is refused locally because `SetKey("")` is a request to store not
 the daemon already refuses it — failing here gives the user the sentence that says what to
 do instead of a D-Bus error.
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
+
+Ran before declaring the module: `running 0 tests … 33 filtered out` — the harness cannot
+see a file that is in no module tree, which is the failure this step is for. With
+`pub mod secret;` added: 5 passed.
 
 Run: `cargo test -p tidemark-cli secret`
 Expected: FAIL — the module is not declared yet. Add `pub mod secret;` to `lib.rs`, then
 the tests compile and pass.
 
-- [ ] **Step 3: Extend the grammar**
+- [x] **Step 3: Extend the grammar**
 
 `cli.rs` gains:
 
@@ -2939,7 +2948,18 @@ pub enum AuthCommand {
 }
 ```
 
-- [ ] **Step 4: Write the commands**
+- [x] **Step 4: Write the commands**
+
+Two deviations, both in the `auth sources` listing:
+
+1. The plan's `print_candidate` printed `id`, `state` and `subtitle`, dropping `title` —
+   the only field a person recognises the source by ("Google Chrome", "Zen"). The row is
+   now `id`, `title`, `state`, `subtitle`: the id first because that is the word
+   `auth select --candidate` takes.
+2. It printed line by line, so its shape could not be tested without a daemon. It is now
+   `sources(&[AuthCandidate]) -> String` with `rows` recursing, and two unit tests: a
+   profile is indented under its browser, and an absent subtitle prints as nothing rather
+   than as a word standing in for one.
 
 `crates/tidemark-cli/src/commands/auth.rs`:
 
@@ -3039,7 +3059,12 @@ fn print_candidate(candidate: &AuthCandidate, depth: usize) {
 
 `commands/mod.rs` gains `pub mod auth;`.
 
-- [ ] **Step 5: Write the failing integration test**
+- [x] **Step 5: Write the failing integration test**
+
+Two more than the plan asked for: a `--key-file` that is not there must fail *before* the
+bus (otherwise the choice is between storing the empty string and a D-Bus error about a
+value the user never managed to supply), and `sign-out` — the one credential command with
+nothing to read — must name the account it was given.
 
 `crates/tidemark-cli/tests/storing_a_secret.rs`:
 
@@ -3089,26 +3114,49 @@ fn a_key_from_a_file_reaches_the_daemon_and_is_never_printed() {
 with `set_session`, `begin_login`, `await_login`, `cancel_login`, `get_auth_sources` and
 `select_auth_source` only if a test drives them; do not add unused methods.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `cargo test -p tidemark-cli`
 Expected: PASS.
 
-- [ ] **Step 7: Smoke it**
+- [x] **Step 7: Smoke it**
 
-```bash
-printf '%s' 'sk-not-a-real-key' | cargo run -p tidemark-cli -- auth set-key zai default
-cargo run -p tidemark-cli -- usage --provider zai
-cargo run -p tidemark-cli -- auth sign-out zai default
+**Not on `zai`:** that account holds a real working key, and the plan's own command would
+have destroyed it. Used `groq` instead — a `key` provider that was not configured — added
+for the test and removed afterwards. `provider list` is back to exactly the eight providers
+it started with, and `claude` is still `ok`.
+
 ```
-Expected: the card moves to `credential-rejected` (a wrong key is a real answer), then back
-to `no-credential`. Do this on a provider you are not signed into, or restore your key
-afterwards.
+provider add groq
+printf '%s' 'gsk-not-a-real-key' | auth set-key groq default   # 0
+provider list | grep groq   →  groq  default  Groq  credential-rejected
+usage --provider groq       →  "the credential was rejected (HTTP 401)"
+auth sign-out groq default  →  0, then the row reads no-credential
+provider rm groq default    →  0
+```
 
-Confirm the prohibition holds: `cargo run -p tidemark-cli -- auth set-key zai default sk-x`
-Expected: clap rejects the extra argument — there is no positional slot for a key.
+The prohibition holds: `auth set-key zai default sk-x` → clap, exit **2**,
+`unexpected argument 'sk-x' found`. There is no positional slot for a secret, and
+`--help` shows only `<PROVIDER> <ACCOUNT>`.
 
-- [ ] **Step 8: Commit**
+Refusals: empty stdin → **64** `no value on stdin: pipe the key in, or pass --key-file`;
+`--key-file /tmp/nope` → **64** naming the path. Neither reached the daemon.
+
+`auth sources` needed a provider with a browser selector, so `t3chat` was added, read and
+removed. It printed 11 rows — `browser` with `chrome`, `chromium`, `firefox` and `zen`
+under it, each with its profiles indented one further, plus `paste` with its hint — and no
+cookie value, token or database path anywhere. `auth select t3chat default --mode browser
+--candidate firefox` returned 0, and `usage --format json` then showed
+`{"candidate":"firefox/j7aiac5u.default-release","mode":"browser"}`: the daemon resolved
+the browser-level id to the profile leaf, which is the behaviour the GUI's dialog relies on.
+`--mode nonsense` → **70**, `the selected authentication source is not ready`.
+
+`auth login claude default` printed the authorize URL immediately — the flush before the
+blocking `AwaitLogin` works — and stayed waiting. `auth cancel-login claude default` from a
+second process ended it with **70** and the daemon's own sentence, `the login was
+cancelled`. Claude's stored credential was untouched: still `ok`.
+
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/tidemark-cli
