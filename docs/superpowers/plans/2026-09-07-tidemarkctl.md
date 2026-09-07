@@ -1816,7 +1816,11 @@ git commit -m "feat(cli): the watch stream's events and mirror"
 - Produces: `watch::run(Sink) -> Result<Exit, Failure>` — the connect/retry loop, never returning under normal operation.
 - Produces: `tests::fake::FakeDaemon` and `tests::fake::serve(name) -> (zbus::Connection, DaemonProxy<'static>)`, reused by Tasks 9-11.
 
-- [ ] **Step 1: Write the pump and the retry loop**
+- [x] **Step 1: Write the pump and the retry loop**
+
+`Signal::Owner` holds `Option<Option<zbus::names::UniqueName<'static>>>`, not
+`OwnedUniqueName`: `receive_owner_changed` yields the borrowed name, which is what
+`crates/tidemark/src/bus.rs` matches on too. The compiler names the right type.
 
 Append to `crates/tidemark-cli/src/watch/mod.rs`. The structure mirrors
 `crates/tidemark/src/bus.rs:249-357` (`serve`) — read it first — minus the GLib half and
@@ -2091,7 +2095,7 @@ impl From<std::io::Error> for Failure {
 }
 ```
 
-- [ ] **Step 2: Extend the grammar and wire the command**
+- [x] **Step 2: Extend the grammar and wire the command**
 
 `cli.rs` gains:
 
@@ -2130,7 +2134,11 @@ pub enum StreamFormat {
         }
 ```
 
-- [ ] **Step 3: Write the fake daemon the integration tests share**
+- [x] **Step 3: Write the fake daemon the integration tests share**
+
+The unique name counts served daemons in an `AtomicU32` rather than
+`calls.recorded().len()`, which is zero for every fresh daemon and so would not be unique
+at all.
 
 `crates/tidemark-cli/tests/fake/mod.rs`:
 
@@ -2298,7 +2306,17 @@ A unique bus name per test matters: `cargo test` runs tests in parallel threads 
 session bus, and two services under the same name would make the second one fail.
 Include the test's own name in the string if collisions still happen.
 
-- [ ] **Step 4: Write the failing integration test**
+- [x] **Step 4: Write the failing integration test**
+
+**The plan's test design was wrong and hung.** `drop(server)` does not end the pump: the
+signal streams belong to the *client* connection, and a served name going away is an owner
+change — a `waiting` line — not a closed stream. `pump` correctly kept streaming, so
+`zip(pumping, emitting)` never completed and `cargo test` sat there until it was killed.
+The test now bounds the pump with
+`futures_lite::future::or(pumping, Timer::after(900ms))` and reads what it printed
+afterwards, which also lets it assert the third line: `waiting`, emitted when the daemon
+left the bus. It additionally asserts `calls.recorded() == ["GetStatus"]` — the snapshot
+came off the wire once and every later line came from a signal, not from re-polling.
 
 `crates/tidemark-cli/tests/watching_a_fake_daemon.rs`:
 
@@ -2385,24 +2403,30 @@ This needs three things the crate does not have yet:
    ```
 3. `cargo add -p tidemark-cli --dev futures-lite` for `zip`.
 
-- [ ] **Step 5: Run it**
+- [x] **Step 5: Run it**
 
 Run: `cargo test -p tidemark-cli --test watching_a_fake_daemon`
 Expected: PASS, or the skip line with no session bus.
 
-- [ ] **Step 6: Smoke it against the live daemon**
+- [x] **Step 6: Smoke it against the live daemon**
 
-In one terminal: `cargo run -p tidemark-cli -- watch`
-In another: `cargo run -p tidemark-cli -- refresh claude`
-Expected: a `snapshot` line at once, then a `changed` line per poll. Then
-`systemctl --user restart tidemarkd` and expect a `waiting` line followed by a fresh
-`snapshot`.
+`refresh` is Task 9's command, so the poll was asked for with the documented probe:
+`busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark io.github.zbndev.Tidemark.Daemon1 Refresh s "zai"`.
 
-Also: `cargo run -p tidemark-cli -- watch --format waybar | head -3`
-Expected: one card per change, each a complete JSON object on its own line. `head` closing
-the pipe must not hang the process.
+Observed: `snapshot` (9 accounts) at once, then one `changed` line per Z.ai account. Across
+`systemctl --user restart tidemarkd`: `snapshot`, `waiting`, `snapshot`, then 18 `changed`
+lines as the fresh daemon polled everything.
 
-- [ ] **Step 7: Full gate and commit**
+**What the pipe test actually shows:** `watch --format waybar | head -1` does *not* end the
+process when `head` closes the pipe — nothing is written until the next signal, so nothing
+notices. At the next event the write fails and the process exits **69** with
+`cannot write the stream: Broken pipe`, verified end to end (5 s: 3 s idle, then a
+`Refresh`). It is not a hang — it is a process that ends when it next has something to say.
+Noticing sooner would mean polling stdout for `POLLERR`, which is real machinery for a
+cosmetic case: Waybar kills its module with a signal, and a shell pipeline has already
+returned to the prompt. Left alone deliberately.
+
+- [x] **Step 7: Full gate and commit**
 
 ```bash
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && ./scripts/check-layering.sh
