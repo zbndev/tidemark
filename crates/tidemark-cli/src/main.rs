@@ -10,6 +10,7 @@ mod connect;
 mod exit;
 mod format;
 mod guard;
+mod watch;
 
 use std::process::ExitCode;
 

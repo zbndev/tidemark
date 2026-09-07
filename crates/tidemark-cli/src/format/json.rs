@@ -7,7 +7,6 @@
 //! produces no key at all, and no `null` invites a plugin to render it as zero.
 
 use serde::Serialize;
-use serde_json::Value;
 use tidemark_types::ProviderStatus;
 
 /// The published document.
@@ -18,37 +17,13 @@ struct Document<'a> {
 
 pub fn render(statuses: &[&ProviderStatus]) -> Result<String, serde_json::Error> {
     let document = serde_json::to_value(Document { accounts: statuses })?;
-    serde_json::to_string_pretty(&payload(document))
-}
-
-/// The values without their D-Bus envelope.
-///
-/// `tidemark-types` derives `SerializeDict`, which exists to encode `a{sv}`: every value
-/// carries its signature, so under `serde_json` `"provider"` arrives as
-/// `{"signature": "s", "value": "claude"}` and `details` nests three of those. A plugin
-/// wants the payload, and the alternative — a second serialization in `tidemark-types` —
-/// would mean two models of one wire shape and two sets of key names to keep in step.
-/// Stripping is safe because no published structure has `signature` and `value` as its
-/// only two fields; the envelope is the only thing that shape means.
-fn payload(value: Value) -> Value {
-    match value {
-        Value::Object(mut map) => {
-            if map.len() == 2
-                && map.contains_key("signature")
-                && let Some(inner) = map.remove("value")
-            {
-                return payload(inner);
-            }
-            Value::Object(map.into_iter().map(|(key, v)| (key, payload(v))).collect())
-        }
-        Value::Array(items) => Value::Array(items.into_iter().map(payload).collect()),
-        other => other,
-    }
+    serde_json::to_string_pretty(&super::payload(document))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use tidemark_types::{
         AccountId, DetailRow, DetailSection, ProviderId, ProviderState, WindowStatus,
     };

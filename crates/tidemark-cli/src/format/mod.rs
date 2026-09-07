@@ -4,7 +4,36 @@ pub mod json;
 pub mod text;
 pub mod waybar;
 
+use serde_json::Value;
 use tidemark_types::{ProviderStatus, Window};
+
+/// The values without their D-Bus envelope.
+///
+/// `tidemark-types` derives `SerializeDict`, which exists to encode `a{sv}`: every value
+/// carries its signature, so under `serde_json` `"provider"` arrives as
+/// `{"signature": "s", "value": "claude"}` and `details` nests three of those. A plugin
+/// wants the payload, and the alternative — a second serialization in `tidemark-types` —
+/// would mean two models of one wire shape and two sets of key names to keep in step.
+/// Stripping is safe because no published structure has `signature` and `value` as its
+/// only two fields; the envelope is the only thing that shape means.
+///
+/// It lives here rather than in [`json`] because `watch`'s event lines publish the same
+/// wire types and need the same peeling: one rule, one place.
+pub fn payload(value: Value) -> Value {
+    match value {
+        Value::Object(mut map) => {
+            if map.len() == 2
+                && map.contains_key("signature")
+                && let Some(inner) = map.remove("value")
+            {
+                return payload(inner);
+            }
+            Value::Object(map.into_iter().map(|(key, v)| (key, payload(v))).collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(payload).collect()),
+        other => other,
+    }
+}
 
 /// The accounts a `--provider` / `--account` pair names, in the daemon's published order.
 ///
