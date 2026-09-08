@@ -109,7 +109,67 @@ quota*.
 Keys are stored in your desktop keyring, never in a config file. Claude, Codex and
 Antigravity can sign in through Tidemark, or reuse the login their own CLI already has.
 
-Removing a provider deletes its credentials and its card but keeps the quota history.
+Removing a provider deletes its Tidemark-owned credentials and its card but keeps the quota
+history. A vendor CLI's own credential file remains owned by that CLI and is never removed.
+
+## From the command line
+
+`tidemarkctl` talks to the same daemon the window does, so anything the interface can do is
+scriptable — and a panel widget needs no D-Bus code of its own.
+
+```bash
+tidemarkctl usage                      # every account, for a person
+tidemarkctl usage --format json        # {"accounts": [...]}, for a program
+tidemarkctl guard --min-remaining 20 --window w604800 || echo "not this week"
+tidemarkctl watch                      # one JSON object per change, until you stop it
+```
+
+`guard` exits `0` when the quota is there, `1` when it is not, and `69` when there is no
+trustworthy reading to judge — a rejected credential never answers "safe".
+
+Secrets are read from stdin, never from the command line:
+
+```bash
+printf '%s' "$ZAI_API_KEY" | tidemarkctl auth set-key zai
+```
+
+Commands that act on one existing account use `default` unless `--account work` says
+otherwise. Aggregate commands keep their broader meaning: `usage`, `guard` and `watch`
+still include every matching account when no account filter is given.
+
+A newly added Claude, Codex or Antigravity account starts pinned to Tidemark OAuth; adding
+it never silently adopts the vendor CLI's login:
+
+```bash
+tidemarkctl provider add codex
+tidemarkctl auth login codex
+
+# Or explicitly use the Codex CLI login that already exists:
+tidemarkctl auth select codex --mode cli
+```
+
+A Waybar module is two files. In `~/.config/waybar/config.jsonc`:
+
+```jsonc
+"custom/tidemark": {
+    "exec": "tidemarkctl watch --format waybar",
+    "return-type": "json",
+    "on-click": "tidemark"
+}
+```
+
+and in your stylesheet, the classes it sets — `ok`, `warning`, `danger` at the same 70% and
+90% the app's own bar changes colour at, plus `stale` when the reading is not fresh:
+
+```css
+#custom-tidemark.warning { color: @warning_color; }
+#custom-tidemark.danger  { color: @error_color; }
+#custom-tidemark.stale   { opacity: 0.5; }
+```
+
+`tidemarkctl completions zsh > ~/.zfunc/_tidemarkctl` installs completions;
+`tidemarkctl --help` lists the rest — `provider`, `account`, `auth`, `notify`, `config`,
+`history`.
 
 ## Reporting a wrong reading
 

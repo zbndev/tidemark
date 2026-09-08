@@ -1246,7 +1246,7 @@ impl Daemon {
         self.auth_sources_request(provider, account).await
     }
 
-    /// Revalidates and persists one explicit local authentication source.
+    /// Validates and persists one explicit authentication source.
     async fn select_auth_source(
         &self,
         provider: &str,

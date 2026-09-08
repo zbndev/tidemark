@@ -31,6 +31,7 @@ output=$(nix build --no-link --print-out-paths .#tidemark)
 
 test -x "$output/bin/tidemark"
 test -x "$output/bin/tidemarkd"
+test -x "$output/bin/tidemarkctl"
 test -f "$output/share/applications/io.github.zbndev.Tidemark.desktop"
 test -f "$output/share/metainfo/io.github.zbndev.Tidemark.metainfo.xml"
 test -f "$output/share/icons/hicolor/512x512/apps/io.github.zbndev.Tidemark.png"

@@ -83,10 +83,11 @@ uses is the user's choice, not a rule hidden in the daemon. It is stored as
 `[provider.<slug>] source = "oauth" | "cli"`, published with the provider so a client can
 draw it without knowing what either credential is, and drawn in the authentication group
 as a two-part control — Tidemark's own login on the left, the local program's on the right.
-**A pinned credential that is not there is `no-credential`, never a quiet fall back to the
-other one**: falling back would show quota for an account the user did not choose. An
-account whose `source` has never been set behaves exactly as it always did — the daemon
-publishes which credential that resolves to, so the control still shows the truth.
+A freshly added provider stores `source = "oauth"` before its first credential probe, so
+adding one never silently adopts a vendor CLI login; `auth select <slug> --mode cli` is the
+explicit opt-in. **A pinned credential that is not there is `no-credential`, never a quiet
+fall back to the other one**. An existing account whose `source` was never set keeps the
+legacy automatic rule, so this cutover does not switch an installed account.
 
 Codex reports `rate_limit.primary_window` / `secondary_window` — slots rather than lanes,
 each declaring its own length — plus a `code_review_rate_limit` of the same shape and named
@@ -109,8 +110,8 @@ Daemon plus client, split over D-Bus.
   notifications. Runs whether or not the window is open, because a warning that only
   arrives when you are already looking is not a warning.
 - **GUI** — a thin viewer. Never performs network I/O.
-- **CLI** — not in v1, but the D-Bus interface is designed so `tidemark usage --json`
-  is a third consumer rather than a bolt-on. Waybar is the obvious client.
+- **CLI** — `tidemarkctl`. The third client, and the one the interface was shaped for:
+  one round trip draws a window, a Waybar module, or a line of output.
 
 Language is Rust; GUI is GTK4 + libadwaita. Rust was chosen for packaging above all —
 `deb`/`rpm`/`PKGBUILD` from a single binary is the cheap path — and for `serde`, which
@@ -119,15 +120,17 @@ named field in an error.
 
 ### Crate layout
 
-Four crates, not three. The extra one exists to make the "GUI never performs network I/O"
-rule checkable rather than aspirational.
+Six crates, and two of them exist to make a rule checkable rather than aspirational: the
+GUI never performs network I/O, and there is exactly one definition of the D-Bus contract.
 
 | crate | holds | must never reach |
 |---|---|---|
 | `tidemark-types` | vocabulary, identity constants, D-Bus wire shapes | anything with I/O |
+| `tidemark-ipc` | the generated D-Bus proxy | providers, storage, the display |
 | `tidemark-core` | provider clients, history, secrets | GTK, GDK, libadwaita |
 | `tidemarkd` | scheduler, D-Bus service, notifications | — |
 | `tidemark` | the interface | `tidemark-core`, HTTP, SQLite |
+| `tidemark-cli` | `tidemarkctl` | `tidemark-core`, GTK, a runtime |
 
 The GUI depends on `tidemark-types` and D-Bus only. Folding the vocabulary into
 `tidemark-core` and feature-gating the network out of it does not work: Cargo unifies
@@ -175,6 +178,42 @@ Failure is part of the published shape, not an absence of it: an account carries
 `credential-rejected`, `rate-limited`, `unreachable`, `malformed` — and keeps its **last
 good reading underneath it**. A failed poll changes the chip on the card, not the numbers;
 blanking a card because one request timed out would be less honest, not more.
+
+### Command line
+
+`tidemarkctl` is the third client, and the reason the interface was shaped as it was.
+It generates its proxy from `tidemark-ipc`, the same crate the window uses, so a method
+that changes shape breaks the build rather than a user's panel.
+
+Commands that act on one existing account default `--account` to `default`; a named
+account stays explicit. Collection commands are deliberately different: omitting the
+filter from `usage`, `guard` or `watch` continues to mean every matching account, which is
+the shape panel plugins need.
+
+Three output formats, and two of them are contracts. `text` is for a person and may be
+reworded. `json` is an object with an `accounts` key — not a bare array, so a key can be
+added later — carrying `ProviderStatus` as serde renders it, absent values still absent.
+`waybar` is `{text, tooltip, class, percentage}`, where `class` is **always an array** so
+its shape does not change when a second class applies: the zone (`ok`, `warning`, `danger`,
+at the same 70/90 the bar uses) and `stale` when the account's state is not `ok`.
+
+`watch` streams NDJSON: a `snapshot` first, then one line per signal, a `waiting` line when
+the daemon leaves the bus, and a fresh `snapshot` after every reconnect — what the daemon
+published while nothing was listening was announced to nobody.
+
+Exit codes are the point of `guard`: `0` safe, `1` below the threshold, `64` an argument
+this build cannot act on, `69` nothing trustworthy to judge, `70` the daemon refused. A
+command line clap itself rejects exits `2`, clap's own code. Only an `ok` account's reading
+is judged; a last-good number behind a rejected credential would otherwise say "safe"
+about quota nobody can spend.
+
+Secrets are read from stdin or `--key-file`, never from argv: `/proc/<pid>/cmdline` is
+readable by every process of the same user. stdin is a file descriptor rather than a
+terminal, so a plugin with its own UI writes into a pipe without opening a console.
+
+Windows is out of scope for the CLI: there the daemon serves zbus p2p over AF_UNIX, and the
+endpoint discovery lives in the window's own reconnect module. The binary still compiles
+there; it is packaged only on Linux.
 
 ### Provider contract
 

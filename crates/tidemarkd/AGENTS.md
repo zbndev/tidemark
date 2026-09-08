@@ -26,6 +26,9 @@ Polling, credential orchestration, and IPC publication; score 9, a distinct runt
 - Rename/removal copies credentials and rekeys history before the config durability point.
 - Roll back pre-commit migration failures; post-commit cleanup failures do not undo reported success.
 - Service identity locks and login cancellation prevent stale writes under retired account IDs.
+- A newly added OAuth-or-CLI provider persists `source = "oauth"` before its first probe.
+  Existing configured accounts without `source` retain legacy `Auto`; never migrate them
+  implicitly or adopt a vendor credential during a fresh add.
 - Notification delivery is recorded only after transport acceptance; a failed send remains retryable.
 - `PeerHub` uses `try_send`: evict an entire full/closed peer rather than blocking publication.
 

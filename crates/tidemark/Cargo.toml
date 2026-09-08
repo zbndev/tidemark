@@ -24,6 +24,7 @@ gtk = { version = "0.11.4", package = "gtk4", features = ["v4_22"] }
 # bundled Rubik available to GTK without installing it for the user.
 pango = { version = "0.22.3", features = ["v1_56"] }
 semver = "1.0.28"
+tidemark-ipc = { path = "../tidemark-ipc" }
 tidemark-types = { path = "../tidemark-types" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -89,6 +90,7 @@ maintainer-scripts = "../../data/packaging/deb"
 assets = [
     ["target/release/tidemark", "usr/bin/", "755"],
     ["target/release/tidemarkd", "usr/bin/", "755"],
+    ["target/release/tidemarkctl", "usr/bin/", "755"],
     ["../../data/tidemarkd.service", "usr/lib/systemd/user/", "644"],
     ["../../data/icons/hicolor/16x16/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
     ["../../data/icons/hicolor/22x22/apps/io.github.zbndev.Tidemark.png", "usr/share/icons/hicolor/22x22/apps/", "644"],
@@ -136,6 +138,7 @@ post_install_script_prog = ["/bin/sh", "-e"]
 assets = [
     { source = "target/release/tidemark", dest = "/usr/bin/tidemark", mode = "755" },
     { source = "target/release/tidemarkd", dest = "/usr/bin/tidemarkd", mode = "755" },
+    { source = "target/release/tidemarkctl", dest = "/usr/bin/tidemarkctl", mode = "755" },
     { source = "../../data/tidemarkd.service", dest = "/usr/lib/systemd/user/tidemarkd.service", mode = "644" },
     { source = "../../data/icons/hicolor/16x16/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/16x16/apps/io.github.zbndev.Tidemark.png", mode = "644" },
     { source = "../../data/icons/hicolor/22x22/apps/io.github.zbndev.Tidemark.png", dest = "/usr/share/icons/hicolor/22x22/apps/io.github.zbndev.Tidemark.png", mode = "644" },

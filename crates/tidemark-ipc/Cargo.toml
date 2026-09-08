@@ -1,0 +1,25 @@
+[package]
+name = "tidemark-ipc"
+description = "The D-Bus contract between tidemarkd and its clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# NOTE: this crate is the contract's client half. It may open a connection and nothing
+# else: no provider I/O, no database, no display, and no second async runtime — zbus's
+# async-io backend is what both the window and tidemarkctl already build on.
+# scripts/check-layering.sh enforces this.
+[dependencies]
+tidemark-types = { path = "../tidemark-types" }
+# `p2p` because the Windows GUI builds its connection that way, and this crate is what it
+# generates the proxy from.
+zbus = { version = "5.13.2", features = ["p2p"] }
+
+[dev-dependencies]
+async-io = "2.6.0"
