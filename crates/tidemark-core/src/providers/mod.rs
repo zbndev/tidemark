@@ -23,12 +23,15 @@
 //! an entry of an *unrecognized* kind is skipped, because that is a quota type that did
 //! not exist when this was written, not a failure to understand one that did.
 
+mod availability;
+
 pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod http;
 pub mod keyed;
 
+pub use availability::blocked_by;
 pub use keyed::{kimi, zai};
 
 use std::fmt;
@@ -360,6 +363,98 @@ impl ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidemark_types::{Window, WindowKey};
+
+    fn window(key: &str, seconds: u64, used_percent: f64) -> Window {
+        Window {
+            key: WindowKey::named(key),
+            title: key.into(),
+            subtitle: None,
+            used_percent,
+            resets_at: None,
+            length: WindowLength::from_secs(seconds),
+        }
+    }
+
+    fn snapshot(provider: &str, windows: Vec<Window>) -> Snapshot {
+        Snapshot {
+            provider: ProviderId::new(provider),
+            account: AccountId::default(),
+            captured_at: Timestamp::from_unix(1_785_700_000).expect("plausible"),
+            windows,
+            details: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn known_limit_ladders_disable_shorter_windows() {
+        for provider in [
+            "alibaba",
+            "antigravity",
+            "claude",
+            "clinepass",
+            "codex",
+            "commandcode",
+            "factory",
+            "minimax",
+            "ollama",
+            "opencode",
+            "opencodego",
+            "sakana",
+            "stepfun",
+            "sub2api",
+            "zai",
+            "zenmux",
+        ] {
+            let snapshot = snapshot(
+                provider,
+                vec![
+                    window("w18000", 18_000, 0.0),
+                    window("w604800", 604_800, 100.0),
+                    window("w2592000", 2_592_000, 100.0),
+                ],
+            );
+            assert_eq!(
+                blocked_by(&snapshot, &snapshot.windows[0]).map(|window| window.key.as_str()),
+                Some("w604800"),
+                "{provider}"
+            );
+            assert_eq!(
+                blocked_by(&snapshot, &snapshot.windows[1]).map(|window| window.key.as_str()),
+                Some("w2592000"),
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_links_its_rate_lane_to_the_plan_allowance() {
+        let snapshot = snapshot(
+            "kimi",
+            vec![
+                window("rate/w18000", 18_000, 0.0),
+                window("w604800", 604_800, 100.0),
+            ],
+        );
+
+        assert_eq!(
+            blocked_by(&snapshot, &snapshot.windows[0]).map(|window| window.key.as_str()),
+            Some("w604800")
+        );
+    }
+
+    #[test]
+    fn a_full_limit_never_crosses_into_a_different_pool() {
+        let snapshot = snapshot(
+            "zai",
+            vec![
+                window("w18000", 18_000, 0.0),
+                window("mcp/w2592000", 2_592_000, 100.0),
+            ],
+        );
+
+        assert!(blocked_by(&snapshot, &snapshot.windows[0]).is_none());
+    }
 
     #[test]
     fn a_credential_never_prints_itself() {

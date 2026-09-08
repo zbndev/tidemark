@@ -407,6 +407,7 @@ mod tests {
                 used_percent: 42.0,
                 resets_at: Some(1_785_718_000),
                 length_secs: *length_secs,
+                blocked_by: None,
             })
             .collect();
         status

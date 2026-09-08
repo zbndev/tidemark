@@ -54,6 +54,7 @@ mod tests {
             used_percent: 72.0,
             resets_at: Some(1_785_708_000),
             length_secs: Some(18_000),
+            blocked_by: None,
         }];
         let text = render(&[&status]).expect("serializes");
         let value: serde_json::Value = serde_json::from_str(&text).expect("valid json");

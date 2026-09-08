@@ -143,6 +143,15 @@ fn account_toggle_state(extra_accounts: usize, expanded: bool) -> AccountToggleS
     }
 }
 
+/// The full window that currently makes this status window unavailable.
+fn blocking_key<'a>(status: &'a ProviderStatus, key: &str) -> Option<&'a str> {
+    status
+        .windows
+        .iter()
+        .find(|window| window.key == key)
+        .and_then(|window| window.blocked_by.as_deref())
+}
+
 /// A provider card.
 #[derive(Debug)]
 pub struct Card {
@@ -535,7 +544,7 @@ impl Card {
                 self.bar.widget().set_visible(true);
                 self.dominant_title.set_label(&dominant.title);
                 self.set_balance_line(balance);
-                self.rebuild_rows(rest)
+                self.rebuild_rows(rest, status)
             }
             (None, Some(balance)) => {
                 self.reading.set_visible(false);
@@ -544,7 +553,7 @@ impl Card {
                 self.footer.set_vexpand(false);
                 self.set_absolutes(None);
                 self.set_balance_line(None);
-                self.rebuild_rows(&[])
+                self.rebuild_rows(&[], status)
             }
             (None, None) => {
                 self.reading.set_visible(false);
@@ -558,7 +567,7 @@ impl Card {
                 // the settings pane.
                 self.blank.set_tooltip_text(Some(&message));
                 self.blank.set_label(&message);
-                self.rebuild_rows(&[])
+                self.rebuild_rows(&[], status)
             }
         };
 
@@ -590,17 +599,25 @@ impl Card {
             return;
         };
 
+        let blocked = blocking_key(&shown.status, dominant.key.as_str()).is_some();
+        let opacity = if blocked { 0.5 } else { 1.0 };
         self.headline
             .set_label(&format::percent(dominant.used_percent));
+        self.headline.set_opacity(opacity);
         self.bar.set(dominant.used_percent, dominant.pace(now));
-        match dominant.seconds_until_reset(now) {
-            Some(seconds) => {
-                self.reset.set_label(&format::resets_in(seconds));
-                self.reset.set_visible(true);
+        self.bar.set_blocked(blocked);
+        if blocked {
+            self.reset.set_visible(false);
+        } else {
+            match dominant.seconds_until_reset(now) {
+                Some(seconds) => {
+                    self.reset.set_label(&format::resets_in(seconds));
+                    self.reset.set_visible(true);
+                }
+                // No reset time is the ordinary case for the window this card leads with. The
+                // line is removed rather than filled with a guess.
+                None => self.reset.set_visible(false),
             }
-            // No reset time is the ordinary case for the window this card leads with. The
-            // line is removed rather than filled with a guess.
-            None => self.reset.set_visible(false),
         }
 
         for (bar, window) in shown.secondary.iter().zip(rest) {
@@ -671,7 +688,7 @@ impl Card {
     }
 
     /// Replaces the thin rows, returning their bars in the same order.
-    fn rebuild_rows(&self, windows: &[Window]) -> Vec<QuotaBar> {
+    fn rebuild_rows(&self, windows: &[Window], status: &ProviderStatus) -> Vec<QuotaBar> {
         while let Some(child) = self.rows.first_child() {
             self.rows.remove(&child);
         }
@@ -691,6 +708,9 @@ impl Card {
                     .build();
                 let bar = QuotaBar::new(ROW_BAR);
                 bar.widget().set_valign(gtk::Align::Center);
+                let blocked = blocking_key(status, window.key.as_str()).is_some();
+                let opacity = if blocked { 0.5 } else { 1.0 };
+                bar.set_blocked(blocked);
                 let value = gtk::Label::builder()
                     .label(format::percent(window.used_percent))
                     .halign(gtk::Align::End)
@@ -698,6 +718,7 @@ impl Card {
                     .xalign(1.0)
                     .css_classes(["dim-label", "caption", "numeric"])
                     .build();
+                value.set_opacity(opacity);
 
                 let row = gtk::Box::builder().spacing(8).build();
                 row.append(&title);
@@ -811,6 +832,7 @@ mod tests {
             used_percent,
             resets_at: Some(CAPTURED_AT + 3_600),
             length_secs,
+            blocked_by: None,
         }
     }
 
@@ -819,6 +841,15 @@ mod tests {
         status.captured_at = Some(CAPTURED_AT);
         status.windows = windows;
         status
+    }
+    #[test]
+    fn a_blocked_five_hour_window_exposes_its_full_parent() {
+        let mut five_hour = window(Some(18_000), 0.0);
+        five_hour.key = "w18000".into();
+        five_hour.blocked_by = Some("w604800".into());
+        let status = status_with(vec![five_hour]);
+
+        assert_eq!(blocking_key(&status, "w18000"), Some("w604800"));
     }
 
     #[test]

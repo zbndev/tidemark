@@ -148,6 +148,7 @@ mod tests {
             used_percent,
             resets_at: Some(NOW + 3_600),
             length_secs: Some(18_000),
+            blocked_by: None,
         }];
         status
     }

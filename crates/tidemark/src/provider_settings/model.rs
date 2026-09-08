@@ -485,6 +485,7 @@ mod tests {
                 used_percent: 0.0,
                 resets_at: None,
                 length_secs: None,
+                blocked_by: None,
             })
             .collect();
         status.notify = notify.iter().map(|key| (*key).to_string()).collect();

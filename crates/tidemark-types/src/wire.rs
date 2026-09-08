@@ -402,6 +402,9 @@ pub struct WindowStatus {
     pub resets_at: Option<i64>,
     /// Window length in seconds, when the provider said or it could be derived.
     pub length_secs: Option<u64>,
+    /// Full window key that currently makes this quota unusable. Absent when the quota is
+    /// usable or when an older daemon did not publish dependency information.
+    pub blocked_by: Option<String>,
 }
 
 impl WindowStatus {
@@ -414,6 +417,7 @@ impl WindowStatus {
             used_percent: window.used_percent,
             resets_at: window.resets_at.map(Timestamp::as_unix),
             length_secs: window.length.map(WindowLength::as_secs),
+            blocked_by: None,
         }
     }
 
@@ -1049,6 +1053,12 @@ mod tests {
             .deserialize()
             .expect("decodes without the new key");
         assert_eq!(decoded.account_label, None);
+    }
+
+    #[test]
+    fn an_unblocked_window_publishes_no_blocking_key() {
+        let published = WindowStatus::from_window(&window(None));
+        assert_eq!(published.blocked_by, None);
     }
 
     #[test]

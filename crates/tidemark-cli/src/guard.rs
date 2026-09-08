@@ -106,6 +106,7 @@ mod tests {
             used_percent,
             resets_at: None,
             length_secs: Some(18_000),
+            blocked_by: None,
         }
     }
 
