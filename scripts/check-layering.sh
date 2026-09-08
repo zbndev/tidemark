@@ -7,7 +7,7 @@
 #   tidemark-ipc    the generated D-Bus proxy, shared by every client.
 #   tidemark-cli    tidemarkctl. Speaks D-Bus and prints; no runtime, no display.
 #   tidemark        the display. Never the network, never the database, never core —
-#                   it speaks D-Bus, which is what keeps a future CLI a third consumer
+#                   it speaks D-Bus, which is what keeps `tidemarkctl` a third consumer
 #                   rather than a rewrite.
 #
 # Run from anywhere; exits non-zero on the first violation.

@@ -5,15 +5,17 @@
 **Branch:** main
 
 ## OVERVIEW
-Tidemark tracks AI-provider quota windows and pace. Four Rust crates separate daemon state, provider I/O, shared vocabulary, and GTK presentation; Rust edition 2024, MSRV 1.92, GTK 4.22, libadwaita 1.9.
+Tidemark tracks AI-provider quota windows and pace. Six Rust crates separate daemon state, provider I/O, shared vocabulary, the generated D-Bus proxy, GTK presentation, and `tidemarkctl`; Rust edition 2024, MSRV 1.92, GTK 4.22, libadwaita 1.9.
 
 ## STRUCTURE
 ```text
 tidemark/
 |-- crates/
 |   |-- tidemark/        # GTK GUI; consumes IPC, never core
+|   |-- tidemark-cli/    # tidemarkctl; D-Bus client, no core/display/Tokio
 |   |-- tidemarkd/       # Polling, history, secrets and IPC ownership
 |   |-- tidemark-core/   # External I/O and provider implementations
+|   |-- tidemark-ipc/    # Single generated D-Bus client proxy
 |   `-- tidemark-types/  # Shared domain and wire vocabulary
 |-- data/               # Desktop assets, user service, packaging payloads
 |-- scripts/            # Layering, integration, packaging and release checks
@@ -28,6 +30,8 @@ tidemark/
 |------|----------|-------|
 | Add a provider | `crates/tidemark-core/src/providers/`, `crates/tidemarkd/src/registry.rs` | Core implementation plus daemon registration; simple catalog and hand-written descriptors coexist |
 | Change IPC vocabulary | `crates/tidemark-types/src/wire.rs` | Keep daemon and GUI compatible |
+| Change the D-Bus proxy | `crates/tidemark-ipc/src/lib.rs` | Keep the one generated client contract synchronized with the daemon interface |
+| Change the CLI | `crates/tidemark-cli/` | Preserve JSON/Waybar shapes, exit codes, secret input and layering |
 | Polling or mutation ordering | `crates/tidemarkd/src/engine.rs`, `service.rs` | Owned state and published mirror |
 | GUI or daemon reconnect | `crates/tidemark/src/window.rs`, `bus.rs` | Presentation and IPC client |
 | Credentials or browser sources | `crates/tidemark-core/src/oauth_file.rs`, `secrets.rs`, `browser/` | Ownership and explicit source selection matter |
@@ -59,7 +63,7 @@ On the GUI side, `bus::watch` drives `DaemonProxy` on `glib::spawn_future_local`
 **D-Bus contract:** name `io.github.zbndev.Tidemark.Daemon`, path `/io/github/zbndev/Tidemark`, interface `io.github.zbndev.Tidemark.Daemon1`; method `GetStatus`, signal `ProviderChanged`. App ID: `io.github.zbndev.Tidemark`. Activation uses `data/dbus-1/services/` and the systemd user unit `tidemarkd.service`. Published `a{sv}` dictionaries are extensible; absent values stay absent.
 
 ## CONVENTIONS
-- Layering is enforced by `scripts/check-layering.sh`: types have no runtime I/O; core has no GTK/GDK/adwaita; GUI has no core/HTTP/SQLite. Types may use zvariant, not zbus.
+- Layering is enforced by `scripts/check-layering.sh`: types have no runtime I/O; IPC has no policy; CLI has no core/HTTP/SQLite/GTK/runtime; core has no GTK/GDK/adwaita; GUI has no core/HTTP/SQLite. Types may use zvariant, not zbus.
 - Cargo sets `unsafe_code = "deny"`, not `forbid`; audited Windows exceptions exist. Clippy warns on `all`, `todo` and `dbg_macro`.
 - Missing provider values stay missing. Window identity is its length, not the vendor field name; slugs are persistent storage keys.
 - Config stores preferences, not secrets; preserve TOML decoration and reject present-but-invalid values. Provider/account array order determines UI order.
@@ -91,6 +95,7 @@ On the GUI side, `bus::watch` drives `DaemonProxy` on `glib::spawn_future_local`
 ```bash
 cargo run -p tidemarkd
 cargo run -p tidemark
+tidemarkctl usage --format json
 # Full local gate (plain workspace tests):
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && ./scripts/check-layering.sh
 scripts/check-desktop-integration.sh

@@ -19,6 +19,8 @@ The generated D-Bus proxy for `io.github.zbndev.Tidemark.Daemon1`, shared by eve
 ## ANTI-PATTERNS
 - Do not add provider I/O, storage, a display dependency, or a second async runtime; `scripts/check-layering.sh` forbids `tidemark-core`, `reqwest`, `hyper`, `rusqlite`, `libsqlite3-sys`, `gtk4`, `gtk4-sys`, `libadwaita` and `tokio`.
 - Do not define wire structures here; they belong to `tidemark-types` so the daemon and clients decode one vocabulary.
+- Never let a second `#[zbus::proxy]` definition exist anywhere in the workspace: every
+  client generates from `src/lib.rs`, so interface drift is a compile failure.
 - Do not add a client-side policy (defaults on error, retry, fallback) to the contract: a caller that wants one writes it.
 
 ## CHECKS
