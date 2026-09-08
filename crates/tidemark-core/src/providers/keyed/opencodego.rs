@@ -93,8 +93,8 @@ const WINDOWS: &[(&[&str], u64)] = &[
 /// Envelope keys the windows have been seen sitting one level down inside.
 const ENVELOPE_KEYS: &[&str] = &["data", "result", "usage", "billing", "payload"];
 
-/// Spellings of a stated share. First one present wins, and the value is a fraction when it
-/// is not greater than one — see the module doc.
+/// Spellings of a stated percentage. A source-provided `percent` is already in percentage
+/// points; ratios can only be derived from an explicit used-over-limit pair.
 const PERCENT_KEYS: &[&str] = &[
     "usagePercent",
     "usedPercent",
@@ -204,10 +204,8 @@ fn window_of(
     seconds: u64,
     captured_at: Timestamp,
 ) -> Result<Window, ProviderError> {
-    // A stated share and a computed one are scaled differently, so which one this is has to
-    // survive the lookup. See the module doc.
+    // A stated percentage is already scaled; only an explicit used-over-limit pair is a ratio.
     let used_percent = match first_number(map, PERCENT_KEYS) {
-        Some(stated) if (0.0..=1.0).contains(&stated) => stated * 100.0,
         Some(stated) => stated,
         None => {
             let used = first_number(map, USED_KEYS);
@@ -419,18 +417,16 @@ mod tests {
     }
 
     #[test]
-    fn a_stated_share_below_one_is_a_fraction_and_a_computed_one_is_not() {
-        // CodexBar's "parses subscription from JSON with reset at and ratio percentages":
-        // 0.25 means 25%, 0.9 means 90%.
-        let ratios = r#"{"usage":{"rollingUsage":{"usagePercent":0.25,"resetInSec":3600},
-            "weeklyUsage":{"usagePercent":75,"resetInSec":7200},
-            "monthlyUsage":{"usagePercent":0.9,"resetInSec":86400}}}"#;
-        let snapshot = parse(ratios, at(1_800_000_000)).expect("parses");
+    fn percent_fields_below_one_are_not_promoted_to_fractions() {
+        let body = r#"{"usage":{"rolling":{"status":"ok","percent":1,
+            "resetsAt":"2026-09-08T16:48:19.903Z"},"weekly":{"status":"ok","percent":0,
+            "resetsAt":"2026-09-14T00:00:00.903Z"},"monthly":{"status":"ok","percent":73,
+            "resetsAt":"2026-09-16T13:23:30.903Z"}}}"#;
+        let snapshot = parse(body, at(1_800_000_000)).expect("parses");
         let percents: Vec<f64> = snapshot.windows.iter().map(|w| w.used_percent).collect();
-        assert_eq!(percents, [25.0, 75.0, 90.0]);
+        assert_eq!(percents, [1.0, 0.0, 73.0]);
 
-        // "computes usage percent from totals and treats monthly as optional": 25 of 100 is
-        // 25%, and 50 of 200 is 25% — neither is multiplied by a hundred a second time.
+        // Totals are ratios, so 25 of 100 and 50 of 200 remain 25%.
         let totals = r#"{"rollingUsage":{"used":25,"limit":100,"resetInSec":600},
             "weeklyUsage":{"used":50,"limit":200,"resetInSec":3600}}"#;
         let snapshot = parse(totals, at(1_800_000_000)).expect("parses");
