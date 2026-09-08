@@ -3752,7 +3752,7 @@ git commit -m "feat(cli): completions, and ship tidemarkctl in every Linux packa
 - Modify: `AGENTS.md`
 - Modify: `crates/tidemark-ipc/AGENTS.md` (created in Task 1)
 
-- [ ] **Step 1: Write the README section**
+- [x] **Step 1: Write the README section**
 
 In `README.md`, after the "Getting started" section, add:
 
@@ -3802,7 +3802,7 @@ and in your stylesheet, the classes it sets — `ok`, `warning`, `danger` at the
 `history`.
 ````
 
-- [ ] **Step 2: Update the architecture record**
+- [x] **Step 2: Update the architecture record**
 
 In `CONTEXT.md` § Architecture, the crate-layout paragraph currently opens with "Four
 crates, not three." Replace that sentence and add the two rows to its table. The new
@@ -3854,7 +3854,7 @@ endpoint discovery lives in the window's own reconnect module. The binary still 
 there; it is packaged only on Linux.
 ```
 
-- [ ] **Step 3: Write the crate AGENTS files**
+- [x] **Step 3: Write the crate AGENTS files**
 
 `crates/tidemark-ipc/AGENTS.md` and `crates/tidemark-cli/AGENTS.md`, following the shape of
 `crates/tidemark-types/AGENTS.md`: an OVERVIEW line, a WHERE TO LOOK table, CONVENTIONS and
@@ -3867,27 +3867,43 @@ ANTI-PATTERNS. The anti-patterns that matter, stated plainly:
   `json` and `waybar` shapes and the exit codes are a published contract — add keys, never
   rename or remove them.
 
-- [ ] **Step 4: Update the root knowledge base**
+- [x] **Step 4: Update the root knowledge base**
 
 In the root `AGENTS.md`: add `tidemark-ipc` and `tidemark-cli` to the STRUCTURE block, one
 row each to WHERE TO LOOK (`Change the CLI` → `crates/tidemark-cli/`; `Change the D-Bus
 proxy` → `crates/tidemark-ipc/src/lib.rs`), and `tidemarkctl usage --format json` to
 COMMANDS.
 
-- [ ] **Step 5: Verify the documentation against the binary**
+- [x] **Step 5: Verify the documentation against the binary**
 
 Run every command block in the new README section verbatim against the live daemon, and the
 Waybar snippet in a real Waybar if one is running.
 Expected: each works as written. A documented command that does not run is worse than an
 undocumented one.
 
-- [ ] **Step 6: Full gate and commit**
+Verified with `target/release/tidemarkctl` on the active user daemon. `usage` printed the
+live account view; JSON parsed with an `accounts` array; the documented weekly guard took
+the unjudgeable path and exited `69`; `watch` opened with `snapshot`; and
+`watch --format waybar` emitted an object whose `class` was an array. No Waybar process was
+running, so there was no live panel in which to install the snippet.
+
+`ZAI_API_KEY` was not set. The live `zai/default` credential was deliberately not
+overwritten: empty stdin exited `64` before a daemon call, and
+`cargo test -p tidemark-cli --test storing_a_secret -- --nocapture` passed all three tests,
+including that a file-provided key reaches the fake daemon and is never printed. Completion
+generation was verified without creating `~/.zfunc/_tidemarkctl`.
+
+- [x] **Step 6: Full gate and commit**
 
 ```bash
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && ./scripts/check-layering.sh
 git add README.md CONTEXT.md AGENTS.md crates/tidemark-cli/AGENTS.md crates/tidemark-ipc/AGENTS.md
 git commit -m "docs: tidemarkctl, and the contract it publishes"
 ```
+
+Committed as `e507b52`. Before the commit: `cargo fmt --check`, workspace clippy with
+`-D warnings`, 1527 tests across 23 suites, and the layering check all passed. The commit
+also updates the stale future-CLI comment in `scripts/check-layering.sh`.
 
 ---
 
