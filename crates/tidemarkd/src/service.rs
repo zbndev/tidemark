@@ -4070,6 +4070,7 @@ mod tests {
             used_percent: 42.0,
             resets_at: None,
             length_secs: Some(18_000),
+            blocked_by: None,
         }];
         let (daemon, _secrets, mut commands) = daemon_over(vec![zai]).await;
         let daemon = Arc::new(daemon);

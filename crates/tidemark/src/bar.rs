@@ -38,6 +38,8 @@ const CLASS_BAR: &str = "quota-bar";
 const CLASS_WARNING: &str = "quota-warning";
 /// Added at [`DANGER_AT`].
 const CLASS_DANGER: &str = "quota-danger";
+/// Standard symbolic padlock centered over a quota that a full parent window blocks.
+const LOCK_ICON: &str = "changes-prevent-symbolic";
 
 /// How loud the fill is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +61,10 @@ pub fn tone(used_percent: f64) -> Tone {
     } else {
         Tone::Normal
     }
+}
+
+fn lock_icon(blocked: bool) -> Option<&'static str> {
+    blocked.then_some(LOCK_ICON)
 }
 
 /// Where the ink goes, in widget coordinates.
@@ -97,7 +103,9 @@ struct Reading {
 /// remaining window, and updates them in place for the life of the card.
 #[derive(Debug, Clone)]
 pub struct QuotaBar {
+    overlay: gtk::Overlay,
     area: gtk::DrawingArea,
+    lock: gtk::Image,
     reading: Rc<Cell<Reading>>,
 }
 
@@ -110,6 +118,16 @@ impl QuotaBar {
             .css_classes([CLASS_BAR])
             .build();
         let reading = Rc::new(Cell::new(Reading::default()));
+        let lock = gtk::Image::builder()
+            .icon_name(LOCK_ICON)
+            .pixel_size(16)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&area));
+        overlay.add_overlay(&lock);
 
         area.set_draw_func({
             let reading = Rc::clone(&reading);
@@ -124,12 +142,17 @@ impl QuotaBar {
             }
         });
 
-        Self { area, reading }
+        Self {
+            overlay,
+            area,
+            lock,
+            reading,
+        }
     }
 
     /// The widget to pack.
-    pub fn widget(&self) -> &gtk::DrawingArea {
-        &self.area
+    pub fn widget(&self) -> &gtk::Overlay {
+        &self.overlay
     }
 
     /// Shows a reading. `pace` is [`tidemark_types::Window::pace`] — `None` whenever the
@@ -148,6 +171,18 @@ impl QuotaBar {
         }
 
         self.area.queue_draw();
+    }
+
+    /// Dims an unavailable quota while keeping its padlock legible over the bar.
+    pub fn set_blocked(&self, blocked: bool) {
+        self.area.set_opacity(if blocked { 0.5 } else { 1.0 });
+        match lock_icon(blocked) {
+            Some(icon) => {
+                self.lock.set_icon_name(Some(icon));
+                self.lock.set_visible(true);
+            }
+            None => self.lock.set_visible(false),
+        }
     }
 }
 
@@ -221,6 +256,12 @@ mod tests {
 
     const WIDTH: f64 = 200.0;
     const HEIGHT: f64 = 12.0;
+
+    #[test]
+    fn only_a_blocked_bar_selects_the_lock_icon() {
+        assert_eq!(lock_icon(false), None);
+        assert_eq!(lock_icon(true), Some("changes-prevent-symbolic"));
+    }
 
     fn at(used: f64, pace: Option<f64>) -> Geometry {
         geometry(WIDTH, HEIGHT, used, pace)
