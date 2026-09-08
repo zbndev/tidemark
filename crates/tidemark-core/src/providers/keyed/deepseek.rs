@@ -73,9 +73,9 @@ impl Balance {
         if self.currency == "CNY" { "¥" } else { "$" }
     }
 
-    /// An amount in this currency, to the cent, the way the source formats it.
+    /// An amount in this currency, retaining up to four meaningful fraction digits.
     fn amount(&self, value: f64) -> String {
-        format!("{}{value:.2}", self.symbol())
+        super::currency_amount(self.symbol(), value)
     }
 }
 
@@ -128,7 +128,7 @@ pub fn parse_for_account(
         None => vec![
             DetailRow {
                 label: "Balance".to_owned(),
-                value: "$0.00".to_owned(),
+                value: super::currency_amount("$", 0.0),
             },
             DetailRow {
                 label: "Status".to_owned(),
@@ -215,7 +215,7 @@ mod tests {
     }"#;
 
     /// Recorded by CodexBar, same file — "prefers positive CNY balance over empty USD
-    /// balance". Its own test asserts the CNY row wins and the card says `¥100.00`.
+    /// balance". Its own test asserts the CNY row wins; the fixture carries `¥100.00`.
     const EMPTY_USD_BESIDE_FUNDED_CNY: &str = r#"{
       "is_available": true,
       "balance_infos": [
@@ -258,9 +258,9 @@ mod tests {
         assert_eq!(
             rows(&snapshot),
             [
-                ("Balance".to_owned(), "$50.00".to_owned()),
-                ("Paid".to_owned(), "$40.00".to_owned()),
-                ("Granted".to_owned(), "$10.00".to_owned()),
+                ("Balance".to_owned(), "$50".to_owned()),
+                ("Paid".to_owned(), "$40".to_owned()),
+                ("Granted".to_owned(), "$10".to_owned()),
             ]
         );
         assert_eq!(snapshot.provider.as_str(), PROVIDER_ID);
@@ -272,9 +272,9 @@ mod tests {
         assert_eq!(
             rows(&snapshot),
             [
-                ("Balance".to_owned(), "¥100.00".to_owned()),
-                ("Paid".to_owned(), "¥100.00".to_owned()),
-                ("Granted".to_owned(), "¥0.00".to_owned()),
+                ("Balance".to_owned(), "¥100".to_owned()),
+                ("Paid".to_owned(), "¥100".to_owned()),
+                ("Granted".to_owned(), "¥0".to_owned()),
             ],
             "an empty USD row must not hide money in another currency"
         );
@@ -286,7 +286,7 @@ mod tests {
             {"currency":"USD","total_balance":"20.00","granted_balance":"5.00",
              "topped_up_balance":"15.00"}]}"#;
         let snapshot = parse(both, at(1_800_000_000)).expect("parses");
-        assert_eq!(rows(&snapshot)[0].1, "$20.00");
+        assert_eq!(rows(&snapshot)[0].1, "$20");
     }
 
     #[test]
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(
             rows(&snapshot),
             [
-                ("Balance".to_owned(), "$0.00".to_owned()),
+                ("Balance".to_owned(), "$0".to_owned()),
                 (
                     "Status".to_owned(),
                     "Add credits at platform.deepseek.com".to_owned()
@@ -312,7 +312,7 @@ mod tests {
         // with nothing in it, not an unreadable response.
         let none = r#"{"is_available":true,"balance_infos":[]}"#;
         let snapshot = parse(none, at(1_800_000_000)).expect("parses");
-        assert_eq!(rows(&snapshot)[0].1, "$0.00");
+        assert_eq!(rows(&snapshot)[0].1, "$0");
         assert_eq!(rows(&snapshot)[1].0, "Status");
         assert!(snapshot.windows.is_empty());
     }
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(
             rows(&snapshot),
             [
-                ("Balance".to_owned(), "$5.00".to_owned()),
+                ("Balance".to_owned(), "$5".to_owned()),
                 ("Status".to_owned(), "Unavailable for API calls".to_owned()),
             ]
         );
@@ -365,7 +365,7 @@ mod tests {
             "total_balance":"1.50","granted_balance":"0.00","topped_up_balance":"1.50",
             "frozen_balance":"9.00"}]}"#;
         let snapshot = parse(body, at(1_800_000_000)).expect("parses");
-        assert_eq!(rows(&snapshot)[0].1, "$1.50");
+        assert_eq!(rows(&snapshot)[0].1, "$1.5");
     }
 
     #[test]
