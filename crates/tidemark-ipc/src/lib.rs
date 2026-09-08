@@ -89,7 +89,7 @@ pub trait Daemon {
     /// Inspects secret-free local authentication candidates for one account.
     fn get_auth_sources(&self, provider: &str, account: &str) -> zbus::Result<Vec<AuthCandidate>>;
 
-    /// Revalidates and stores one local authentication selection.
+    /// Validates and stores one explicit authentication selection.
     fn select_auth_source(
         &self,
         provider: &str,

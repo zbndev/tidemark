@@ -1,16 +1,16 @@
 # tidemarkctl — the command-line consumer of the daemon
 
 **Date:** 2026-09-07
-**Status:** approved design, not yet implemented
+**Status:** implemented; UX revised 2026-09-08
 **Branch:** `feat/cli`
 
 ## Why
 
-`tidemarkd` publishes everything it knows on the session bus, and the interface was
-shaped for a third consumer from the start: `tidemark-types/src/lib.rs`, `wire.rs` and
-`tidemarkd/src/service.rs` all say in their own comments that a CLI and a Waybar module
-were assumed while the dictionaries were designed. Nothing consumes it that way yet, so
-today the only clients are the GTK window and `busctl`.
+`tidemarkd` publishes everything it knows on the session bus, and the interface was shaped
+for a third consumer from the start: `tidemark-types/src/lib.rs`, `wire.rs` and
+`tidemarkd/src/service.rs` all assumed a CLI and a Waybar module while their dictionaries
+were designed. `tidemarkctl` is that consumer; scripts and panel plugins no longer need to
+generate a D-Bus proxy.
 
 Two things follow from shipping the CLI:
 
@@ -67,21 +67,35 @@ usage    [--provider P] [--account A] [--format text|json|waybar]
 guard    --min-remaining N [--window KEY | --any] [--provider P] [--account A]
 watch    [--provider P] [--format json|waybar]
 refresh  [P]
-provider catalog | list | add P | rm P A | order P...
-account  add P A | rm P A | rename P A NEW | order P A...
-auth     set-key P A [--key-file PATH] | set-session P A [--key-file PATH]
-         sign-out P A | login P A | cancel-login P A | sources P A
-         select P A --mode M [--candidate ID]
-option   set P A NAME VALUE
-notify   set P A WINDOW on|off
+provider catalog | list | add P | rm P [--account A] | order P...
+account  add P A | rm P [--account A] | rename P NEW [--account A] | order P A...
+auth     set-key P [--account A] [--key-file PATH]
+         set-session P [--account A] [--key-file PATH]
+         sign-out P [--account A] | login P [--account A]
+         cancel-login P [--account A] | sources P [--account A]
+         select P [--account A] --mode M [--candidate ID]
+option   P NAME VALUE [--account A]
+notify   P WINDOW on|off [--account A]
 config   show | proxy MODE [HOST PORT] | refresh auto|manual [--minutes N]
          retention R | theme T | startup M | release-check on|off | minimize-on-close on|off
-history  segment P A WINDOW | clear
+history  segment P WINDOW [--account A] | clear
 data
 update
 version
 completions bash|zsh|fish
 ```
+
+On commands that target one existing account, `--account` defaults to `default`. It stays
+required where it is the value being created (`account add`) or part of a complete
+permutation (`account order`). `usage`, `guard` and `watch` are collection commands:
+omitting their account filter continues to select every matching account for panel and
+script integrations.
+
+Adding Claude, Codex or Antigravity stores the explicit `oauth` source before the daemon's
+first credential probe. `provider add codex` therefore creates a `no-credential` account
+until `auth login codex` succeeds; it never silently reads `~/.codex/auth.json`.
+`auth select codex --mode cli` opts into that file. Existing configurations with no stored
+source retain the legacy `Auto` behavior and are not migrated.
 
 `RequestActivate` is deliberately absent: it is the second-instance path that asks a
 running window to come forward, and a CLI has no window to raise.

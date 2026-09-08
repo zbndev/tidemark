@@ -299,10 +299,41 @@ pub fn account(
     secrets: &Arc<dyn Secrets>,
     config: &Config,
 ) -> Result<Option<Account>, ProviderError> {
+    account_with_source(provider, account, secrets, config, None)
+}
+
+/// Builds an account with a source chosen before its configuration is durable.
+pub(crate) fn account_with_source(
+    provider: &str,
+    account: &AccountId,
+    secrets: &Arc<dyn Secrets>,
+    config: &Config,
+    source: Option<Source>,
+) -> Result<Option<Account>, ProviderError> {
+    let mut published_options = options(provider, config);
+    if let Some(source) = source
+        && let Some(option) = published_options
+            .iter_mut()
+            .find(|option| option.name == AUTH_SOURCE)
+    {
+        option.value = source.as_value().to_owned();
+    }
     let account = match provider {
-        antigravity::PROVIDER_ID => Some(antigravity_account(account, secrets, config)?),
-        claude::PROVIDER_ID => Some(claude_account(account, secrets, config)?),
-        codex::PROVIDER_ID => Some(codex_account(account, secrets, config)?),
+        antigravity::PROVIDER_ID => Some(antigravity_account(
+            account,
+            secrets,
+            source.unwrap_or_else(|| source_for_account(provider, account, config)),
+        )?),
+        claude::PROVIDER_ID => Some(claude_account(
+            account,
+            secrets,
+            source.unwrap_or_else(|| source_for_account(provider, account, config)),
+        )?),
+        codex::PROVIDER_ID => Some(codex_account(
+            account,
+            secrets,
+            source.unwrap_or_else(|| source_for_account(provider, account, config)),
+        )?),
         other => keyed::CATALOG
             .iter()
             .find(|spec| spec.id == other)
@@ -316,7 +347,7 @@ pub fn account(
     };
     Ok(account.map(|account| {
         account
-            .with_options(options(provider, config))
+            .with_options(published_options)
             .with_auth_selection(browser_auth_selection(provider, config))
             .with_notify(notify(provider, config))
     }))
@@ -582,6 +613,14 @@ fn source_value(provider: &str, config: &Config) -> Source {
     Source::from_value(config.option(provider, AUTH_SOURCE))
 }
 
+/// A newly configured OAuth provider starts pinned to Tidemark's own login.
+///
+/// Existing providers without a stored choice keep [`Source::Auto`] through
+/// [`source_for_account`]; this value is only used while adding a provider.
+pub(crate) fn source_for_new_account(provider: &str) -> Option<Source> {
+    oauth_entry(provider).map(|_| Source::OAuth)
+}
+
 /// Extra configured accounts have no vendor CLI file, so they always use Tidemark's login.
 pub(crate) fn source_for_account(provider: &str, account: &AccountId, config: &Config) -> Source {
     if account.as_str() == "default" {
@@ -708,9 +747,8 @@ fn build_antigravity(
 fn antigravity_account(
     account: &AccountId,
     secrets: &Arc<dyn Secrets>,
-    config: &Config,
+    source: Source,
 ) -> Result<Account, ProviderError> {
-    let source = source_for_account(antigravity::PROVIDER_ID, account, config);
     let account_id = account.clone();
     Ok(Account::with_client(Arc::new(build_antigravity(
         account_id.clone(),
@@ -745,9 +783,8 @@ fn antigravity_account(
 fn claude_account(
     account: &AccountId,
     secrets: &Arc<dyn Secrets>,
-    config: &Config,
+    source: Source,
 ) -> Result<Account, ProviderError> {
-    let source = source_for_account(claude::PROVIDER_ID, account, config);
     let account_id = account.clone();
     Ok(Account::with_client(Arc::new(claude::Claude::new(
         account_id.clone(),
@@ -777,9 +814,8 @@ fn claude_account(
 fn codex_account(
     account: &AccountId,
     secrets: &Arc<dyn Secrets>,
-    config: &Config,
+    source: Source,
 ) -> Result<Account, ProviderError> {
-    let source = source_for_account(codex::PROVIDER_ID, account, config);
     let account_id = account.clone();
     Ok(Account::with_client(Arc::new(codex::Codex::new(
         account_id.clone(),
@@ -992,6 +1028,18 @@ mod tests {
         assert_eq!(
             source_for_account(claude::PROVIDER_ID, &AccountId::new("work"), &config),
             Source::OAuth
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_existing_default_account_without_a_source_keeps_legacy_auto_selection() {
+        let path = scratch_config("codex-legacy-source", "providers = [\"codex\"]\n");
+        let config = Config::at(path.clone()).expect("config reads");
+
+        assert_eq!(
+            source_for_account(codex::PROVIDER_ID, &AccountId::default(), &config),
+            Source::Auto
         );
         let _ = std::fs::remove_file(path);
     }

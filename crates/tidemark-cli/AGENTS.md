@@ -25,6 +25,11 @@
 - Every published value passes through `format::payload`: `SerializeDict` renders `{"signature", "value"}` under `serde_json`, and events and snapshots must peel identically.
 - `watch` opens with a `snapshot`, prints `waiting` when the daemon leaves the bus, and re-reads a fresh `snapshot` after every reconnect; lines are flushed one at a time because a pipe is block-buffered.
 - Account order is the daemon's published order — the user's — and is never re-sorted here.
+- Commands targeting one existing account expose `--account` with `default` as the
+  default. `usage`, `guard` and `watch` keep omission as an all-account filter; `account
+  add` and `account order` keep explicit ids because those ids are the operation's value.
+- `auth select --mode oauth|cli` chooses the static source of a dual-source provider;
+  dynamic browser/profile choices still use the mode and candidate ids from `auth sources`.
 - `zbus` without `p2p`: the CLI is a session-bus client. Windows compiles the crate but packages nothing.
 
 ## ANTI-PATTERNS

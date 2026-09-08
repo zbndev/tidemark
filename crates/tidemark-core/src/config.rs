@@ -552,11 +552,31 @@ impl Config {
 
     /// Adds a provider to the configured set and normalizes any existing duplicates.
     pub fn add_provider(&mut self, provider: &str) -> Result<bool, ConfigError> {
+        self.add_provider_with_initial_option(provider, None)
+    }
+
+    /// Adds a provider and one initial setting in the same durable write.
+    pub fn add_provider_with_option(
+        &mut self,
+        provider: &str,
+        name: &str,
+        setting: &str,
+    ) -> Result<bool, ConfigError> {
+        self.add_provider_with_initial_option(provider, Some((name, setting)))
+    }
+
+    fn add_provider_with_initial_option(
+        &mut self,
+        provider: &str,
+        option: Option<(&str, &str)>,
+    ) -> Result<bool, ConfigError> {
         let normalized = self.normalize_providers(None)?;
         let already_configured = self
             .providers()?
             .iter()
             .any(|configured| configured == provider);
+        let option_changed =
+            option.is_some_and(|(name, setting)| self.option(provider, name) != Some(setting));
         let item = self
             .document
             .entry(PROVIDERS_KEY)
@@ -570,7 +590,10 @@ impl Config {
         if !already_configured {
             push_provider(array, provider);
         }
-        if normalized || !already_configured {
+        if let Some((name, setting)) = option.filter(|_| option_changed) {
+            self.set_option_value(provider, name, setting)?;
+        }
+        if normalized || !already_configured || option_changed {
             self.write()?;
         }
         Ok(!already_configured)
@@ -685,6 +708,16 @@ impl Config {
         setting: &str,
     ) -> Result<(), ConfigError> {
         self.normalize_providers(None)?;
+        self.set_option_value(provider, name, setting)?;
+        self.write()
+    }
+
+    fn set_option_value(
+        &mut self,
+        provider: &str,
+        name: &str,
+        setting: &str,
+    ) -> Result<(), ConfigError> {
         let providers = self
             .document
             .entry(PROVIDER_TABLE)
@@ -705,7 +738,7 @@ impl Config {
                 table: format!("{PROVIDER_TABLE}.{provider}"),
             })?;
         table.insert(name, value(setting));
-        self.write()
+        Ok(())
     }
 
     /// Sets one provider's ordered account list and writes the file.

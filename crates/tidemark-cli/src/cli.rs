@@ -45,6 +45,8 @@ pub enum Command {
     /// One of a provider's own settings.
     Option {
         provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
         account: String,
         name: String,
         value: String,
@@ -52,6 +54,8 @@ pub enum Command {
     /// Notifications for one window of one account.
     Notify {
         provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
         account: String,
         window: String,
         enabled: Switch,
@@ -133,6 +137,8 @@ pub enum HistoryCommand {
     /// The stored points of one window's current segment, oldest first.
     Segment {
         provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
         account: String,
         window: String,
     },
@@ -148,6 +154,8 @@ pub enum AuthCommand {
     /// Store an API key. The key is read from stdin, or from --key-file.
     SetKey {
         provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
         account: String,
         /// Read the key from this file instead of stdin.
         #[arg(long)]
@@ -156,24 +164,48 @@ pub enum AuthCommand {
     /// Store a browser session header. Read like a key.
     SetSession {
         provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
         account: String,
         /// Read the session from this file instead of stdin.
         #[arg(long)]
         key_file: Option<std::path::PathBuf>,
     },
     /// Remove whatever credential Tidemark holds for an account.
-    SignOut { provider: String, account: String },
+    SignOut {
+        provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
     /// Print the authorize URL, then wait for the browser to come back.
-    Login { provider: String, account: String },
+    Login {
+        provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
     /// Abandon a login that is waiting.
-    CancelLogin { provider: String, account: String },
-    /// The local authentication sources the daemon can see, without their credentials.
-    Sources { provider: String, account: String },
-    /// Record which local source this account uses.
+    CancelLogin {
+        provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
+    /// The dynamic local authentication sources the daemon can see, without credentials.
+    Sources {
+        provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
+    /// Record which authentication source this account uses.
     Select {
         provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
         account: String,
-        /// The mode value from `auth sources`.
+        /// `oauth` or `cli`, or a dynamic mode value from `auth sources`.
         #[arg(long)]
         mode: String,
         /// The candidate id, for a mode that offers a choice.
@@ -191,7 +223,12 @@ pub enum ProviderCommand {
     /// Configure a provider, creating its default account.
     Add { provider: String },
     /// Remove one configured account, its credentials and its card.
-    Rm { provider: String, account: String },
+    Rm {
+        provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
     /// Rewrite the order the cards go in. Must name every configured provider.
     Order { providers: Vec<String> },
 }
@@ -201,10 +238,17 @@ pub enum AccountCommand {
     /// Add one more account to a provider the config already has.
     Add { provider: String, account: String },
     /// Remove one account. The same call as `provider rm`.
-    Rm { provider: String, account: String },
+    Rm {
+        provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
     /// Rename an account, carrying its credential and history to the new id.
     Rename {
         provider: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
         account: String,
         new: String,
     },
@@ -286,5 +330,154 @@ mod tests {
     fn version_takes_no_arguments() {
         let cli = Cli::parse_from(["tidemarkctl", "version"]);
         assert!(matches!(cli.command, Command::Version));
+    }
+
+    #[test]
+    fn provider_and_account_mutations_default_to_the_default_account() {
+        let provider = Cli::try_parse_from(["tidemarkctl", "provider", "rm", "codex"])
+            .expect("provider removal defaults the account");
+        assert!(matches!(
+            provider.command,
+            Command::Provider {
+                command: ProviderCommand::Rm {
+                    provider,
+                    account
+                }
+            } if provider == "codex" && account == "default"
+        ));
+
+        let remove = Cli::try_parse_from(["tidemarkctl", "account", "rm", "codex"])
+            .expect("account removal defaults the account");
+        assert!(matches!(
+            remove.command,
+            Command::Account {
+                command: AccountCommand::Rm {
+                    provider,
+                    account
+                }
+            } if provider == "codex" && account == "default"
+        ));
+
+        let rename = Cli::try_parse_from(["tidemarkctl", "account", "rename", "codex", "personal"])
+            .expect("account rename defaults the old account");
+        assert!(matches!(
+            rename.command,
+            Command::Account {
+                command: AccountCommand::Rename {
+                    provider,
+                    account,
+                    new
+                }
+            } if provider == "codex" && account == "default" && new == "personal"
+        ));
+    }
+
+    #[test]
+    fn authentication_commands_default_to_the_default_account() {
+        for verb in ["sign-out", "login", "cancel-login", "sources"] {
+            let parsed = Cli::try_parse_from(["tidemarkctl", "auth", verb, "codex"])
+                .unwrap_or_else(|error| panic!("{verb} should default the account: {error}"));
+            let account = match parsed.command {
+                Command::Auth {
+                    command:
+                        AuthCommand::SignOut { account, .. }
+                        | AuthCommand::Login { account, .. }
+                        | AuthCommand::CancelLogin { account, .. }
+                        | AuthCommand::Sources { account, .. },
+                } => account,
+                other => panic!("unexpected command: {other:?}"),
+            };
+            assert_eq!(account, "default", "{verb}");
+        }
+
+        let key = Cli::try_parse_from(["tidemarkctl", "auth", "set-key", "zai"])
+            .expect("set-key defaults the account");
+        assert!(matches!(
+            key.command,
+            Command::Auth {
+                command: AuthCommand::SetKey { account, .. }
+            } if account == "default"
+        ));
+
+        let session = Cli::try_parse_from(["tidemarkctl", "auth", "set-session", "t3chat"])
+            .expect("set-session defaults the account");
+        assert!(matches!(
+            session.command,
+            Command::Auth {
+                command: AuthCommand::SetSession { account, .. }
+            } if account == "default"
+        ));
+
+        let select =
+            Cli::try_parse_from(["tidemarkctl", "auth", "select", "codex", "--mode", "oauth"])
+                .expect("select defaults the account");
+        assert!(matches!(
+            select.command,
+            Command::Auth {
+                command: AuthCommand::Select { account, .. }
+            } if account == "default"
+        ));
+    }
+
+    #[test]
+    fn option_notification_and_history_default_to_the_default_account() {
+        let option = Cli::try_parse_from(["tidemarkctl", "option", "zai", "region", "china"])
+            .expect("option defaults the account");
+        assert!(matches!(
+            option.command,
+            Command::Option { account, .. } if account == "default"
+        ));
+
+        let notify = Cli::try_parse_from(["tidemarkctl", "notify", "codex", "w604800", "on"])
+            .expect("notify defaults the account");
+        assert!(matches!(
+            notify.command,
+            Command::Notify { account, .. } if account == "default"
+        ));
+
+        let history =
+            Cli::try_parse_from(["tidemarkctl", "history", "segment", "codex", "w604800"])
+                .expect("history defaults the account");
+        assert!(matches!(
+            history.command,
+            Command::History {
+                command: HistoryCommand::Segment { account, .. }
+            } if account == "default"
+        ));
+    }
+
+    #[test]
+    fn an_explicit_account_overrides_the_default() {
+        let parsed =
+            Cli::try_parse_from(["tidemarkctl", "auth", "login", "codex", "--account", "work"])
+                .expect("an account override is accepted");
+        assert!(matches!(
+            parsed.command,
+            Command::Auth {
+                command: AuthCommand::Login { account, .. }
+            } if account == "work"
+        ));
+    }
+
+    #[test]
+    fn aggregate_filters_still_include_every_account_by_default() {
+        let usage = Cli::parse_from(["tidemarkctl", "usage", "--provider", "codex"]);
+        assert!(matches!(
+            usage.command,
+            Command::Usage(Usage { account: None, .. })
+        ));
+
+        let guard = Cli::parse_from([
+            "tidemarkctl",
+            "guard",
+            "--min-remaining",
+            "20",
+            "--provider",
+            "codex",
+        ]);
+        assert!(matches!(
+            guard.command,
+            Command::Guard(Guard { account: None, .. })
+        ));
     }
 }

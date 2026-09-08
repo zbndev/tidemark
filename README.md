@@ -109,7 +109,8 @@ quota*.
 Keys are stored in your desktop keyring, never in a config file. Claude, Codex and
 Antigravity can sign in through Tidemark, or reuse the login their own CLI already has.
 
-Removing a provider deletes its credentials and its card but keeps the quota history.
+Removing a provider deletes its Tidemark-owned credentials and its card but keeps the quota
+history. A vendor CLI's own credential file remains owned by that CLI and is never removed.
 
 ## From the command line
 
@@ -129,7 +130,22 @@ trustworthy reading to judge — a rejected credential never answers "safe".
 Secrets are read from stdin, never from the command line:
 
 ```bash
-printf '%s' "$ZAI_API_KEY" | tidemarkctl auth set-key zai default
+printf '%s' "$ZAI_API_KEY" | tidemarkctl auth set-key zai
+```
+
+Commands that act on one existing account use `default` unless `--account work` says
+otherwise. Aggregate commands keep their broader meaning: `usage`, `guard` and `watch`
+still include every matching account when no account filter is given.
+
+A newly added Claude, Codex or Antigravity account starts pinned to Tidemark OAuth; adding
+it never silently adopts the vendor CLI's login:
+
+```bash
+tidemarkctl provider add codex
+tidemarkctl auth login codex
+
+# Or explicitly use the Codex CLI login that already exists:
+tidemarkctl auth select codex --mode cli
 ```
 
 A Waybar module is two files. In `~/.config/waybar/config.jsonc`:

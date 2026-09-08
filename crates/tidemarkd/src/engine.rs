@@ -542,17 +542,29 @@ impl Engine {
             return Ok(());
         }
 
-        let Some(mut account) =
-            crate::registry::account(provider, &AccountId::default(), &self.secrets, &config)
-                .map_err(|error| error.to_string())?
+        let source = crate::registry::source_for_new_account(provider);
+        let Some(mut account) = crate::registry::account_with_source(
+            provider,
+            &AccountId::default(),
+            &self.secrets,
+            &config,
+            source,
+        )
+        .map_err(|error| error.to_string())?
         else {
             return Err(format!(
                 "provider {provider} is not supported by this build"
             ));
         };
-        config
-            .add_provider(provider)
-            .map_err(|error| error.to_string())?;
+        match source {
+            Some(source) => config.add_provider_with_option(
+                provider,
+                crate::registry::AUTH_SOURCE,
+                source.as_value(),
+            ),
+            None => config.add_provider(provider),
+        }
+        .map_err(|error| error.to_string())?;
 
         account.due = Instant::now();
         self.accounts.push(account);
@@ -1193,7 +1205,7 @@ impl Engine {
         Ok(sources)
     }
 
-    /// Revalidates, then atomically persists one selected dynamic local source.
+    /// Validates and atomically persists one selected authentication source.
     pub async fn select_auth_source(
         &mut self,
         provider: &str,
@@ -1205,6 +1217,25 @@ impl Engine {
         }) else {
             return Err(format!("account {provider}/{account} is not configured"));
         };
+        if crate::registry::source_for_new_account(provider).is_some() {
+            if account != AccountId::default().as_str() {
+                return Err(
+                    "the local credential source can only be selected for the default account"
+                        .to_owned(),
+                );
+            }
+            if selection.candidate.is_some() {
+                return Err("an OAuth or CLI source does not take a candidate".to_owned());
+            }
+            return self
+                .set_option(
+                    provider,
+                    account,
+                    crate::registry::AUTH_SOURCE,
+                    &selection.mode,
+                )
+                .await;
+        }
         // A pasted session is stored, not discovered: there are no candidates to resolve
         // it against, and nothing can prove it until the client is rebuilt around it. The
         // poll this schedules is what asks — the same contract `SetKey` has.
@@ -2701,6 +2732,88 @@ mod tests {
         assert!(matches!(publication, Publication::Changed(status) if status.provider == "kimi"));
         let config = Config::at(harness.config_path.clone()).expect("parses");
         assert_eq!(config.providers().expect("readable"), ["kimi"]);
+    }
+
+    #[tokio::test]
+    async fn adding_an_oauth_provider_pins_tidemark_login_before_the_first_probe() {
+        let mut harness = Harness::empty("runtime-add-oauth").await;
+        harness.engine.add_provider("codex").await.expect("added");
+
+        let account = &harness.engine.accounts()[0];
+        assert_eq!(account.source, tidemark_core::providers::Source::OAuth);
+        assert_eq!(account.status().auth_source.as_deref(), Some("oauth"));
+        let source = account
+            .status()
+            .options
+            .iter()
+            .find(|option| option.name == crate::registry::AUTH_SOURCE)
+            .expect("the credential source is published");
+        assert_eq!(source.value, "oauth");
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(
+            config.option("codex", crate::registry::AUTH_SOURCE),
+            Some("oauth")
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_select_switches_the_default_oauth_account_to_the_cli_source() {
+        let mut harness = Harness::empty("runtime-select-oauth-source").await;
+        harness.engine.add_provider("codex").await.expect("added");
+
+        harness
+            .engine
+            .select_auth_source(
+                "codex",
+                "default",
+                AuthSelection {
+                    mode: "cli".to_owned(),
+                    candidate: None,
+                },
+            )
+            .await
+            .expect("source selected");
+
+        assert_eq!(
+            harness.engine.accounts()[0].source,
+            tidemark_core::providers::Source::Cli
+        );
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(
+            config.option("codex", crate::registry::AUTH_SOURCE),
+            Some("cli")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_extra_oauth_account_cannot_change_the_default_accounts_source() {
+        let mut harness = Harness::empty("runtime-select-extra-oauth-source").await;
+        harness.engine.add_provider("codex").await.expect("added");
+        harness
+            .engine
+            .add_account("codex", "work")
+            .await
+            .expect("extra account added");
+
+        let error = harness
+            .engine
+            .select_auth_source(
+                "codex",
+                "work",
+                AuthSelection {
+                    mode: "cli".to_owned(),
+                    candidate: None,
+                },
+            )
+            .await
+            .expect_err("an extra account is OAuth-only");
+
+        assert!(error.contains("default account"), "{error}");
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(
+            config.option("codex", crate::registry::AUTH_SOURCE),
+            Some("oauth")
+        );
     }
 
     #[tokio::test]

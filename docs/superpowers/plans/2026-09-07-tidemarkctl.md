@@ -2490,7 +2490,11 @@ pub enum ProviderCommand {
     /// Configure a provider, creating its default account.
     Add { provider: String },
     /// Remove one configured account, its credentials and its card.
-    Rm { provider: String, account: String },
+    Rm {
+        provider: String,
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
     /// Rewrite the order the cards go in. Must name every configured provider.
     Order { providers: Vec<String> },
 }
@@ -2500,10 +2504,15 @@ pub enum AccountCommand {
     /// Add one more account to a provider the config already has.
     Add { provider: String, account: String },
     /// Remove one account. The same call as `provider rm`.
-    Rm { provider: String, account: String },
+    Rm {
+        provider: String,
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
     /// Rename an account, carrying its credential and history to the new id.
     Rename {
         provider: String,
+        #[arg(long, default_value = "default")]
         account: String,
         new: String,
     },
@@ -2755,7 +2764,7 @@ pub async fn run(proxy: &DaemonProxy<'_>, command: AccountCommand) -> Result<Exi
 58 catalog rows, 9 configured accounts, `refresh` accepted. The full mutation round trip on
 `wayfinder`, then put back exactly as found: `provider add wayfinder` → the row appears
 `unreachable` (no credential, as expected); `provider order wayfinder codex claude …` → the
-list comes back with wayfinder first; `provider rm wayfinder default` → gone, and the
+list comes back with wayfinder first; `provider rm wayfinder` → gone, and the
 original order restored.
 
 The refusals are worth recording, because they are the exit-code split working on live
@@ -2914,6 +2923,7 @@ pub enum AuthCommand {
     /// Store an API key. The key is read from stdin, or from --key-file.
     SetKey {
         provider: String,
+        #[arg(long, default_value = "default")]
         account: String,
         /// Read the key from this file instead of stdin.
         #[arg(long)]
@@ -2922,23 +2932,41 @@ pub enum AuthCommand {
     /// Store a browser session header. Read like a key.
     SetSession {
         provider: String,
+        #[arg(long, default_value = "default")]
         account: String,
         #[arg(long)]
         key_file: Option<std::path::PathBuf>,
     },
     /// Remove whatever credential Tidemark holds for an account.
-    SignOut { provider: String, account: String },
+    SignOut {
+        provider: String,
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
     /// Print the authorize URL, then wait for the browser to come back.
-    Login { provider: String, account: String },
+    Login {
+        provider: String,
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
     /// Abandon a login that is waiting.
-    CancelLogin { provider: String, account: String },
-    /// The local authentication sources the daemon can see, without their credentials.
-    Sources { provider: String, account: String },
-    /// Record which local source this account uses.
+    CancelLogin {
+        provider: String,
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
+    /// The dynamic local authentication sources the daemon can see, without credentials.
+    Sources {
+        provider: String,
+        #[arg(long, default_value = "default")]
+        account: String,
+    },
+    /// Record which authentication source this account uses.
     Select {
         provider: String,
+        #[arg(long, default_value = "default")]
         account: String,
-        /// The mode value from `auth sources`.
+        /// `oauth` or `cli`, or a dynamic mode value from `auth sources`.
         #[arg(long)]
         mode: String,
         /// The candidate id, for a mode that offers a choice.
@@ -3128,16 +3156,16 @@ it started with, and `claude` is still `ok`.
 
 ```
 provider add groq
-printf '%s' 'gsk-not-a-real-key' | auth set-key groq default   # 0
+printf '%s' 'gsk-not-a-real-key' | auth set-key groq           # 0
 provider list | grep groq   →  groq  default  Groq  credential-rejected
 usage --provider groq       →  "the credential was rejected (HTTP 401)"
-auth sign-out groq default  →  0, then the row reads no-credential
-provider rm groq default    →  0
+auth sign-out groq          →  0, then the row reads no-credential
+provider rm groq            →  0
 ```
 
-The prohibition holds: `auth set-key zai default sk-x` → clap, exit **2**,
-`unexpected argument 'sk-x' found`. There is no positional slot for a secret, and
-`--help` shows only `<PROVIDER> <ACCOUNT>`.
+The prohibition holds: `auth set-key zai sk-x` → clap, exit **2**, `unexpected argument
+'sk-x' found`. There is no positional slot for a secret, and `--help` shows only
+`<PROVIDER>` plus the optional `--account` and `--key-file`.
 
 Refusals: empty stdin → **64** `no value on stdin: pipe the key in, or pass --key-file`;
 `--key-file /tmp/nope` → **64** naming the path. Neither reached the daemon.
@@ -3145,14 +3173,14 @@ Refusals: empty stdin → **64** `no value on stdin: pipe the key in, or pass --
 `auth sources` needed a provider with a browser selector, so `t3chat` was added, read and
 removed. It printed 11 rows — `browser` with `chrome`, `chromium`, `firefox` and `zen`
 under it, each with its profiles indented one further, plus `paste` with its hint — and no
-cookie value, token or database path anywhere. `auth select t3chat default --mode browser
+cookie value, token or database path anywhere. `auth select t3chat --mode browser
 --candidate firefox` returned 0, and `usage --format json` then showed
 `{"candidate":"firefox/j7aiac5u.default-release","mode":"browser"}`: the daemon resolved
 the browser-level id to the profile leaf, which is the behaviour the GUI's dialog relies on.
 `--mode nonsense` → **70**, `the selected authentication source is not ready`.
 
-`auth login claude default` printed the authorize URL immediately — the flush before the
-blocking `AwaitLogin` works — and stayed waiting. `auth cancel-login claude default` from a
+`auth login claude` printed the authorize URL immediately — the flush before the blocking
+`AwaitLogin` works — and stayed waiting. `auth cancel-login claude` from a
 second process ended it with **70** and the daemon's own sentence, `the login was
 cancelled`. Claude's stored credential was untouched: still `ok`.
 
@@ -3190,6 +3218,7 @@ rather than by a hand-written message.
     /// One of a provider's own settings.
     Option {
         provider: String,
+        #[arg(long, default_value = "default")]
         account: String,
         name: String,
         value: String,
@@ -3197,6 +3226,7 @@ rather than by a hand-written message.
     /// Notifications for one window of one account.
     Notify {
         provider: String,
+        #[arg(long, default_value = "default")]
         account: String,
         window: String,
         #[arg(value_parser = switch)]
@@ -3272,6 +3302,7 @@ pub enum HistoryCommand {
     /// The stored points of one window's current segment, oldest first.
     Segment {
         provider: String,
+        #[arg(long, default_value = "default")]
         account: String,
         window: String,
     },
@@ -3526,9 +3557,9 @@ data          →  config and history paths, history-bytes 1203760, both keyring
 update        →  0.4.1
 config refresh manual --minutes 15   →  config show says manual / 15
 config refresh auto --minutes 1      →  back to auto / 1
-history segment claude default w18000 | tail -3  →  1788810721 87% / 1788810752 88% /
+history segment claude w18000 | tail -3          →  1788810721 87% / 1788810752 88% /
                                                     1788810985 92%
-history segment claude default w99999            →  no lines, exit 0: a window with no
+history segment claude w99999                    →  no lines, exit 0: a window with no
                                                     stored points is not an error
 ```
 
@@ -3538,22 +3569,22 @@ All three refusal layers, on live data:
 - `config proxy socks5 127.0.0.1` → **64**, `the `socks5` proxy mode needs a host and a
   port`. Never reached the bus.
 - `config theme neon` → **70**, `unknown theme "neon"`. The daemon's list, not ours.
-- `option antigravity default source nonsense` → **70**, `nonsense is not one of the values
-  source can take`.
+- `option antigravity source nonsense` → **70**, `nonsense is not one of the values source
+  can take`.
 
-`notify claude default w604800 on` then `off`: the account's `notify` array went `[]` →
-`["w604800"]` → `[]`. `option antigravity default source cli` took effect and was visible
-in the published option value.
+`notify claude w604800 on` then `off`: the account's `notify` array went `[]` →
+`["w604800"]` → `[]`. `auth select antigravity --mode cli` took effect and was visible in
+the published option value.
 
-**Two things the smoke wrote into the user's config, and how they were undone.** `option`
-pinned `[provider.antigravity] source = "cli"` where nothing had been pinned before (the
+**Two things the smoke wrote into the user's config, and how they were undone.** `auth
+select` pinned `[provider.antigravity] source = "cli"` where nothing had been pinned before (the
 published value was the `auto` sentinel, and `auto` is *not* one of the option's choices —
 there is no CLI way to unset it), and the `notify` round trip left an empty
 `[notify.claude] windows = []` section. Restored by stopping `tidemarkd`, deleting both
 stanzas from `config.toml`, and starting it again; verified afterwards that the option
 publishes `auto` with `auth_source` still `cli`, that claude's `notify` is `[]`, and that
-every other preference reads exactly as it did before. Worth knowing for later: `option`
-can pin a provider setting that no command can unpin.
+every other preference reads exactly as it did before. Worth knowing for later: selecting
+a source can pin a provider setting that no command can unpin.
 
 `history clear` was deliberately not run: it deletes every stored point, and this machine's
 history is 1.2 MB of the user's real readings. Its argument path is one proxy call with no
@@ -3775,7 +3806,7 @@ trustworthy reading to judge — a rejected credential never answers "safe".
 Secrets are read from stdin, never from the command line:
 
 ```bash
-printf '%s' "$ZAI_API_KEY" | tidemarkctl auth set-key zai default
+printf '%s' "$ZAI_API_KEY" | tidemarkctl auth set-key zai
 ```
 
 A Waybar module is two files. In `~/.config/waybar/config.jsonc`:
@@ -3906,6 +3937,20 @@ Committed as `e507b52`. Before the commit: `cargo fmt --check`, workspace clippy
 also updates the stale future-CLI comment in `scripts/check-layering.sh`.
 
 ---
+
+## Post-implementation UX correction — 2026-09-08
+
+- [x] Single-account commands expose `--account`, defaulting to `default`; `account add`
+  and `account order` keep the identifiers they create or permute mandatory.
+- [x] `usage`, `guard` and `watch` retain aggregate semantics when no account filter is
+  supplied, preserving their plugin contract.
+- [x] A newly added OAuth-or-CLI provider persists `source = "oauth"` before its first
+  credential probe. Existing accounts with no stored source retain legacy `Auto`.
+- [x] `auth select codex --mode cli` explicitly opts the default account into the vendor
+  CLI credential; extra OAuth accounts cannot change that provider-wide choice.
+- [x] Provider removal continues to delete only Tidemark-owned secrets. The vendor CLI's
+  credential file remains outside Tidemark's ownership.
+
 
 ## Done when
 

@@ -83,10 +83,11 @@ uses is the user's choice, not a rule hidden in the daemon. It is stored as
 `[provider.<slug>] source = "oauth" | "cli"`, published with the provider so a client can
 draw it without knowing what either credential is, and drawn in the authentication group
 as a two-part control — Tidemark's own login on the left, the local program's on the right.
-**A pinned credential that is not there is `no-credential`, never a quiet fall back to the
-other one**: falling back would show quota for an account the user did not choose. An
-account whose `source` has never been set behaves exactly as it always did — the daemon
-publishes which credential that resolves to, so the control still shows the truth.
+A freshly added provider stores `source = "oauth"` before its first credential probe, so
+adding one never silently adopts a vendor CLI login; `auth select <slug> --mode cli` is the
+explicit opt-in. **A pinned credential that is not there is `no-credential`, never a quiet
+fall back to the other one**. An existing account whose `source` was never set keeps the
+legacy automatic rule, so this cutover does not switch an installed account.
 
 Codex reports `rate_limit.primary_window` / `secondary_window` — slots rather than lanes,
 each declaring its own length — plus a `code_review_rate_limit` of the same shape and named
@@ -183,6 +184,11 @@ blanking a card because one request timed out would be less honest, not more.
 `tidemarkctl` is the third client, and the reason the interface was shaped as it was.
 It generates its proxy from `tidemark-ipc`, the same crate the window uses, so a method
 that changes shape breaks the build rather than a user's panel.
+
+Commands that act on one existing account default `--account` to `default`; a named
+account stays explicit. Collection commands are deliberately different: omitting the
+filter from `usage`, `guard` or `watch` continues to mean every matching account, which is
+the shape panel plugins need.
 
 Three output formats, and two of them are contracts. `text` is for a person and may be
 reworded. `json` is an object with an `accounts` key — not a bare array, so a key can be
