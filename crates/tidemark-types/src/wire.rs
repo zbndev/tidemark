@@ -488,6 +488,12 @@ pub struct Preferences {
     pub refresh_mode: String,
     /// Minutes between polls in manual mode, 1 to 120. Ignored while the mode is `auto`.
     pub refresh_minutes: u32,
+    /// Whether the client lays out as many card columns as the window fits. Absent means
+    /// auto, so a newer client can still read an older daemon's dictionary.
+    pub columns_auto: Option<bool>,
+    /// Most card columns when [`Self::columns_auto`] is off, at least one. Absent means
+    /// three, the width the grid was built around. Ignored while the mode is `auto`.
+    pub max_columns: Option<u32>,
 }
 
 impl Preferences {
@@ -554,6 +560,13 @@ impl Preferences {
     pub fn valid_refresh_minutes(value: u32) -> bool {
         (1..=120).contains(&value)
     }
+
+    /// Whether a column ceiling is one the daemon will store. No upper bound: the window's
+    /// own width keeps the real count honest, so a ceiling beyond any display is inert
+    /// rather than wrong, while zero would collapse every row into one column by decree.
+    pub fn valid_max_columns(value: u32) -> bool {
+        value >= 1
+    }
 }
 
 impl Default for Preferences {
@@ -569,6 +582,8 @@ impl Default for Preferences {
             proxy_port: 0,
             refresh_mode: Self::REFRESH_AUTO.into(),
             refresh_minutes: 5,
+            columns_auto: Some(true),
+            max_columns: Some(3),
         }
     }
 }
@@ -1224,11 +1239,39 @@ mod tests {
             proxy_port: 1080,
             refresh_mode: "manual".into(),
             refresh_minutes: 30,
+            columns_auto: Some(false),
+            max_columns: Some(7),
         };
 
         let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
         let (decoded, _): (Preferences, _) = encoded.deserialize().expect("decodes again");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn an_older_preferences_dictionary_without_the_column_settings_still_decodes() {
+        let encoded = to_bytes(Context::new_dbus(LE, 0), &Preferences::default())
+            .expect("the current dictionary encodes");
+        let (mut old_dict, _): (HashMap<String, OwnedValue>, _) =
+            encoded.deserialize().expect("decodes as a dictionary");
+        assert!(old_dict.remove("columns_auto").is_some());
+        assert!(old_dict.remove("max_columns").is_some());
+        let old_encoded =
+            to_bytes(Context::new_dbus(LE, 0), &old_dict).expect("the old dictionary encodes");
+
+        let (decoded, _): (Preferences, _) = old_encoded.deserialize().expect("still decodes");
+        assert_eq!(decoded.columns_auto, None);
+        assert_eq!(decoded.max_columns, None);
+    }
+
+    #[test]
+    fn any_positive_column_count_is_known_and_zero_is_not() {
+        assert!(Preferences::valid_max_columns(1));
+        assert!(Preferences::valid_max_columns(999));
+        assert!(!Preferences::valid_max_columns(0));
+
+        assert_eq!(Preferences::default().columns_auto, Some(true));
+        assert_eq!(Preferences::default().max_columns, Some(3));
     }
 
     #[test]

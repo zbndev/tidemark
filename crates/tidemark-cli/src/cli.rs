@@ -120,6 +120,14 @@ pub enum ConfigCommand {
         #[arg(long)]
         minutes: Option<u32>,
     },
+    /// How many card columns the window lays out.
+    Columns {
+        /// auto or manual.
+        mode: String,
+        /// Most columns in manual mode, at least 1.
+        #[arg(long)]
+        max: Option<u32>,
+    },
     /// forever, six-months or one-year.
     Retention { retention: String },
     /// system, light or dark.
