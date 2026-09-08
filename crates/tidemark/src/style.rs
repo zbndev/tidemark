@@ -215,6 +215,18 @@ pub(crate) const STYLE: &str = "
     font-size: 1.2em;
 }
 
+/* A balance-only card treats money as its primary reading. The fraction is a little quieter
+   without losing the shared baseline, while the whole amount remains the visual anchor. */
+.quota-balance-whole {
+    font-weight: 700;
+    font-size: 2.5em;
+}
+
+.quota-balance-fraction {
+    font-weight: 700;
+    font-size: 2em;
+}
+
 /* The credential pill sits in a preferences row of its own so that it gets the full width
    of the group — a header suffix ellipsized both of its labels, and neither `Tidemark
    login` nor `Claude Code login` can be shortened without becoming a guess. A plain

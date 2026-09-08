@@ -504,6 +504,21 @@ pub fn base_url(options: &Options, name: &str, default: &str) -> Result<String, 
     Ok(raw.to_owned())
 }
 
+/// A currency amount with at most four meaningful fraction digits.
+///
+/// Provider balances can be much smaller than one cent. Four digits retain those readings
+/// without padding ordinary whole-dollar and cent values with zeroes.
+fn currency_amount(symbol: &str, value: f64) -> String {
+    let mut amount = format!("{symbol}{value:.4}");
+    while amount.ends_with('0') {
+        amount.pop();
+    }
+    if amount.ends_with('.') {
+        amount.pop();
+    }
+    amount
+}
+
 /// Strips the query string — where [`Auth::Query`] carries the credential — off every
 /// `reqwest::Error` before it can be rendered.
 ///
@@ -580,6 +595,13 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn currency_amount_keeps_up_to_four_meaningful_fraction_digits() {
+        assert_eq!(currency_amount("$", 60.0), "$60");
+        assert_eq!(currency_amount("$", 1.93), "$1.93");
+        assert_eq!(currency_amount("$", 454.542_594_979), "$454.5426");
     }
 
     fn snapshot_of(id: &str, captured_at: Timestamp) -> Snapshot {

@@ -455,10 +455,10 @@ fn labeled(label: &str, value: impl ToString) -> DetailRow {
     }
 }
 
-/// The source's currency rendering: dollars, two fraction digits, negatives clamped to
-/// zero — a negative figure is a refund in the pipeline, not money to show.
+/// Dollars with up to four meaningful fraction digits, negatives clamped to zero — a
+/// negative figure is a refund in the pipeline, not money to show.
 fn usd(value: f64) -> String {
-    format!("${:.2}", value.max(0.0))
+    super::currency_amount("$", value.max(0.0))
 }
 
 #[cfg(test)]
@@ -593,19 +593,19 @@ mod tests {
             "a remaining balance says nothing about a percentage"
         );
         assert_eq!(snapshot.details[0].title, DetailSection::BALANCE);
-        assert_eq!(row_of(&snapshot, "Remaining").value, "\u{24}60.00");
-        assert_eq!(row_of(&snapshot, "API key budget").value, "\u{24}20.00");
+        assert_eq!(row_of(&snapshot, "Remaining").value, "\u{24}60");
+        assert_eq!(row_of(&snapshot, "API key budget").value, "\u{24}20");
     }
 
     #[test]
     fn the_credits_become_three_rows() {
         let snapshot = snapshot_with(&KeyState::Data(key_data(KEY_LIMIT_USAGE)));
-        assert_eq!(row_of(&snapshot, "Remaining").value, "$60.00");
-        assert_eq!(row_of(&snapshot, "Used").value, "$40.00");
-        assert_eq!(row_of(&snapshot, "Total added").value, "$100.00");
-        assert_eq!(row_of(&snapshot, "API key budget").value, "$20.00");
-        assert_eq!(row_of(&snapshot, "API key remaining").value, "$15.00");
-        assert_eq!(row_of(&snapshot, "API key used").value, "$5.00");
+        assert_eq!(row_of(&snapshot, "Remaining").value, "$60");
+        assert_eq!(row_of(&snapshot, "Used").value, "$40");
+        assert_eq!(row_of(&snapshot, "Total added").value, "$100");
+        assert_eq!(row_of(&snapshot, "API key budget").value, "$20");
+        assert_eq!(row_of(&snapshot, "API key remaining").value, "$15");
+        assert_eq!(row_of(&snapshot, "API key used").value, "$5");
     }
 
     #[test]
@@ -622,7 +622,7 @@ mod tests {
         let snapshot = snapshot_with(&KeyState::Data(key_data(KEY_REMAINING)));
         assert_eq!(
             row_of(&snapshot, "API key remaining").value,
-            format!("{}454.54", char::from(36))
+            format!("{}454.5426", char::from(36))
         );
         assert_eq!(row_of(&snapshot, "Reset window").value, "monthly");
     }
@@ -633,7 +633,7 @@ mod tests {
             let snapshot = snapshot_with(&KeyState::Data(key_data(body)));
             assert_eq!(
                 row_of(&snapshot, "API key remaining").value,
-                format!("{}454.54", char::from(36))
+                format!("{}454.5426", char::from(36))
             );
         }
     }
@@ -643,7 +643,7 @@ mod tests {
         let snapshot = snapshot_with(&KeyState::Data(key_data(KEY_NEGATIVE_REMAINING)));
         assert_eq!(
             row_of(&snapshot, "API key remaining").value,
-            format!("{}0.00", char::from(36))
+            format!("{}0", char::from(36))
         );
     }
 
@@ -654,7 +654,7 @@ mod tests {
         assert_eq!(row_of(&snapshot, "This week").value, "$0.74");
         assert_eq!(row_of(&snapshot, "This month").value, "$4.56");
         assert_eq!(row_of(&snapshot, "Rate limit").value, "120 requests / 10s");
-        assert_eq!(row_of(&snapshot, "API key remaining").value, "$19.50");
+        assert_eq!(row_of(&snapshot, "API key remaining").value, "$19.5");
     }
 
     #[test]
@@ -662,7 +662,7 @@ mod tests {
         let snapshot = snapshot_with(&KeyState::Degraded("HTTP 500".to_owned()));
         assert_eq!(
             row_of(&snapshot, "Remaining").value,
-            format!("{}60.00", char::from(36))
+            format!("{}60", char::from(36))
         );
         assert_eq!(
             row_of(&snapshot, "API key budget").value,

@@ -161,6 +161,9 @@ pub struct Card {
     absolutes: gtk::Label,
     rows: gtk::Box,
     balance: gtk::Label,
+    balance_only: gtk::Box,
+    balance_whole: gtk::Label,
+    balance_fraction: gtk::Label,
     footer: gtk::Label,
     shown: RefCell<Shown>,
 }
@@ -329,6 +332,42 @@ impl Card {
             .css_classes(["quota-balance"])
             .build();
 
+        // A balance with no quota windows is the card's primary reading. Keep it separate
+        // from the ordinary headline row: the amount sits vertically centred at the left,
+        // with its fraction on the same baseline in quieter type and its meaning below.
+        let balance_whole = gtk::Label::builder()
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Baseline)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["numeric", "quota-balance-whole"])
+            .build();
+        let balance_fraction = gtk::Label::builder()
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Baseline)
+            .css_classes(["numeric", "quota-balance-fraction"])
+            .build();
+        let balance_amount = gtk::Box::builder()
+            .spacing(0)
+            .valign(gtk::Align::Baseline)
+            .build();
+        balance_amount.append(&balance_whole);
+        balance_amount.append(&balance_fraction);
+        let balance_caption = gtk::Label::builder()
+            .label(DetailSection::BALANCE)
+            .halign(gtk::Align::Start)
+            .css_classes(["dim-label"])
+            .build();
+        let balance_only = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(0)
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Center)
+            .vexpand(true)
+            .build();
+        balance_only.append(&balance_amount);
+        balance_only.append(&balance_caption);
+        balance_only.set_visible(false);
+
         // Pinned to the bottom so that cards sharing a row line their footers up: the grid
         // gives every card the height of the tallest one, and without this the extra space
         // would fall in a different place on every card.
@@ -346,6 +385,7 @@ impl Card {
         body.append(&title_row);
         body.append(&reading);
         body.append(&blank);
+        body.append(&balance_only);
         body.append(&rows);
         body.append(&balance);
         body.append(&footer);
@@ -422,6 +462,9 @@ impl Card {
             absolutes,
             rows,
             balance,
+            balance_only,
+            balance_whole,
+            balance_fraction,
             footer,
             shown: RefCell::new(Shown {
                 status: status.clone(),
@@ -487,18 +530,18 @@ impl Card {
             (Some((dominant, rest)), _) => {
                 self.reading.set_visible(true);
                 self.blank.set_visible(false);
+                self.set_balance_only(None);
+                self.footer.set_vexpand(true);
                 self.bar.widget().set_visible(true);
                 self.dominant_title.set_label(&dominant.title);
                 self.set_balance_line(balance);
                 self.rebuild_rows(rest)
             }
             (None, Some(balance)) => {
-                self.reading.set_visible(true);
+                self.reading.set_visible(false);
                 self.blank.set_visible(false);
-                self.headline.set_label(balance);
-                self.dominant_title.set_label(DetailSection::BALANCE);
-                self.bar.widget().set_visible(false);
-                self.reset.set_visible(false);
+                self.set_balance_only(Some(balance));
+                self.footer.set_vexpand(false);
                 self.set_absolutes(None);
                 self.set_balance_line(None);
                 self.rebuild_rows(&[])
@@ -506,6 +549,8 @@ impl Card {
             (None, None) => {
                 self.reading.set_visible(false);
                 self.blank.set_visible(true);
+                self.set_balance_only(None);
+                self.footer.set_vexpand(true);
                 self.set_balance_line(None);
                 let message = blank_message(status);
                 // The card shows the first `BLANK_LINES` of it; the tooltip is where the
@@ -594,6 +639,33 @@ impl Card {
             None => {
                 self.balance.set_label("");
                 self.balance.set_visible(false);
+            }
+        }
+    }
+
+    /// Shows the primary amount for a card that has no quota windows.
+    fn set_balance_only(&self, amount: Option<&str>) {
+        match amount {
+            Some(amount) => {
+                let (whole, fraction) = balance_parts(amount);
+                self.balance_whole.set_label(whole);
+                match fraction {
+                    Some(fraction) => {
+                        self.balance_fraction.set_label(fraction);
+                        self.balance_fraction.set_visible(true);
+                    }
+                    None => {
+                        self.balance_fraction.set_label("");
+                        self.balance_fraction.set_visible(false);
+                    }
+                }
+                self.balance_only.set_visible(true);
+            }
+            None => {
+                self.balance_whole.set_label("");
+                self.balance_fraction.set_label("");
+                self.balance_fraction.set_visible(false);
+                self.balance_only.set_visible(false);
             }
         }
     }
@@ -688,6 +760,26 @@ fn balance_for(status: &ProviderStatus) -> Option<&str> {
         .flatten()
 }
 
+/// Splits a formatted balance at its decimal point so the fraction can use smaller type.
+///
+/// Only the currency shape the adapters publish is split. Arbitrary provider prose stays
+/// intact rather than shrinking everything after its last full stop.
+fn balance_parts(amount: &str) -> (&str, Option<&str>) {
+    let Some(point) = amount.rfind('.') else {
+        return (amount, None);
+    };
+    let (whole, fraction) = amount.split_at(point);
+    let digits = &fraction[1..];
+    if !whole.is_empty()
+        && (1..=4).contains(&digits.len())
+        && digits.bytes().all(|digit| digit.is_ascii_digit())
+    {
+        (whole, Some(fraction))
+    } else {
+        (amount, None)
+    }
+}
+
 /// What to say on a card that has no quota window or amount-only balance.
 fn blank_message(status: &ProviderStatus) -> String {
     status
@@ -765,6 +857,12 @@ mod tests {
         status.set_state(ProviderState::Ok, None);
 
         assert_eq!(balance_for(&status), Some("$1.93"));
+    }
+
+    #[test]
+    fn a_balance_amount_separates_its_fraction_for_smaller_type() {
+        assert_eq!(balance_parts("$454.5426"), ("$454", Some(".5426")));
+        assert_eq!(balance_parts("$60"), ("$60", None));
     }
 
     #[test]
