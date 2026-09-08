@@ -5,12 +5,12 @@
 # Tidemark-v<version>-setup.exe asset, and open a PR against
 # microsoft/winget-pkgs.
 PackageIdentifier: io.github.zbndev.Tidemark
-PackageVersion: 0.4.1
+PackageVersion: 0.4.2
 Installers:
   - InstallerLocale: en-US
     Architecture: x64
     InstallerType: nullsoft
-    InstallerUrl: https://github.com/zbndev/tidemark/releases/download/v0.4.1/Tidemark-v0.4.1-setup.exe
+    InstallerUrl: https://github.com/zbndev/tidemark/releases/download/v0.4.2/Tidemark-v0.4.2-setup.exe
     InstallerSha256: <sha256 of the released setup executable, filled at release time>
     Scope: user
     InstallerSwitches:
