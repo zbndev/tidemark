@@ -66,6 +66,9 @@ pub enum Preference {
     HistoryRetention(String),
     RefreshMode(String),
     RefreshMinutes(u32),
+    /// How the client lays out its card columns: fit-to-width, or capped.
+    ColumnsAuto(bool),
+    MaxColumns(u32),
     /// The one preference that changes how this process reaches the network, rather than
     /// what it does with what it reaches.
     Proxy {
@@ -1304,9 +1307,11 @@ impl Engine {
             Preference::MinimizeOnClose(enabled) => config.set_minimize_on_close(enabled),
             Preference::Theme(theme) => config.set_theme(&theme),
             Preference::StartupMode(mode) => config.set_startup_mode(&mode),
-            Preference::HistoryRetention(retention) => config.set_history_retention(&retention),
             Preference::RefreshMode(mode) => config.set_refresh_mode(&mode),
             Preference::RefreshMinutes(minutes) => config.set_refresh_minutes(minutes),
+            Preference::ColumnsAuto(enabled) => config.set_columns_auto(enabled),
+            Preference::MaxColumns(columns) => config.set_max_columns(columns),
+            Preference::HistoryRetention(retention) => config.set_history_retention(&retention),
             Preference::Proxy { mode, host, port } => config.set_proxy(&mode, &host, port),
         }
         .map_err(|error| error.to_string())?;
@@ -4946,13 +4951,23 @@ mod tests {
             .set_preference(Preference::StartupMode(Preferences::STARTUP_DAEMON.into()))
             .await
             .expect("startup mode changed");
-        let preferences = harness
+        harness
             .engine
             .set_preference(Preference::HistoryRetention(
                 Preferences::RETENTION_SIX_MONTHS.into(),
             ))
             .await
             .expect("history retention changed");
+        harness
+            .engine
+            .set_preference(Preference::ColumnsAuto(false))
+            .await
+            .expect("column mode changed");
+        let preferences = harness
+            .engine
+            .set_preference(Preference::MaxColumns(7))
+            .await
+            .expect("column ceiling changed");
 
         assert_eq!(
             preferences,
@@ -4967,6 +4982,8 @@ mod tests {
                 proxy_port: 0,
                 refresh_mode: Preferences::REFRESH_AUTO.into(),
                 refresh_minutes: 5,
+                columns_auto: Some(false),
+                max_columns: Some(7),
             }
         );
         assert_eq!(

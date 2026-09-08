@@ -41,9 +41,6 @@ use gtk::subclass::prelude::*;
 
 /// Space between cards, both ways. What the `GtkFlowBox` used.
 const SPACING: i32 = 12;
-/// Most columns, however wide the window gets. Three 300-pixel cards is already a wide
-/// window, and a fourth column would make each card a strip.
-const MAX_COLUMNS: usize = 3;
 /// How long a displaced card takes to get out of the way. `AdwTabGrid`'s figure.
 const REORDER_MS: u32 = 250;
 /// How long a released card takes to settle into its slot.
@@ -303,6 +300,10 @@ mod imp {
         pub(super) drag: RefCell<Option<Drag>>,
         /// Called once per completed move, with the indices it went between.
         pub(super) on_reorder: RefCell<Option<OnReorder>>,
+        /// The most columns the layout may use, or `None` to fit as many as the width
+        /// allows. `None` until a preference arrives, so a grid that never hears one lays
+        /// itself out the way Auto describes.
+        pub(super) column_cap: Cell<Option<usize>>,
         /// The layout the last allocation settled on, so the drag arithmetic and the
         /// allocation cannot come to different conclusions about where a slot is.
         pub(super) columns: Cell<usize>,
@@ -360,12 +361,16 @@ mod imp {
                 return (0, 0, -1, -1);
             }
             let cell_width = self.cell_width();
+            // The ceiling the preference set, or no ceiling at all: uncapped is what the
+            // Auto mode of the columns preference means, and `usize::MAX` is safe because
+            // `columns` bounds the count by the width before it ever looks at the cap.
+            let max = self.column_cap.get().unwrap_or(usize::MAX);
             match orientation {
                 // One column is the minimum, because a card is as narrow as it is going to
                 // get. The natural width is however many columns there are cards for, up to
-                // the maximum, which is what stops a wide window at three.
+                // the cap, which is what stops a wide window at the preference's ceiling.
                 gtk::Orientation::Horizontal => {
-                    let wanted = count.min(MAX_COLUMNS) as i32;
+                    let wanted = count.min(max) as i32;
                     (
                         cell_width,
                         wanted * cell_width + (wanted - 1) * SPACING,
@@ -375,11 +380,11 @@ mod imp {
                 }
                 _ => {
                     let available = if for_size < 0 {
-                        count.min(MAX_COLUMNS) as i32 * (cell_width + SPACING) - SPACING
+                        count.min(max) as i32 * (cell_width + SPACING) - SPACING
                     } else {
                         for_size
                     };
-                    let columns = columns(available, cell_width, SPACING, MAX_COLUMNS);
+                    let columns = columns(available, cell_width, SPACING, max);
                     let rows = count.div_ceil(columns) as i32;
                     let height = rows * self.natural_height(cell_width) + (rows - 1) * SPACING;
                     (height, height, -1, -1)
@@ -394,7 +399,12 @@ mod imp {
             }
             let cell_width = self.cell_width();
             let cell_height = self.natural_height(cell_width);
-            let columns = columns(width, cell_width, SPACING, MAX_COLUMNS);
+            let columns = columns(
+                width,
+                cell_width,
+                SPACING,
+                self.column_cap.get().unwrap_or(usize::MAX),
+            );
             self.columns.set(columns);
             self.cell
                 .set((f64::from(cell_width), f64::from(cell_height)));
@@ -484,6 +494,17 @@ impl imp::CardGrid {
 impl CardGrid {
     pub fn new() -> Self {
         glib::Object::builder().build()
+    }
+
+    /// Caps how many columns the layout uses, however wide the window gets, or lifts the
+    /// cap (`None`) to fit as many columns as the width holds.
+    ///
+    /// Applied on the next allocation, not this one: card positions are decided in
+    /// [`WidgetImpl::size_allocate`], and every part of the drag arithmetic that names a
+    /// column count reads what the last allocation settled on.
+    pub fn set_max_columns(&self, max: Option<usize>) {
+        self.imp().column_cap.set(max);
+        self.queue_resize();
     }
 
     /// Adds a card at the end. Where a new account goes, always.

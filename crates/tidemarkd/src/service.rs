@@ -1416,6 +1416,37 @@ impl Daemon {
         self.publish_preferences(&emitter, preferences).await
     }
 
+    /// Chooses whether the client lays out as many card columns as the window fits.
+    async fn set_columns_auto(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        enabled: bool,
+    ) -> fdo::Result<()> {
+        let _guard = self.preference_mutation.lock().await;
+        let preferences = self
+            .preference_request(Preference::ColumnsAuto(enabled))
+            .await?;
+        self.publish_preferences(&emitter, preferences).await
+    }
+
+    /// Sets the most card columns a window lays out while Auto is off.
+    async fn set_max_columns(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        columns: u32,
+    ) -> fdo::Result<()> {
+        if !Preferences::valid_max_columns(columns) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "max columns must be at least 1, not {columns}"
+            )));
+        }
+        let _guard = self.preference_mutation.lock().await;
+        let preferences = self
+            .preference_request(Preference::MaxColumns(columns))
+            .await?;
+        self.publish_preferences(&emitter, preferences).await
+    }
+
     /// Points every outbound request and every child process at a proxy, or at none.
     ///
     /// Takes all three values together because they are one setting: applying a mode
@@ -4460,6 +4491,77 @@ mod tests {
             .await
             .expect("task did not panic")
             .expect("accepted");
+    }
+
+    #[tokio::test]
+    async fn a_column_change_reaches_the_engine_and_publishes_the_dict() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let daemon = Arc::new(daemon);
+        let Ok(connection) = zbus::Connection::session().await else {
+            eprintln!("skipped: no session bus reachable");
+            return;
+        };
+        let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH).expect("a valid path");
+
+        let changing = {
+            let daemon = Arc::clone(&daemon);
+            let emitter = emitter.clone();
+            tokio::spawn(async move { daemon.set_columns_auto(emitter, false).await })
+        };
+        let Command::SetPreference { preference, reply } = commands
+            .recv()
+            .await
+            .expect("the change reaches the engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert!(matches!(preference, Preference::ColumnsAuto(false)));
+        reply
+            .send(Ok(Preferences::default()))
+            .expect("caller waits for reply");
+        changing
+            .await
+            .expect("task did not panic")
+            .expect("accepted");
+
+        let changing = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { daemon.set_max_columns(emitter, 7).await })
+        };
+        let Command::SetPreference { preference, reply } = commands
+            .recv()
+            .await
+            .expect("the change reaches the engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert!(matches!(preference, Preference::MaxColumns(7)));
+        reply
+            .send(Ok(Preferences::default()))
+            .expect("caller waits for reply");
+        changing
+            .await
+            .expect("task did not panic")
+            .expect("accepted");
+    }
+
+    #[tokio::test]
+    async fn a_zero_column_ceiling_is_refused_before_the_engine_hears_it() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let Ok(connection) = zbus::Connection::session().await else {
+            eprintln!("skipped: no session bus reachable");
+            return;
+        };
+        let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH).expect("a valid path");
+
+        assert!(matches!(
+            daemon.set_max_columns(emitter, 0).await,
+            Err(fdo::Error::InvalidArgs(_))
+        ));
+        assert!(
+            commands.try_recv().is_err(),
+            "a refused value must not reach the engine"
+        );
     }
 
     #[tokio::test]

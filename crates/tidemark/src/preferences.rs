@@ -51,6 +51,7 @@ enum SwitchKind {
     ReleaseCheck,
     MinimizeOnClose,
     RefreshAuto,
+    ColumnsAuto,
 }
 
 /// Whether an incomplete proxy is the user's mistake or just the middle of typing one in.
@@ -71,6 +72,9 @@ pub struct PreferencesDialog {
     minimize_on_close: adw::SwitchRow,
     refresh_auto: adw::SwitchRow,
     refresh_minutes: adw::SpinRow,
+    columns_auto: adw::SwitchRow,
+    max_columns: adw::SpinRow,
+
     theme: adw::ComboRow,
     startup: adw::ComboRow,
     retention: adw::ComboRow,
@@ -154,6 +158,23 @@ impl PreferencesDialog {
             .build();
         refresh_group.add(&refresh_auto);
         refresh_group.add(&refresh_minutes);
+        let columns_auto = adw::SwitchRow::builder()
+            .title("Auto")
+            .subtitle("Column count follows the window width.")
+            .build();
+        let max_columns = adw::SpinRow::new(
+            Some(&gtk::Adjustment::new(3.0, 1.0, 999.0, 1.0, 10.0, 0.0)),
+            1.0,
+            0,
+        );
+        max_columns.set_title("Maximum columns");
+        max_columns.set_subtitle("Most columns when Auto is off.");
+        let columns_group = adw::PreferencesGroup::builder()
+            .title("Card columns")
+            .build();
+        columns_group.add(&columns_auto);
+        columns_group.add(&max_columns);
+
         let general = adw::PreferencesPage::builder()
             .title("General")
             .icon_name("preferences-system-symbolic")
@@ -162,6 +183,7 @@ impl PreferencesDialog {
         general.add(&startup);
         general.add(&theme_group);
         general.add(&refresh_group);
+        general.add(&columns_group);
         dialog.add(&general);
 
         let proxy_mode = adw::ComboRow::builder()
@@ -277,6 +299,9 @@ impl PreferencesDialog {
             minimize_on_close,
             refresh_auto,
             refresh_minutes,
+            columns_auto,
+            max_columns,
+
             theme,
             startup: startup_mode,
             retention,
@@ -296,11 +321,15 @@ impl PreferencesDialog {
         settings.connect_switch(&settings.release_check, SwitchKind::ReleaseCheck);
         settings.connect_switch(&settings.minimize_on_close, SwitchKind::MinimizeOnClose);
         settings.connect_switch(&settings.refresh_auto, SwitchKind::RefreshAuto);
+        settings.connect_switch(&settings.columns_auto, SwitchKind::ColumnsAuto);
+
         settings.connect_theme();
         settings.connect_startup();
         settings.connect_retention();
         settings.connect_proxy();
         settings.connect_refresh_minutes();
+        settings.connect_max_columns();
+
         settings.connect_clear(&clear);
         settings.apply(&preferences, &data);
 
@@ -328,6 +357,11 @@ impl PreferencesDialog {
             .set_active(preferences.refresh_mode == Preferences::REFRESH_AUTO);
         self.refresh_minutes
             .set_value(f64::from(preferences.refresh_minutes));
+        self.columns_auto
+            .set_active(preferences.columns_auto.unwrap_or(true));
+        self.max_columns
+            .set_value(f64::from(preferences.max_columns.unwrap_or(3)));
+
         apply_named_choice(
             &self.theme,
             &THEME_LABELS,
@@ -390,6 +424,7 @@ impl PreferencesDialog {
         }
         self.sync_proxy_editable();
         self.sync_refresh_editable();
+        self.sync_columns_editable();
     }
 
     /// Whether the manual interval row can be typed into, from what the Auto switch
@@ -398,6 +433,13 @@ impl PreferencesDialog {
     fn sync_refresh_editable(&self) {
         self.refresh_minutes
             .set_sensitive(manual_refresh_editable(self.refresh_auto.is_active()));
+    }
+
+    /// Whether the ceiling row can be typed into — the same contract the manual interval
+    /// row follows, read from the switch and not the store.
+    fn sync_columns_editable(&self) {
+        self.max_columns
+            .set_sensitive(manual_columns_editable(self.columns_auto.is_active()));
     }
 
     fn connect_switch(self: &Rc<Self>, row: &adw::SwitchRow, kind: SwitchKind) {
@@ -415,6 +457,10 @@ impl PreferencesDialog {
                     // locks the moment the switch flips and not a reply later.
                     settings.sync_refresh_editable();
                 }
+                if matches!(kind, SwitchKind::ColumnsAuto) {
+                    settings.sync_columns_editable();
+                }
+
                 settings.change_switch(kind, row.is_active());
             }
         });
@@ -431,6 +477,7 @@ impl PreferencesDialog {
                     let mode = refresh_mode_for(enabled);
                     self.proxy.set_refresh_mode(mode).await
                 }
+                SwitchKind::ColumnsAuto => self.proxy.set_columns_auto(enabled).await,
             };
             if let Err(error) = result {
                 let preferences = self.preferences.borrow().clone();
@@ -445,6 +492,7 @@ impl PreferencesDialog {
                     SwitchKind::RefreshAuto => {
                         preferences.refresh_mode = refresh_mode_for(enabled).to_owned();
                     }
+                    SwitchKind::ColumnsAuto => preferences.columns_auto = Some(enabled),
                 }
             }
             if !matches!(kind, SwitchKind::ReleaseCheck)
@@ -460,6 +508,7 @@ impl PreferencesDialog {
             SwitchKind::ReleaseCheck => &self.release_check,
             SwitchKind::MinimizeOnClose => &self.minimize_on_close,
             SwitchKind::RefreshAuto => &self.refresh_auto,
+            SwitchKind::ColumnsAuto => &self.columns_auto,
         }
     }
 
@@ -491,6 +540,37 @@ impl PreferencesDialog {
                     // Either way the row is redrawn from the switch, which is what
                     // restores its sensitivity under the mode that allows typing.
                     settings.sync_refresh_editable();
+                });
+            }
+        });
+    }
+
+    /// Commits the column ceiling each time the stepper settles on a value, under the same
+    /// round-trip insensitivity that bounds the commit rate of the interval row.
+    fn connect_max_columns(self: &Rc<Self>) {
+        self.max_columns.connect_value_notify({
+            let weak = Rc::downgrade(self);
+            move |row| {
+                let Some(settings) = weak.upgrade() else {
+                    return;
+                };
+                if settings.suppress.get() {
+                    return;
+                }
+                let columns = row.value() as u32;
+                row.set_sensitive(false);
+                glib::spawn_future_local(async move {
+                    if let Err(error) = settings.proxy.set_max_columns(columns).await {
+                        let preferences = settings.preferences.borrow().clone();
+                        let data = settings.data.borrow().clone();
+                        settings.apply(&preferences, &data);
+                        settings.toast(&error.to_string());
+                    } else {
+                        settings.preferences.borrow_mut().max_columns = Some(columns);
+                    }
+                    // Either way the row is redrawn from the switch, which is what
+                    // restores its sensitivity under the mode that allows typing.
+                    settings.sync_columns_editable();
                 });
             }
         });
@@ -857,6 +937,12 @@ fn refresh_mode_for(auto_active: bool) -> &'static str {
     }
 }
 
+/// Whether the ceiling row belongs to the mode the Auto switch shows right now — the same
+/// moment-between-a-toggle-and-the-answer the manual interval row handles.
+fn manual_columns_editable(auto_active: bool) -> bool {
+    !auto_active
+}
+
 fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
@@ -916,6 +1002,18 @@ mod tests {
         assert!(
             manual_refresh_editable(false),
             "manual needs a pace to read"
+        );
+    }
+
+    #[test]
+    fn the_maximum_columns_row_follows_the_auto_switch() {
+        // The same contract as the manual interval row: the switch flips before the
+        // daemon answers, so the ceiling row must lock against what the switch says and
+        // not what the store still holds.
+        assert!(!manual_columns_editable(true), "auto decides the count");
+        assert!(
+            manual_columns_editable(false),
+            "manual needs a ceiling to read"
         );
     }
 

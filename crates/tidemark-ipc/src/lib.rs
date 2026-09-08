@@ -118,6 +118,12 @@ pub trait Daemon {
     /// Sets the fixed interval Manual mode polls at, in minutes.
     fn set_refresh_minutes(&self, minutes: u32) -> zbus::Result<()>;
 
+    /// Chooses whether the client lays out as many card columns as the window fits.
+    fn set_columns_auto(&self, enabled: bool) -> zbus::Result<()>;
+
+    /// Sets the most card columns a window lays out while Auto is off, at least one.
+    fn set_max_columns(&self, columns: u32) -> zbus::Result<()>;
+
     /// All three proxy settings at once: they are one setting, and half of it applied is a
     /// proxy nothing can be reached through.
     fn set_proxy(&self, mode: &str, host: &str, port: u16) -> zbus::Result<()>;
