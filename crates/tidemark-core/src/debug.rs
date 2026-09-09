@@ -15,6 +15,12 @@
 //! same reason — a few providers take the key there. And the OAuth token endpoints do not
 //! come through here at all, because their response body *is* the credential.
 //!
+//! The rules above keep credentials out of what Tidemark *sends*. A plugin adds the other
+//! direction: the endpoint is a stranger's, and one that echoes its own credential back in
+//! a response would otherwise put it in this file. So an account's exact secret is a
+//! needle, registered by the daemon with [`set_account_secret`], matched per provider and
+//! never across providers, and replaced before anything is persisted.
+//!
 //! # Why the sink is process-wide rather than a parameter
 //!
 //! For the reason [`crate::providers::http`] gives about the proxy, which this deliberately
@@ -22,10 +28,11 @@
 //! written once at startup, and forty-odd provider clients would otherwise forward the
 //! same value, unchanged, from the same source.
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -46,6 +53,52 @@ const ROTATE_AT: u64 = 16 * 1024 * 1024;
 
 /// The open log, or `None` for "the user did not ask for one".
 static SINK: Mutex<Option<Sink>> = Mutex::new(None);
+
+/// The secret each provider's configured account authenticates with, for redaction only.
+///
+/// Keyed by provider slug, so one provider's key is never hunted for in another's body: a
+/// short or shared string would otherwise blank an unrelated response and make the log
+/// useless for the reading it exists to explain.
+static SECRETS: RwLock<BTreeMap<String, String>> = RwLock::new(BTreeMap::new());
+
+/// Below this length a secret is not treated as a needle.
+///
+/// Redacting a two-character key would blank half of every body and teach nobody anything;
+/// a key that short is a configuration mistake, not a redaction case.
+const SHORTEST_NEEDLE: usize = 8;
+
+/// What replaces an echoed secret, chosen to be obvious in a body read by eye.
+const REDACTED: &str = "<REDACTED>";
+
+/// Registers the secret a provider's account authenticates with, or forgets it.
+///
+/// Called by the daemon when it builds a client for an account and again, with `None`,
+/// when that account goes away. Nothing here reads the value back out: it exists only to
+/// be searched for in a response body.
+pub fn set_account_secret(provider: &str, secret: Option<&str>) {
+    let mut secrets = SECRETS.write().unwrap_or_else(PoisonError::into_inner);
+    match secret {
+        Some(secret) if secret.len() >= SHORTEST_NEEDLE => {
+            secrets.insert(provider.to_owned(), secret.to_owned());
+        }
+        // A secret too short to search for is forgotten rather than stored, so that a
+        // later lookup cannot resurrect it.
+        _ => {
+            secrets.remove(provider);
+        }
+    }
+}
+
+/// A body with this provider's secret taken out of it, if it appeared at all.
+fn without_secret<'a>(provider: &str, body: &'a str) -> std::borrow::Cow<'a, str> {
+    let secrets = SECRETS.read().unwrap_or_else(PoisonError::into_inner);
+    match secrets.get(provider) {
+        Some(secret) if body.contains(secret.as_str()) => {
+            std::borrow::Cow::Owned(body.replace(secret.as_str(), REDACTED))
+        }
+        _ => std::borrow::Cow::Borrowed(body),
+    }
+}
 
 /// What was sent. Headers are absent by construction — see the module docs.
 #[derive(Debug, Clone, Copy)]
@@ -248,7 +301,10 @@ fn line(exchange: &Exchange<'_>) -> String {
     match exchange.answer {
         Answer::Body { status, body } => {
             entry.insert("status".to_owned(), status.into());
-            entry.insert("body".to_owned(), body.into());
+            entry.insert(
+                "body".to_owned(),
+                without_secret(exchange.provider, body).into_owned().into(),
+            );
         }
         Answer::Refused { status } => {
             entry.insert("status".to_owned(), status.into());
@@ -297,6 +353,69 @@ mod tests {
 
     fn parsed(line: &str) -> serde_json::Value {
         serde_json::from_str(line).expect("every written line is one JSON object")
+    }
+
+    fn sent(url: &str) -> Sent<'_> {
+        Sent::get(url)
+    }
+
+    fn recorded_line(exchange: Exchange<'_>) -> String {
+        line(&exchange)
+    }
+
+    #[test]
+    fn a_response_that_echoes_the_accounts_key_is_recorded_without_it() {
+        set_account_secret("com.acme.echo", Some("sk-live-abc123"));
+        let line = recorded_line(Exchange {
+            provider: "com.acme.echo",
+            sent: sent("https://a.test/u"),
+            answer: Answer::Body {
+                status: 200,
+                body: r#"{"echo":"sk-live-abc123","used":1}"#,
+            },
+        });
+        set_account_secret("com.acme.echo", None);
+        assert!(!line.contains("sk-live-abc123"), "{line}");
+        assert!(line.contains("REDACTED"));
+        assert!(
+            line.contains("\\\"used\\\":1"),
+            "the rest of the body is still worth reading: {line}"
+        );
+    }
+
+    #[test]
+    fn a_short_or_absent_secret_is_never_used_as_a_needle() {
+        // Redacting a two-character secret would blank half of every body and teach nobody
+        // anything. A secret that short is a configuration mistake, not a redaction case.
+        set_account_secret("com.acme.short", Some("ab"));
+        let line = recorded_line(Exchange {
+            provider: "com.acme.short",
+            sent: sent("https://a.test/u"),
+            answer: Answer::Body {
+                status: 200,
+                body: r#"{"about":"abacus"}"#,
+            },
+        });
+        set_account_secret("com.acme.short", None);
+        assert!(line.contains("abacus"), "{line}");
+    }
+
+    #[test]
+    fn one_providers_secret_is_not_looked_for_in_another_providers_body() {
+        set_account_secret("com.acme.other", Some("sk-live-abc123"));
+        let line = recorded_line(Exchange {
+            provider: "zai",
+            sent: sent("https://zai.test/u"),
+            answer: Answer::Body {
+                status: 200,
+                body: "sk-live-abc123",
+            },
+        });
+        set_account_secret("com.acme.other", None);
+        assert!(
+            line.contains("sk-live-abc123"),
+            "the needle belongs to one provider only: {line}"
+        );
     }
 
     #[test]

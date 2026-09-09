@@ -937,6 +937,17 @@ impl Engine {
         }
 
         let removed = self.accounts.remove(index);
+        // The recorder holds the key of whichever plugin account last built a client. Once
+        // no account of that plugin is configured, nothing is left to look for, and a stale
+        // needle would go on blanking an unrelated body.
+        if self.plugins.get(provider).is_some()
+            && !self
+                .accounts
+                .iter()
+                .any(|configured| configured.provider.as_str() == provider)
+        {
+            tidemark_core::debug::set_account_secret(provider, None);
+        }
         if promote_from.is_some() {
             let promoted_index = self
                 .accounts

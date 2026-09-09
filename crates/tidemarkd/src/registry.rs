@@ -23,6 +23,7 @@
 use std::sync::Arc;
 
 use tidemark_core::config::Config;
+use tidemark_core::debug;
 use tidemark_core::oauth;
 use tidemark_core::plugin::Definition;
 use tidemark_core::plugin::provider::PluginProvider;
@@ -381,6 +382,11 @@ pub fn plugin_account(
         ProviderId::new(&definition.id),
         account.clone(),
         Box::new(move |account_id, credential, _options| {
+            // The endpoint belongs to a stranger, and one that echoes the key back would
+            // otherwise write it into the raw-response log. The recorder is told the exact
+            // string to look for; it never reads the value back out, and it never reaches
+            // the plugin's Lua.
+            debug::set_account_secret(&definition.id, Some(credential.expose()));
             let endpoint = endpoint.clone().map_err(ProviderError::Local)?;
             Ok(Arc::new(PluginProvider::new(
                 Arc::clone(&definition),
