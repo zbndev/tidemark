@@ -1,0 +1,17 @@
+{
+    "activity": {
+        "cost": "0.00000",
+        "period": {
+            "type": "last_4_weeks",
+            "starting_at": "2026-08-17T00:00:00Z",
+            "ending_at": "2026-09-09T23:05:51Z"
+        },
+        "models": []
+    },
+    "limits": {
+        "monthly": {
+            "usage": 0,
+            "models": []
+        }
+    }
+}

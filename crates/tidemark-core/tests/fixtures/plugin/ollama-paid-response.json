@@ -1,0 +1,31 @@
+{
+    "activity": {
+        "cost": "12.5",
+        "period": {
+            "type": "last_4_weeks",
+            "starting_at": "2026-08-17T00:00:00Z",
+            "ending_at": "2026-09-09T23:05:51Z"
+        },
+        "models": [
+            {
+                "id": "gemma4:31b",
+                "name": "gemma4:31b",
+                "usage": 320,
+                "limit": 1000
+            },
+            {
+                "id": "gpt-oss:120b",
+                "name": "gpt-oss:120b",
+                "usage": 74,
+                "limit": null
+            }
+        ]
+    },
+    "limits": {
+        "monthly": {
+            "usage": 41.2,
+            "usage_limit": 100,
+            "models": []
+        }
+    }
+}

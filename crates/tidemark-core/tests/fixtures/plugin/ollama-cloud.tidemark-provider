@@ -1,0 +1,134 @@
+format_version = 1
+
+[provider]
+id = "com.ollama.cloud"
+name = "Ollama Cloud"
+plugin_version = "1.0.0"
+
+[request]
+method = "GET"
+api_key_header = "Authorization"
+api_key_prefix = "Bearer "
+
+[parser]
+language = "lua54"
+source = '''
+function parse(response, context)
+    -- ollama.com/api/usage answers with two top-level tables:
+    --   activity — cost and per-model usage over the trailing four weeks
+    --   limits   — the plan's monthly included usage
+    --
+    -- The endpoint reports no absolute cap on the free plan: limits.monthly carries
+    -- only `usage`. A paid plan is expected to spell its cap `usage_limit`; when the
+    -- field is absent the reading stays honest — a value with no maximum, no
+    -- percentage — rather than fabricating one.
+    --
+    -- The 5-hour/weekly session windows the settings page renders are not part of
+    -- this endpoint; the built-in `ollama` provider (browser session) tracks those.
+
+    local monthly = response.limits.monthly
+
+    local metrics = {}
+    local card = {}
+    local items = {}
+
+    local used = nil
+    if monthly.usage ~= nil then
+        used = number(monthly.usage)
+    end
+
+    local limit = nil
+    if monthly.usage_limit ~= nil then
+        limit = number(monthly.usage_limit)
+    end
+
+    if used ~= nil and limit ~= nil then
+        table.insert(metrics, {
+            id = "monthly-usage",
+            title = "Monthly usage",
+            value = used,
+            maximum = limit,
+            remaining = limit - used,
+            used_percent = percent(used, limit),
+            window = {
+                key = "month",
+                resets_at = parse_time(response.activity.period.ending_at),
+                length_seconds = 2592000,
+            },
+        })
+        table.insert(card, gauge("monthly-usage"))
+        table.insert(items, ratio("monthly-usage", { left = "value", right = "maximum" }))
+    elseif used ~= nil then
+        -- No cap on this plan: report the raw usage without a window, so nothing is
+        -- invented and the card says what the endpoint actually said.
+        table.insert(metrics, {
+            id = "monthly-usage",
+            title = "Monthly usage",
+            value = used,
+        })
+        table.insert(card, value("monthly-usage", { field = "value" }))
+    end
+
+    local cost = nil
+    if response.activity.cost ~= nil then
+        cost = number(response.activity.cost)
+    end
+    if cost ~= nil then
+        table.insert(metrics, {
+            id = "cost-4w",
+            title = "Cost (4 weeks)",
+            value = cost,
+            unit = "USD",
+        })
+        table.insert(items, value("cost-4w", { field = "value", format = "currency" }))
+    end
+
+    if response.activity.models ~= nil then
+        for _, model in ipairs(response.activity.models) do
+            local used_m = nil
+            if model.usage ~= nil then
+                used_m = number(model.usage)
+            end
+            local cap = nil
+            if model.limit ~= nil and not is_null(model.limit) then
+                cap = number(model.limit)
+            end
+
+            local id = "model-" .. tostring(model.id)
+            local title = tostring(model.name or model.id)
+
+            if used_m ~= nil and cap ~= nil then
+                table.insert(metrics, {
+                    id = id,
+                    title = title,
+                    value = used_m,
+                    maximum = cap,
+                    remaining = cap - used_m,
+                    used_percent = percent(used_m, cap),
+                })
+                table.insert(items, ratio(id, { left = "value", right = "maximum" }))
+            elseif used_m ~= nil then
+                table.insert(metrics, {
+                    id = id,
+                    title = title,
+                    value = used_m,
+                })
+                table.insert(items, value(id, { field = "value" }))
+            end
+        end
+    end
+
+    return {
+        metrics = metrics,
+        card = card,
+        details = { { title = "Usage", items = items } },
+    }
+end
+'''
+
+[icon]
+svg = '''
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <path fill="currentColor" d="M32 4c-5 0-9 2-12 5-4 1-7 4-8 8-2 3-3 7-3 11s1 8 3 11c1 4 4 7 8 8 3 3 7 5 12 5s9-2 12-5c4-1 7-4 8-8 2-3 3-7 3-11s-1-8-3-11c-1-4-4-7-8-8-3-3-7-5-12-5zm0 8c3 0 6 1 8 3 2 1 4 3 5 5 1 2 2 5 2 7s-1 5-2 7c-1 2-3 4-5 5-2 2-5 3-8 3s-6-1-8-3c-2-1-4-3-5-5-1-2-2-5-2-7s1-5 2-7c1-2 3-4 5-5 2-2 5-3 8-3z"/>
+</svg>
+'''
