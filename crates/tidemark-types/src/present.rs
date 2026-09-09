@@ -13,6 +13,51 @@
 //! daemon already sent, which is what makes the awkward cases — an overdue reset, a window
 //! that is not quite empty — testable without waiting for them.
 
+use crate::{Field, Format, Metric};
+
+/// One reported field, spelled in the producer's semantic format and our house style.
+pub fn format_field(metric: &Metric, field: Field, format: Option<Format>) -> Option<String> {
+    if field == Field::Text {
+        return metric.text.clone();
+    }
+    let number = metric.field(field)?;
+    Some(match format.unwrap_or(Format::Number) {
+        Format::Percent => percent(number),
+        Format::Currency => match metric.unit.as_deref() {
+            Some(unit) => format!("{number:.2} {unit}"),
+            None => format!("{number:.2}"),
+        },
+        Format::Duration => duration(number.round() as i64),
+        Format::Text => trim_number(number),
+        Format::Number => match metric.unit.as_deref() {
+            Some(unit) => format!("{} {unit}", trim_number(number)),
+            None => trim_number(number),
+        },
+    })
+}
+
+/// Two reported fields as `X of Y`, in the metric's unit.
+pub fn format_ratio(metric: &Metric, left: Field, right: Field) -> Option<String> {
+    let (left, right) = (metric.field(left)?, metric.field(right)?);
+    let body = format!("{} of {}", trim_number(left), trim_number(right));
+    Some(match metric.unit.as_deref() {
+        Some(unit) => format!("{body} {unit}"),
+        None => body,
+    })
+}
+
+fn trim_number(number: f64) -> String {
+    if number.fract() == 0.0 && number.abs() < 1e15 {
+        format!("{number:.0}")
+    } else {
+        let rendered = format!("{number:.2}");
+        rendered
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_owned()
+    }
+}
+
 /// Consumption as the big number on the card, and as the number a notification leads with.
 ///
 /// Rounds, but never across the ends: a window with something spent in it never reads `0%`,
@@ -90,6 +135,67 @@ pub fn plugin_icon_slug(provider_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metric() -> crate::Metric {
+        crate::Metric {
+            id: "cost".into(),
+            title: "Monthly cost".into(),
+            subtitle: None,
+            value: Some(12.5),
+            maximum: Some(50.0),
+            remaining: Some(37.5),
+            used_percent: Some(25.0),
+            text: Some("active".into()),
+            unit: Some("USD".into()),
+            window: None,
+        }
+    }
+
+    #[test]
+    fn a_field_is_spelled_by_the_format_the_producer_chose() {
+        use crate::{Field, Format};
+        let m = metric();
+        assert_eq!(
+            format_field(&m, Field::UsedPercent, Some(Format::Percent)).as_deref(),
+            Some("25%")
+        );
+        assert_eq!(
+            format_field(&m, Field::Value, Some(Format::Currency)).as_deref(),
+            Some("12.50 USD")
+        );
+        assert_eq!(
+            format_field(&m, Field::Text, Some(Format::Text)).as_deref(),
+            Some("active")
+        );
+    }
+
+    #[test]
+    fn a_field_the_producer_never_reported_is_spelled_as_nothing() {
+        use crate::{Field, Format};
+        let bare = crate::Metric {
+            remaining: None,
+            ..metric()
+        };
+        assert_eq!(
+            format_field(&bare, Field::Remaining, Some(Format::Number)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_ratio_needs_both_operands() {
+        use crate::Field;
+        let m = metric();
+        assert_eq!(
+            format_ratio(&m, Field::Value, Field::Maximum).as_deref(),
+            Some("12.5 of 50 USD")
+        );
+        let bare = crate::Metric {
+            maximum: None,
+            ..metric()
+        };
+        assert_eq!(format_ratio(&bare, Field::Value, Field::Maximum), None);
+    }
 
     #[test]
     fn rounding_never_reports_an_untouched_window_or_an_exhausted_one_by_mistake() {

@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
-use tidemark_types::{ProviderStatus, Timestamp, WindowStatus};
+use tidemark_types::{DetailRow, DetailSection, ProviderStatus, Timestamp, WindowStatus};
 
 use crate::bus::DaemonProxy;
 use crate::chart::Chart;
@@ -278,13 +278,7 @@ impl DetailDialog {
         while let Some(child) = self.details.first_child() {
             self.details.remove(&child);
         }
-        for section in self
-            .status
-            .borrow()
-            .details
-            .iter()
-            .filter(|section| !section.rows.is_empty())
-        {
+        for section in detail_sections(&self.status.borrow()) {
             let group = adw::PreferencesGroup::builder()
                 .title(&section.title)
                 .build();
@@ -359,6 +353,47 @@ impl DetailDialog {
     }
 }
 
+/// Preserve section boundaries as well as the producer's item order.
+fn detail_sections(status: &ProviderStatus) -> Vec<DetailSection> {
+    let Some(presentation) = &status.presentation else {
+        return status
+            .details
+            .iter()
+            .filter(|section| !section.rows.is_empty())
+            .cloned()
+            .collect();
+    };
+    presentation
+        .details
+        .iter()
+        .filter_map(|section| {
+            let rows = section
+                .items
+                .iter()
+                .filter_map(|widget| {
+                    let row = crate::card::presentation_row(presentation, widget)?;
+                    Some(DetailRow {
+                        label: row.metric.title.clone(),
+                        value: row.text()?,
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!rows.is_empty()).then(|| DetailSection {
+                title: section.title.clone(),
+                rows,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn detail_rows(status: &ProviderStatus) -> Vec<(String, String)> {
+    detail_sections(status)
+        .into_iter()
+        .flat_map(|section| section.rows.into_iter().map(|row| (row.label, row.value)))
+        .collect()
+}
+
 /// The one line under a window's title: how much is gone, the absolute quantities behind
 /// that percentage when the provider sent them, and when the window resets.
 ///
@@ -394,6 +429,75 @@ mod tests {
     use tidemark_types::{AccountId, ProviderId, ProviderStatus, Timestamp, WindowStatus};
 
     use super::{RequestGeneration, Selection, window_summary};
+
+    #[test]
+    fn detail_sections_come_from_the_presentation_in_its_own_order() {
+        use tidemark_types::{Field, Metric, Presentation, PresentedSection, Widget};
+        let mut status = status(&[]);
+        let metric = |id: &str, title: &str| Metric {
+            id: id.into(),
+            title: title.into(),
+            subtitle: None,
+            value: Some(12.5),
+            maximum: Some(50.0),
+            remaining: None,
+            used_percent: None,
+            text: Some("active".into()),
+            unit: Some("USD".into()),
+            window: None,
+        };
+        status.presentation = Some(Presentation {
+            metrics: vec![metric("a", "Monthly cost"), metric("b", "Subscription")],
+            card: vec![],
+            details: vec![
+                PresentedSection {
+                    title: "Second".into(),
+                    items: vec![Widget::status("b"), Widget::value("ghost", Field::Value)],
+                },
+                PresentedSection {
+                    title: "First".into(),
+                    items: vec![
+                        Widget::ratio("a", Field::Value, Field::Maximum),
+                        Widget::value("a", Field::Remaining),
+                    ],
+                },
+            ],
+        });
+        assert_eq!(
+            super::detail_rows(&status),
+            [
+                ("Subscription".to_owned(), "active".to_owned()),
+                ("Monthly cost".to_owned(), "12.5 of 50 USD".to_owned())
+            ]
+        );
+        assert_eq!(
+            super::detail_sections(&status)
+                .iter()
+                .map(|section| section.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Second", "First"]
+        );
+    }
+
+    #[test]
+    fn legacy_details_are_used_only_when_presentation_is_absent() {
+        use tidemark_types::{DetailRow, DetailSection, Presentation};
+        let mut status = status(&[]);
+        status.details = vec![DetailSection {
+            title: "Legacy".into(),
+            rows: vec![DetailRow {
+                label: "Plan".into(),
+                value: "Pro".into(),
+            }],
+        }];
+        assert_eq!(super::detail_rows(&status), [("Plan".into(), "Pro".into())]);
+        status.presentation = Some(Presentation {
+            metrics: vec![],
+            card: vec![],
+            details: vec![],
+        });
+        assert!(super::detail_rows(&status).is_empty());
+    }
 
     fn status(windows: &[(&str, Option<u64>)]) -> ProviderStatus {
         let mut status = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::default());

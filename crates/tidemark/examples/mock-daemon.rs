@@ -245,6 +245,9 @@ fn account(provider: &str, plan: &str, windows: Vec<Window>) -> ProviderStatus {
 }
 
 fn statuses() -> Vec<ProviderStatus> {
+    let mut opus = window("1 week (Opus)", 604_800, 4.0, Some(3 * 86_400));
+    // Distinct weekly pools need distinct metric IDs when the presentation resolves them.
+    opus.key = WindowKey::for_pool("opus", WindowLength::from_secs(604_800).expect("nonzero"));
     let mut claude = account(
         "claude",
         "max",
@@ -253,7 +256,7 @@ fn statuses() -> Vec<ProviderStatus> {
             // time for, so there is no pace mark to draw.
             window("5 hours", 18_000, 12.0, None),
             window("1 week", 604_800, 61.0, Some(3 * 86_400)),
-            window("1 week (Opus)", 604_800, 4.0, Some(3 * 86_400)),
+            opus,
         ],
     );
     claude.next_poll_at = Some(Timestamp::now().as_unix() + 40);
@@ -368,4 +371,21 @@ fn main() -> gtk::glib::ExitCode {
 
     looper.run();
     gtk::glib::ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_mock_gauge_resolves_its_own_window_reading() {
+        for status in super::statuses() {
+            let Some(presentation) = &status.presentation else {
+                continue;
+            };
+            for window in &status.windows {
+                let metric = presentation.metric(&window.key).expect("published metric");
+                assert_eq!(metric.title, window.title);
+                assert_eq!(metric.used_percent, Some(window.used_percent));
+            }
+        }
+    }
 }
