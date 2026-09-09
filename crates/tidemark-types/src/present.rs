@@ -143,6 +143,18 @@ pub fn plugin_icon_slug(provider_id: &str) -> Option<String> {
     usable.then(|| provider_id.replace('.', "-"))
 }
 
+/// The icon name a provider's mark goes by, whether the provider is named by a built-in
+/// slug or by a plugin id.
+///
+/// The two spellings differ where the storage keys differ: a built-in provider is `zai`,
+/// while a plugin's id — its storage key — must carry a dot, `gpt.srvdev.bars`. The mark is
+/// materialized under the dot-less slug ([`plugin_icon_slug`]), so a lookup that handed the
+/// raw id to [`icon_name`] would find nothing for every plugin, forever. Card, detail
+/// dialog, provider rows and notifications all resolve through here so they cannot disagree.
+pub fn provider_icon_name(provider: &str) -> Option<String> {
+    icon_name(provider).or_else(|| plugin_icon_slug(provider).and_then(|slug| icon_name(&slug)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +313,25 @@ mod tests {
         );
         assert_eq!(plugin_icon_slug("../../etc/passwd"), None);
         assert_eq!(plugin_icon_slug("Com.Acme"), None);
+    }
+
+    #[test]
+    fn a_provider_icon_name_covers_both_spellings_of_a_provider() {
+        assert_eq!(
+            provider_icon_name("zai").as_deref(),
+            Some("tidemark-zai-symbolic"),
+            "a built-in slug names its mark directly"
+        );
+        assert_eq!(
+            provider_icon_name("gpt.srvdev.bars").as_deref(),
+            Some("tidemark-gpt-srvdev-bars-symbolic"),
+            "a plugin id names the mark its dots were dashed out of"
+        );
+        assert_eq!(
+            provider_icon_name("Com.Acme"),
+            None,
+            "an id nothing would have installed under names no mark"
+        );
     }
 
     #[test]

@@ -15,7 +15,9 @@ pub mod time;
 pub mod window;
 pub mod wire;
 
-pub use present::{duration, format_field, format_ratio, icon_name, percent, plugin_icon_slug};
+pub use present::{
+    duration, format_field, format_ratio, icon_name, percent, plugin_icon_slug, provider_icon_name,
+};
 pub use semantic::{
     Emphasis, Field, Format, Metric, MetricWindow, Presentation, PresentedSection, Widget,
     WidgetKind,

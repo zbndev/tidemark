@@ -307,6 +307,7 @@ pub fn catalog_with_plugins(
             api_key_header: definition.api_key_header.clone(),
             api_key_prefix: definition.api_key_prefix.clone(),
             has_mark: definition.icon_svg.is_some(),
+            mark_svg: None,
         }),
     }));
     definitions

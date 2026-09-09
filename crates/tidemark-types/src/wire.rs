@@ -373,8 +373,11 @@ pub struct PluginInfo {
     pub api_key_header: String,
     /// What precedes the key in that header.
     pub api_key_prefix: String,
-    /// Whether a sanitized mark was installed for this definition.
+    /// Whether this definition carries a sanitized mark.
     pub has_mark: bool,
+    /// The sanitized mark for a dry-run import preview. Installed catalogs omit the bytes:
+    /// their mark is already materialized in the icon theme.
+    pub mark_svg: Option<String>,
 }
 
 /// Presentation metadata for one provider in the daemon's catalog.

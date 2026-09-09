@@ -259,7 +259,7 @@ pub(super) async fn import_dialog(
     let dialog = adw::AlertDialog::builder()
         .heading(format!("Install {}?", info.name))
         .body(
-            "This provider is not part of Tidemark. It runs a parser the file's author              wrote, and it will be sent the API key you give it.",
+            "This provider is not part of Tidemark. It runs a parser the file's author wrote, and it will be sent the API key you give it.",
         )
         .build();
     dialog.add_responses(&[("cancel", "Cancel"), ("install", "Install")]);
@@ -273,7 +273,13 @@ pub(super) async fn import_dialog(
         .build();
     if info.has_mark {
         let image = mark::image();
-        mark::set(&image, &info.id);
+        if let Some(svg) = info.mark_svg.as_deref() {
+            mark::set_preview(&image, svg);
+        } else {
+            // Compatibility with an older daemon: installed plugins only named their
+            // materialized mark, which still works when the icon is already on disk.
+            mark::set(&image, &info.id);
+        }
         image.set_halign(gtk::Align::Center);
         content.append(&image);
     }
@@ -359,6 +365,7 @@ mod tests {
             api_key_header: header.into(),
             api_key_prefix: prefix.into(),
             has_mark: true,
+            mark_svg: None,
         }
     }
 

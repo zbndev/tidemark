@@ -323,11 +323,18 @@ impl MainWindow {
             Update::Data(data) => self.apply_data(data),
             // A second instance asked this one to come forward: raise the window
             // however it currently stands, even over a waiting screen.
-            // A plugin was installed or removed. Only the catalog changed; the cards and
-            // their readings are untouched, so nothing here is redrawn but the pages that
-            // list what can be added.
+            // A plugin was installed or removed. Its mark was materialized beneath an icon
+            // search path GTK may already have cached, so refresh that database before any
+            // catalog consumer looks the provider up again. Reapplying the held statuses
+            // redraws existing cards without changing their identity or ordering; the open
+            // provider dialog does the same for its rows in `update_provider_settings`.
             Update::Catalog(definitions) => {
+                crate::mark::refresh(&gtk::prelude::WidgetExt::display(&self.window));
                 *self.definitions.borrow_mut() = definitions;
+                let now = Timestamp::now();
+                for card in self.cards.borrow().iter() {
+                    card.apply(&card.status(), now);
+                }
                 self.update_provider_settings();
             }
             Update::Activate => self.window.present(),

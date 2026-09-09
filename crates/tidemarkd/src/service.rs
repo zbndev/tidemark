@@ -4674,6 +4674,7 @@ mod tests {
             api_key_header: "X-Acme-Key".into(),
             api_key_prefix: String::new(),
             has_mark: true,
+            mark_svg: None,
         }
     }
 

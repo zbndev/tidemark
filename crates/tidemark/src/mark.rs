@@ -45,7 +45,11 @@ const SIZE: i32 = 28;
 
 /// The icon name a provider's mark is installed under. Defined in the shared crate, so
 /// the card and the daemon's notifications look the same mark up.
-pub use tidemark_types::present::icon_name;
+///
+/// Provider-first, not slug-first: a plugin's storage key is its dotted id, and the mark is
+/// materialized under that id with the dots dashed out — `provider_icon_name` is why both
+/// spellings resolve through one place.
+pub use tidemark_types::present::provider_icon_name;
 
 /// The image widget for a card's title row. Starts hidden; [`set`] fills it in.
 pub fn image_at(pixel_size: i32) -> gtk::Image {
@@ -61,9 +65,11 @@ pub fn image() -> gtk::Image {
     image_at(SIZE)
 }
 
-/// Shows `slug`'s mark in `image`, or hides the image if there is no mark for it.
-pub fn set(image: &gtk::Image, slug: &str) {
-    let name = icon_name(slug).filter(|name| has_icon(image, name));
+/// Shows `provider`'s mark in `image`, or hides the image if there is no mark for it.
+///
+/// `provider` is what the wire calls the service: a built-in slug or a plugin's dotted id.
+pub fn set(image: &gtk::Image, provider: &str) {
+    let name = provider_icon_name(provider).filter(|name| has_icon(image, name));
     match name {
         Some(name) => {
             image.set_icon_name(Some(&name));
@@ -76,6 +82,31 @@ pub fn set(image: &gtk::Image, slug: &str) {
     }
 }
 
+/// Shows a sanitized mark received from `InspectPlugin` before the plugin exists in the
+/// icon theme.
+///
+/// `FORCE_SYMBOLIC` matters here for exactly the same reason as the installed icon-name
+/// path: a direct texture would keep the SVG's black fill on a dark theme. `BytesIcon`
+/// keeps the dry-run a dry run — neither the daemon nor the GUI has to materialize the
+/// preview on disk.
+pub fn set_preview(image: &gtk::Image, svg: &str) {
+    let bytes = gtk::glib::Bytes::from_owned(svg.as_bytes().to_vec());
+    let icon = gtk::gio::BytesIcon::new(&bytes);
+    let paintable = gtk::IconTheme::for_display(&image.display()).lookup_by_gicon(
+        &icon,
+        image.pixel_size().max(1),
+        image.scale_factor(),
+        gtk::TextDirection::None,
+        gtk::IconLookupFlags::FORCE_SYMBOLIC,
+    );
+    // Unlike a named `*-symbolic` theme icon, a BytesIcon carries no symbolic filename for
+    // GTK to infer this property from. The lookup flag selects the symbolic loader; the
+    // property tells GtkImage to snapshot the resulting SymbolicPaintable with CSS colours.
+    paintable.set_property("is-symbolic", true);
+    image.set_paintable(Some(&paintable));
+    image.set_visible(true);
+}
+
 /// Whether the icon theme of the display this widget is on has `name`.
 fn has_icon(widget: &impl IsA<gtk::Widget>, name: &str) -> bool {
     gtk::IconTheme::for_display(&widget.as_ref().display()).has_icon(name)
@@ -84,7 +115,7 @@ fn has_icon(widget: &impl IsA<gtk::Widget>, name: &str) -> bool {
 /// Adds a directory of installed plugin marks to this display's icon theme.
 ///
 /// Called with the root the daemon publishes in `DataInfo`. After this a plugin mark is
-/// found by [`icon_name`] exactly the way a shipped mark is — which is the whole reason
+/// found by [`provider_icon_name`] exactly the way a shipped mark is — which is the whole reason
 /// the daemon materializes it as a file rather than sending bytes: GTK only recolours a
 /// symbolic SVG it loaded *through the icon theme*, and a texture built from bytes would
 /// be the black smudge this module's own note describes.
@@ -93,4 +124,106 @@ fn has_icon(widget: &impl IsA<gtk::Widget>, name: &str) -> bool {
 /// a daemon that republishes its `DataInfo` does not lengthen the search path.
 pub fn add_plugin_path(display: &gtk::gdk::Display, root: &std::path::Path) {
     gtk::IconTheme::for_display(display).add_search_path(root);
+}
+
+/// Rebuilds GTK's icon database after the daemon changed the contents of a registered
+/// plugin theme.
+///
+/// GTK notices ordinary theme switches, but it does not discover a mark written beneath
+/// an application search path that was already empty when the path was registered. There
+/// is no rescan operation in GTK 4; assigning the existing search path is its supported
+/// invalidation boundary. The list is replaced in place rather than appending the plugin
+/// root again on every install.
+pub fn refresh(display: &gtk::gdk::Display) {
+    let theme = gtk::IconTheme::for_display(display);
+    let paths = theme.search_path();
+    let paths = paths
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .collect::<Vec<_>>();
+    theme.set_search_path(&paths);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the two behaviours of this module that need a real display: a mark
+    /// materialized beneath an already-registered search path appears after [`refresh`],
+    /// and [`set_preview`] draws inspected bytes symbolically before anything is installed.
+    ///
+    /// Ignored rather than dropped, because the harness gives every test its own thread
+    /// while GTK belongs to one: run alongside the widget tests, this test's display and
+    /// icon-theme work collides with theirs — the same boundary `font.rs` names when it
+    /// declines its own display-bound assertion. Run it when nothing else in the process
+    /// touches GTK: `cargo test -p tidemark -- --ignored`.
+    #[test]
+    #[ignore = "needs a display and exclusive GTK ownership; run alone with --ignored"]
+    fn a_materialized_mark_appears_after_refresh_and_a_preview_draws_symbolically() {
+        // `adw::init` alone is not evidence of a display: it succeeds headless, and the
+        // first NULL then reaches the icon theme as an assertion, not a skip.
+        if adw::init().is_err() || gtk::gdk::Display::default().is_none() {
+            eprintln!("skipped: no display is available");
+            return;
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the test clock is after the epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tidemark-icon-theme-refresh-{}-{nonce}",
+            std::process::id()
+        ));
+        let provider = format!("com.example.refresh{nonce}");
+        let name = provider_icon_name(&provider).expect("the plugin id names an icon");
+        let path = root
+            .join("hicolor/symbolic/apps")
+            .join(format!("{name}.svg"));
+        std::fs::create_dir_all(path.parent().expect("the icon has a parent"))
+            .expect("the temporary icon theme is created");
+
+        let display = gtk::gdk::Display::default().expect("GTK has a display");
+        let theme = gtk::IconTheme::for_display(&display);
+        add_plugin_path(&display, &root);
+        assert!(!theme.has_icon(&name), "the theme starts without the mark");
+
+        std::fs::write(
+            &path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="currentColor" d="M0 0h64v64H0z"/></svg>"#,
+        )
+        .expect("the daemon materializes the mark");
+        assert!(
+            !theme.has_icon(&name),
+            "GTK keeps the theme database it built before the mark existed"
+        );
+
+        refresh(&display);
+
+        assert!(
+            theme.has_icon(&name),
+            "the running client discovers the newly materialized mark"
+        );
+        let shown = image();
+        set(&shown, &provider);
+        assert_eq!(shown.icon_name().as_deref(), Some(name.as_str()));
+        assert!(shown.is_visible(), "the provider mark is drawn again");
+
+        std::fs::remove_dir_all(root).expect("the temporary icon theme is removed");
+
+        let preview = image();
+        set_preview(
+            &preview,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="currentColor" d="M0 0h64v64H0z"/></svg>"#,
+        );
+        let paintable = preview
+            .paintable()
+            .expect("the inspected bytes draw without an installed theme icon")
+            .downcast::<gtk::IconPaintable>()
+            .expect("the preview uses GTK's icon loader");
+        assert!(
+            paintable.property::<bool>("is-symbolic"),
+            "the preview follows the theme colour"
+        );
+        assert!(preview.is_visible());
+    }
 }

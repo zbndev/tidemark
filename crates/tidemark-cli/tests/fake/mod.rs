@@ -117,6 +117,7 @@ pub fn plugin_info(id: &str, name: &str) -> PluginInfo {
         api_key_header: "X-Acme-Key".to_owned(),
         api_key_prefix: String::new(),
         has_mark: true,
+        mark_svg: None,
     }
 }
 

@@ -1280,6 +1280,7 @@ impl Engine {
             api_key_header: definition.api_key_header.clone(),
             api_key_prefix: definition.api_key_prefix.clone(),
             has_mark: definition.icon_svg.is_some(),
+            mark_svg: None,
         }
     }
 
@@ -1328,10 +1329,13 @@ impl Engine {
     /// The same two checks an install runs — schema, then Lua compile — so a preview that
     /// says a file is good is a promise the install will keep.
     pub fn inspect_plugin(&self, bytes: &[u8]) -> Result<PluginInfo, String> {
-        self.plugins
+        let definition = self
+            .plugins
             .inspect(bytes, &crate::registry::builtin_ids())
-            .map(|definition| Self::plugin_info(&definition))
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let mut info = Self::plugin_info(&definition);
+        info.mark_svg = definition.icon_svg.clone();
+        Ok(info)
     }
 
     /// Validates a plugin file, stores it, and republishes the catalog.
@@ -3236,6 +3240,13 @@ svg = '''
             .expect("valid");
         assert_eq!(info.id, "com.acme.quota");
         assert!(info.has_mark);
+        assert_eq!(
+            info.mark_svg.as_deref(),
+            Some(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="currentColor" d="M0 0h64v64H0z"/></svg>"#
+            ),
+            "the dry-run preview needs the sanitized mark before anything is installed"
+        );
         assert!(
             harness
                 .engine

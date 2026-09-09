@@ -220,7 +220,7 @@ pub fn compose(provider: &str, window: &Window, kind: Kind, now: Timestamp) -> N
     Notice {
         summary: format!("{event} — {} · {}", display_name(provider), window.title),
         body,
-        icon: present::icon_name(provider),
+        icon: present::provider_icon_name(provider),
         urgency: match kind {
             Kind::Threshold(Threshold::Danger) => Urgency::Critical,
             _ => Urgency::Normal,
@@ -738,6 +738,22 @@ mod tests {
             now(),
         );
         assert_eq!(notice.icon.as_deref(), Some("tidemark-claude-symbolic"));
+    }
+
+    /// A plugin's storage key carries dots its mark cannot: the file is materialized with
+    /// them dashed out, and this is the one place a notification resolves that name.
+    #[test]
+    fn a_plugins_notice_names_the_mark_its_dots_were_dashed_out_of() {
+        let notice = compose(
+            "gpt.srvdev.bars",
+            &window(80.0, None),
+            Kind::Threshold(Threshold::Warning),
+            now(),
+        );
+        assert_eq!(
+            notice.icon.as_deref(),
+            Some("tidemark-gpt-srvdev-bars-symbolic")
+        );
     }
 
     /// Only the last warning before the quota runs out is allowed to stay on screen.
