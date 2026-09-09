@@ -16,19 +16,30 @@
 use crate::{Field, Format, Metric};
 
 /// One reported field, spelled in the producer's semantic format and our house style.
+///
+/// The format says how to spell a number; the *field* says what kind of quantity it is, and
+/// only the field can say that. A metric denominated in `USD` still measures its fullness in
+/// percent, so the unit belongs to the amounts — value, maximum, remaining — and never to
+/// `used_percent`, which would otherwise read `25 USD`. For the same reason the 0-100 clamp
+/// in [`percent`] belongs to `used_percent` alone: it exists so a window that is not quite
+/// empty never reads `100%`, and applying it to an amount the producer reported would print
+/// a number nobody sent.
 pub fn format_field(metric: &Metric, field: Field, format: Option<Format>) -> Option<String> {
     if field == Field::Text {
         return metric.text.clone();
     }
     let number = metric.field(field)?;
+    let fullness = field == Field::UsedPercent;
     Some(match format.unwrap_or(Format::Number) {
-        Format::Percent => percent(number),
+        Format::Percent if fullness => percent(number),
+        Format::Percent => format!("{}%", trim_number(number)),
         Format::Currency => match metric.unit.as_deref() {
             Some(unit) => format!("{number:.2} {unit}"),
             None => format!("{number:.2}"),
         },
         Format::Duration => duration(number.round() as i64),
         Format::Text => trim_number(number),
+        Format::Number if fullness => format!("{}%", trim_number(number)),
         Format::Number => match metric.unit.as_deref() {
             Some(unit) => format!("{} {unit}", trim_number(number)),
             None => trim_number(number),
@@ -166,6 +177,45 @@ mod tests {
         assert_eq!(
             format_field(&m, Field::Text, Some(Format::Text)).as_deref(),
             Some("active")
+        );
+    }
+
+    #[test]
+    fn a_field_is_spelled_as_the_kind_of_quantity_it_is() {
+        use crate::{Field, Format};
+        let m = metric();
+        assert_eq!(
+            format_field(&m, Field::UsedPercent, Some(Format::Number)).as_deref(),
+            Some("25%"),
+            "a percentage is not denominated in the metric's unit"
+        );
+        assert_eq!(
+            format_field(&m, Field::Remaining, Some(Format::Number)).as_deref(),
+            Some("37.5 USD"),
+            "an amount still carries the unit"
+        );
+    }
+
+    #[test]
+    fn only_a_used_percentage_is_clamped_to_the_ends_of_a_window() {
+        use crate::{Field, Format};
+        let over = crate::Metric {
+            value: Some(150.0),
+            ..metric()
+        };
+        assert_eq!(
+            format_field(&over, Field::Value, Some(Format::Percent)).as_deref(),
+            Some("150%"),
+            "an amount the producer reported is not rewritten to fit 0-100"
+        );
+        let overfull = crate::Metric {
+            used_percent: Some(150.0),
+            ..metric()
+        };
+        assert_eq!(
+            format_field(&overfull, Field::UsedPercent, Some(Format::Percent)).as_deref(),
+            Some("100%"),
+            "a window's own fullness still stops at full"
         );
     }
 

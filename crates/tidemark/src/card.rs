@@ -191,7 +191,15 @@ pub(crate) fn presentation_row<'a>(
 ) -> Option<Row<'a>> {
     let kind = widget.kind()?;
     let metric = presentation.metric(&widget.metric)?;
-    widget_text(kind, metric, widget)?;
+    // A gauge is its bar first and its label second. Losing the label — a field it cannot
+    // put a number on, or a format token only a newer daemon knows — must not cost the
+    // percentage the producer actually reported, or a rolling upgrade degrades harder than
+    // the extensible `a{sv}` contract implies. Every other kind *is* its text.
+    let drawable = match kind {
+        WidgetKind::Gauge => gauge_percent(metric, widget).is_some(),
+        _ => widget_text(kind, metric, widget).is_some(),
+    };
+    drawable.then_some(())?;
     Some(Row {
         kind,
         metric: Cow::Borrowed(metric),
@@ -1082,6 +1090,29 @@ mod tests {
         let rows = card_rows(&status);
         assert_eq!(rows[0].text().as_deref(), Some("37.50 USD"));
         assert_eq!(gauge_percent(&rows[0].metric, &rows[0].widget), Some(25.0));
+    }
+
+    #[test]
+    fn a_gauge_keeps_its_bar_when_its_label_cannot_be_spelled() {
+        use tidemark_types::{Field, Widget};
+        // A newer daemon's format token, and a field a gauge cannot put a number on. Both
+        // cost the number; neither costs the percentage the producer actually reported.
+        let mut unreadable_format = Widget::gauge("a", Field::UsedPercent);
+        unreadable_format.format = Some("bushels".into());
+        let status = presented(
+            vec![unreadable_format, Widget::gauge("a", Field::Text)],
+            vec![numeric_metric("a")],
+        );
+        let rows = card_rows(&status);
+        assert_eq!(
+            rows.len(),
+            2,
+            "an unspellable label does not remove the bar"
+        );
+        for row in &rows {
+            assert_eq!(row.text(), None);
+            assert_eq!(gauge_percent(&row.metric, &row.widget), Some(25.0));
+        }
     }
 
     #[test]
