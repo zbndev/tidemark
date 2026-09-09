@@ -123,3 +123,6 @@ busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark i
 - Nix exports packages, apps, a NixOS module and a dev shell for x86_64-linux/aarch64-linux.
 - `scripts/test-package-upgrade.sh [workdir]` needs Docker/systemd; `scripts/check-tag-version.sh <tag>` validates release version alignment.
 - More specific AGENTS.md files cover each crate and core's providers, keyed providers, Antigravity, browser and storage domains; keep implementation details there.
+
+## USER PREFERENCES (binding)
+- Never perform manual/UI verification (clicking through the app, screenshots, driving the installed app) — the user does all manual checks. State what to verify by hand and stop.

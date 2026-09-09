@@ -88,8 +88,24 @@ pub fn set(image: &gtk::Image, provider: &str) {
 /// `FORCE_SYMBOLIC` matters here for exactly the same reason as the installed icon-name
 /// path: a direct texture would keep the SVG's black fill on a dark theme. `BytesIcon`
 /// keeps the dry-run a dry run — neither the daemon nor the GUI has to materialize the
-/// preview on disk.
+/// preview on disk. Windows cannot take that road: GTK's icon backend there does not
+/// resolve a `BytesIcon` into a drawable SVG — the lookup hands back the missing-image
+/// emblem, which is how the import dialog first shipped with a broken mark. Decoding the
+/// bytes as a texture instead is no way out either, because `gdk::Texture::from_bytes`
+/// goes through gdk-pixbuf and the installed runtime carries a pixbuf `loaders.cache`
+/// whose relative module paths never resolve, so no loader — SVG included — is found
+/// there. What Windows *can* do, exactly as it loads the installed marks, is ask the icon
+/// theme for a file: the sanitized SVG is parked under the process's temp directory and
+/// looked up through a `FileIcon` — still nothing installed, still theme-recoloured.
 pub fn set_preview(image: &gtk::Image, svg: &str) {
+    #[cfg(windows)]
+    if let Some(paintable) = preview_paintable(image, svg) {
+        paintable.set_property("is-symbolic", true);
+        image.set_paintable(Some(&paintable));
+        image.set_visible(true);
+        return;
+    }
+
     let bytes = gtk::glib::Bytes::from_owned(svg.as_bytes().to_vec());
     let icon = gtk::gio::BytesIcon::new(&bytes);
     let paintable = gtk::IconTheme::for_display(&image.display()).lookup_by_gicon(
@@ -105,6 +121,42 @@ pub fn set_preview(image: &gtk::Image, svg: &str) {
     paintable.set_property("is-symbolic", true);
     image.set_paintable(Some(&paintable));
     image.set_visible(true);
+}
+
+/// Looks up a sanitized SVG for Windows by parking it in the temp directory, because the
+/// bytes-only routes (`BytesIcon`, `gdk::Texture::from_bytes`) both fail there.
+///
+/// The file is deliberately not deleted afterwards: an `IconPaintable` is resolved lazily
+/// and may re-read its file while the dialog it belongs to is still open. One file per
+/// preview, under the process's own temp prefix, is the bounded cost of that.
+#[cfg(windows)]
+fn preview_paintable(image: &gtk::Image, svg: &str) -> Option<gtk::IconPaintable> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PREVIEWS: AtomicU64 = AtomicU64::new(0);
+
+    // The `-symbolic` suffix is not decoration: GTK infers the symbolic recolouring from
+    // the file name, the same convention the installed marks under `hicolor/symbolic`
+    // follow.
+    let nonce = PREVIEWS.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "tidemark-preview-{}-{nonce}-symbolic.svg",
+        std::process::id()
+    ));
+    std::fs::write(&path, svg).ok()?;
+
+    let icon = gtk::gio::FileIcon::new(&gtk::gio::File::for_path(&path));
+    let paintable = gtk::IconTheme::for_display(&image.display()).lookup_by_gicon(
+        &icon,
+        image.pixel_size().max(1),
+        image.scale_factor(),
+        gtk::TextDirection::None,
+        gtk::IconLookupFlags::FORCE_SYMBOLIC,
+    );
+    // A failed lookup is still an IconPaintable — the missing-image emblem — and its
+    // absent file is the only signal of that.
+    paintable.file().and_then(|file| file.path())?;
+    Some(paintable)
 }
 
 /// Whether the icon theme of the display this widget is on has `name`.
@@ -220,6 +272,37 @@ mod tests {
             .expect("the inspected bytes draw without an installed theme icon")
             .downcast::<gtk::IconPaintable>()
             .expect("the preview uses GTK's icon loader");
+        assert!(
+            paintable.property::<bool>("is-symbolic"),
+            "the preview follows the theme colour"
+        );
+        assert!(preview.is_visible());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "needs a display and exclusive GTK ownership; run alone on Windows"]
+    fn a_preview_mark_resolves_through_the_icon_theme_on_windows() {
+        if adw::init().is_err() || gtk::gdk::Display::default().is_none() {
+            eprintln!("skipped: no display is available");
+            return;
+        }
+
+        let preview = image();
+        set_preview(
+            &preview,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="currentColor" d="M0 0h64v64H0z"/></svg>"#,
+        );
+
+        let paintable = preview
+            .paintable()
+            .expect("the inspected bytes draw without an installed theme icon")
+            .downcast::<gtk::IconPaintable>()
+            .expect("Windows previews load through GTK's icon loader, not a pixbuf texture");
+        assert!(
+            paintable.file().is_some_and(|file| file.path().is_some()),
+            "the preview must resolve to the parked SVG, not the missing-image emblem"
+        );
         assert!(
             paintable.property::<bool>("is-symbolic"),
             "the preview follows the theme colour"
