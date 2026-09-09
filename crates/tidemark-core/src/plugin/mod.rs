@@ -14,6 +14,7 @@
 pub mod limits;
 pub mod lua;
 pub mod output;
+pub mod provider;
 pub mod schema;
 pub mod svg;
 
