@@ -475,6 +475,13 @@ pub struct DataInfo {
     pub token_schema: String,
     /// False when a distribution built the daemon without its GitHub release checker.
     pub release_check_available: bool,
+    /// Where installed plugin marks are materialized, as an XDG icon-theme root.
+    ///
+    /// A path the client *adds to its icon search path*, never one it opens files from
+    /// itself: a symbolic SVG only takes the theme's colour when GTK loads it through the
+    /// icon theme. Empty from a daemon that has no plugin directory, which a client must
+    /// read as "add nothing" rather than as a root at the filesystem's top.
+    pub plugin_icons_path: String,
 }
 
 /// Application preferences kept by the daemon in `config.toml`.
@@ -1286,6 +1293,7 @@ mod tests {
             key_schema: "io.github.zbndev.Tidemark.ProviderKey".into(),
             token_schema: "io.github.zbndev.Tidemark.ProviderToken".into(),
             release_check_available: true,
+            plugin_icons_path: "/home/test/.local/share/tidemark/plugins/icons".into(),
         };
 
         let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");

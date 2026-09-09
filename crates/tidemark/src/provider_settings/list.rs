@@ -223,17 +223,32 @@ struct AccountRow {
 }
 
 impl ConfiguredList {
-    pub(super) fn new(on_add: Rc<dyn Fn()>) -> Self {
+    pub(super) fn new(on_add: Rc<dyn Fn()>, on_import: Rc<dyn Fn()>) -> Self {
         let add = gtk::Button::builder()
             .icon_name("list-add-symbolic")
             .tooltip_text("Add provider")
             .valign(gtk::Align::Center)
             .build();
         add.connect_clicked(move |_| on_add());
+        // Beside "+" rather than inside the picker: importing a file is how a provider
+        // that is not in the catalog gets there, and it has to be findable before the
+        // user has anything to search the picker for.
+        let import = gtk::Button::builder()
+            .icon_name("document-open-symbolic")
+            .tooltip_text("Import a provider file")
+            .valign(gtk::Align::Center)
+            .build();
+        import.connect_clicked(move |_| on_import());
+        let actions = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(PROVIDER_ACTION_SPACING)
+            .build();
+        actions.append(&import);
+        actions.append(&add);
 
         let group = adw::PreferencesGroup::builder()
             .title("Providers")
-            .header_suffix(&add)
+            .header_suffix(&actions)
             .build();
         let empty = adw::StatusPage::builder()
             .title("No providers added")
@@ -577,6 +592,7 @@ pub(super) struct Picker {
     definitions: RefCell<Vec<ProviderDefinition>>,
     statuses: RefCell<Vec<ProviderStatus>>,
     on_select: Rc<dyn Fn(String)>,
+    on_remove_plugin: Rc<dyn Fn(String)>,
 }
 
 impl std::fmt::Debug for Picker {
@@ -591,7 +607,10 @@ impl std::fmt::Debug for Picker {
 }
 
 impl Picker {
-    pub(super) fn new(on_select: Rc<dyn Fn(String)>) -> Rc<Self> {
+    pub(super) fn new(
+        on_select: Rc<dyn Fn(String)>,
+        on_remove_plugin: Rc<dyn Fn(String)>,
+    ) -> Rc<Self> {
         let search = gtk::SearchEntry::builder()
             .placeholder_text("Search providers")
             .margin_top(12)
@@ -631,6 +650,7 @@ impl Picker {
             definitions: RefCell::new(Vec::new()),
             statuses: RefCell::new(Vec::new()),
             on_select,
+            on_remove_plugin,
         });
         picker.search.connect_search_changed({
             let weak = Rc::downgrade(&picker);
@@ -680,6 +700,23 @@ impl Picker {
                 .activatable(true)
                 .build();
             row.add_prefix(&image);
+            // An installed definition nothing uses can be deleted, and this row is the
+            // only place it exists on screen: once an account is configured it moves to
+            // the configured list, and the daemon refuses to remove it from there.
+            if definition.plugin.is_some() {
+                let remove = gtk::Button::builder()
+                    .icon_name("user-trash-symbolic")
+                    .tooltip_text("Remove this installed provider")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat"])
+                    .build();
+                remove.connect_clicked({
+                    let on_remove_plugin = Rc::clone(&self.on_remove_plugin);
+                    let provider = definition.provider.clone();
+                    move |_| on_remove_plugin(provider.clone())
+                });
+                row.add_suffix(&remove);
+            }
             row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
             row.connect_activated({
                 let on_select = Rc::clone(&self.on_select);

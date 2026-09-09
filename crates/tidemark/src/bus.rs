@@ -40,8 +40,8 @@ const RETRY_SECONDS: u32 = 5;
 /// message type per signal, so those names come from there too: [`Event`] below matches on
 /// them.
 pub use tidemark_ipc::{
-    ActivateRequested, DaemonProxy, DataChanged, OrderChanged, PreferencesChanged, ProviderChanged,
-    ProviderRemoved, UpdateChanged,
+    ActivateRequested, DaemonProxy, DataChanged, OrderChanged, PluginsChanged, PreferencesChanged,
+    ProviderChanged, ProviderRemoved, UpdateChanged,
 };
 
 /// What the window is told.
@@ -73,6 +73,13 @@ pub enum Update {
     Preferences(Preferences),
     /// Paths or storage facts changed.
     Data(DataInfo),
+    /// The provider catalog changed: a plugin was installed or removed.
+    ///
+    /// The catalog rather than the plugin list the signal carries, because the catalog is
+    /// what every view here is drawn from. Re-read rather than patched: the daemon owns
+    /// one catalog, and a client assembling a second would be assembling the one that
+    /// disagrees.
+    Catalog(Vec<ProviderDefinition>),
     /// Another client asked this one to come forward.
     Activate,
     /// There is nothing to show, with the reason to put on the screen.
@@ -126,6 +133,7 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
     let mut preference_changes = pin!(proxy.receive_preferences_changed().await?);
     let mut data_changes = pin!(proxy.receive_data_changed().await?);
     let mut activations = pin!(proxy.receive_activate_requested().await?);
+    let mut plugin_changes = pin!(proxy.receive_plugins_changed().await?);
 
     load(&proxy, on).await;
 
@@ -155,6 +163,9 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
             }
             if let Poll::Ready(activation) = activations.as_mut().poll_next(context) {
                 return Poll::Ready(Event::Activate(activation));
+            }
+            if let Poll::Ready(plugins) = plugin_changes.as_mut().poll_next(context) {
+                return Poll::Ready(Event::Plugins(plugins));
             }
             Poll::Pending
         })
@@ -201,6 +212,14 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
                 Err(error) => tracing::warn!(%error, "a DataChanged signal did not parse"),
             },
             Event::Activate(Some(_)) => on(Update::Activate),
+            // The signal says *that* the installed set changed; the catalog says what it
+            // now is, and that is what the picker and the settings pages read.
+            Event::Plugins(Some(_)) => match proxy.list_providers().await {
+                Ok(definitions) => on(Update::Catalog(definitions)),
+                Err(error) => {
+                    tracing::warn!(%error, "the catalog could not be re-read after PluginsChanged");
+                }
+            },
             // Any stream ending means the connection is finished with.
             #[cfg(unix)]
             Event::Owner(None) => return Ok(()),
@@ -210,7 +229,8 @@ async fn serve(on: &impl Fn(Update)) -> zbus::Result<()> {
             | Event::Available(None)
             | Event::Preferences(None)
             | Event::Data(None)
-            | Event::Activate(None) => return Ok(()),
+            | Event::Activate(None)
+            | Event::Plugins(None) => return Ok(()),
         }
     }
 }
@@ -271,6 +291,7 @@ async fn load(proxy: &DaemonProxy<'static>, on: &impl Fn(Update)) {
             key_schema: ids::SECRET_SCHEMA.into(),
             token_schema: ids::TOKEN_SCHEMA.into(),
             release_check_available: false,
+            plugin_icons_path: String::new(),
         }
     });
     match (definitions, statuses) {
@@ -676,6 +697,7 @@ enum Event {
     Preferences(Option<PreferencesChanged>),
     Data(Option<DataChanged>),
     Activate(Option<ActivateRequested>),
+    Plugins(Option<PluginsChanged>),
 }
 
 #[cfg(test)]

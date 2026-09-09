@@ -4,6 +4,7 @@ mod browser_auth;
 mod detail;
 mod list;
 pub mod model;
+mod plugins;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -12,7 +13,7 @@ use std::rc::{Rc, Weak};
 use adw::prelude::*;
 use gtk::glib;
 use tidemark_types::{
-    AccountId, CredentialKind, ProviderDefinition, ProviderId, ProviderStatus,
+    AccountId, CredentialKind, PluginInfo, ProviderDefinition, ProviderId, ProviderStatus,
     account_slug_suggestion, valid_account_slug,
 };
 
@@ -192,26 +193,46 @@ impl ProviderSettings {
             .build();
 
         let controller: Rc<RefCell<Option<Weak<Self>>>> = Rc::new(RefCell::new(None));
-        let configured = ConfiguredList::new({
-            let controller = Rc::clone(&controller);
-            Rc::new(move || {
-                if let Some(settings) = controller.borrow().as_ref().and_then(Weak::upgrade) {
-                    settings.open_picker();
-                }
-            })
-        });
+        let configured = ConfiguredList::new(
+            {
+                let controller = Rc::clone(&controller);
+                Rc::new(move || {
+                    if let Some(settings) = controller.borrow().as_ref().and_then(Weak::upgrade) {
+                        settings.open_picker();
+                    }
+                })
+            },
+            {
+                let controller = Rc::clone(&controller);
+                Rc::new(move || {
+                    if let Some(settings) = controller.borrow().as_ref().and_then(Weak::upgrade) {
+                        settings.import_plugin();
+                    }
+                })
+            },
+        );
         let page = adw::PreferencesPage::new();
         page.add(&configured.group);
         dialog.add(&page);
 
-        let picker = Picker::new({
-            let controller = Rc::clone(&controller);
-            Rc::new(move |provider| {
-                if let Some(settings) = controller.borrow().as_ref().and_then(Weak::upgrade) {
-                    settings.add_provider(provider);
-                }
-            })
-        });
+        let picker = Picker::new(
+            {
+                let controller = Rc::clone(&controller);
+                Rc::new(move |provider| {
+                    if let Some(settings) = controller.borrow().as_ref().and_then(Weak::upgrade) {
+                        settings.add_provider(provider);
+                    }
+                })
+            },
+            {
+                let controller = Rc::clone(&controller);
+                Rc::new(move |provider| {
+                    if let Some(settings) = controller.borrow().as_ref().and_then(Weak::upgrade) {
+                        settings.confirm_plugin_removal(provider);
+                    }
+                })
+            },
+        );
         let settings = Rc::new(Self {
             dialog: dialog.clone(),
             proxy,
@@ -324,17 +345,38 @@ impl ProviderSettings {
     fn add_provider(self: &Rc<Self>, provider: String) {
         let settings = Rc::clone(self);
         glib::spawn_future_local(async move {
-            if let Err(error) = settings.proxy.add_provider(&provider).await {
-                settings.toast(&reason(&error));
-                return;
-            }
-
             let definition = settings
                 .definitions
                 .borrow()
                 .iter()
                 .find(|definition| definition.provider == provider)
                 .cloned();
+            // A plugin has nowhere to send anything until an endpoint is filed, and its
+            // detail page has no field for one. So the form comes first and adds the
+            // provider itself: a user who changes their mind is left with nothing to
+            // clean up, and one who does not never has to find a second dialog.
+            if let Some(definition) = definition.as_ref()
+                && let Some(info) = definition.plugin.clone()
+            {
+                settings.dialog.pop_subpage();
+                if let Some(account) = settings
+                    .configure_plugin_account(
+                        &definition.provider,
+                        &definition.title,
+                        &info,
+                        PluginTarget::NewProvider,
+                    )
+                    .await
+                {
+                    settings.note_local_account(&provider, &account);
+                }
+                return;
+            }
+            if let Err(error) = settings.proxy.add_provider(&provider).await {
+                settings.toast(&reason(&error));
+                return;
+            }
+
             let Some(definition) = definition else {
                 return;
             };
@@ -375,21 +417,43 @@ impl ProviderSettings {
         };
         let settings = Rc::clone(self);
         glib::spawn_future_local(async move {
-            let Some(slug) = name_dialog(
-                &settings.dialog,
-                &format!("New {} account", definition.title),
-                "",
-                "Add",
-                None,
-            )
-            .await
-            else {
-                return;
+            let slug = match definition.plugin.clone() {
+                // One form: the account's name, where its key is sent, and the key. The
+                // three are one decision, and `configure_plugin_account` has already
+                // added the account by the time it answers.
+                Some(info) => {
+                    let Some(slug) = settings
+                        .configure_plugin_account(
+                            &definition.provider,
+                            &definition.title,
+                            &info,
+                            PluginTarget::NewAccount,
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+                    slug
+                }
+                None => {
+                    let Some(slug) = name_dialog(
+                        &settings.dialog,
+                        &format!("New {} account", definition.title),
+                        "",
+                        "Add",
+                        None,
+                    )
+                    .await
+                    else {
+                        return;
+                    };
+                    if let Err(error) = settings.proxy.add_account(&provider, &slug).await {
+                        settings.toast(&reason(&error));
+                        return;
+                    }
+                    slug
+                }
             };
-            if let Err(error) = settings.proxy.add_account(&provider, &slug).await {
-                settings.toast(&reason(&error));
-                return;
-            }
             // The daemon persists the account before it answers, and publishes its first
             // status from its own task; until that lands, the account exists only as this
             // pending row, kept alive by the same machinery an added provider's is.
@@ -511,6 +575,176 @@ impl ProviderSettings {
         });
     }
 
+    /// The "import" button: choose a file, show what it declares, install it if asked.
+    ///
+    /// The catalog is not patched here. Installing makes the daemon emit `PluginsChanged`,
+    /// and the definitions arrive through the same `apply` every other catalog change
+    /// does — a locally invented entry would be a second answer waiting to disagree.
+    fn import_plugin(self: &Rc<Self>) {
+        let settings = Rc::clone(self);
+        glib::spawn_future_local(async move {
+            let chooser = plugins::file_dialog();
+            let Ok(file) = chooser
+                .open_future(window_of(&settings.dialog).as_ref())
+                .await
+            else {
+                // Dismissed. `open_future` reports a cancelled chooser as an error, and
+                // there is nothing to report about a user closing a file dialog.
+                return;
+            };
+            let Some(path) = file.path() else {
+                settings.toast("That file has no path this build can read.");
+                return;
+            };
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    settings.toast(&format!("Cannot read {}: {error}", path.display()));
+                    return;
+                }
+            };
+            let Some(info) = plugins::import_dialog(&settings.dialog, &settings.proxy, bytes).await
+            else {
+                return;
+            };
+            // Straight on to the endpoint and the key. An installed definition nobody has
+            // pointed at a URL polls nothing and draws no card, so stopping here would
+            // leave the user with a success message and no way to guess what is next.
+            let id = info.id.clone();
+            let name = info.name.clone();
+            if let Some(account) = settings
+                .configure_plugin_account(&id, &name, &info, PluginTarget::NewProvider)
+                .await
+            {
+                settings.note_local_account(&id, &account);
+            } else {
+                settings.toast(&format!(
+                    "{name} installed. Use + to add an account for it."
+                ));
+            }
+        });
+    }
+
+    /// Removes an installed definition, which the daemon refuses while an account uses it.
+    ///
+    /// The refusal is shown as it arrives: the daemon counts the accounts, and a second
+    /// count kept here would be the one that is wrong.
+    fn confirm_plugin_removal(self: &Rc<Self>, provider: String) {
+        let title = self
+            .definitions
+            .borrow()
+            .iter()
+            .find(|definition| definition.provider == provider)
+            .map_or_else(|| provider.clone(), |definition| definition.title.clone());
+        let settings = Rc::clone(self);
+        glib::spawn_future_local(async move {
+            let confirmation = adw::AlertDialog::builder()
+                .heading(format!("Remove {title}?"))
+                .body(
+                    "This deletes the installed provider file. Any account still using it                      must be removed first.",
+                )
+                .build();
+            confirmation.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
+            confirmation.set_default_response(Some("cancel"));
+            confirmation.set_close_response("cancel");
+            confirmation.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+            if confirmation.choose_future(Some(&settings.dialog)).await != "remove" {
+                return;
+            }
+            match settings.proxy.remove_plugin(&provider).await {
+                Ok(()) => settings.toast(&format!("{title} removed.")),
+                Err(error) => settings.toast(&reason(&error)),
+            }
+        });
+    }
+
+    /// Fills in one plugin account: the endpoint and the key together, in that order.
+    ///
+    /// Nothing is written until the form is confirmed, which is why the target says what
+    /// *would* be created rather than the caller creating it first: a dismissed form must
+    /// leave no half-configured provider behind. After that the order is fixed —
+    /// the account, then the endpoint, then the key, so a key is never stored for an
+    /// account with nowhere to send it. Returns the account id on success.
+    async fn configure_plugin_account(
+        self: &Rc<Self>,
+        provider: &str,
+        title: &str,
+        info: &PluginInfo,
+        target: PluginTarget,
+    ) -> Option<String> {
+        let heading = match &target {
+            PluginTarget::NewProvider => format!("Add {title}"),
+            PluginTarget::NewAccount => format!("New {title} account"),
+        };
+        let naming = matches!(target, PluginTarget::NewAccount);
+        let form = plugins::account_dialog(&self.dialog, info, &heading, naming).await?;
+
+        let slug = match &target {
+            PluginTarget::NewProvider => {
+                if let Err(error) = self.proxy.add_provider(provider).await {
+                    self.toast(&reason(&error));
+                    return None;
+                }
+                DEFAULT_ACCOUNT.to_owned()
+            }
+            PluginTarget::NewAccount => {
+                let named = form
+                    .slug
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_ACCOUNT.to_owned());
+                if let Err(error) = self.proxy.add_account(provider, &named).await {
+                    self.toast(&reason(&error));
+                    return None;
+                }
+                named
+            }
+        };
+
+        if let Err(error) = self
+            .proxy
+            .set_plugin_endpoint(provider, &slug, &form.endpoint, form.allow_insecure_http)
+            .await
+        {
+            self.toast(&reason(&error));
+            return Some(slug);
+        }
+        if let Err(error) = self.proxy.set_key(provider, &slug, &form.key).await {
+            self.toast(&reason(&error));
+        }
+        Some(slug)
+    }
+
+    /// Draws the account a plugin flow just created before the daemon's own status for it
+    /// arrives, the way an added provider's row is drawn.
+    fn note_local_account(&self, provider: &str, account: &str) {
+        let definition = self
+            .definitions
+            .borrow()
+            .iter()
+            .find(|definition| definition.provider == provider)
+            .cloned();
+        // Absent only just after an import, when the refreshed catalog is still in flight.
+        // The daemon publishes the account's first status either way, so the row appears a
+        // moment later rather than not at all.
+        let Some(definition) = definition else {
+            return;
+        };
+        if !self
+            .statuses
+            .borrow()
+            .iter()
+            .any(|status| status.provider == provider && status.account == account)
+        {
+            self.local_added
+                .borrow_mut()
+                .insert((provider.to_owned(), account.to_owned()));
+            self.statuses
+                .borrow_mut()
+                .push(pending_status(&definition, account));
+        }
+        self.refresh_views();
+    }
+
     fn toast(&self, message: &str) {
         self.dialog.add_toast(adw::Toast::new(message));
     }
@@ -629,6 +863,27 @@ pub(super) async fn name_dialog(
 
     (dialog.choose_future(Some(parent)).await == "accept")
         .then(|| account_slug_suggestion(&entry.text()))
+}
+
+/// What confirming a plugin's account form would create.
+///
+/// Carried into the form rather than acted on before it, so a dismissed form leaves the
+/// configuration exactly as it found it.
+#[derive(Debug)]
+enum PluginTarget {
+    /// Nothing is configured for this plugin yet: confirming adds the provider, which
+    /// comes with its `default` account.
+    NewProvider,
+    /// The provider is configured; confirming names and adds another account.
+    NewAccount,
+}
+
+/// The native window a dialog is presented in, which the file chooser needs as its parent.
+///
+/// An `AdwDialog` is not a window: it is hosted by one, and a chooser parented to nothing
+/// opens unattached to the app.
+fn window_of(dialog: &adw::PreferencesDialog) -> Option<gtk::Window> {
+    dialog.root().and_downcast::<gtk::Window>()
 }
 
 /// A D-Bus error as one sentence for a toast.

@@ -225,6 +225,7 @@ impl MainWindow {
                 key_schema: ids::SECRET_SCHEMA.into(),
                 token_schema: ids::TOKEN_SCHEMA.into(),
                 release_check_available: false,
+                plugin_icons_path: String::new(),
             }),
             minimize_on_close: Cell::new(true),
             expanded: RefCell::new(BTreeSet::new()),
@@ -322,6 +323,13 @@ impl MainWindow {
             Update::Data(data) => self.apply_data(data),
             // A second instance asked this one to come forward: raise the window
             // however it currently stands, even over a waiting screen.
+            // A plugin was installed or removed. Only the catalog changed; the cards and
+            // their readings are untouched, so nothing here is redrawn but the pages that
+            // list what can be added.
+            Update::Catalog(definitions) => {
+                *self.definitions.borrow_mut() = definitions;
+                self.update_provider_settings();
+            }
             Update::Activate => self.window.present(),
             Update::Waiting(reason) => {
                 *self.daemon.borrow_mut() = None;
@@ -669,6 +677,16 @@ impl MainWindow {
     }
 
     fn apply_data(&self, data: DataInfo) {
+        // Before the dialog is told anything: a mark asked for by name has to be findable
+        // by the time a plugin row is drawn, and this is the only message that carries the
+        // root. An empty path is a daemon with no plugin directory, not the filesystem's
+        // top, so it adds nothing.
+        if !data.plugin_icons_path.is_empty() {
+            crate::mark::add_plugin_path(
+                &gtk::prelude::WidgetExt::display(&self.window),
+                std::path::Path::new(&data.plugin_icons_path),
+            );
+        }
         *self.data_info.borrow_mut() = data;
         if let Some(dialog) = self.preferences_dialog.get() {
             dialog.apply(&self.preferences.borrow(), &self.data_info.borrow());

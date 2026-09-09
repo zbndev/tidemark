@@ -80,3 +80,17 @@ pub fn set(image: &gtk::Image, slug: &str) {
 fn has_icon(widget: &impl IsA<gtk::Widget>, name: &str) -> bool {
     gtk::IconTheme::for_display(&widget.as_ref().display()).has_icon(name)
 }
+
+/// Adds a directory of installed plugin marks to this display's icon theme.
+///
+/// Called with the root the daemon publishes in `DataInfo`. After this a plugin mark is
+/// found by [`icon_name`] exactly the way a shipped mark is — which is the whole reason
+/// the daemon materializes it as a file rather than sending bytes: GTK only recolours a
+/// symbolic SVG it loaded *through the icon theme*, and a texture built from bytes would
+/// be the black smudge this module's own note describes.
+///
+/// Idempotent by construction: adding a path the theme already has is a no-op in GTK, so
+/// a daemon that republishes its `DataInfo` does not lengthen the search path.
+pub fn add_plugin_path(display: &gtk::gdk::Display, root: &std::path::Path) {
+    gtk::IconTheme::for_display(display).add_search_path(root);
+}

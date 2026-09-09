@@ -221,6 +221,10 @@ pub struct DaemonState {
     /// The p2p fan-out, present only where the daemon serves peers directly (Windows).
     /// `None` keeps the session-bus emitters exactly as they were.
     hub: Option<Arc<PeerHub>>,
+    /// The icon-theme root installed plugin marks are materialized under, published so a
+    /// client can add it to its own search path. Empty for a daemon with no plugin
+    /// directory, which is what every test that does not name one gets.
+    plugin_icons: PathBuf,
 }
 
 /// The D-Bus interface handle: cloneable, and shared by every p2p peer connection.
@@ -273,6 +277,19 @@ impl Daemon {
             release_checks,
             release_check_available,
         });
+        this
+    }
+
+    /// Names the icon-theme root a client adds to find installed plugin marks.
+    ///
+    /// Separate from [`Self::with_preferences`] rather than a seventh argument to it: the
+    /// path is one fact for one client to act on, and every caller that does not have a
+    /// plugin directory would otherwise have to say so.
+    pub fn with_plugin_icons(self, root: PathBuf) -> Self {
+        let mut this = self;
+        Arc::get_mut(&mut this.0)
+            .expect("the daemon is not shared while it is being built")
+            .plugin_icons = root;
         this
     }
 
@@ -385,6 +402,7 @@ impl DaemonState {
             preferences: None,
             preference_mutation: Mutex::new(()),
             hub: None,
+            plugin_icons: PathBuf::new(),
         }
     }
 
@@ -951,6 +969,7 @@ impl Daemon {
             key_schema: ids::SECRET_SCHEMA.into(),
             token_schema: ids::TOKEN_SCHEMA.into(),
             release_check_available: runtime.release_check_available,
+            plugin_icons_path: self.plugin_icons.to_string_lossy().into_owned(),
         })
     }
 
