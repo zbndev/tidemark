@@ -20,6 +20,11 @@ cbc = { version = "0.2.1", features = ["block-padding"] }
 fs4 = "1.1.0"
 hmac = "0.13.0"
 libc = "0.2.180"
+# mlua with vendored Lua 5.4: the plugin transformation language. Vendored so a user
+# installs no interpreter and every platform runs the same VM; `lua54` for the goto/integer
+# semantics the format documents. What it costs the stripped daemon is measured by the
+# release size gate, not assumed here.
+mlua = { version = "0.12.1", features = ["lua54", "vendored"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 # quick-xml: the plugin SVG sanitizer. A pull parser and a writer, no DOM and no network —
 # an XML library that resolved an external entity or a DTD would defeat the point of

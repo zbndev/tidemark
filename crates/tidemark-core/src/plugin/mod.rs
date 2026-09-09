@@ -12,6 +12,7 @@
 //! limit, semantic output.
 
 pub mod limits;
+pub mod lua;
 pub mod schema;
 pub mod svg;
 
