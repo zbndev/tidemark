@@ -22,11 +22,15 @@
 //! card's *minimum* width, so a label that answered "as wide as my text" would be answering
 //! for every card on screen.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use tidemark_types::{DetailSection, ProviderState, ProviderStatus, Timestamp, Window};
+use tidemark_types::{
+    DetailSection, Emphasis, Field, Metric, MetricWindow, Presentation, ProviderState,
+    ProviderStatus, Timestamp, Widget, WidgetKind, Window, WindowKey, WindowLength, present,
+};
 
 use crate::bar::QuotaBar;
 use crate::format;
@@ -89,7 +93,7 @@ impl CardIdentity {
 #[derive(Debug)]
 struct Shown {
     status: ProviderStatus,
-    /// The bars of the secondary rows, in the order [`model::ordered_windows`] put them.
+    /// The secondary gauges, in published order (text rows have no bar).
     secondary: Vec<QuotaBar>,
 }
 
@@ -152,6 +156,17 @@ fn blocking_key<'a>(status: &'a ProviderStatus, key: &str) -> Option<&'a str> {
         .and_then(|window| window.blocked_by.as_deref())
 }
 
+/// Whether a card row's window is unavailable because another window consumed it.
+///
+/// A row without a window — a plugin's free-form text or a plain value — is never
+/// blocked: it does not describe a quota that could stop being enforced.
+fn row_blocked(status: &ProviderStatus, metric: &Metric) -> bool {
+    metric
+        .window
+        .as_ref()
+        .is_some_and(|window| blocking_key(status, &window.key).is_some())
+}
+
 /// A provider card.
 #[derive(Debug)]
 pub struct Card {
@@ -175,6 +190,165 @@ pub struct Card {
     balance_fraction: gtk::Label,
     footer: gtk::Label,
     shown: RefCell<Shown>,
+}
+
+/// A drawable widget resolved against its metric. Only old-daemon rows own their data.
+pub(crate) struct Row<'a> {
+    pub(crate) kind: WidgetKind,
+    pub(crate) metric: Cow<'a, Metric>,
+    pub(crate) widget: Cow<'a, Widget>,
+}
+
+impl Row<'_> {
+    pub(crate) fn text(&self) -> Option<String> {
+        widget_text(self.kind, &self.metric, &self.widget)
+    }
+}
+
+pub(crate) fn presentation_row<'a>(
+    presentation: &'a Presentation,
+    widget: &'a Widget,
+) -> Option<Row<'a>> {
+    let kind = widget.kind()?;
+    let metric = presentation.metric(&widget.metric)?;
+    // A gauge is its bar first and its label second. Losing the label — a field it cannot
+    // put a number on, or a format token only a newer daemon knows — must not cost the
+    // percentage the producer actually reported, or a rolling upgrade degrades harder than
+    // the extensible `a{sv}` contract implies. Every other kind *is* its text.
+    let drawable = match kind {
+        WidgetKind::Gauge => gauge_percent(metric, widget).is_some(),
+        _ => widget_text(kind, metric, widget).is_some(),
+    };
+    drawable.then_some(())?;
+    Some(Row {
+        kind,
+        metric: Cow::Borrowed(metric),
+        widget: Cow::Borrowed(widget),
+    })
+}
+
+/// Published order is authoritative. Only an absent presentation takes the rolling-upgrade path.
+pub(crate) fn card_rows(status: &ProviderStatus) -> Vec<Row<'_>> {
+    if let Some(presentation) = &status.presentation {
+        return presentation
+            .card
+            .iter()
+            .filter_map(|widget| presentation_row(presentation, widget))
+            .collect();
+    }
+    status
+        .to_snapshot()
+        .map(|snapshot| model::ordered_windows(&snapshot))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|window| window.used_percent.is_finite())
+        .map(|window| {
+            let metric = Metric {
+                id: window.key.to_string(),
+                title: window.title,
+                subtitle: window.subtitle,
+                value: None,
+                maximum: None,
+                remaining: None,
+                used_percent: Some(window.used_percent),
+                text: None,
+                unit: None,
+                window: Some(MetricWindow {
+                    key: window.key.to_string(),
+                    resets_at: window.resets_at.map(Timestamp::as_unix),
+                    length_secs: window.length.map(WindowLength::as_secs),
+                }),
+            };
+            let widget = Widget::gauge(&metric.id, Field::UsedPercent);
+            Row {
+                kind: WidgetKind::Gauge,
+                metric: Cow::Owned(metric),
+                widget: Cow::Owned(widget),
+            }
+        })
+        .collect()
+}
+
+fn widget_text(kind: WidgetKind, metric: &Metric, widget: &Widget) -> Option<String> {
+    // Unknown explicit selectors cannot silently choose another field or format.
+    if widget.format.is_some() && widget.format().is_none() {
+        return None;
+    }
+    match kind {
+        WidgetKind::Gauge => {
+            let percent = gauge_percent(metric, widget)?;
+            let field = if widget.field.is_none() {
+                Field::UsedPercent
+            } else {
+                widget.field()?
+            };
+            if field == Field::Text {
+                return None;
+            }
+            if field == Field::UsedPercent {
+                let metric = Metric {
+                    used_percent: Some(percent),
+                    ..metric.clone()
+                };
+                present::format_field(
+                    &metric,
+                    field,
+                    widget.format().or(Some(tidemark_types::Format::Percent)),
+                )
+            } else {
+                present::format_field(metric, field, widget.format())
+            }
+        }
+        WidgetKind::Value => {
+            let field = if widget.field.is_none() {
+                Field::Text
+            } else {
+                widget.field()?
+            };
+            present::format_field(metric, field, widget.format())
+        }
+        WidgetKind::Ratio => {
+            let (left, right) = (widget.left()?, widget.right()?);
+            (metric.field(right)? > 0.0).then_some(())?;
+            present::format_ratio(metric, left, right)
+        }
+        WidgetKind::Status => metric.text.clone(),
+    }
+}
+
+/// Reported percentage, or a finite quotient with a positive denominator.
+pub(crate) fn gauge_percent(metric: &Metric, widget: &Widget) -> Option<f64> {
+    if let Some(used) = metric.used_percent {
+        return used.is_finite().then_some(used);
+    }
+    let left = if widget.left.is_none() {
+        Field::Value
+    } else {
+        widget.left()?
+    };
+    let right = if widget.right.is_none() {
+        Field::Maximum
+    } else {
+        widget.right()?
+    };
+    let numerator = metric.field(left)?;
+    let denominator = metric.field(right)?;
+    let percent = numerator / denominator * 100.0;
+    (denominator > 0.0 && percent.is_finite()).then_some(percent)
+}
+
+fn metric_window(metric: &Metric, used_percent: f64) -> Option<Window> {
+    let window = metric.window.as_ref()?;
+    Some(Window {
+        key: WindowKey::named(&window.key),
+        title: metric.title.clone(),
+        subtitle: metric.subtitle.clone(),
+        used_percent,
+        resets_at: window
+            .resets_at
+            .and_then(|seconds| Timestamp::from_unix(seconds).ok()),
+        length: window.length_secs.and_then(WindowLength::from_secs),
+    })
 }
 
 impl Card {
@@ -263,6 +437,7 @@ impl Card {
 
         let headline = gtk::Label::builder()
             .halign(gtk::Align::Start)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
             .css_classes(["title-1"])
             .build();
         let dominant_title = gtk::Label::builder()
@@ -527,22 +702,30 @@ impl Card {
             None => self.chip.set_visible(false),
         }
 
-        let windows = status
-            .to_snapshot()
-            .map(|snapshot| model::ordered_windows(&snapshot))
-            .unwrap_or_default();
+        let rows = card_rows(status);
 
         self.set_absolutes(absolutes_for(status).as_deref());
 
         let balance = balance_for(status);
-        let secondary = match (windows.split_first(), balance) {
+        let secondary = match (rows.split_first(), balance) {
             (Some((dominant, rest)), _) => {
                 self.reading.set_visible(true);
                 self.blank.set_visible(false);
                 self.set_balance_only(None);
                 self.footer.set_vexpand(true);
-                self.bar.widget().set_visible(true);
-                self.dominant_title.set_label(&dominant.title);
+                self.bar
+                    .widget()
+                    .set_visible(dominant.kind == WidgetKind::Gauge);
+                self.dominant_title.set_label(&dominant.metric.title);
+                self.headline
+                    .set_label(&dominant.text().unwrap_or_default());
+                self.headline.set_css_classes(
+                    if dominant.widget.emphasis() == Some(Emphasis::Compact) {
+                        &["heading"]
+                    } else {
+                        &["title-1"]
+                    },
+                );
                 self.set_balance_line(balance);
                 self.rebuild_rows(rest, status)
             }
@@ -591,25 +774,32 @@ impl Card {
             None => self.footer.set_visible(false),
         }
 
-        let Some(snapshot) = shown.status.to_snapshot() else {
-            return;
-        };
-        let windows = model::ordered_windows(&snapshot);
-        let Some((dominant, rest)) = windows.split_first() else {
+        let rows = card_rows(&shown.status);
+        let Some((dominant, rest)) = rows.split_first() else {
             return;
         };
 
-        let blocked = blocking_key(&shown.status, dominant.key.as_str()).is_some();
-        let opacity = if blocked { 0.5 } else { 1.0 };
-        self.headline
-            .set_label(&format::percent(dominant.used_percent));
-        self.headline.set_opacity(opacity);
-        self.bar.set(dominant.used_percent, dominant.pace(now));
+        let window = if dominant.kind == WidgetKind::Gauge {
+            gauge_percent(&dominant.metric, &dominant.widget).and_then(|percent| {
+                let window = metric_window(&dominant.metric, percent);
+                self.bar
+                    .set(percent, window.as_ref().and_then(|window| window.pace(now)));
+                window
+            })
+        } else {
+            None
+        };
+        // A window another window has consumed is drawn dimmed, with its reset line gone:
+        // the reset belongs to a quota that is not being enforced right now.
+        let blocked = window
+            .as_ref()
+            .is_some_and(|window| blocking_key(&shown.status, window.key.as_str()).is_some());
+        self.headline.set_opacity(if blocked { 0.5 } else { 1.0 });
         self.bar.set_blocked(blocked);
         if blocked {
             self.reset.set_visible(false);
         } else {
-            match dominant.seconds_until_reset(now) {
+            match window.and_then(|window| window.seconds_until_reset(now)) {
                 Some(seconds) => {
                     self.reset.set_label(&format::resets_in(seconds));
                     self.reset.set_visible(true);
@@ -620,8 +810,15 @@ impl Card {
             }
         }
 
-        for (bar, window) in shown.secondary.iter().zip(rest) {
-            bar.set(window.used_percent, window.pace(now));
+        for (bar, row) in shown
+            .secondary
+            .iter()
+            .zip(rest.iter().filter(|row| row.kind == WidgetKind::Gauge))
+        {
+            if let Some(percent) = gauge_percent(&row.metric, &row.widget) {
+                let pace = metric_window(&row.metric, percent).and_then(|window| window.pace(now));
+                bar.set(percent, pace);
+            }
         }
     }
 
@@ -688,17 +885,16 @@ impl Card {
     }
 
     /// Replaces the thin rows, returning their bars in the same order.
-    fn rebuild_rows(&self, windows: &[Window], status: &ProviderStatus) -> Vec<QuotaBar> {
+    fn rebuild_rows(&self, rows: &[Row<'_>], status: &ProviderStatus) -> Vec<QuotaBar> {
         while let Some(child) = self.rows.first_child() {
             self.rows.remove(&child);
         }
-        self.rows.set_visible(!windows.is_empty());
+        self.rows.set_visible(!rows.is_empty());
 
-        windows
-            .iter()
-            .map(|window| {
+        rows.iter()
+            .filter_map(|resolved| {
                 let title = gtk::Label::builder()
-                    .label(&window.title)
+                    .label(&resolved.metric.title)
                     .halign(gtk::Align::Start)
                     .width_chars(12)
                     .max_width_chars(12)
@@ -706,15 +902,14 @@ impl Card {
                     .ellipsize(gtk::pango::EllipsizeMode::End)
                     .css_classes(["dim-label", "caption"])
                     .build();
-                let bar = QuotaBar::new(ROW_BAR);
-                bar.widget().set_valign(gtk::Align::Center);
-                let blocked = blocking_key(status, window.key.as_str()).is_some();
+                let blocked = row_blocked(status, &resolved.metric);
                 let opacity = if blocked { 0.5 } else { 1.0 };
-                bar.set_blocked(blocked);
                 let value = gtk::Label::builder()
-                    .label(format::percent(window.used_percent))
+                    .label(resolved.text().unwrap_or_default())
                     .halign(gtk::Align::End)
+                    .hexpand(true)
                     .width_chars(5)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
                     .xalign(1.0)
                     .css_classes(["dim-label", "caption", "numeric"])
                     .build();
@@ -722,7 +917,14 @@ impl Card {
 
                 let row = gtk::Box::builder().spacing(8).build();
                 row.append(&title);
-                row.append(bar.widget());
+                let bar = (resolved.kind == WidgetKind::Gauge).then(|| {
+                    let bar = QuotaBar::new(ROW_BAR);
+                    bar.widget().set_valign(gtk::Align::Center);
+                    bar.set_blocked(blocked);
+                    value.set_hexpand(false);
+                    row.append(bar.widget());
+                    bar
+                });
                 row.append(&value);
                 self.rows.append(&row);
                 bar
@@ -737,10 +939,9 @@ impl Card {
 /// belong on the card — and therefore a free function, testable without a windowing
 /// system. [`Card::set_absolutes`] only renders what this decides.
 fn absolutes_for(status: &ProviderStatus) -> Option<String> {
-    let snapshot = status.to_snapshot()?;
-    model::ordered_windows(&snapshot)
+    card_rows(status)
         .first()
-        .and_then(|window| window.subtitle.clone())
+        .and_then(|row| row.metric.subtitle.clone())
 }
 
 /// Puts the mark, the name and the plan on one baseline, once there is a resolved font to
@@ -850,6 +1051,153 @@ mod tests {
         let status = status_with(vec![five_hour]);
 
         assert_eq!(blocking_key(&status, "w18000"), Some("w604800"));
+    }
+
+    fn numeric_metric(id: &str) -> tidemark_types::Metric {
+        tidemark_types::Metric {
+            id: id.into(),
+            title: id.into(),
+            subtitle: None,
+            value: Some(12.5),
+            maximum: Some(50.0),
+            remaining: Some(37.5),
+            used_percent: Some(25.0),
+            text: Some("active".into()),
+            unit: Some("USD".into()),
+            window: None,
+        }
+    }
+
+    fn presented(
+        card: Vec<tidemark_types::Widget>,
+        metrics: Vec<tidemark_types::Metric>,
+    ) -> ProviderStatus {
+        let mut status = status_with(Vec::new());
+        status.presentation = Some(tidemark_types::Presentation {
+            metrics,
+            card,
+            details: Vec::new(),
+        });
+        status
+    }
+
+    #[test]
+    fn the_card_draws_the_widgets_in_the_published_order() {
+        use tidemark_types::{Field, Widget, WidgetKind};
+        let status = presented(
+            vec![
+                Widget::gauge("a", Field::UsedPercent),
+                Widget::value("b", Field::Remaining),
+                Widget::ratio("a", Field::Value, Field::Maximum),
+            ],
+            vec![numeric_metric("a"), numeric_metric("b")],
+        );
+        assert_eq!(
+            card_rows(&status)
+                .iter()
+                .map(|row| row.kind)
+                .collect::<Vec<_>>(),
+            [WidgetKind::Gauge, WidgetKind::Value, WidgetKind::Ratio]
+        );
+    }
+
+    #[test]
+    fn a_widget_naming_a_metric_that_is_not_there_is_not_drawn() {
+        use tidemark_types::{Field, Widget};
+        let status = presented(
+            vec![Widget::gauge("ghost", Field::UsedPercent)],
+            vec![numeric_metric("a")],
+        );
+        assert!(card_rows(&status).is_empty());
+    }
+
+    #[test]
+    fn a_card_from_an_older_daemon_still_draws_its_windows() {
+        let mut status = status_with(vec![window(Some(18_000), 42.0)]);
+        status.presentation = None;
+        assert_eq!(card_rows(&status).len(), 1);
+    }
+
+    #[test]
+    fn an_empty_presentation_does_not_resurrect_legacy_windows() {
+        let mut status = presented(Vec::new(), Vec::new());
+        status.windows = vec![window(Some(18_000), 42.0)];
+        assert!(card_rows(&status).is_empty());
+    }
+
+    #[test]
+    fn a_gauge_spells_its_selected_field_while_its_bar_uses_the_percentage() {
+        use tidemark_types::{Field, Format, Widget};
+        let status = presented(
+            vec![Widget::gauge("a", Field::Remaining).formatted(Format::Currency)],
+            vec![numeric_metric("a")],
+        );
+        let rows = card_rows(&status);
+        assert_eq!(rows[0].text().as_deref(), Some("37.50 USD"));
+        assert_eq!(gauge_percent(&rows[0].metric, &rows[0].widget), Some(25.0));
+    }
+
+    #[test]
+    fn a_gauge_keeps_its_bar_when_its_label_cannot_be_spelled() {
+        use tidemark_types::{Field, Widget};
+        // A newer daemon's format token, and a field a gauge cannot put a number on. Both
+        // cost the number; neither costs the percentage the producer actually reported.
+        let mut unreadable_format = Widget::gauge("a", Field::UsedPercent);
+        unreadable_format.format = Some("bushels".into());
+        let status = presented(
+            vec![unreadable_format, Widget::gauge("a", Field::Text)],
+            vec![numeric_metric("a")],
+        );
+        let rows = card_rows(&status);
+        assert_eq!(
+            rows.len(),
+            2,
+            "an unspellable label does not remove the bar"
+        );
+        for row in &rows {
+            assert_eq!(row.text(), None);
+            assert_eq!(gauge_percent(&row.metric, &row.widget), Some(25.0));
+        }
+    }
+
+    #[test]
+    fn undrawable_values_ratios_and_gauges_stay_absent() {
+        use tidemark_types::{Field, Widget};
+        let mut metric = numeric_metric("a");
+        metric.used_percent = None;
+        metric.maximum = Some(0.0);
+        metric.remaining = None;
+        metric.text = None;
+        let status = presented(
+            vec![
+                Widget::gauge("a", Field::UsedPercent),
+                Widget::value("a", Field::Remaining),
+                Widget::ratio("a", Field::Value, Field::Maximum),
+                Widget::status("a"),
+            ],
+            vec![metric],
+        );
+        assert!(card_rows(&status).is_empty());
+    }
+
+    #[test]
+    fn a_gauge_derives_a_finite_percentage_and_only_uses_reported_window_pace() {
+        use tidemark_types::{Field, MetricWindow, Widget};
+        let mut metric = numeric_metric("a");
+        metric.used_percent = None;
+        let widget = Widget::gauge("a", Field::UsedPercent);
+        assert_eq!(gauge_percent(&metric, &widget), Some(25.0));
+        assert!(metric_window(&metric, 25.0).is_none());
+        metric.window = Some(MetricWindow {
+            key: "a".into(),
+            resets_at: Some(CAPTURED_AT + 3600),
+            length_secs: Some(18_000),
+        });
+        let now = Timestamp::from_unix(CAPTURED_AT).unwrap();
+        assert_eq!(metric_window(&metric, 25.0).unwrap().pace(now), Some(0.8));
+        metric.value = Some(f64::MAX);
+        metric.maximum = Some(f64::MIN_POSITIVE);
+        assert_eq!(gauge_percent(&metric, &widget), None);
     }
 
     #[test]

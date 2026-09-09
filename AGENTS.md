@@ -123,3 +123,19 @@ busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark i
 - Nix exports packages, apps, a NixOS module and a dev shell for x86_64-linux/aarch64-linux.
 - `scripts/test-package-upgrade.sh [workdir]` needs Docker/systemd; `scripts/check-tag-version.sh <tag>` validates release version alignment.
 - More specific AGENTS.md files cover each crate and core's providers, keyed providers, Antigravity, browser and storage domains; keep implementation details there.
+
+## USER PREFERENCES (binding)
+- Never perform manual/UI verification (clicking through the app, screenshots, driving the installed app) — the user does all manual checks. State what to verify by hand and stop.
+
+## BUILDING & TESTING ON THIS WINDOWS MACHINE (binding recipe)
+The default Rust host toolchain here is MSVC and plain `cargo` in Git Bash FAILS (`link.exe` resolves to GNU coreutils' `link`, build scripts die). The project targets `stable-x86_64-pc-windows-gnu` with the MSYS2 UCRT64 GTK runtime. Always run builds/tests through MSYS2 bash with the toolchain and paths pinned:
+
+```bash
+C:/msys64/usr/bin/bash.exe -lc 'set -euo pipefail; \
+  export PATH=/c/Users/zaebo/.cargo/bin:/ucrt64/bin:$PATH; \
+  export RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu; \
+  export PKG_CONFIG_PATH=/ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig; \
+  cd /c/Users/zaebo/tidemark; \
+  cargo build --release -p tidemark -p tidemarkd'
+```
+(adjust the final cargo command as needed). Without `/ucrt64/bin` on PATH linking fails (`cannot find -lglib-2.0`); without `RUSTUP_TOOLCHAIN` it builds MSVC. Replacing installed binaries: installed app lives in `$LOCALAPPDATA/Programs/tidemark`; `taskkill //IM tidemark.exe //IM tidemarkd.exe //F` first, back up, then copy from `target/release`. Known unrelated local test failures: `tidemark-core secrets::windows_store` tests fail while the real app/daemon is running (they touch the real Windows credential store), the `tidemarkd lifecycle::tests::the_singleton_is_exclusive_within_this_session` test fails while the daemon is running (singleton lock held), and `providers::keyed`/`providers::codex`/`oauth` live-transport tests fail behind a system proxy (HTTP 503) — neither is a regression signal; verify a suspicious failure with `git stash` before believing it.

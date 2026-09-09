@@ -25,6 +25,7 @@
 //! The same derives give serde a map, so `tidemark usage --json` is the same struct
 //! serialized to JSON rather than a second definition to keep in step.
 
+use crate::semantic::Presentation;
 use crate::snapshot::{AccountId, DetailSection, ProviderId, Snapshot};
 use crate::time::Timestamp;
 use crate::window::{Window, WindowKey, WindowLength};
@@ -341,6 +342,22 @@ impl AuthCandidate {
     }
 }
 
+/// The Metrics URL a plugin account sends its key to, with the plain-http acknowledgement
+/// that was given for it.
+///
+/// Published so a client adding a second account to the same plugin can inherit the
+/// sibling's endpoint instead of asking for a URL the user has already answered. Absent
+/// for built-in providers, for a plugin account with no endpoint yet, and from an older
+/// daemon — which a client must treat as "ask", never as "no endpoint exists".
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct PluginEndpoint {
+    /// The absolute URL the key is sent to.
+    pub url: String,
+    /// Whether the owner acknowledged that this URL puts the key on the network in clear.
+    pub allow_insecure_http: bool,
+}
+
 /// The explicit local authentication source an account uses.
 #[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
 #[zvariant(signature = "a{sv}")]
@@ -349,6 +366,34 @@ pub struct AuthSelection {
     pub mode: String,
     /// The selected candidate, or none for a mode that has no candidate choice.
     pub candidate: Option<String>,
+}
+
+/// What an installed plugin declares about itself, for the import preview and the settings
+/// pane.
+///
+/// Published rather than read from the file by the client: the client has no parser, and the
+/// two facts a user must see before the first request — which header the key goes in, and
+/// what goes in front of it — are exactly the ones a client must not have to guess at.
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct PluginInfo {
+    /// Reverse-DNS provider id.
+    pub id: String,
+    /// The author's display name.
+    pub name: String,
+    /// The author's SemVer string. Informational.
+    pub plugin_version: String,
+    /// `GET` or `POST`.
+    pub method: String,
+    /// The header the account's key is sent in.
+    pub api_key_header: String,
+    /// What precedes the key in that header.
+    pub api_key_prefix: String,
+    /// Whether this definition carries a sanitized mark.
+    pub has_mark: bool,
+    /// The sanitized mark for a dry-run import preview. Installed catalogs omit the bytes:
+    /// their mark is already materialized in the icon theme.
+    pub mark_svg: Option<String>,
 }
 
 /// Presentation metadata for one provider in the daemon's catalog.
@@ -365,6 +410,9 @@ pub struct ProviderDefinition {
     /// supports one. Its dynamic candidates are fetched separately from the daemon.
     pub browser_auth: Option<AuthSelector>,
     pub options: Vec<ProviderOption>,
+    /// What an installed plugin declares, and absent for every compiled-in provider — which
+    /// is also how a client tells the two apart without a list of built-in slugs.
+    pub plugin: Option<PluginInfo>,
 }
 
 impl ProviderDefinition {
@@ -450,6 +498,13 @@ pub struct DataInfo {
     pub token_schema: String,
     /// False when a distribution built the daemon without its GitHub release checker.
     pub release_check_available: bool,
+    /// Where installed plugin marks are materialized, as an XDG icon-theme root.
+    ///
+    /// A path the client *adds to its icon search path*, never one it opens files from
+    /// itself: a symbolic SVG only takes the theme's colour when GTK loads it through the
+    /// icon theme. Empty from a daemon that has no plugin directory, which a client must
+    /// read as "add nothing" rather than as a root at the filesystem's top.
+    pub plugin_icons_path: String,
 }
 
 /// Application preferences kept by the daemon in `config.toml`.
@@ -630,6 +685,13 @@ pub struct ProviderStatus {
     pub windows: Vec<WindowStatus>,
     /// Everything from the last good reading that does not fit the window model.
     pub details: Vec<DetailSection>,
+    /// How the last good reading is laid out: its metrics, and the card and detail orders
+    /// over them. **Survives a failed poll**, exactly as `windows` does.
+    ///
+    /// Absent while the account has never been polled successfully, and absent from a
+    /// daemon older than the semantic presentation — which a client must draw as "an older
+    /// daemon", never as "a reading with nothing in it".
+    pub presentation: Option<Presentation>,
     /// A [`CredentialKind`] as a string, saying what the credentials dialog should offer
     /// for this account. Absent from a daemon older than the credentials interface.
     pub credential: Option<String>,
@@ -657,6 +719,9 @@ pub struct ProviderStatus {
     /// The daemon-resolved local source selected for browser-cookie authentication.
     /// Absent on providers without this capability and when speaking to an older daemon.
     pub auth_selection: Option<AuthSelection>,
+    /// The Metrics URL this plugin account sends its key to. Absent for built-in
+    /// providers, for a plugin account with no endpoint yet, and from an older daemon.
+    pub plugin_endpoint: Option<PluginEndpoint>,
     /// The provider's own settings, with their current values and alternatives.
     pub options: Vec<ProviderOption>,
     /// Keys of the windows whose notifications the user has switched on.
@@ -680,12 +745,14 @@ impl ProviderStatus {
             next_poll_at: None,
             windows: Vec::new(),
             details: Vec::new(),
+            presentation: None,
             credential: None,
             has_credential: None,
             credential_hint: None,
             external_present: None,
             auth_source: None,
             auth_selection: None,
+            plugin_endpoint: None,
             options: Vec::new(),
             notify: Vec::new(),
         }
@@ -733,8 +800,12 @@ impl ProviderStatus {
         self.message = message;
     }
 
-    /// Replaces the reading, and sets the state to [`ProviderState::Ok`].
-    pub fn set_reading(&mut self, snapshot: &Snapshot) {
+    /// Replaces the reading and its layout, and sets the state to [`ProviderState::Ok`].
+    ///
+    /// The presentation is a parameter rather than something derived here: deriving it
+    /// would put provider conventions in the contract crate, and a plugin's layout is not
+    /// derivable from a `Snapshot` at all.
+    pub fn set_reading(&mut self, snapshot: &Snapshot, presentation: Presentation) {
         self.captured_at = Some(snapshot.captured_at.as_unix());
         self.windows = snapshot
             .windows
@@ -742,6 +813,7 @@ impl ProviderStatus {
             .map(WindowStatus::from_window)
             .collect();
         self.details = snapshot.details.clone();
+        self.presentation = Some(presentation);
         self.set_state(ProviderState::Ok, None);
     }
 
@@ -800,6 +872,7 @@ pub fn account_slug_suggestion(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semantic::{Field, Metric, Presentation, Widget};
     use crate::snapshot::DetailRow;
     use std::collections::HashMap;
     use zvariant::serialized::{Context, Data};
@@ -818,7 +891,7 @@ mod tests {
 
     fn status() -> ProviderStatus {
         let mut status = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::default());
-        status.set_reading(&Snapshot {
+        let snapshot = Snapshot {
             provider: ProviderId::new("zai"),
             account: AccountId::default(),
             captured_at: Timestamp::from_unix(1_785_700_000).expect("plausible"),
@@ -830,13 +903,59 @@ mod tests {
                     value: "pro".into(),
                 }],
             }],
-        });
+        };
+        let presentation = Presentation {
+            metrics: snapshot
+                .windows
+                .iter()
+                .map(|window| Metric {
+                    id: window.key.to_string(),
+                    title: window.title.clone(),
+                    subtitle: None,
+                    value: None,
+                    maximum: None,
+                    remaining: None,
+                    used_percent: Some(window.used_percent),
+                    text: None,
+                    unit: None,
+                    window: None,
+                })
+                .collect(),
+            card: snapshot
+                .windows
+                .iter()
+                .map(|window| Widget::gauge(window.key.as_str(), Field::UsedPercent))
+                .collect(),
+            details: Vec::new(),
+        };
+        status.set_reading(&snapshot, presentation);
         status.next_poll_at = Some(1_785_700_300);
         status
     }
 
     fn encode(status: &ProviderStatus) -> Data<'static, 'static> {
         to_bytes(Context::new_dbus(LE, 0), status).expect("the published shape encodes")
+    }
+
+    #[test]
+    fn a_published_reading_carries_its_presentation_and_survives_a_round_trip() {
+        let status = status();
+        let decoded: HashMap<String, OwnedValue> =
+            encode(&status).deserialize().expect("decodes").0;
+        assert!(decoded.contains_key("presentation"));
+        let presentation = status
+            .presentation
+            .expect("the reading was published with one");
+        assert_eq!(presentation.card.len(), 2, "one gauge per published window");
+    }
+
+    #[test]
+    fn a_status_that_has_never_had_a_reading_publishes_no_presentation() {
+        let pending = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::default());
+        assert!(pending.presentation.is_none());
+        let decoded: HashMap<String, OwnedValue> =
+            encode(&pending).deserialize().expect("decodes").0;
+        assert!(!decoded.contains_key("presentation"), "absent means absent");
     }
 
     #[test]
@@ -855,6 +974,7 @@ mod tests {
             }),
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         };
         let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
         let (decoded, _): (ProviderDefinition, _) = encoded.deserialize().expect("decodes");
@@ -888,6 +1008,7 @@ mod tests {
             external: None,
             browser_auth: Some(selector.clone()),
             options: Vec::new(),
+            plugin: None,
         };
         let candidate = AuthCandidate {
             id: "firefox".into(),
@@ -943,6 +1064,7 @@ mod tests {
             external: None,
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         };
         assert_eq!(definition.auth_option(), None);
     }
@@ -1219,6 +1341,7 @@ mod tests {
             key_schema: "io.github.zbndev.Tidemark.ProviderKey".into(),
             token_schema: "io.github.zbndev.Tidemark.ProviderToken".into(),
             release_check_available: true,
+            plugin_icons_path: "/home/test/.local/share/tidemark/plugins/icons".into(),
         };
 
         let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");

@@ -23,7 +23,10 @@
 use std::sync::Arc;
 
 use tidemark_core::config::Config;
+use tidemark_core::debug;
 use tidemark_core::oauth;
+use tidemark_core::plugin::Definition;
+use tidemark_core::plugin::provider::PluginProvider;
 use tidemark_core::providers::keyed::{
     self, abacus, aiand, alibaba, augment, codebuff, commandcode, cursor, deepgram, deepinfra,
     factory, fireworks, gemini, grok, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo,
@@ -41,7 +44,7 @@ use tidemark_core::providers::{
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
     AccountId, AuthMode, AuthSelection, AuthSelector, CredentialKind, ExternalLogin, OptionChoice,
-    ProviderDefinition, ProviderId, ProviderOption, ProviderStatus,
+    PluginInfo, ProviderDefinition, ProviderId, ProviderOption, ProviderStatus,
 };
 
 use crate::engine::Account;
@@ -239,7 +242,21 @@ pub fn title(provider: &str) -> Option<&'static str> {
 /// follows, one entry per spec in `keyed::CATALOG` — so adding one is a file beside
 /// `keyed.rs` and a line in that table, not a new stanza here. The hand-written
 /// key-authenticated providers come last, from the table above, in the same shape.
-pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
+/// The compiled catalog, followed by the installed plugin definitions.
+///
+/// The three OAuth providers come first, written out because each of them acquires its
+/// credential its own way. Every single-request key-authenticated provider follows, one entry
+/// per spec in `keyed::CATALOG` — so adding one is a file beside `keyed.rs` and a line in that
+/// table, not a new stanza here. The hand-written key-authenticated providers come next.
+///
+/// Plugins come last and in installation order, so adding one never moves a compiled
+/// provider in the settings dialog. A plugin publishes no [`ProviderOption`]: its whole
+/// configuration is its per-account endpoint, which is not a shared provider setting — see
+/// `Config::plugin_endpoint`.
+pub fn catalog_with_plugins(
+    config: &Config,
+    plugins: &[Arc<Definition>],
+) -> Vec<ProviderDefinition> {
     let mut definitions: Vec<ProviderDefinition> = OAUTH
         .iter()
         .map(|entry| ProviderDefinition {
@@ -256,6 +273,7 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
             }),
             browser_auth: None,
             options: options(entry.slug, config),
+            plugin: None,
         })
         .collect();
     definitions.extend(keyed::CATALOG.iter().map(|spec| ProviderDefinition {
@@ -266,18 +284,44 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
         external: None,
         browser_auth: None,
         options: options(spec.id, config),
+        plugin: None,
     }));
     definitions.extend(
         HAND_WRITTEN
             .iter()
             .map(|spec| hand_written_definition(spec, config)),
     );
+    definitions.extend(plugins.iter().map(|definition| ProviderDefinition {
+        provider: definition.id.clone(),
+        title: definition.name.clone(),
+        credential: CredentialKind::Key.as_wire().to_owned(),
+        credential_hint: key_hint(definition),
+        external: None,
+        browser_auth: None,
+        options: Vec::new(),
+        plugin: Some(PluginInfo {
+            id: definition.id.clone(),
+            name: definition.name.clone(),
+            plugin_version: definition.plugin_version.clone(),
+            method: definition.method.as_str().to_owned(),
+            api_key_header: definition.api_key_header.clone(),
+            api_key_prefix: definition.api_key_prefix.clone(),
+            has_mark: definition.icon_svg.is_some(),
+            mark_svg: None,
+        }),
+    }));
     definitions
+}
+
+/// One sentence on where a plugin account's key comes from. Only the author's own name is
+/// available to say it with: nothing in the file names a host, by design.
+fn key_hint(definition: &Definition) -> String {
+    format!("Paste the API key {} issues.", definition.name)
 }
 
 /// One hand-written provider as the settings dialog sees it.
 ///
-/// Written apart from [`catalog`] so that the mapping can be checked against a spec of a
+/// Written apart from [`catalog_with_plugins`] so that the mapping can be checked against a spec of a
 /// test's own — above all the credential kind, the one field of the table that is not the
 /// same for every entry in it.
 fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderDefinition {
@@ -289,7 +333,148 @@ fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderD
         external: None,
         browser_auth: browser_auth(spec.id),
         options: options(spec.id, config),
+        plugin: None,
     }
+}
+
+/// Every provider id this build compiles in, and therefore every id a plugin may not claim.
+///
+/// The `reserved` argument every `schema::parse` call takes. A plugin that could take `zai`
+/// would shadow the compiled provider the moment it was installed, and — worse — inherit its
+/// history and its keyring entries, because the id is the storage key for both. Collected
+/// from the same three tables the catalog is built from, so a provider added there is
+/// reserved without anyone remembering to add it here too.
+pub fn builtin_ids() -> Vec<&'static str> {
+    OAUTH
+        .iter()
+        .map(|entry| entry.slug)
+        .chain(keyed::CATALOG.iter().map(|spec| spec.id))
+        .chain(HAND_WRITTEN.iter().map(|spec| spec.id))
+        .collect()
+}
+
+/// One plugin account.
+///
+/// The endpoint is resolved here rather than inside the factory, the way every
+/// option-dependent provider resolves its URL at build time: an endpoint edit drops this
+/// account's client, and the rebuild reads the file again.
+///
+/// An account with no usable endpoint is still an account — published with a message saying
+/// what is missing rather than omitted, because a provider the user configured and then
+/// cannot see is indistinguishable from one Tidemark forgot about. The same sentence is what
+/// the factory refuses with, so nothing polls on a half-configured account either.
+pub fn plugin_account(
+    definition: &Arc<Definition>,
+    account: &AccountId,
+    config: &Config,
+) -> Account {
+    let hint = key_hint(definition);
+    let endpoint = match config.plugin_endpoint(&definition.id, account.as_str()) {
+        Ok(Some(endpoint)) => Ok(endpoint),
+        Ok(None) => Err(NO_ENDPOINT.to_owned()),
+        // A present-but-invalid endpoint is the user's own file saying something this build
+        // cannot act on. It is reported as it stands rather than treated as unconfigured,
+        // which would tell them to fill in a field they have already filled in.
+        Err(error) => Err(error.to_string()),
+    };
+    // Read before the factory below moves the endpoint into itself. The endpoint is
+    // published so the client can hand a second account the same Metrics URL its sibling
+    // already sends the key to, instead of asking a question twice; the message is the
+    // one the old code published — no endpoint yet, or the user's own file holding one
+    // this build cannot act on.
+    let (published, missing) = match endpoint.as_ref() {
+        Ok(endpoint) => (Some(endpoint.clone()), None),
+        Err(message) => (None, Some(message.clone())),
+    };
+    let definition = Arc::clone(definition);
+    let built = Account::new(
+        ProviderId::new(&definition.id),
+        account.clone(),
+        Box::new(move |account_id, credential, _options| {
+            // The endpoint belongs to a stranger, and one that echoes the key back would
+            // otherwise write it into the raw-response log. The recorder is told the exact
+            // string to look for; it never reads the value back out, and it never reaches
+            // the plugin's Lua.
+            debug::set_account_secret(&definition.id, Some(credential.expose()));
+            let endpoint = endpoint.clone().map_err(ProviderError::Local)?;
+            Ok(Arc::new(PluginProvider::new(
+                Arc::clone(&definition),
+                account_id.clone(),
+                endpoint,
+                credential,
+            )?) as Arc<dyn Provider>)
+        }),
+    )
+    .with_credential(CredentialKind::Key)
+    .with_hint(&hint);
+    match (published, missing) {
+        (Some(endpoint), _) => built.with_plugin_endpoint(endpoint),
+        (None, Some(message)) => built.with_message(&message),
+        // The match above produced exactly one of the two; this arm is unreachable.
+        (None, None) => built,
+    }
+}
+
+/// What an account with nothing to poll says, in one place: the factory refuses with it and
+/// the unconfigured account is published with it, so a card reads the same either way.
+const NO_ENDPOINT: &str = "this account has no endpoint yet; set the metrics URL for it";
+
+/// Every configured account the daemon polls, including the ones a plugin owns.
+///
+/// A configured slug no compiled entry claims is looked for among the installed definitions
+/// before it is given up on, which is the whole difference from [`accounts_with_plugins`].
+pub fn accounts_with_plugins(
+    secrets: &Arc<dyn Secrets>,
+    config: &Config,
+    plugins: &[Arc<Definition>],
+) -> Result<Vec<Account>, ProviderError> {
+    let providers = config
+        .providers()
+        .map_err(|error| ProviderError::Local(error.to_string()))?;
+    let mut accounts = Vec::with_capacity(providers.len());
+    for provider in providers {
+        for account_id in config
+            .accounts(&provider)
+            .map_err(|error| ProviderError::Local(error.to_string()))?
+        {
+            let account_id = AccountId::new(account_id);
+            if let Some(account) = account(&provider, &account_id, secrets, config)? {
+                accounts.push(account);
+                continue;
+            }
+            match plugins.iter().find(|definition| definition.id == provider) {
+                Some(definition) => accounts.push(plugin_account(definition, &account_id, config)),
+                // A definition the user removed, or one that stopped validating on this
+                // build. The config keeps naming it, because the accounts are still theirs
+                // to remove; nothing polls it in the meantime.
+                None => tracing::warn!(
+                    provider,
+                    account = %account_id,
+                    "configured provider is unsupported by this build"
+                ),
+            }
+        }
+    }
+    Ok(accounts)
+}
+
+/// An installed plugin's own name, for the places the daemon speaks to a person with only a
+/// slug in hand — above all a notification, which must say `Acme AI` and not `Com.acme.quota`.
+///
+/// Separate from [`title`] because a plugin's name lives in an installed file rather than in
+/// the binary, so it cannot be `&'static str`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read by the notifier once the engine owns the installed definitions"
+    )
+)]
+pub fn plugin_title<'a>(provider: &str, plugins: &'a [Arc<Definition>]) -> Option<&'a str> {
+    plugins
+        .iter()
+        .find(|definition| definition.id == provider)
+        .map(|definition| definition.name.as_str())
 }
 
 /// Builds one configured account, or returns `None` for a slug this build does not support.
@@ -468,33 +653,6 @@ pub(crate) fn browser_auth_selection(provider: &str, config: &Config) -> Option<
 }
 
 /// Every configured account the daemon polls, in the order of `config.toml`.
-pub fn accounts(
-    secrets: &Arc<dyn Secrets>,
-    config: &Config,
-) -> Result<Vec<Account>, ProviderError> {
-    let providers = config
-        .providers()
-        .map_err(|error| ProviderError::Local(error.to_string()))?;
-    let mut accounts = Vec::with_capacity(providers.len());
-    for provider in providers {
-        for account_id in config
-            .accounts(&provider)
-            .map_err(|error| ProviderError::Local(error.to_string()))?
-        {
-            let account_id = AccountId::new(account_id);
-            match account(&provider, &account_id, secrets, config)? {
-                Some(account) => accounts.push(account),
-                None => tracing::warn!(
-                    provider,
-                    account = %account_id,
-                    "configured provider is unsupported by this build"
-                ),
-            }
-        }
-    }
-    Ok(accounts)
-}
-
 /// Which of a provider's windows the user asked to be notified about.
 ///
 /// A list the file holds in a shape this build cannot read is reported and treated as
@@ -905,6 +1063,7 @@ fn hand_written_account(spec: &'static keyed::HandSpec, account: &AccountId) -> 
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use tidemark_core::plugin::provider::Endpoint;
     use tidemark_core::providers::{BoxFuture, Credential, zai};
     use tidemark_core::secrets::{Kind, SecretError};
 
@@ -986,7 +1145,7 @@ mod tests {
             "providers = [\"zai\"]\n\n[provider.zai]\naccounts = [\"default\", \"work\"]\n",
         );
         let config = Config::at(path.clone()).expect("config reads");
-        let accounts = accounts(&secrets(), &config).expect("accounts build");
+        let accounts = accounts_with_plugins(&secrets(), &config, &[]).expect("accounts build");
 
         assert_eq!(
             accounts
@@ -1046,7 +1205,7 @@ mod tests {
 
     #[test]
     fn every_oauth_provider_publishes_its_available_credentials() {
-        let published = catalog(&empty_config());
+        let published = catalog_with_plugins(&empty_config(), &[]);
         for entry in OAUTH {
             let definition = published
                 .iter()
@@ -1094,7 +1253,7 @@ mod tests {
     #[test]
     fn unix_publishes_antigravity_oauth_and_local_agy() {
         let config = empty_config();
-        let definition = catalog(&config)
+        let definition = catalog_with_plugins(&config, &[])
             .into_iter()
             .find(|definition| definition.provider == antigravity::PROVIDER_ID)
             .expect("Antigravity remains in the catalog");
@@ -1151,7 +1310,7 @@ mod tests {
             "providers = [\"antigravity\"]\n\n[provider.antigravity]\nsource = \"cli\"\n",
         );
         let config = Config::at(path.clone()).expect("config reads");
-        let definition = catalog(&config)
+        let definition = catalog_with_plugins(&config, &[])
             .into_iter()
             .find(|definition| definition.provider == antigravity::PROVIDER_ID)
             .expect("Antigravity remains in the catalog");
@@ -1205,7 +1364,7 @@ mod tests {
     fn a_provider_publishes_external_login_exactly_when_available() {
         // The absent field is the whole signal a client dispatches on: no external login
         // means no credential choice to draw.
-        for definition in catalog(&empty_config()) {
+        for definition in catalog_with_plugins(&empty_config(), &[]) {
             assert_eq!(
                 definition.external.is_some(),
                 oauth_entry(&definition.provider)
@@ -1218,7 +1377,7 @@ mod tests {
 
     #[test]
     fn cursor_publishes_its_browser_auth_capability_and_stored_selection() {
-        let definition = catalog(&empty_config())
+        let definition = catalog_with_plugins(&empty_config(), &[])
             .into_iter()
             .find(|definition| definition.provider == cursor::PROVIDER_ID)
             .expect("Cursor is in the catalog");
@@ -1267,7 +1426,7 @@ mod tests {
 
     #[test]
     fn qoder_publishes_browser_auth_and_restores_its_selected_profile() {
-        let definition = catalog(&empty_config())
+        let definition = catalog_with_plugins(&empty_config(), &[])
             .into_iter()
             .find(|definition| definition.provider == qoder::PROVIDER_ID)
             .expect("Qoder is in the catalog");
@@ -1317,7 +1476,7 @@ mod tests {
     fn t3chat_publishes_browser_auth_and_restores_its_selected_profile() {
         // Without the selector, the settings dialog cannot write a Firefox choice and the
         // provider necessarily reports NoCredential despite a signed-in browser profile.
-        let definition = catalog(&empty_config())
+        let definition = catalog_with_plugins(&empty_config(), &[])
             .into_iter()
             .find(|definition| definition.provider == t3chat::PROVIDER_ID)
             .expect("T3 Chat is in the catalog");
@@ -1386,7 +1545,7 @@ mod tests {
             t3chat::PROVIDER_ID,
             zoommate::PROVIDER_ID,
         ] {
-            let definition = catalog(&empty_config())
+            let definition = catalog_with_plugins(&empty_config(), &[])
                 .into_iter()
                 .find(|definition| definition.provider == provider)
                 .expect("browser-session provider is in the catalog");
@@ -1411,7 +1570,7 @@ mod tests {
 
     #[test]
     fn zoommate_publishes_browser_auth_and_restores_its_selected_profile() {
-        let definition = catalog(&empty_config())
+        let definition = catalog_with_plugins(&empty_config(), &[])
             .into_iter()
             .find(|definition| definition.provider == zoommate::PROVIDER_ID)
             .expect("ZoomMate is in the catalog");
@@ -1695,11 +1854,11 @@ mod tests {
     fn the_catalog_exists_even_when_no_account_is_configured() {
         let config = empty_config();
         assert!(
-            accounts(&secrets(), &config)
+            accounts_with_plugins(&secrets(), &config, &[])
                 .expect("accounts build")
                 .is_empty()
         );
-        let definitions = catalog(&config);
+        let definitions = catalog_with_plugins(&config, &[]);
         assert_eq!(definitions.len(), 58);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
@@ -1753,7 +1912,8 @@ mod tests {
             "providers = [\"zai\", \"future\", \"claude\"]\n",
         );
         let config = Config::at(path.clone()).expect("parses");
-        let accounts = accounts(&secrets(), &config).expect("known accounts build");
+        let accounts =
+            accounts_with_plugins(&secrets(), &config, &[]).expect("known accounts build");
         let slugs: Vec<&str> = accounts
             .iter()
             .map(|account| account.provider().as_str())
@@ -1766,7 +1926,8 @@ mod tests {
     fn invalid_configured_providers_are_reported_as_local_errors() {
         let path = scratch_config("invalid-providers", "providers = \"claude\"\n");
         let config = Config::at(path.clone()).expect("parses");
-        let error = accounts(&secrets(), &config).expect_err("providers are invalid");
+        let error =
+            accounts_with_plugins(&secrets(), &config, &[]).expect_err("providers are invalid");
         assert!(
             matches!(error, ProviderError::Local(message) if message.contains("providers must be an array of strings"))
         );
@@ -1811,7 +1972,7 @@ mod tests {
     #[test]
     fn every_keyed_spec_reaches_the_published_catalog() {
         let config = empty_config();
-        let published = catalog(&config);
+        let published = catalog_with_plugins(&config, &[]);
         for spec in keyed::CATALOG {
             let entry = published
                 .iter()
@@ -1830,7 +1991,7 @@ mod tests {
         // same agreement the catalog gets as a whole: same title, the credential the spec
         // itself declares, same hint, same options — and it must build an account at all.
         let config = empty_config();
-        let published = catalog(&config);
+        let published = catalog_with_plugins(&config, &[]);
         for spec in HAND_WRITTEN {
             let entry = published
                 .iter()
@@ -1852,7 +2013,7 @@ mod tests {
 
     #[test]
     fn the_oauth_providers_keep_the_head_of_the_catalog() {
-        let published = catalog(&empty_config());
+        let published = catalog_with_plugins(&empty_config(), &[]);
         let slugs: Vec<&str> = published
             .iter()
             .map(|definition| definition.provider.as_str())
@@ -1868,7 +2029,7 @@ mod tests {
         // slug is worse, because the hand-written stanza and the spec then shadow each
         // other. At two entries neither can happen by accident; across the tables it can,
         // so the invariant is asserted rather than trusted.
-        let published = catalog(&empty_config());
+        let published = catalog_with_plugins(&empty_config(), &[]);
         let mut slugs: Vec<&str> = published
             .iter()
             .map(|definition| definition.provider.as_str())
@@ -1884,7 +2045,7 @@ mod tests {
         // Notifications name providers through `title()`; the settings dialog through
         // `catalog()`. If the two disagreed, a provider's card and its notification would
         // spell its name differently on the same desktop.
-        for definition in catalog(&empty_config()) {
+        for definition in catalog_with_plugins(&empty_config(), &[]) {
             assert_eq!(
                 title(&definition.provider),
                 Some(definition.title.as_str()),
@@ -1921,7 +2082,7 @@ mod tests {
     fn a_published_option_carries_the_users_current_value() {
         let path = scratch_config("zai-region", "[provider.zai]\nregion = \"bigmodel-cn\"\n");
         let config = Config::at(path.clone()).expect("parses");
-        let published = catalog(&config);
+        let published = catalog_with_plugins(&config, &[]);
         let zai = published
             .iter()
             .find(|definition| definition.provider == "zai")
@@ -1934,5 +2095,168 @@ mod tests {
         assert_eq!(region.value, "bigmodel-cn");
         assert_eq!(region.choices.len(), 2);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A minimal plugin file, with a mark, parsed the way the store parses one.
+    const PLUGIN_FILE: &str = r#"
+format_version = 1
+
+[provider]
+id = "com.acme.quota"
+name = "Acme AI"
+plugin_version = "1.0.0"
+
+[request]
+method = "GET"
+api_key_header = "X-Acme-Key"
+api_key_prefix = ""
+
+[parser]
+language = "lua54"
+source = '''
+function parse(response, context)
+    return { metrics = {}, card = {}, details = {} }
+end
+'''
+
+[icon]
+svg = '''
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="currentColor" d="M0 0h64v64H0z"/></svg>
+'''
+"#;
+
+    /// One installed definition, validated by the real schema rather than hand-built, so a
+    /// registry test cannot drift from what an actual import produces.
+    fn test_definition(id: &str, name: &str) -> Arc<Definition> {
+        let file = PLUGIN_FILE
+            .replace("id = \"com.acme.quota\"", &format!("id = \"{id}\""))
+            .replace("name = \"Acme AI\"", &format!("name = \"{name}\""));
+        Arc::new(
+            tidemark_core::plugin::schema::parse(file.as_bytes(), &[]).expect("a valid definition"),
+        )
+    }
+
+    #[test]
+    fn the_catalog_lists_installed_plugins_after_the_compiled_providers() {
+        let config = empty_config();
+        let plugins = vec![test_definition("com.acme.quota", "Acme AI")];
+        let catalog = catalog_with_plugins(&config, &plugins);
+        let last = catalog.last().expect("non-empty");
+        assert_eq!(last.provider, "com.acme.quota");
+        assert_eq!(last.title, "Acme AI");
+        assert_eq!(last.credential, CredentialKind::Key.as_wire());
+        let info = last
+            .plugin
+            .as_ref()
+            .expect("a plugin publishes what it declared");
+        assert_eq!(info.method, "GET");
+        assert_eq!(info.api_key_header, "X-Acme-Key");
+        assert_eq!(info.api_key_prefix, "");
+        assert!(info.has_mark);
+    }
+
+    #[test]
+    fn a_compiled_provider_publishes_no_plugin_metadata() {
+        let catalog = catalog_with_plugins(&empty_config(), &[]);
+        assert!(catalog.iter().all(|definition| definition.plugin.is_none()));
+    }
+
+    #[test]
+    fn every_built_in_id_is_reserved_against_a_plugin_claiming_it() {
+        let ids = builtin_ids();
+        for expected in ["zai", "claude", "codex", "antigravity", "nanogpt"] {
+            assert!(ids.contains(&expected), "{expected} must be reserved");
+        }
+        assert_eq!(
+            ids.len(),
+            catalog_with_plugins(&empty_config(), &[]).len(),
+            "the reserved list and the compiled catalog are the same set"
+        );
+    }
+
+    #[test]
+    fn a_plugin_account_is_built_from_its_configured_endpoint() {
+        let path = scratch_config("plugin-endpoint", "");
+        let mut config = Config::at(path.clone()).expect("parses");
+        config.add_provider("com.acme.quota").expect("adds");
+        config
+            .set_plugin_endpoint(
+                "com.acme.quota",
+                "default",
+                &Endpoint {
+                    url: "https://a.test/u".into(),
+                    allow_insecure_http: false,
+                },
+            )
+            .expect("writes");
+        let account = plugin_account(
+            &test_definition("com.acme.quota", "Acme AI"),
+            &AccountId::default(),
+            &config,
+        );
+        assert_eq!(account.provider().as_str(), "com.acme.quota");
+        assert_eq!(account.status().credential.as_deref(), Some("key"));
+        assert_eq!(
+            account.status().message,
+            None,
+            "a configured account is waiting on nothing"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_plugin_account_with_no_endpoint_publishes_what_is_missing_instead_of_polling() {
+        let config = empty_config();
+        let account = plugin_account(
+            &test_definition("com.acme.quota", "Acme AI"),
+            &AccountId::default(),
+            &config,
+        );
+        let message = account.status().message.clone().unwrap_or_default();
+        assert!(
+            message.contains("endpoint"),
+            "the card says what to fill in: {message}"
+        );
+    }
+
+    #[test]
+    fn a_configured_plugin_account_is_among_the_accounts_the_daemon_polls() {
+        let path = scratch_config("plugin-accounts", "");
+        let mut config = Config::at(path.clone()).expect("parses");
+        config.add_provider("com.acme.quota").expect("adds");
+        config
+            .set_plugin_endpoint(
+                "com.acme.quota",
+                "default",
+                &Endpoint {
+                    url: "https://a.test/u".into(),
+                    allow_insecure_http: false,
+                },
+            )
+            .expect("writes");
+        let plugins = vec![test_definition("com.acme.quota", "Acme AI")];
+        let accounts = accounts_with_plugins(&secrets(), &config, &plugins).expect("builds");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].provider().as_str(), "com.acme.quota");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_configured_provider_whose_definition_is_gone_is_warned_about_not_polled() {
+        let path = scratch_config("plugin-missing", "providers = [\"com.acme.quota\"]\n");
+        let config = Config::at(path.clone()).expect("parses");
+        assert!(
+            accounts_with_plugins(&secrets(), &config, &[])
+                .expect("builds")
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_plugin_is_titled_by_its_own_name_in_notifications() {
+        let plugins = vec![test_definition("com.acme.quota", "Acme AI")];
+        assert_eq!(plugin_title("com.acme.quota", &plugins), Some("Acme AI"));
+        assert_eq!(plugin_title("zai", &plugins), None);
     }
 }

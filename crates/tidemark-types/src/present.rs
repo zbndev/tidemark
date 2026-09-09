@@ -13,6 +13,62 @@
 //! daemon already sent, which is what makes the awkward cases — an overdue reset, a window
 //! that is not quite empty — testable without waiting for them.
 
+use crate::{Field, Format, Metric};
+
+/// One reported field, spelled in the producer's semantic format and our house style.
+///
+/// The format says how to spell a number; the *field* says what kind of quantity it is, and
+/// only the field can say that. A metric denominated in `USD` still measures its fullness in
+/// percent, so the unit belongs to the amounts — value, maximum, remaining — and never to
+/// `used_percent`, which would otherwise read `25 USD`. For the same reason the 0-100 clamp
+/// in [`percent`] belongs to `used_percent` alone: it exists so a window that is not quite
+/// empty never reads `100%`, and applying it to an amount the producer reported would print
+/// a number nobody sent.
+pub fn format_field(metric: &Metric, field: Field, format: Option<Format>) -> Option<String> {
+    if field == Field::Text {
+        return metric.text.clone();
+    }
+    let number = metric.field(field)?;
+    let fullness = field == Field::UsedPercent;
+    Some(match format.unwrap_or(Format::Number) {
+        Format::Percent if fullness => percent(number),
+        Format::Percent => format!("{}%", trim_number(number)),
+        Format::Currency => match metric.unit.as_deref() {
+            Some(unit) => format!("{number:.2} {unit}"),
+            None => format!("{number:.2}"),
+        },
+        Format::Duration => duration(number.round() as i64),
+        Format::Text => trim_number(number),
+        Format::Number if fullness => format!("{}%", trim_number(number)),
+        Format::Number => match metric.unit.as_deref() {
+            Some(unit) => format!("{} {unit}", trim_number(number)),
+            None => trim_number(number),
+        },
+    })
+}
+
+/// Two reported fields as `X of Y`, in the metric's unit.
+pub fn format_ratio(metric: &Metric, left: Field, right: Field) -> Option<String> {
+    let (left, right) = (metric.field(left)?, metric.field(right)?);
+    let body = format!("{} of {}", trim_number(left), trim_number(right));
+    Some(match metric.unit.as_deref() {
+        Some(unit) => format!("{body} {unit}"),
+        None => body,
+    })
+}
+
+fn trim_number(number: f64) -> String {
+    if number.fract() == 0.0 && number.abs() < 1e15 {
+        format!("{number:.0}")
+    } else {
+        let rendered = format!("{number:.2}");
+        rendered
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_owned()
+    }
+}
+
 /// Consumption as the big number on the card, and as the number a notification leads with.
 ///
 /// Rounds, but never across the ends: a window with something spent in it never reads `0%`,
@@ -78,9 +134,130 @@ pub fn icon_name(slug: &str) -> Option<String> {
     usable.then(|| format!("tidemark-{slug}-symbolic"))
 }
 
+/// The icon-theme slug an installed plugin's mark is filed under.
+pub fn plugin_icon_slug(provider_id: &str) -> Option<String> {
+    let usable = !provider_id.is_empty()
+        && provider_id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-');
+    usable.then(|| provider_id.replace('.', "-"))
+}
+
+/// The icon name a provider's mark goes by, whether the provider is named by a built-in
+/// slug or by a plugin id.
+///
+/// The two spellings differ where the storage keys differ: a built-in provider is `zai`,
+/// while a plugin's id — its storage key — must carry a dot, `gpt.srvdev.bars`. The mark is
+/// materialized under the dot-less slug ([`plugin_icon_slug`]), so a lookup that handed the
+/// raw id to [`icon_name`] would find nothing for every plugin, forever. Card, detail
+/// dialog, provider rows and notifications all resolve through here so they cannot disagree.
+pub fn provider_icon_name(provider: &str) -> Option<String> {
+    icon_name(provider).or_else(|| plugin_icon_slug(provider).and_then(|slug| icon_name(&slug)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metric() -> crate::Metric {
+        crate::Metric {
+            id: "cost".into(),
+            title: "Monthly cost".into(),
+            subtitle: None,
+            value: Some(12.5),
+            maximum: Some(50.0),
+            remaining: Some(37.5),
+            used_percent: Some(25.0),
+            text: Some("active".into()),
+            unit: Some("USD".into()),
+            window: None,
+        }
+    }
+
+    #[test]
+    fn a_field_is_spelled_by_the_format_the_producer_chose() {
+        use crate::{Field, Format};
+        let m = metric();
+        assert_eq!(
+            format_field(&m, Field::UsedPercent, Some(Format::Percent)).as_deref(),
+            Some("25%")
+        );
+        assert_eq!(
+            format_field(&m, Field::Value, Some(Format::Currency)).as_deref(),
+            Some("12.50 USD")
+        );
+        assert_eq!(
+            format_field(&m, Field::Text, Some(Format::Text)).as_deref(),
+            Some("active")
+        );
+    }
+
+    #[test]
+    fn a_field_is_spelled_as_the_kind_of_quantity_it_is() {
+        use crate::{Field, Format};
+        let m = metric();
+        assert_eq!(
+            format_field(&m, Field::UsedPercent, Some(Format::Number)).as_deref(),
+            Some("25%"),
+            "a percentage is not denominated in the metric's unit"
+        );
+        assert_eq!(
+            format_field(&m, Field::Remaining, Some(Format::Number)).as_deref(),
+            Some("37.5 USD"),
+            "an amount still carries the unit"
+        );
+    }
+
+    #[test]
+    fn only_a_used_percentage_is_clamped_to_the_ends_of_a_window() {
+        use crate::{Field, Format};
+        let over = crate::Metric {
+            value: Some(150.0),
+            ..metric()
+        };
+        assert_eq!(
+            format_field(&over, Field::Value, Some(Format::Percent)).as_deref(),
+            Some("150%"),
+            "an amount the producer reported is not rewritten to fit 0-100"
+        );
+        let overfull = crate::Metric {
+            used_percent: Some(150.0),
+            ..metric()
+        };
+        assert_eq!(
+            format_field(&overfull, Field::UsedPercent, Some(Format::Percent)).as_deref(),
+            Some("100%"),
+            "a window's own fullness still stops at full"
+        );
+    }
+
+    #[test]
+    fn a_field_the_producer_never_reported_is_spelled_as_nothing() {
+        use crate::{Field, Format};
+        let bare = crate::Metric {
+            remaining: None,
+            ..metric()
+        };
+        assert_eq!(
+            format_field(&bare, Field::Remaining, Some(Format::Number)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_ratio_needs_both_operands() {
+        use crate::Field;
+        let m = metric();
+        assert_eq!(
+            format_ratio(&m, Field::Value, Field::Maximum).as_deref(),
+            Some("12.5 of 50 USD")
+        );
+        let bare = crate::Metric {
+            maximum: None,
+            ..metric()
+        };
+        assert_eq!(format_ratio(&bare, Field::Value, Field::Maximum), None);
+    }
 
     #[test]
     fn rounding_never_reports_an_untouched_window_or_an_exhausted_one_by_mistake() {
@@ -124,6 +301,37 @@ mod tests {
         for slug in ["", "Z.ai", "../../etc", "zai fake", "ZAI"] {
             assert_eq!(icon_name(slug), None, "slug {slug:?} should name no icon");
         }
+    }
+
+    #[test]
+    fn a_plugin_id_names_a_mark_through_the_same_lookup_a_built_in_does() {
+        let slug = plugin_icon_slug("com.acme.quota").expect("usable");
+        assert_eq!(slug, "com-acme-quota");
+        assert_eq!(
+            icon_name(&slug).as_deref(),
+            Some("tidemark-com-acme-quota-symbolic")
+        );
+        assert_eq!(plugin_icon_slug("../../etc/passwd"), None);
+        assert_eq!(plugin_icon_slug("Com.Acme"), None);
+    }
+
+    #[test]
+    fn a_provider_icon_name_covers_both_spellings_of_a_provider() {
+        assert_eq!(
+            provider_icon_name("zai").as_deref(),
+            Some("tidemark-zai-symbolic"),
+            "a built-in slug names its mark directly"
+        );
+        assert_eq!(
+            provider_icon_name("gpt.srvdev.bars").as_deref(),
+            Some("tidemark-gpt-srvdev-bars-symbolic"),
+            "a plugin id names the mark its dots were dashed out of"
+        );
+        assert_eq!(
+            provider_icon_name("Com.Acme"),
+            None,
+            "an id nothing would have installed under names no mark"
+        );
     }
 
     #[test]

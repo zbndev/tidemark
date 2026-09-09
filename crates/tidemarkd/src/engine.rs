@@ -13,20 +13,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tidemark_core::config::Config;
+use tidemark_core::plugin;
 use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::providers::keyed::session;
-use tidemark_core::providers::{Credential, Provider, ProviderError, Source, blocked_by};
+use tidemark_core::providers::{Credential, Provider, ProviderError, Reading, Source, blocked_by};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
 use tidemark_types::{
     AccountId, AuthCandidate, AuthCandidateState, AuthSelection, CredentialKind, HistoryPoint,
-    Preferences, ProviderId, ProviderOption, ProviderState, ProviderStatus, Snapshot, Timestamp,
-    WindowKey, WindowStatus,
+    PluginEndpoint, PluginInfo, Preferences, Presentation, ProviderDefinition, ProviderId,
+    ProviderOption, ProviderState, ProviderStatus, Snapshot, Timestamp, WindowKey, WindowStatus,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use crate::notify::{self, Notifier};
+use crate::plugins;
 use crate::scheduler::{self, Situation};
 
 /// How often the history is thinned. Thinning only touches points older than ninety days,
@@ -135,6 +137,51 @@ pub enum Command {
         /// caller's mirror of it is updated asynchronously and must not be guessed at.
         reply: oneshot::Sender<Result<Vec<(String, String)>, String>>,
     },
+    /// Validate a plugin file without storing it: the import preview.
+    InspectPlugin {
+        /// The file, exactly as the user chose it.
+        bytes: Vec<u8>,
+        /// What the file declares, or the one stage that refused it.
+        reply: oneshot::Sender<Result<PluginInfo, String>>,
+    },
+    /// Validate a plugin file and install it, replacing an earlier version of the same id.
+    InstallPlugin {
+        /// The file, exactly as the user chose it.
+        bytes: Vec<u8>,
+        /// What was installed, and the topology it changed.
+        reply: oneshot::Sender<Result<(PluginInfo, PluginChange), String>>,
+    },
+    /// Remove an installed definition. Refused while any account still uses it.
+    RemovePlugin {
+        /// The plugin's provider id.
+        provider: String,
+        /// The topology after the removal.
+        reply: oneshot::Sender<Result<PluginChange, String>>,
+    },
+    /// Validate and persist one plugin account's endpoint, in the same queue as topology
+    /// writes.
+    SetPluginEndpoint {
+        /// The plugin's provider id.
+        provider: String,
+        /// Stable account name.
+        account: String,
+        /// The complete absolute URL this account's key is sent to.
+        endpoint: String,
+        /// Whether the owner accepts plain http for it.
+        allow_insecure_http: bool,
+        /// Completion sent after validation and persistence finish.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Run a plugin's parser over a local response fixture. Reads no key and makes no
+    /// request: the authoring loop.
+    RenderPlugin {
+        /// The file, exactly as the author has it.
+        bytes: Vec<u8>,
+        /// The recorded response body to parse.
+        response: Vec<u8>,
+        /// What the parser produced, or the one stage that refused it.
+        reply: oneshot::Sender<Result<Presentation, String>>,
+    },
     /// Validate and persist one provider setting in the same queue as topology writes.
     SetOption {
         /// Stable provider slug.
@@ -220,6 +267,18 @@ pub enum Command {
     },
     /// Stop the loop.
     Shutdown,
+}
+
+/// What an install or a removal changed, carried back to the interface in one reply.
+///
+/// Both halves travel together because the interface publishes both in one step: the
+/// signal payload, and the catalog its `ListProviders` answers from.
+#[derive(Debug, Clone)]
+pub struct PluginChange {
+    /// Every installed definition after the change: the `PluginsChanged` payload.
+    pub plugins: Vec<PluginInfo>,
+    /// The provider catalog after the change.
+    pub catalog: Vec<ProviderDefinition>,
 }
 
 /// Builds a provider client once a credential is in hand.
@@ -418,6 +477,28 @@ impl Account {
         self
     }
 
+    /// What this account is waiting on before it can poll at all, published before its
+    /// first poll rather than discovered at it.
+    ///
+    /// For an account whose configuration is genuinely incomplete — a plugin account with no
+    /// endpoint yet. Leaving it `Pending` with no message would show a card that looks like
+    /// it is about to fetch something, when nothing will ever be fetched until the user
+    /// fills the missing value in.
+    pub fn with_message(mut self, message: &str) -> Self {
+        self.set_state(ProviderState::Pending, Some(message.to_owned()));
+        self
+    }
+
+    /// Publishes the Metrics URL a plugin account sends its key to, so a client adding a
+    /// sibling account can inherit it rather than ask for it again.
+    pub fn with_plugin_endpoint(mut self, endpoint: plugin::provider::Endpoint) -> Self {
+        self.status.plugin_endpoint = Some(PluginEndpoint {
+            url: endpoint.url,
+            allow_insecure_http: endpoint.allow_insecure_http,
+        });
+        self
+    }
+
     /// Replaces the set of windows this account notifies about.
     pub fn with_notify(mut self, windows: Vec<String>) -> Self {
         self.status.notify = windows;
@@ -497,6 +578,9 @@ pub struct Engine {
     refresh: scheduler::RefreshMode,
     last_thin: Option<Instant>,
     notifier: Arc<dyn Notifier>,
+    /// The installed plugin definitions. Detached until [`Engine::with_plugins`] attaches
+    /// one, so a test that says nothing about plugins names no directory.
+    plugins: plugins::Store,
 }
 
 impl Engine {
@@ -519,7 +603,17 @@ impl Engine {
             refresh,
             last_thin: None,
             notifier,
+            plugins: plugins::Store::detached(),
         }
+    }
+
+    /// Attaches the installed plugin definitions.
+    ///
+    /// A builder rather than a constructor argument: every engine has a store, but only the
+    /// daemon has a directory to root one at.
+    pub fn with_plugins(mut self, plugins: plugins::Store) -> Self {
+        self.plugins = plugins;
+        self
     }
 
     /// Publishes every account as pending.
@@ -546,14 +640,8 @@ impl Engine {
         }
 
         let source = crate::registry::source_for_new_account(provider);
-        let Some(mut account) = crate::registry::account_with_source(
-            provider,
-            &AccountId::default(),
-            &self.secrets,
-            &config,
-            source,
-        )
-        .map_err(|error| error.to_string())?
+        let Some(mut account) =
+            self.build_account(provider, &AccountId::default(), &config, source)?
         else {
             return Err(format!(
                 "provider {provider} is not supported by this build"
@@ -610,8 +698,7 @@ impl Engine {
         }
 
         let Some(mut new_account) =
-            crate::registry::account(provider, &AccountId::new(account), &self.secrets, &config)
-                .map_err(|error| error.to_string())?
+            self.build_account(provider, &AccountId::new(account), &config, None)?
         else {
             return Err(format!(
                 "provider {provider} is not supported by this build"
@@ -863,6 +950,17 @@ impl Engine {
         }
 
         let removed = self.accounts.remove(index);
+        // The recorder holds the key of whichever plugin account last built a client. Once
+        // no account of that plugin is configured, nothing is left to look for, and a stale
+        // needle would go on blanking an unrelated body.
+        if self.plugins.get(provider).is_some()
+            && !self
+                .accounts
+                .iter()
+                .any(|configured| configured.provider.as_str() == provider)
+        {
+            tidemark_core::debug::set_account_secret(provider, None);
+        }
         if promote_from.is_some() {
             let promoted_index = self
                 .accounts
@@ -1185,6 +1283,198 @@ impl Engine {
         Ok(())
     }
 
+    /// What one installed definition declares, for a client that has no parser.
+    fn plugin_info(definition: &plugin::Definition) -> PluginInfo {
+        PluginInfo {
+            id: definition.id.clone(),
+            name: definition.name.clone(),
+            plugin_version: definition.plugin_version.clone(),
+            method: definition.method.as_str().to_owned(),
+            api_key_header: definition.api_key_header.clone(),
+            api_key_prefix: definition.api_key_prefix.clone(),
+            has_mark: definition.icon_svg.is_some(),
+            mark_svg: None,
+        }
+    }
+
+    /// The catalog and the installed list as they now stand, for the interface to publish.
+    ///
+    /// The catalog travels with the change rather than being rebuilt by the interface: the
+    /// interface has neither the settings file nor the installed definitions, and a catalog
+    /// it guessed at would go stale the moment a plugin's options changed.
+    fn plugin_change(&self) -> Result<PluginChange, String> {
+        let config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        let installed = self.plugins.installed();
+        Ok(PluginChange {
+            plugins: installed
+                .iter()
+                .map(|definition| Self::plugin_info(definition))
+                .collect(),
+            catalog: crate::registry::catalog_with_plugins(&config, &installed),
+        })
+    }
+
+    /// One account of any provider this daemon can build: compiled in, or installed.
+    ///
+    /// The compiled registry is asked first, so a plugin can never shadow a built-in even if
+    /// one somehow reached the store under a reserved id.
+    fn build_account(
+        &self,
+        provider: &str,
+        account: &AccountId,
+        config: &Config,
+        source: Option<Source>,
+    ) -> Result<Option<Account>, String> {
+        if let Some(account) =
+            crate::registry::account_with_source(provider, account, &self.secrets, config, source)
+                .map_err(|error| error.to_string())?
+        {
+            return Ok(Some(account));
+        }
+        Ok(self
+            .plugins
+            .get(provider)
+            .map(|definition| crate::registry::plugin_account(&definition, account, config)))
+    }
+
+    /// Validates a plugin file and reports what it declares, storing nothing.
+    ///
+    /// The same two checks an install runs — schema, then Lua compile — so a preview that
+    /// says a file is good is a promise the install will keep.
+    pub fn inspect_plugin(&self, bytes: &[u8]) -> Result<PluginInfo, String> {
+        let definition = self
+            .plugins
+            .inspect(bytes, &crate::registry::builtin_ids())
+            .map_err(|error| error.to_string())?;
+        let mut info = Self::plugin_info(&definition);
+        info.mark_svg = definition.icon_svg.clone();
+        Ok(info)
+    }
+
+    /// Validates a plugin file, stores it, and republishes the catalog.
+    ///
+    /// Nothing is polled by this for a definition nobody configured: an account arrives
+    /// through `AddProvider`, as it does for any other provider. A definition whose provider
+    /// *is* configured is the replacement case, and there every account of that provider is
+    /// rebuilt the way an endpoint edit rebuilds one — the account's factory captured the
+    /// earlier definition, and without the rebuild the new parser would wait for a daemon
+    /// restart that nothing announces. Options, notification preferences and the endpoint
+    /// come from the config, which a replacement does not touch.
+    pub async fn install_plugin(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(PluginInfo, PluginChange), String> {
+        let installed = self
+            .plugins
+            .install(bytes, &crate::registry::builtin_ids())
+            .map_err(|error| error.to_string())?;
+        let info = Self::plugin_info(&installed);
+        // The store's own copy, so the rebuilt accounts and the published catalog share one
+        // definition rather than two allocations of the same bytes.
+        let definition = self
+            .plugins
+            .get(&installed.id)
+            .expect("the store holds what it just installed");
+        let config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        for index in 0..self.accounts.len() {
+            if self.accounts[index].provider.as_str() != definition.id {
+                continue;
+            }
+            let account = self.accounts[index].account.clone();
+            let options = self.accounts[index].status.options.clone();
+            self.accounts[index] = crate::registry::plugin_account(&definition, &account, &config)
+                .with_options(options)
+                .with_notify(crate::registry::notify(&definition.id, &config));
+            self.accounts[index].due = Instant::now();
+        }
+        self.probe_credentials(Some(&definition.id)).await;
+        Ok((info, self.plugin_change()?))
+    }
+
+    /// Removes an installed definition, refusing while any account still uses it.
+    ///
+    /// The account count comes from the loaded topology rather than from the file, so a
+    /// definition cannot be removed out from under a card that is on screen right now.
+    pub fn remove_plugin(&mut self, provider: &str) -> Result<PluginChange, String> {
+        let configured = self
+            .accounts
+            .iter()
+            .filter(|account| account.provider.as_str() == provider)
+            .count();
+        self.plugins
+            .remove(provider, configured)
+            .map_err(|error| error.to_string())?;
+        self.plugin_change()
+    }
+
+    /// Validates and persists one plugin account's endpoint, then rebuilds that client.
+    ///
+    /// Validation is [`PluginProvider::new`] itself rather than a second spelling of its
+    /// rules, so an endpoint the daemon accepts is one the poll will accept too — and an
+    /// endpoint it refuses is never written to the file.
+    pub async fn set_plugin_endpoint(
+        &mut self,
+        provider: &str,
+        account: &str,
+        endpoint: &str,
+        allow_insecure_http: bool,
+    ) -> Result<(), String> {
+        let Some(index) = self.accounts.iter().position(|configured| {
+            configured.provider.as_str() == provider && configured.account.as_str() == account
+        }) else {
+            return Err(format!("account {provider}/{account} is not configured"));
+        };
+        let definition = self
+            .plugins
+            .get(provider)
+            .ok_or_else(|| format!("{provider} is not an installed plugin"))?;
+        let endpoint = plugin::provider::Endpoint {
+            url: endpoint.to_owned(),
+            allow_insecure_http,
+        };
+        // A placeholder credential, never stored and never sent: the URL rules do not
+        // depend on the key, and an account being configured usually has no key yet.
+        plugin::provider::PluginProvider::new(
+            Arc::clone(&definition),
+            AccountId::new(account),
+            endpoint.clone(),
+            Credential::new("validating"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        config
+            .set_plugin_endpoint(provider, account, &endpoint)
+            .map_err(|error| error.to_string())?;
+
+        // The endpoint is resolved when the client is built, so the account is rebuilt
+        // rather than told about the change — the same transaction `set_option` runs.
+        self.accounts[index] =
+            crate::registry::plugin_account(&definition, &AccountId::new(account), &config)
+                .with_options(self.accounts[index].status.options.clone())
+                .with_notify(crate::registry::notify(provider, &config));
+        self.accounts[index].due = Instant::now();
+        self.probe_credentials(Some(provider)).await;
+        Ok(())
+    }
+
+    /// Runs a plugin's parser over a recorded response body.
+    ///
+    /// Nothing here reads a key, opens a socket or touches the store: it is the authoring
+    /// loop, and an author must be able to run it against a file before installing anything.
+    pub fn render_plugin(&self, bytes: &[u8], response: &[u8]) -> Result<Presentation, String> {
+        let definition = plugin::schema::parse(bytes, &crate::registry::builtin_ids())
+            .map_err(|error| error.to_string())?;
+        plugin::provider::render(
+            &definition,
+            response,
+            &AccountId::default(),
+            Timestamp::now(),
+        )
+        .map(|reading| reading.presentation)
+        .map_err(|error| error.to_string())
+    }
+
     /// Discovers and validates the dynamic local sources one configured account offers.
     pub async fn inspect_auth_sources(
         &mut self,
@@ -1462,6 +1752,30 @@ impl Engine {
                         let result = self.rename_account(&provider, &account, &new).await;
                         let _ = reply.send(result);
                     }
+                    Some(Command::InspectPlugin { bytes, reply }) => {
+                        let _ = reply.send(self.inspect_plugin(&bytes));
+                    }
+                    Some(Command::InstallPlugin { bytes, reply }) => {
+                        let _ = reply.send(self.install_plugin(&bytes).await);
+                    }
+                    Some(Command::RemovePlugin { provider, reply }) => {
+                        let _ = reply.send(self.remove_plugin(&provider));
+                    }
+                    Some(Command::SetPluginEndpoint {
+                        provider,
+                        account,
+                        endpoint,
+                        allow_insecure_http,
+                        reply,
+                    }) => {
+                        let result = self
+                            .set_plugin_endpoint(&provider, &account, &endpoint, allow_insecure_http)
+                            .await;
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::RenderPlugin { bytes, response, reply }) => {
+                        let _ = reply.send(self.render_plugin(&bytes, &response));
+                    }
                     Some(Command::SetOption { provider, account, name, value, reply }) => {
                         let result = self.set_option(&provider, &account, &name, &value).await;
                         let _ = reply.send(result);
@@ -1529,7 +1843,7 @@ impl Engine {
         let mut fetches = JoinSet::new();
         for &index in &due {
             if let Some(client) = self.accounts[index].client.clone() {
-                fetches.spawn(async move { (index, client.fetch().await) });
+                fetches.spawn(async move { (index, client.fetch_reading().await) });
             }
         }
 
@@ -1678,14 +1992,17 @@ impl Engine {
         }
     }
     /// Files one fetch result and publishes the account.
-    async fn apply(&mut self, index: usize, result: Result<Snapshot, ProviderError>) {
+    async fn apply(&mut self, index: usize, result: Result<Reading, ProviderError>) {
         match result {
-            Ok(snapshot) => {
+            Ok(Reading {
+                snapshot,
+                presentation,
+            }) => {
                 self.record(index, &snapshot).await;
                 let account = &mut self.accounts[index];
                 account.failures = 0;
                 account.retry_after = None;
-                account.status.set_reading(&snapshot);
+                account.status.set_reading(&snapshot, presentation);
                 for published in &mut account.status.windows {
                     published.blocked_by = snapshot
                         .windows
@@ -2177,8 +2494,10 @@ mod tests {
     use crate::notify::{Notice, Notifier, NotifyError};
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use tidemark_core::providers::BoxFuture;
-    use tidemark_types::{AuthCandidate, AuthSelection, Window, WindowKey, WindowLength};
+    use tidemark_core::providers::{BoxFuture, Reading};
+    use tidemark_types::{
+        AuthCandidate, AuthSelection, Field, Widget, Window, WindowKey, WindowLength,
+    };
 
     #[test]
     fn a_missing_cli_credential_has_its_own_published_state() {
@@ -2307,6 +2626,34 @@ mod tests {
                 .pop()
                 .unwrap_or(Err(ProviderError::Http { status: 503 }));
             Box::pin(async move { answer })
+        }
+    }
+
+    /// A provider whose card cannot be reconstructed from its snapshot: the window still
+    /// belongs in history, while the provider deliberately presents its percentage as a
+    /// plain value rather than a gauge.
+    #[derive(Debug)]
+    struct PresentedFake;
+
+    impl Provider for PresentedFake {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("fake")
+        }
+
+        fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+            Box::pin(async { Ok(snapshot(42.0, 18_000)) })
+        }
+
+        fn fetch_reading(&self) -> BoxFuture<'_, Result<Reading, ProviderError>> {
+            Box::pin(async {
+                let snapshot = snapshot(42.0, 18_000);
+                let mut presentation = tidemark_core::presentation::from_snapshot(&snapshot);
+                presentation.card = vec![Widget::value("w18000", Field::UsedPercent)];
+                Ok(Reading {
+                    snapshot,
+                    presentation,
+                })
+            })
         }
     }
 
@@ -2661,7 +3008,8 @@ mod tests {
                 config.add_provider(provider).expect("provider configured");
             }
             let secrets = unlocked();
-            let accounts = crate::registry::accounts(&secrets, &config).expect("accounts build");
+            let accounts = crate::registry::accounts_with_plugins(&secrets, &config, &[])
+                .expect("accounts build");
             let (tx, rx) = mpsc::channel(64);
             let notices = Arc::new(Recorder::default());
             Self {
@@ -2735,6 +3083,281 @@ mod tests {
             config_path: config,
             notices,
         }
+    }
+
+    /// A minimal plugin file whose parser reports one window, so a render has something to
+    /// show and an installed definition has something to poll.
+    const PLUGIN_FILE: &str = r#"
+format_version = 1
+
+[provider]
+id = "com.acme.quota"
+name = "Acme AI"
+plugin_version = "1.0.0"
+
+[request]
+method = "GET"
+api_key_header = "X-Acme-Key"
+api_key_prefix = ""
+
+[parser]
+language = "lua54"
+source = '''
+function parse(response, context)
+    return {
+        metrics = {
+            { id = "monthly", title = "Monthly", value = response.used, maximum = response.limit },
+        },
+        card = { gauge("monthly", {}) },
+        details = {},
+    }
+end
+'''
+
+[icon]
+svg = '''
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="currentColor" d="M0 0h64v64H0z"/></svg>
+'''
+"#;
+
+    /// A harness whose engine writes plugins into a scratch directory of its own.
+    async fn plugin_harness(name: &str) -> Harness {
+        let root = std::env::temp_dir().join(format!(
+            "tidemark-engine-plugins-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut harness = Harness::empty(name).await;
+        harness.engine = std::mem::replace(
+            &mut harness.engine,
+            Engine::new(
+                Vec::new(),
+                History::in_memory().expect("an in-memory database opens"),
+                unlocked(),
+                mpsc::channel(1).0,
+                harness.config_path.clone(),
+                scheduler::RefreshMode::Auto,
+                Arc::new(Recorder::default()) as Arc<dyn Notifier>,
+            ),
+        )
+        .with_plugins(plugins::Store::open(root).expect("a scratch store opens"));
+        harness
+    }
+
+    /// A harness with the plugin installed and the named accounts configured against it.
+    async fn plugin_harness_with_accounts(name: &str, accounts: &[&str]) -> Harness {
+        let mut harness = plugin_harness(name).await;
+        harness
+            .engine
+            .install_plugin(PLUGIN_FILE.as_bytes())
+            .await
+            .expect("installs");
+        harness
+            .engine
+            .add_provider("com.acme.quota")
+            .await
+            .expect("the plugin is configurable");
+        for account in accounts.iter().filter(|account| **account != "default") {
+            harness
+                .engine
+                .add_account("com.acme.quota", account)
+                .await
+                .expect("account added");
+        }
+        harness
+    }
+
+    #[tokio::test]
+    async fn installing_a_definition_makes_its_provider_configurable() {
+        let mut harness = plugin_harness("install").await;
+        let (info, change) = harness
+            .engine
+            .install_plugin(PLUGIN_FILE.as_bytes())
+            .await
+            .expect("installs");
+        assert_eq!(info.id, "com.acme.quota");
+        assert_eq!(info.api_key_header, "X-Acme-Key");
+        assert!(
+            change
+                .catalog
+                .iter()
+                .any(|definition| definition.provider == "com.acme.quota"),
+            "an installed definition is a configurable provider"
+        );
+        assert_eq!(change.plugins.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_is_stored_per_account_and_rebuilds_only_that_client() {
+        let mut harness = plugin_harness_with_accounts("endpoint", &["default", "work"]).await;
+        harness
+            .engine
+            .set_plugin_endpoint("com.acme.quota", "work", "https://corp.test/u", false)
+            .await
+            .expect("stores");
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert!(
+            config
+                .plugin_endpoint("com.acme.quota", "work")
+                .expect("reads")
+                .is_some()
+        );
+        assert!(
+            config
+                .plugin_endpoint("com.acme.quota", "default")
+                .expect("reads")
+                .is_none(),
+            "one account's endpoint is not the other's"
+        );
+    }
+
+    /// A configured account's factory captured the definition it was built from, so a
+    /// replacement that left the account in place would keep polling the old parser until
+    /// the daemon restarted — which is exactly what a user re-importing a fixed plugin
+    /// file would see: the install succeeds, the card does not change.
+    #[tokio::test]
+    async fn replacing_a_definition_rebuilds_the_accounts_that_poll_it() {
+        let mut harness = plugin_harness_with_accounts("replace", &["default", "work"]).await;
+        for account in ["default", "work"] {
+            harness
+                .engine
+                .set_plugin_endpoint("com.acme.quota", account, "https://metrics.test/u", false)
+                .await
+                .expect("endpoint");
+        }
+        harness.engine.ensure_client(1).await;
+        assert!(
+            harness.engine.accounts()[1].client.is_some(),
+            "the account being replaced must first hold a client"
+        );
+
+        let replacement = PLUGIN_FILE.replace(
+            r#"card = { gauge("monthly", {}) }"#,
+            r#"card = { value("monthly", { field = "value" }) }"#,
+        );
+        harness
+            .engine
+            .install_plugin(replacement.as_bytes())
+            .await
+            .expect("replaces");
+
+        for index in 0..2 {
+            assert!(
+                harness.engine.accounts()[index].client.is_none(),
+                "a replaced definition must not leave a client the old one built"
+            );
+            assert!(
+                harness.engine.accounts()[index].due <= Instant::now(),
+                "the replacement is polled at once, not at the old schedule"
+            );
+        }
+        harness.engine.ensure_client(1).await;
+        assert!(
+            harness.engine.accounts()[1].client.is_some(),
+            "the rebuilt account builds a client from the new definition"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_http_endpoint_without_the_acknowledgement_is_refused_by_the_daemon() {
+        let mut harness = plugin_harness_with_accounts("insecure", &["default"]).await;
+        let error = harness
+            .engine
+            .set_plugin_endpoint("com.acme.quota", "default", "http://corp.test/u", false)
+            .await
+            .expect_err("the daemon refuses before storing");
+        assert!(error.contains("http"), "{error}");
+        assert!(
+            Config::at(harness.config_path.clone())
+                .expect("parses")
+                .plugin_endpoint("com.acme.quota", "default")
+                .expect("reads")
+                .is_none(),
+            "a refused endpoint is never written"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_a_definition_is_refused_while_an_account_uses_it() {
+        let mut harness = plugin_harness_with_accounts("in-use", &["default"]).await;
+        assert!(harness.engine.remove_plugin("com.acme.quota").is_err());
+        harness
+            .engine
+            .remove_provider("com.acme.quota", "default")
+            .await
+            .expect("removes the account");
+        let change = harness
+            .engine
+            .remove_plugin("com.acme.quota")
+            .expect("now removable");
+        assert!(change.plugins.is_empty());
+        assert!(
+            change
+                .catalog
+                .iter()
+                .all(|definition| definition.provider != "com.acme.quota")
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_an_account_removes_its_endpoint_with_its_credential() {
+        let mut harness =
+            plugin_harness_with_accounts("account-removal", &["default", "work"]).await;
+        harness
+            .engine
+            .set_plugin_endpoint("com.acme.quota", "work", "https://corp.test/u", false)
+            .await
+            .expect("stores");
+        harness
+            .engine
+            .remove_provider("com.acme.quota", "work")
+            .await
+            .expect("removes");
+        assert!(
+            Config::at(harness.config_path.clone())
+                .expect("parses")
+                .plugin_endpoint("com.acme.quota", "work")
+                .expect("reads")
+                .is_none(),
+            "an endpoint is account state and goes with the account"
+        );
+    }
+
+    #[tokio::test]
+    async fn rendering_a_fixture_reaches_no_network_and_reads_no_key() {
+        let harness = plugin_harness("render").await;
+        let presentation = harness
+            .engine
+            .render_plugin(PLUGIN_FILE.as_bytes(), br#"{"used": 1, "limit": 4}"#)
+            .expect("renders");
+        assert_eq!(presentation.card.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn inspecting_a_file_says_what_it_declares_without_installing_it() {
+        let harness = plugin_harness("inspect").await;
+        let info = harness
+            .engine
+            .inspect_plugin(PLUGIN_FILE.as_bytes())
+            .expect("valid");
+        assert_eq!(info.id, "com.acme.quota");
+        assert!(info.has_mark);
+        assert_eq!(
+            info.mark_svg.as_deref(),
+            Some(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="currentColor" d="M0 0h64v64H0z"/></svg>"#
+            ),
+            "the dry-run preview needs the sanitized mark before anything is installed"
+        );
+        assert!(
+            harness
+                .engine
+                .plugin_change()
+                .expect("reads")
+                .plugins
+                .is_empty(),
+            "inspection is a dry run"
+        );
     }
 
     #[tokio::test]
@@ -2933,7 +3556,8 @@ mod tests {
             .expect("accounts configured");
         let secrets = Arc::new(StoredSecrets::default());
         let secrets_dyn: Arc<dyn Secrets> = secrets.clone();
-        let accounts = crate::registry::accounts(&secrets_dyn, &config).expect("accounts built");
+        let accounts = crate::registry::accounts_with_plugins(&secrets_dyn, &config, &[])
+            .expect("accounts built");
         let (tx, rx) = mpsc::channel(64);
         let notices = Arc::new(Recorder::default());
         (
@@ -3192,7 +3816,8 @@ mod tests {
         secrets.insert(Kind::Token, "kimi", "default", "stale-token");
         secrets.insert(Kind::Token, "kimi", "work", "stale-token");
         let secrets_dyn: Arc<dyn Secrets> = secrets.clone();
-        let accounts = crate::registry::accounts(&secrets_dyn, &config).expect("accounts built");
+        let accounts = crate::registry::accounts_with_plugins(&secrets_dyn, &config, &[])
+            .expect("accounts built");
         let (tx, rx) = mpsc::channel(64);
         let notices = Arc::new(Recorder::default());
         let mut harness = Harness {
@@ -3859,7 +4484,8 @@ mod tests {
         let secrets = Arc::new(StoredSecrets::default());
         secrets.insert(Kind::Key, "kimi", "work", "work-secret");
         let secrets_dyn: Arc<dyn Secrets> = secrets.clone();
-        let accounts = crate::registry::accounts(&secrets_dyn, &config).expect("accounts built");
+        let accounts = crate::registry::accounts_with_plugins(&secrets_dyn, &config, &[])
+            .expect("accounts built");
         let (tx, rx) = mpsc::channel(64);
         let notices = Arc::new(Recorder::default());
         let mut harness = Harness {
@@ -3907,7 +4533,8 @@ mod tests {
 
         let reloaded_config = Config::at(config_path.clone()).expect("config reloaded");
         let reloaded_accounts =
-            crate::registry::accounts(&secrets_dyn, &reloaded_config).expect("accounts reloaded");
+            crate::registry::accounts_with_plugins(&secrets_dyn, &reloaded_config, &[])
+                .expect("accounts reloaded");
         assert_eq!(reloaded_accounts.len(), 1);
         assert_eq!(reloaded_accounts[0].account().as_str(), "default");
         let reloaded_history = History::open(history_path.clone()).expect("history reloaded");
@@ -3939,7 +4566,8 @@ mod tests {
         let mut config = Config::at(config_path.clone()).expect("empty config parses");
         config.add_provider("antigravity").expect("configured");
         let secrets: Arc<dyn Secrets> = Arc::new(Keyring(|| Ok(None)));
-        let accounts = crate::registry::accounts(&secrets, &config).expect("accounts build");
+        let accounts =
+            crate::registry::accounts_with_plugins(&secrets, &config, &[]).expect("accounts build");
         let (updates, _published) = mpsc::channel(64);
         let mut engine = Engine::new(
             accounts,
@@ -4128,7 +4756,8 @@ mod tests {
             .set_option("zai", "region", "global")
             .expect("initial option written");
         let secrets: Arc<dyn Secrets> = Arc::new(Keyring(|| Ok(None)));
-        let accounts = crate::registry::accounts(&secrets, &config).expect("accounts build");
+        let accounts =
+            crate::registry::accounts_with_plugins(&secrets, &config, &[]).expect("accounts build");
         let (updates, _published) = mpsc::channel(64);
         let mut engine = Engine::new(
             accounts,
@@ -4380,6 +5009,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_successful_poll_publishes_the_presentation_of_its_reading() {
+        let mut harness = with_provider(Fake::new(vec![Ok(snapshot(42.0, 18_000))]));
+        harness.engine.poll_due(Instant::now()).await;
+
+        let presentation = harness.engine.accounts()[0]
+            .status()
+            .presentation
+            .clone()
+            .expect("a successful poll publishes a layout");
+        assert_eq!(presentation.card.len(), 1);
+        assert_eq!(presentation.card[0].metric, "w18000");
+    }
+
+    #[tokio::test]
+    async fn polling_publishes_the_providers_presentation_without_rebuilding_it() {
+        let mut harness = with_provider(Arc::new(PresentedFake));
+        harness.engine.poll_due(Instant::now()).await;
+
+        let presentation = harness.engine.accounts()[0]
+            .status()
+            .presentation
+            .as_ref()
+            .expect("a successful poll publishes a layout");
+        assert_eq!(
+            presentation.card[0].kind, "value",
+            "a provider's value widget must not be regenerated as a gauge from its window"
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_poll_keeps_the_numbers_and_changes_the_state() {
         let mut harness = with_provider(Fake::new(vec![
             Ok(snapshot(42.0, 4 * 3600)),
@@ -4396,6 +5055,23 @@ mod tests {
             "the last good reading stays on screen behind the state chip"
         );
         assert!(status.message.is_some(), "and says what went wrong");
+    }
+
+    #[tokio::test]
+    async fn a_failed_poll_keeps_the_last_good_presentation() {
+        let mut harness = with_provider(Fake::new(vec![
+            Ok(snapshot(42.0, 18_000)),
+            Err(ProviderError::Http { status: 500 }),
+        ]));
+        harness.engine.poll_due(Instant::now()).await;
+        harness.poll_again().await;
+
+        let status = harness.engine.accounts()[0].status();
+        assert_eq!(status.state(), Some(ProviderState::Unreachable));
+        assert!(
+            status.presentation.is_some(),
+            "the card keeps showing the last known numbers behind a failure chip"
+        );
     }
 
     #[tokio::test]

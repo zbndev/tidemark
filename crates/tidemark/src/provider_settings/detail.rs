@@ -1389,6 +1389,7 @@ mod tests {
             external: None,
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         }
     }
 

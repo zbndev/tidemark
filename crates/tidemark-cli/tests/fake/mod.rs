@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use tidemark_ipc::DaemonProxy;
 use tidemark_types::{
-    AccountId, ProviderDefinition, ProviderId, ProviderState, ProviderStatus, ids,
+    AccountId, PluginInfo, Presentation, ProviderDefinition, ProviderId, ProviderState,
+    ProviderStatus, ids,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -29,6 +30,12 @@ impl Calls {
 pub struct FakeDaemon {
     pub calls: Calls,
     pub statuses: Vec<ProviderStatus>,
+    /// What every plugin method refuses with, for the tests about a refusal reaching the
+    /// user. `None` is a daemon that accepts everything.
+    pub refusal: Option<String>,
+    /// What the catalog says about installed plugins, which is where `plugin list` reads
+    /// them from: the daemon publishes one catalog, not a second plugin-only listing.
+    pub definitions: Vec<ProviderDefinition>,
 }
 
 impl FakeDaemon {
@@ -39,7 +46,78 @@ impl FakeDaemon {
         Self {
             calls: Calls::default(),
             statuses: vec![status],
+            refusal: None,
+            definitions: Vec::new(),
         }
+    }
+
+    /// A daemon carrying one installed plugin in its catalog.
+    ///
+    /// Unused in the binaries that do not test plugins — see `emit_change` for why that is
+    /// expected here rather than dead.
+    #[allow(dead_code)]
+    pub fn with_one_plugin() -> Self {
+        Self {
+            definitions: vec![
+                plugin_definition("com.acme.quota", "Acme AI"),
+                ProviderDefinition {
+                    provider: "claude".to_owned(),
+                    title: "Claude".to_owned(),
+                    credential: "oauth".to_owned(),
+                    credential_hint: String::new(),
+                    external: None,
+                    browser_auth: None,
+                    options: Vec::new(),
+                    plugin: None,
+                },
+            ],
+            ..Self::with_one_account()
+        }
+    }
+
+    /// A daemon that refuses every plugin method with one message.
+    #[allow(dead_code)]
+    pub fn refusing(message: &str) -> Self {
+        Self {
+            refusal: Some(message.to_owned()),
+            ..Self::with_one_account()
+        }
+    }
+
+    /// The refusal as the bus carries it, or nothing when this daemon accepts.
+    fn refuse<T>(&self) -> Option<zbus::fdo::Result<T>> {
+        self.refusal
+            .clone()
+            .map(|message| Err(zbus::fdo::Error::InvalidArgs(message)))
+    }
+}
+
+/// What the daemon publishes for an installed plugin: a catalog entry carrying `plugin`.
+#[allow(dead_code)]
+pub fn plugin_definition(id: &str, name: &str) -> ProviderDefinition {
+    ProviderDefinition {
+        provider: id.to_owned(),
+        title: name.to_owned(),
+        credential: "key".to_owned(),
+        credential_hint: "X-Acme-Key".to_owned(),
+        external: None,
+        browser_auth: None,
+        options: Vec::new(),
+        plugin: Some(plugin_info(id, name)),
+    }
+}
+
+/// The metadata every plugin method here answers with.
+pub fn plugin_info(id: &str, name: &str) -> PluginInfo {
+    PluginInfo {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        plugin_version: "1.2.0".to_owned(),
+        method: "GET".to_owned(),
+        api_key_header: "X-Acme-Key".to_owned(),
+        api_key_prefix: String::new(),
+        has_mark: true,
+        mark_svg: None,
     }
 }
 
@@ -52,7 +130,75 @@ impl FakeDaemon {
 
     async fn list_providers(&self) -> Vec<ProviderDefinition> {
         self.calls.record("ListProviders");
-        Vec::new()
+        self.definitions.clone()
+    }
+
+    // The plugin surface. The bytes are recorded by *length* rather than content: what
+    // these tests are about is that the file the user named reached the daemon whole, and
+    // a fixture pasted into an assertion would only be re-asserting the fixture.
+    async fn inspect_plugin(&self, bytes: Vec<u8>) -> zbus::fdo::Result<PluginInfo> {
+        self.calls
+            .record(format!("InspectPlugin({} bytes)", bytes.len()));
+        self.refuse()
+            .unwrap_or_else(|| Ok(plugin_info("com.acme.quota", "Acme AI")))
+    }
+
+    async fn install_plugin(&self, bytes: Vec<u8>) -> zbus::fdo::Result<PluginInfo> {
+        self.calls
+            .record(format!("InstallPlugin({} bytes)", bytes.len()));
+        self.refuse()
+            .unwrap_or_else(|| Ok(plugin_info("com.acme.quota", "Acme AI")))
+    }
+
+    async fn remove_plugin(&self, provider: &str) -> zbus::fdo::Result<()> {
+        self.calls.record(format!("RemovePlugin({provider})"));
+        self.refuse().unwrap_or(Ok(()))
+    }
+
+    async fn set_plugin_endpoint(
+        &self,
+        provider: &str,
+        account: &str,
+        endpoint: &str,
+        allow_insecure_http: bool,
+    ) -> zbus::fdo::Result<()> {
+        self.calls.record(format!(
+            "SetPluginEndpoint({provider},{account},{endpoint},{allow_insecure_http})"
+        ));
+        self.refuse().unwrap_or(Ok(()))
+    }
+
+    async fn render_plugin(
+        &self,
+        bytes: Vec<u8>,
+        response: Vec<u8>,
+    ) -> zbus::fdo::Result<Presentation> {
+        self.calls.record(format!(
+            "RenderPlugin({} bytes,{} bytes)",
+            bytes.len(),
+            response.len()
+        ));
+        self.refuse().unwrap_or_else(|| {
+            Ok(Presentation {
+                metrics: vec![tidemark_types::Metric {
+                    id: "monthly".to_owned(),
+                    title: "Monthly".to_owned(),
+                    subtitle: None,
+                    value: Some(1.0),
+                    maximum: Some(4.0),
+                    remaining: Some(3.0),
+                    used_percent: Some(25.0),
+                    text: None,
+                    unit: None,
+                    window: None,
+                }],
+                card: vec![tidemark_types::Widget::gauge(
+                    "monthly",
+                    tidemark_types::Field::UsedPercent,
+                )],
+                details: Vec::new(),
+            })
+        })
     }
 
     async fn add_provider(&self, provider: &str) {

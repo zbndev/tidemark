@@ -38,7 +38,9 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
-use tidemark_types::{AccountId, AuthCandidate, ProviderId, Snapshot, Timestamp, WindowLength};
+use tidemark_types::{
+    AccountId, AuthCandidate, Presentation, ProviderId, Snapshot, Timestamp, WindowLength,
+};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// A future returned from a trait method.
@@ -47,6 +49,20 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 /// as a heterogeneous list. Boxing one future per poll costs nothing at a five-minute
 /// interval, and it keeps the trait free of a proc-macro dependency.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// One successful provider reading: the data consumed by history and policy, and the
+/// semantic layout published to clients.
+///
+/// Built-in providers only produce a [`Snapshot`], so [`Provider::fetch_reading`] derives
+/// their established presentation. A plugin produces both in one parser execution because
+/// its card order and widget kinds cannot be recovered from the snapshot afterwards.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reading {
+    /// Windows and details used by history, scheduling and notifications.
+    pub snapshot: Snapshot,
+    /// The card and detail layout the provider produced.
+    pub presentation: Presentation,
+}
 
 /// One service Tidemark can ask about quota.
 pub trait Provider: fmt::Debug + Send + Sync {
@@ -65,6 +81,21 @@ pub trait Provider: fmt::Debug + Send + Sync {
 
     /// Fetch current quota.
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>>;
+
+    /// Fetch current quota together with its semantic presentation.
+    ///
+    /// The default preserves the existing contract for every built-in provider. Producers
+    /// whose presentation is not derivable from a snapshot override this method.
+    fn fetch_reading(&self) -> BoxFuture<'_, Result<Reading, ProviderError>> {
+        Box::pin(async move {
+            let snapshot = self.fetch().await?;
+            let presentation = crate::presentation::from_snapshot(&snapshot);
+            Ok(Reading {
+                snapshot,
+                presentation,
+            })
+        })
+    }
 
     /// Inspects selectable local authentication sources without exposing their credentials.
     ///

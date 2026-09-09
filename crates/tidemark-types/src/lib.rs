@@ -9,22 +9,30 @@
 //! belongs in `tidemark`. `scripts/check-layering.sh` enforces that.
 
 pub mod present;
+pub mod semantic;
 pub mod snapshot;
 pub mod time;
 pub mod window;
 pub mod wire;
 
-pub use present::{duration, icon_name, percent};
+pub use present::{
+    duration, format_field, format_ratio, icon_name, percent, plugin_icon_slug, provider_icon_name,
+};
+pub use semantic::{
+    Emphasis, Field, Format, Metric, MetricWindow, Presentation, PresentedSection, Widget,
+    WidgetKind,
+};
 pub use snapshot::{
-    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, lead_window_key, provider_label,
+    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, lead_window_key, ordered_windows,
+    provider_label,
 };
 pub use time::{AbsurdTimestamp, Timestamp};
 pub use window::{DANGER_AT, WARNING_AT, Window, WindowKey, WindowLength};
 pub use wire::{
     AuthCandidate, AuthCandidateState, AuthMode, AuthSelection, AuthSelector, CredentialKind,
-    DataInfo, ExternalLogin, HistoryPoint, OptionChoice, Preferences, ProviderDefinition,
-    ProviderOption, ProviderState, ProviderStatus, Remedy, WindowStatus, account_slug_suggestion,
-    valid_account_slug,
+    DataInfo, ExternalLogin, HistoryPoint, OptionChoice, PluginEndpoint, PluginInfo, Preferences,
+    ProviderDefinition, ProviderOption, ProviderState, ProviderStatus, Remedy, WindowStatus,
+    account_slug_suggestion, valid_account_slug,
 };
 
 /// Identity constants. Changing any of these is a breaking change for installed units,

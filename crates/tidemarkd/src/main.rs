@@ -23,6 +23,7 @@ mod keyring;
 mod lifecycle;
 mod notify;
 mod peer;
+mod plugins;
 mod registry;
 mod scheduler;
 mod service;
@@ -313,7 +314,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // would keep talking around the proxy until the daemon was restarted.
     http::set_proxy(Proxy::configured(&preferences).map_err(Box::<dyn Error>::from)?);
     let secrets: Arc<dyn Secrets> = Arc::new(keyring::Keyring::default());
-    let accounts = registry::accounts(&secrets, &config)?;
+    // Read before the accounts, because a configured plugin provider has no account
+    // without its definition — a definition that fails to load leaves its accounts
+    // unpolled and warned about rather than taking the daemon down with it.
+    let plugin_store = plugins::Store::open(paths::plugins_dir()?)?;
+    // Published to the client, which adds it to its icon search path so a plugin's mark
+    // loads by name exactly the way a shipped one does.
+    let plugin_icons = paths::plugin_icons_dir()?;
+    let installed = plugin_store.installed();
+    let accounts = registry::accounts_with_plugins(&secrets, &config, &installed)?;
     let configured = accounts
         .iter()
         .map(|account| {
@@ -323,7 +332,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             )
         })
         .collect();
-    let catalog = registry::catalog(&config);
+    let catalog = registry::catalog_with_plugins(&config, &installed);
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -368,7 +377,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 Arc::new(startup::System),
                 release_checks.clone(),
                 cfg!(feature = "update-check"),
-            ),
+            )
+            .with_plugin_icons(plugin_icons.clone()),
         )?
         .build()
         .await
@@ -405,6 +415,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             release_checks.clone(),
             cfg!(feature = "update-check"),
         )
+        .with_plugin_icons(plugin_icons.clone())
         .with_hub(Arc::clone(&hub));
         let accept_task = peer::listen(daemon, Arc::clone(&hub)).await?;
         (Announcer::Peers(hub), accept_task)
@@ -492,7 +503,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         config_path,
         scheduler::RefreshMode::configured(&preferences),
         notifier as Arc<dyn notify::Notifier>,
-    );
+    )
+    .with_plugins(plugin_store);
     // Before the first announcement, so a client connecting immediately is told whether
     // each account has a credential rather than having to wait a poll to find out.
     engine.probe_credentials(None).await;

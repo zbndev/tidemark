@@ -30,6 +30,12 @@ const PROVIDER_TABLE: &str = "provider";
 const PROVIDERS_KEY: &str = "providers";
 /// The account ids configured for a provider.
 const ACCOUNTS_KEY: &str = "accounts";
+/// The subtable a plugin provider's per-account configuration lives under.
+const ACCOUNT_TABLE: &str = "account";
+/// The endpoint key inside it.
+const ENDPOINT_KEY: &str = "endpoint";
+/// The insecure-transport acknowledgement key inside it.
+const INSECURE_KEY: &str = "allow_insecure_http";
 /// The shared storage keys used by browser-cookie authentication providers.
 const AUTH_SOURCE_KEY: &str = "auth-source";
 const AUTH_BROWSER_KEY: &str = "auth-browser";
@@ -140,6 +146,18 @@ pub enum ConfigError {
         /// The provider carrying the selection.
         provider: String,
         /// Why the selected opaque candidate cannot be stored.
+        reason: String,
+    },
+    /// A plugin account's endpoint is present and cannot be used.
+    #[error("{path}: [{PROVIDER_TABLE}.{provider}.{ACCOUNT_TABLE}.{account}] {reason}")]
+    InvalidEndpoint {
+        /// The file.
+        path: PathBuf,
+        /// Whose endpoint it is.
+        provider: String,
+        /// Which account's.
+        account: String,
+        /// What was wrong with it.
         reason: String,
     },
     /// An application preference has a wrong type or an unknown named value.
@@ -733,6 +751,10 @@ impl Config {
         if accounts.is_empty() {
             return self.remove_provider(provider);
         }
+        // The account's endpoint and its insecure-transport acknowledgement belong to that
+        // account id, not to the provider. Leaving them behind would hand a reused id someone
+        // else's URL and someone else's acknowledgement.
+        self.forget_account_table(provider, account)?;
         if account == "default" {
             accounts[0] = "default".to_owned();
         }
@@ -753,6 +775,152 @@ impl Config {
         self.normalize_providers(None)?;
         self.set_option_value(provider, name, setting)?;
         self.write()
+    }
+
+    /// One plugin account's endpoint, or `None` when it has not been configured.
+    ///
+    /// Account-addressed, and deliberately not a [`Self::option`]: a provider option is one
+    /// value under `[provider.<id>]` shared by every account, and `Engine::set_option` takes
+    /// an account only to decide which client to rebuild. An endpoint stored that way would
+    /// silently send two accounts' different keys to one host — which is the single thing this
+    /// feature must never do.
+    ///
+    /// Present-but-invalid is refused rather than ignored: an endpoint the file holds in a
+    /// shape this build cannot read must not fall back to "unconfigured", because a
+    /// half-configured account would then quietly stop polling.
+    pub fn plugin_endpoint(
+        &self,
+        provider: &str,
+        account: &str,
+    ) -> Result<Option<crate::plugin::provider::Endpoint>, ConfigError> {
+        let Some(table) = self
+            .document
+            .get(PROVIDER_TABLE)
+            .and_then(|table| table.get(provider))
+            .and_then(|table| table.get(ACCOUNT_TABLE))
+            .and_then(|table| table.get(account))
+        else {
+            return Ok(None);
+        };
+        let invalid = |reason: &str| ConfigError::InvalidEndpoint {
+            path: self.path.clone(),
+            provider: provider.to_owned(),
+            account: account.to_owned(),
+            reason: reason.to_owned(),
+        };
+        let table = table
+            .as_table_like()
+            .ok_or_else(|| invalid("must be a table"))?;
+        let url = match table.get(ENDPOINT_KEY) {
+            // An empty table is an account nothing has been filed under yet. A table that
+            // carries the acknowledgement but no endpoint is half-configured, and reading it
+            // as "unconfigured" would quietly send the key nowhere.
+            None if table.is_empty() => return Ok(None),
+            None => return Err(invalid("endpoint must be set")),
+            Some(item) => item
+                .as_str()
+                .ok_or_else(|| invalid("endpoint must be a string"))?
+                .to_owned(),
+        };
+        if url.trim().is_empty() {
+            return Err(invalid("endpoint must not be empty"));
+        }
+        let allow_insecure_http = match table.get(INSECURE_KEY) {
+            None => false,
+            Some(item) => item
+                .as_bool()
+                .ok_or_else(|| invalid("allow_insecure_http must be true or false"))?,
+        };
+        Ok(Some(crate::plugin::provider::Endpoint {
+            url,
+            allow_insecure_http,
+        }))
+    }
+
+    /// Stores one plugin account's endpoint and writes the file.
+    pub fn set_plugin_endpoint(
+        &mut self,
+        provider: &str,
+        account: &str,
+        endpoint: &crate::plugin::provider::Endpoint,
+    ) -> Result<(), ConfigError> {
+        let table = self.account_table(provider, account)?;
+        table.insert(ENDPOINT_KEY, value(&endpoint.url));
+        table.insert(
+            INSECURE_KEY,
+            Item::Value(Value::from(endpoint.allow_insecure_http)),
+        );
+        self.write()
+    }
+
+    /// Removes one plugin account's endpoint and acknowledgement, and writes the file.
+    pub fn remove_plugin_endpoint(
+        &mut self,
+        provider: &str,
+        account: &str,
+    ) -> Result<(), ConfigError> {
+        if !self.forget_account_table(provider, account)? {
+            return Ok(());
+        }
+        self.write()
+    }
+
+    /// Drops `[provider.<id>.account.<account>]` if it is there, reporting whether it was.
+    fn forget_account_table(&mut self, provider: &str, account: &str) -> Result<bool, ConfigError> {
+        let Some(accounts) = self
+            .document
+            .get_mut(PROVIDER_TABLE)
+            .and_then(|table| table.get_mut(provider))
+            .and_then(|table| table.get_mut(ACCOUNT_TABLE))
+            .and_then(|table| table.as_table_like_mut())
+        else {
+            return Ok(false);
+        };
+        Ok(accounts.remove(account).is_some())
+    }
+
+    /// The `[provider.<id>.account.<account>]` table, created if it is not there.
+    fn account_table(
+        &mut self,
+        provider: &str,
+        account: &str,
+    ) -> Result<&mut dyn toml_edit::TableLike, ConfigError> {
+        // The same entry/`as_table_like_mut` walk `set_option_value` uses, one level deeper, so a
+        // non-table in the way is the same `NotATable` refusal rather than a second spelling of
+        // it — and every intermediate table is created implicitly, which is what preserves the
+        // decoration around whatever is already in the file.
+        self.normalize_providers(None)?;
+        let mut table = self
+            .document
+            .entry(PROVIDER_TABLE)
+            .or_insert_with(|| Item::Table(implicit_table()))
+            .as_table_like_mut()
+            .ok_or_else(|| ConfigError::NotATable {
+                path: self.path.clone(),
+                table: PROVIDER_TABLE.to_owned(),
+            })?;
+        for (segment, dotted) in [
+            (provider, provider.to_owned()),
+            (ACCOUNT_TABLE, format!("{provider}.{ACCOUNT_TABLE}")),
+            (account, format!("{provider}.{ACCOUNT_TABLE}.{account}")),
+        ] {
+            let implicit = segment != account;
+            table = table
+                .entry(segment)
+                .or_insert_with(|| {
+                    Item::Table(if implicit {
+                        implicit_table()
+                    } else {
+                        Table::new()
+                    })
+                })
+                .as_table_like_mut()
+                .ok_or_else(|| ConfigError::NotATable {
+                    path: self.path.clone(),
+                    table: format!("{PROVIDER_TABLE}.{dotted}"),
+                })?;
+        }
+        Ok(table)
     }
 
     fn set_option_value(
@@ -1135,6 +1303,7 @@ fn implicit_table() -> Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin::provider::Endpoint;
     use tidemark_types::AuthSelection;
 
     fn scratch(name: &str) -> PathBuf {
@@ -1991,5 +2160,185 @@ mod tests {
             );
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    /// A config over its own scratch file, seeded with `body`.
+    fn seeded(name: &str, body: &str) -> (PathBuf, Config) {
+        let path = scratch(name);
+        std::fs::write(&path, body).expect("seed written");
+        let config = Config::at(path.clone()).expect("loads");
+        (path, config)
+    }
+
+    #[test]
+    fn each_account_gets_its_own_endpoint() {
+        let (_path, mut config) = seeded("endpoints", "");
+        config
+            .set_plugin_endpoint(
+                "com.acme.quota",
+                "default",
+                &Endpoint {
+                    url: "https://metrics.example.test/v1/usage".into(),
+                    allow_insecure_http: false,
+                },
+            )
+            .expect("writes");
+        config
+            .set_plugin_endpoint(
+                "com.acme.quota",
+                "work",
+                &Endpoint {
+                    url: "http://metrics.corp.test/v1/usage".into(),
+                    allow_insecure_http: true,
+                },
+            )
+            .expect("writes");
+
+        let default = config
+            .plugin_endpoint("com.acme.quota", "default")
+            .expect("reads")
+            .expect("set");
+        let work = config
+            .plugin_endpoint("com.acme.quota", "work")
+            .expect("reads")
+            .expect("set");
+        assert_eq!(default.url, "https://metrics.example.test/v1/usage");
+        assert!(!default.allow_insecure_http);
+        assert_eq!(work.url, "http://metrics.corp.test/v1/usage");
+        assert!(
+            work.allow_insecure_http,
+            "one account's acknowledgement is not the other's"
+        );
+    }
+
+    #[test]
+    fn an_endpoint_survives_a_reload_under_the_account_addressed_table() {
+        let (path, mut config) = seeded("endpoint-reload", "");
+        let endpoint = Endpoint {
+            url: "https://a.test/u".into(),
+            allow_insecure_http: false,
+        };
+        config
+            .set_plugin_endpoint("com.acme.quota", "work", &endpoint)
+            .expect("writes");
+        let text = std::fs::read_to_string(&path).expect("readable");
+        assert!(
+            text.contains("[provider.\"com.acme.quota\".account.work]"),
+            "the endpoint is account-addressed, not a shared provider option: {text}"
+        );
+        let reloaded = Config::at(path).expect("reloads");
+        assert_eq!(
+            reloaded.plugin_endpoint("com.acme.quota", "work").unwrap(),
+            Some(endpoint)
+        );
+    }
+
+    #[test]
+    fn an_endpoint_write_preserves_the_rest_of_the_file_and_its_decoration() {
+        let (path, mut config) = seeded(
+            "endpoint-decoration",
+            "# kept\nproviders = [\"zai\"]\n\n[provider.zai]\n# a comment\nregion = \"global\"\n",
+        );
+        config
+            .set_plugin_endpoint(
+                "com.acme.quota",
+                "default",
+                &Endpoint {
+                    url: "https://a.test/u".into(),
+                    allow_insecure_http: false,
+                },
+            )
+            .expect("writes");
+        let text = std::fs::read_to_string(&path).expect("readable");
+        assert!(text.contains("# kept"));
+        assert!(text.contains("# a comment"));
+        assert!(text.contains("region = \"global\""));
+    }
+
+    #[test]
+    fn a_present_but_invalid_endpoint_is_refused_rather_than_ignored() {
+        for body in [
+            "[provider.\"com.acme.quota\".account.default]\nendpoint = 4\n",
+            "[provider.\"com.acme.quota\".account.default]\nendpoint = \"https://a.test\"\nallow_insecure_http = \"yes\"\n",
+            "[provider.\"com.acme.quota\".account.default]\nendpoint = \"\"\n",
+            "[provider.\"com.acme.quota\".account.default]\nallow_insecure_http = true\n",
+        ] {
+            let (_path, config) = seeded("endpoint-invalid", body);
+            assert!(
+                matches!(
+                    config.plugin_endpoint("com.acme.quota", "default"),
+                    Err(ConfigError::InvalidEndpoint { .. })
+                ),
+                "{body} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_account_with_no_endpoint_reads_as_none_rather_than_an_error() {
+        let (_path, config) = seeded("endpoint-absent", "");
+        assert_eq!(
+            config
+                .plugin_endpoint("com.acme.quota", "default")
+                .expect("reads"),
+            None
+        );
+    }
+
+    #[test]
+    fn removing_an_account_removes_its_endpoint_and_its_acknowledgement() {
+        let (path, mut config) = seeded("endpoint-account-removal", "");
+        config.add_provider("com.acme.quota").expect("adds");
+        config
+            .set_accounts("com.acme.quota", &["default".into(), "work".into()])
+            .expect("sets");
+        for account in ["default", "work"] {
+            config
+                .set_plugin_endpoint(
+                    "com.acme.quota",
+                    account,
+                    &Endpoint {
+                        url: "http://a.test/u".into(),
+                        allow_insecure_http: true,
+                    },
+                )
+                .expect("writes");
+        }
+        config
+            .remove_account("com.acme.quota", "work")
+            .expect("removes");
+        assert_eq!(
+            config
+                .plugin_endpoint("com.acme.quota", "work")
+                .expect("reads"),
+            None
+        );
+        assert!(
+            config
+                .plugin_endpoint("com.acme.quota", "default")
+                .expect("reads")
+                .is_some()
+        );
+        let text = std::fs::read_to_string(&path).expect("readable");
+        assert!(!text.contains("account.work"), "{text}");
+    }
+
+    #[test]
+    fn removing_a_provider_removes_every_accounts_endpoint() {
+        let (path, mut config) = seeded("endpoint-provider-removal", "");
+        config.add_provider("com.acme.quota").expect("adds");
+        config
+            .set_plugin_endpoint(
+                "com.acme.quota",
+                "default",
+                &Endpoint {
+                    url: "https://a.test/u".into(),
+                    allow_insecure_http: false,
+                },
+            )
+            .expect("writes");
+        config.remove_provider("com.acme.quota").expect("removes");
+        let text = std::fs::read_to_string(&path).expect("readable");
+        assert!(!text.contains("com.acme.quota"), "{text}");
     }
 }

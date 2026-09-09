@@ -9,8 +9,8 @@
 //! Windows peer-to-peer transport belong to the client that needs them.
 
 use tidemark_types::{
-    AuthCandidate, AuthSelection, DataInfo, HistoryPoint, Preferences, ProviderDefinition,
-    ProviderStatus,
+    AuthCandidate, AuthSelection, DataInfo, HistoryPoint, PluginInfo, Preferences, Presentation,
+    ProviderDefinition, ProviderStatus,
 };
 
 #[zbus::proxy(
@@ -86,6 +86,29 @@ pub trait Daemon {
         value: &str,
     ) -> zbus::Result<()>;
 
+    /// Validates a plugin file without storing it: what the import preview shows.
+    fn inspect_plugin(&self, bytes: Vec<u8>) -> zbus::Result<PluginInfo>;
+
+    /// Validates and installs a plugin file, replacing an earlier version of the same id.
+    fn install_plugin(&self, bytes: Vec<u8>) -> zbus::Result<PluginInfo>;
+
+    /// Removes an installed definition. Refused while any account still uses it.
+    fn remove_plugin(&self, provider: &str) -> zbus::Result<()>;
+
+    /// Sets one plugin account's complete metrics URL, and whether plain http is accepted
+    /// for it. Per account, never shared: two accounts of one plugin are two endpoints.
+    fn set_plugin_endpoint(
+        &self,
+        provider: &str,
+        account: &str,
+        endpoint: &str,
+        allow_insecure_http: bool,
+    ) -> zbus::Result<()>;
+
+    /// Runs a plugin's parser against a local response fixture: the authoring loop, with no
+    /// key read and no request made.
+    fn render_plugin(&self, bytes: Vec<u8>, response: Vec<u8>) -> zbus::Result<Presentation>;
+
     /// Inspects secret-free local authentication candidates for one account.
     fn get_auth_sources(&self, provider: &str, account: &str) -> zbus::Result<Vec<AuthCandidate>>;
 
@@ -139,6 +162,10 @@ pub trait Daemon {
     /// What the daemon on the other end is.
     #[zbus(property(emits_changed_signal = "false"))]
     fn version(&self) -> zbus::Result<String>;
+
+    /// The installed plugin definitions changed.
+    #[zbus(signal)]
+    fn plugins_changed(&self, plugins: Vec<PluginInfo>) -> zbus::Result<()>;
 
     /// One account changed.
     #[zbus(signal)]

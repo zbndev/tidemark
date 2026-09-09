@@ -182,6 +182,21 @@ impl Snapshot {
     }
 }
 
+/// The order a card draws a reading's windows in: the lead window first, then shortest
+/// first, then the windows whose length the provider never said.
+pub fn ordered_windows(snapshot: &Snapshot) -> Vec<Window> {
+    let lead = snapshot.dominant_window().map(|window| window.key.clone());
+    let mut windows = snapshot.windows.clone();
+    windows.sort_by_key(|window| {
+        (
+            !lead.as_ref().is_some_and(|key| *key == window.key),
+            window.length.is_none(),
+            window.length.map(WindowLength::as_secs),
+        )
+    });
+    windows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +248,19 @@ mod tests {
         assert_eq!(
             s.dominant_window().expect("present").length,
             WindowLength::from_secs(18_000)
+        );
+    }
+
+    #[test]
+    fn the_card_order_leads_with_the_dominant_window_then_shortest_first() {
+        let s = snapshot(&[Some(2_592_000), None, Some(18_000), Some(604_800)]);
+        let lengths: Vec<Option<u64>> = ordered_windows(&s)
+            .iter()
+            .map(|w| w.length.map(WindowLength::as_secs))
+            .collect();
+        assert_eq!(
+            lengths,
+            [Some(18_000), Some(604_800), Some(2_592_000), None]
         );
     }
 

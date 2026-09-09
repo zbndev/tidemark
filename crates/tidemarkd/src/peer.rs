@@ -20,7 +20,7 @@ use std::thread;
 
 #[cfg(any(windows, test))]
 use tidemark_types::ids;
-use tidemark_types::{DataInfo, Preferences, ProviderStatus};
+use tidemark_types::{DataInfo, PluginInfo, Preferences, ProviderStatus};
 use tokio::sync::mpsc;
 use zbus::Connection;
 #[cfg(any(windows, test))]
@@ -65,6 +65,7 @@ pub(crate) enum Announcement {
     PreferencesChanged(Preferences),
     DataChanged(DataInfo),
     UpdateChanged(String),
+    PluginsChanged(Vec<PluginInfo>),
     ActivateRequested,
 }
 
@@ -88,6 +89,9 @@ impl Announcement {
             Self::DataChanged(data) => Daemon::data_changed(emitter, data.clone()).await,
             Self::ActivateRequested => Daemon::activate_requested(emitter).await,
             Self::UpdateChanged(version) => Daemon::update_changed(emitter, version).await,
+            Self::PluginsChanged(plugins) => {
+                Daemon::plugins_changed(emitter, plugins.clone()).await
+            }
         }
     }
 }
@@ -461,6 +465,7 @@ mod tests {
             Announcement::ProviderRemoved { provider, .. } => format!("removed:{provider}"),
             Announcement::PreferencesChanged(_) => "preferences".into(),
             Announcement::DataChanged(_) => "data".into(),
+            Announcement::PluginsChanged(plugins) => format!("plugins:{}", plugins.len()),
             Announcement::ActivateRequested => "activate".into(),
         }
     }

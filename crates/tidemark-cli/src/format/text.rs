@@ -157,6 +157,7 @@ mod tests {
             external: None,
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         }]);
         let out = render(&[&status], &titles, now());
         assert!(out.starts_with("Claude Code · default"), "{out}");

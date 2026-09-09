@@ -2,6 +2,8 @@
 //! into thirty verbs: a person reading `--help` should find `provider add` under
 //! `provider`, and a plugin author should be able to guess the next one.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 /// The command-line client for the Tidemark daemon.
@@ -60,6 +62,11 @@ pub enum Command {
         window: String,
         enabled: Switch,
     },
+    /// User-installed providers: validate, render, install, list and configure.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
     /// Application preferences the daemon keeps in config.toml.
     Config {
         #[command(subcommand)]
@@ -97,6 +104,69 @@ impl From<Switch> for bool {
     fn from(switch: Switch) -> Self {
         matches!(switch, Switch::On)
     }
+}
+
+/// Everything a plugin file goes through, in the order an author meets it: check it,
+/// render it against a saved response, install it, point an account at a URL.
+#[derive(Debug, Subcommand)]
+pub enum PluginCommand {
+    /// Check a plugin file and print what it declares. Nothing is installed and nothing is
+    /// polled, so this is safe to run on a file somebody sent you.
+    Validate {
+        /// Path to a `.tidemark-provider` file.
+        file: PathBuf,
+        #[arg(long, value_enum, default_value_t = PluginFormat::Text)]
+        format: PluginFormat,
+    },
+    /// Run a plugin's parser against a saved JSON response. The authoring loop: no key is
+    /// read and no request is made.
+    Render {
+        /// Path to a `.tidemark-provider` file.
+        file: PathBuf,
+        /// Path to a JSON response to transform.
+        #[arg(long)]
+        response: PathBuf,
+        #[arg(long, value_enum, default_value_t = PluginFormat::Text)]
+        format: PluginFormat,
+    },
+    /// Install a plugin file, replacing an earlier version of the same provider id.
+    Install {
+        /// Path to a `.tidemark-provider` file.
+        file: PathBuf,
+        #[arg(long, value_enum, default_value_t = PluginFormat::Text)]
+        format: PluginFormat,
+    },
+    /// Every installed plugin definition.
+    List {
+        #[arg(long, value_enum, default_value_t = PluginFormat::Text)]
+        format: PluginFormat,
+    },
+    /// Remove an installed definition. Refused while any account still uses it.
+    Remove {
+        /// The plugin's provider id.
+        provider: String,
+    },
+    /// The complete metrics URL one account sends its key to.
+    Endpoint {
+        /// The plugin's provider id.
+        provider: String,
+        /// The absolute URL. https unless insecure transport is confirmed.
+        url: String,
+        /// Another account id; defaults to `default`.
+        #[arg(long, default_value = "default")]
+        account: String,
+        /// Accept plain http for this account, sending the key in clear.
+        #[arg(long)]
+        allow_insecure_http: bool,
+    },
+}
+
+/// What `plugin` prints in. No `waybar`: none of these is a status line, and offering a
+/// shape that cannot mean anything here would only invite a bug report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PluginFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
@@ -332,6 +402,44 @@ mod tests {
     #[test]
     fn the_grammar_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn the_plugin_subcommands_parse_the_way_help_says_they_do() {
+        assert!(
+            Cli::try_parse_from(["tidemarkctl", "plugin", "validate", "a.tidemark-provider"])
+                .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["tidemarkctl", "plugin", "render", "a.tidemark-provider"])
+                .is_err(),
+            "render needs a fixture: it has no key and no network, so a response is the input"
+        );
+        assert!(Cli::try_parse_from(["tidemarkctl", "plugin", "endpoint", "com.acme.q"]).is_err());
+        let endpoint = Cli::try_parse_from([
+            "tidemarkctl",
+            "plugin",
+            "endpoint",
+            "com.acme.q",
+            "https://a/u",
+        ])
+        .expect("a provider and a url are enough");
+        let Command::Plugin {
+            command:
+                PluginCommand::Endpoint {
+                    account,
+                    allow_insecure_http,
+                    ..
+                },
+        } = endpoint.command
+        else {
+            panic!("the endpoint subcommand parsed as something else");
+        };
+        assert_eq!(account, "default");
+        assert!(
+            !allow_insecure_http,
+            "plain http is opt-in, never a default"
+        );
     }
 
     #[test]

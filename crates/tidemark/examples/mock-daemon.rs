@@ -26,9 +26,10 @@
 //! It is a development aid, not a test fixture: nothing in the suite depends on it.
 
 use tidemark_types::{
-    AccountId, CredentialKind, DetailRow, DetailSection, ExternalLogin, OptionChoice,
-    ProviderDefinition, ProviderId, ProviderOption, ProviderState, ProviderStatus, Snapshot,
-    Timestamp, Window, WindowKey, WindowLength, ids, provider_label,
+    AccountId, CredentialKind, DetailRow, DetailSection, ExternalLogin, Field, Metric,
+    MetricWindow, OptionChoice, Presentation, ProviderDefinition, ProviderId, ProviderOption,
+    ProviderState, ProviderStatus, Snapshot, Timestamp, Widget, Window, WindowKey, WindowLength,
+    ids, provider_label,
 };
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
@@ -70,6 +71,7 @@ impl MockDaemon {
                     options: external.iter().map(source_option).collect(),
                     external,
                     browser_auth: None,
+                    plugin: None,
                 }
             })
             .collect()
@@ -197,7 +199,7 @@ fn account(provider: &str, plan: &str, windows: Vec<Window>) -> ProviderStatus {
     let provider = ProviderId::new(provider);
     let account = AccountId::default();
     let mut status = ProviderStatus::pending(&provider, &account);
-    status.set_reading(&Snapshot {
+    let snapshot = Snapshot {
         provider,
         account,
         captured_at: Timestamp::now().saturating_add_seconds(-90),
@@ -209,12 +211,44 @@ fn account(provider: &str, plan: &str, windows: Vec<Window>) -> ProviderStatus {
                 value: plan.to_owned(),
             }],
         }],
-    });
+    };
+    let presentation = Presentation {
+        metrics: snapshot
+            .windows
+            .iter()
+            .map(|window| Metric {
+                id: window.key.to_string(),
+                title: window.title.clone(),
+                subtitle: window.subtitle.clone(),
+                value: None,
+                maximum: None,
+                remaining: None,
+                used_percent: Some(window.used_percent),
+                text: None,
+                unit: None,
+                window: Some(MetricWindow {
+                    key: window.key.to_string(),
+                    resets_at: window.resets_at.map(Timestamp::as_unix),
+                    length_secs: window.length.map(WindowLength::as_secs),
+                }),
+            })
+            .collect(),
+        card: snapshot
+            .windows
+            .iter()
+            .map(|window| Widget::gauge(window.key.as_str(), Field::UsedPercent))
+            .collect(),
+        details: Vec::new(),
+    };
+    status.set_reading(&snapshot, presentation);
     status.next_poll_at = Some(Timestamp::now().as_unix() + 210);
     status
 }
 
 fn statuses() -> Vec<ProviderStatus> {
+    let mut opus = window("1 week (Opus)", 604_800, 4.0, Some(3 * 86_400));
+    // Distinct weekly pools need distinct metric IDs when the presentation resolves them.
+    opus.key = WindowKey::for_pool("opus", WindowLength::from_secs(604_800).expect("nonzero"));
     let mut claude = account(
         "claude",
         "max",
@@ -339,4 +373,21 @@ fn main() -> gtk::glib::ExitCode {
 
     looper.run();
     gtk::glib::ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_mock_gauge_resolves_its_own_window_reading() {
+        for status in super::statuses() {
+            let Some(presentation) = &status.presentation else {
+                continue;
+            };
+            for window in &status.windows {
+                let metric = presentation.metric(&window.key).expect("published metric");
+                assert_eq!(metric.title, window.title);
+                assert_eq!(metric.used_percent, Some(window.used_percent));
+            }
+        }
+    }
 }
