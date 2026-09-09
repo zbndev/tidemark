@@ -11,10 +11,6 @@
 //! exportable; only the sanitized mark is materialized separately, because the icon theme
 //! loads marks from files by name.
 
-// Nothing reads the store yet: Task 13 hangs the dynamic registry entries off it and Task 14
-// the D-Bus methods. Until then the tests are its only caller.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,6 +33,9 @@ pub enum StoreError {
         /// How many accounts are still using it.
         accounts: usize,
     },
+    /// The store has no directory: an engine that was never given one.
+    #[error("this daemon has no plugin directory")]
+    Detached,
     /// The store's own directory or one of its files could not be read or written.
     #[error("{path}: {source}")]
     Io {
@@ -53,7 +52,10 @@ pub enum StoreError {
 /// The installed definitions, held open for the daemon's lifetime.
 #[derive(Debug)]
 pub struct Store {
-    root: PathBuf,
+    /// Absent for a store nothing may be written to. An engine built without one has this,
+    /// so a daemon misconfigured at startup refuses an import in one sentence rather than
+    /// writing a definition into a directory nobody chose.
+    root: Option<PathBuf>,
     installed: BTreeMap<String, Arc<Definition>>,
 }
 
@@ -96,7 +98,26 @@ impl Store {
                 return Err(StoreError::Io { path: root, source });
             }
         }
-        Ok(Self { root, installed })
+        Ok(Self {
+            root: Some(root),
+            installed,
+        })
+    }
+
+    /// A store with nowhere to write, and nothing in it.
+    ///
+    /// What an [`crate::engine::Engine`] holds until one is attached, so a test that says
+    /// nothing about plugins does not have to name a directory.
+    pub fn detached() -> Self {
+        Self {
+            root: None,
+            installed: BTreeMap::new(),
+        }
+    }
+
+    /// The directory this store writes to.
+    fn root(&self) -> Result<&Path, StoreError> {
+        self.root.as_deref().ok_or(StoreError::Detached)
     }
 
     /// Validates a file without storing it: the import preview, and a dry run in every sense.
@@ -117,11 +138,11 @@ impl Store {
     /// leaves the previous definition installed, on disk and in the map.
     pub fn install(&mut self, bytes: &[u8], reserved: &[&str]) -> Result<Definition, StoreError> {
         let definition = self.inspect(bytes, reserved)?;
-        self.write(&self.definition_path(&definition.id), bytes)?;
+        self.write(&self.definition_path(&definition.id)?, bytes)?;
         // The mark is written after the definition, so a failure here leaves an installed
         // definition with no mark — which renders as a provider without an icon, rather
         // than as an icon with no provider.
-        if let (Some(svg), Some(path)) = (&definition.icon_svg, self.mark_path(&definition.id)) {
+        if let (Some(svg), Some(path)) = (&definition.icon_svg, self.mark_path(&definition.id)?) {
             self.write(&path, svg.as_bytes())?;
         }
         self.installed
@@ -152,8 +173,8 @@ impl Store {
                 accounts: configured_accounts,
             });
         }
-        Self::forget(&self.definition_path(id))?;
-        if let Some(path) = self.mark_path(id) {
+        Self::forget(&self.definition_path(id)?)?;
+        if let Some(path) = self.mark_path(id)? {
             Self::forget(&path)?;
         }
         self.installed.remove(id);
@@ -175,26 +196,26 @@ impl Store {
     }
 
     /// Where one definition's bytes live.
-    fn definition_path(&self, id: &str) -> PathBuf {
-        self.root.join(format!("{id}.{EXTENSION}"))
+    fn definition_path(&self, id: &str) -> Result<PathBuf, StoreError> {
+        Ok(self.root()?.join(format!("{id}.{EXTENSION}")))
     }
 
     /// Where one definition's mark is materialized, when its id names a usable slug.
-    fn mark_path(&self, id: &str) -> Option<PathBuf> {
-        let slug = tidemark_types::plugin_icon_slug(id)?;
-        let name = tidemark_types::icon_name(&slug)?;
-        Some(
-            self.root
-                .join("icons")
-                .join(MARK_DIR)
-                .join(format!("{name}.svg")),
-        )
+    fn mark_path(&self, id: &str) -> Result<Option<PathBuf>, StoreError> {
+        let root = self.root()?;
+        Ok(tidemark_types::plugin_icon_slug(id)
+            .and_then(|slug| tidemark_types::icon_name(&slug))
+            .map(|name| {
+                root.join("icons")
+                    .join(MARK_DIR)
+                    .join(format!("{name}.svg"))
+            }))
     }
 
     /// Stages a file beside its destination and renames it into place, so a daemon killed
     /// mid-write leaves the previous file intact rather than a truncated one.
     fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-        let parent = path.parent().unwrap_or(&self.root);
+        let parent = path.parent().unwrap_or(self.root()?);
         std::fs::create_dir_all(parent).map_err(|source| StoreError::Io {
             path: parent.to_path_buf(),
             source,

@@ -41,15 +41,15 @@ use tidemark_core::providers::Credential;
 use tidemark_core::providers::keyed::session;
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_types::{
-    AccountId, AuthCandidate, AuthSelection, CredentialKind, DataInfo, HistoryPoint, Preferences,
-    ProviderDefinition, ProviderId, ProviderStatus, ids,
+    AccountId, AuthCandidate, AuthSelection, CredentialKind, DataInfo, HistoryPoint, PluginInfo,
+    Preferences, Presentation, ProviderDefinition, ProviderId, ProviderStatus, ids,
 };
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use zbus::object_server::SignalEmitter;
 use zbus::{fdo, interface};
 
-use crate::engine::{Command, Preference, stored_kind};
+use crate::engine::{Command, PluginChange, Preference, stored_kind};
 use crate::peer::{Announcement, PeerHub};
 use crate::registry;
 use crate::startup::Startup;
@@ -205,7 +205,9 @@ struct PreferencesRuntime {
 pub struct DaemonState {
     statuses: Published,
     update: PublishedUpdate,
-    catalog: Vec<ProviderDefinition>,
+    /// Behind a lock because installing or removing a plugin changes it while the daemon
+    /// is running: the compiled part never moves, the plugin part does.
+    catalog: RwLock<Vec<ProviderDefinition>>,
     configured: RwLock<HashSet<AccountKey>>,
     commands: mpsc::Sender<Command>,
     /// The daemon runtime, retained because zbus executes p2p method callbacks on
@@ -301,6 +303,40 @@ impl Daemon {
         Ok(())
     }
 
+    /// Sends a plugin request through the engine and names the stage that refused it.
+    ///
+    /// Every plugin failure is the caller's file or the caller's argument, never the
+    /// daemon's state, so they map onto `InvalidArgs` rather than `Failed` — a client can
+    /// then show the message beside the field the user is editing.
+    async fn plugin_request<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, String>>) -> Command,
+    ) -> fdo::Result<T> {
+        self.config_request(make)
+            .await
+            .map_err(invalid_plugin_argument)
+    }
+
+    /// Republishes the catalog and announces the installed definitions.
+    ///
+    /// The catalog is replaced before the signal goes out, so a client that reacts to the
+    /// signal by calling `ListProviders` cannot see the old one.
+    async fn apply_plugin_change(
+        &self,
+        emitter: &SignalEmitter<'_>,
+        change: PluginChange,
+    ) -> fdo::Result<()> {
+        *self.catalog.write().await = change.catalog;
+        match &self.0.hub {
+            Some(hub) => {
+                hub.publish(Announcement::PluginsChanged(change.plugins))
+                    .await;
+            }
+            None => Self::plugins_changed(emitter, change.plugins).await?,
+        }
+        Ok(())
+    }
+
     /// Announces the empty update after a disable, on the hub or the session bus.
     async fn announce_update_removal(&self, emitter: &SignalEmitter<'_>) -> fdo::Result<()> {
         match &self.0.hub {
@@ -339,7 +375,7 @@ impl DaemonState {
         Self {
             statuses,
             update,
-            catalog,
+            catalog: RwLock::new(catalog),
             configured: RwLock::new(configured.into_iter().collect()),
             commands,
             runtime: tokio::runtime::Handle::current(),
@@ -422,8 +458,8 @@ impl DaemonState {
             return Ok(status);
         }
 
-        let definition = self
-            .catalog
+        let catalog = self.catalog.read().await;
+        let definition = catalog
             .iter()
             .find(|definition| definition.provider == provider)
             .ok_or_else(|| {
@@ -645,7 +681,7 @@ async fn commit_login(
 impl Daemon {
     /// Every provider this build knows how to configure.
     async fn list_providers(&self) -> Vec<ProviderDefinition> {
-        self.catalog.clone()
+        self.catalog.read().await.clone()
     }
 
     /// Adds a compiled-in provider's default account and waits for it to be persisted.
@@ -654,6 +690,8 @@ impl Daemon {
         let _guard = mutation.lock().await;
         if !self
             .catalog
+            .read()
+            .await
             .iter()
             .any(|definition| definition.provider == provider)
         {
@@ -761,6 +799,8 @@ impl Daemon {
         let _guard = mutation.lock().await;
         if !self
             .catalog
+            .read()
+            .await
             .iter()
             .any(|definition| definition.provider == provider)
         {
@@ -1499,6 +1539,94 @@ impl Daemon {
         Ok(())
     }
 
+    /// Validates a plugin file and reports what it declares, storing nothing.
+    ///
+    /// The import preview. Nothing becomes configurable and nothing is polled, so a file a
+    /// user is only looking at cannot reach the network by being looked at.
+    async fn inspect_plugin(&self, bytes: Vec<u8>) -> fdo::Result<PluginInfo> {
+        self.plugin_request(|reply| Command::InspectPlugin { bytes, reply })
+            .await
+    }
+
+    /// Validates and installs a plugin file, replacing an earlier version of the same id.
+    async fn install_plugin(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        bytes: Vec<u8>,
+    ) -> fdo::Result<PluginInfo> {
+        let (info, change) = self
+            .plugin_request(|reply| Command::InstallPlugin { bytes, reply })
+            .await?;
+        self.apply_plugin_change(&emitter, change).await?;
+        tracing::info!(plugin = %info.id, version = %info.plugin_version, "plugin installed");
+        Ok(info)
+    }
+
+    /// Removes an installed definition. Refused while any account still uses it.
+    async fn remove_plugin(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        provider: &str,
+    ) -> fdo::Result<()> {
+        let change = self
+            .plugin_request(|reply| Command::RemovePlugin {
+                provider: provider.to_owned(),
+                reply,
+            })
+            .await?;
+        self.apply_plugin_change(&emitter, change).await?;
+        tracing::info!(plugin = provider, "plugin removed");
+        Ok(())
+    }
+
+    /// Sets one plugin account's complete metrics URL, and whether plain http is accepted
+    /// for it.
+    ///
+    /// Per account and never shared: two accounts of one plugin are two endpoints, because
+    /// they are two keys, and one URL for both would send the wrong key to a host.
+    async fn set_plugin_endpoint(
+        &self,
+        provider: &str,
+        account: &str,
+        endpoint: &str,
+        allow_insecure_http: bool,
+    ) -> fdo::Result<()> {
+        let mutation = self.mutation(provider, account).await;
+        let _guard = mutation.lock().await;
+        if !self
+            .configured
+            .read()
+            .await
+            .contains(&key(provider, account))
+        {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "no account {account} is configured for {provider}"
+            )));
+        }
+        self.config_request(|reply| Command::SetPluginEndpoint {
+            provider: provider.to_owned(),
+            account: account.to_owned(),
+            endpoint: endpoint.to_owned(),
+            allow_insecure_http,
+            reply,
+        })
+        .await
+        .map_err(invalid_plugin_argument)?;
+        tracing::info!(provider, account, "plugin endpoint set");
+        Ok(())
+    }
+
+    /// Runs a plugin's parser against a local response fixture: the authoring loop, with no
+    /// key read and no request made.
+    async fn render_plugin(&self, bytes: Vec<u8>, response: Vec<u8>) -> fdo::Result<Presentation> {
+        self.plugin_request(|reply| Command::RenderPlugin {
+            bytes,
+            response,
+            reply,
+        })
+        .await
+    }
+
     /// The daemon's version, so a client can tell what it is talking to.
     #[zbus(property(emits_changed_signal = "false"))]
     async fn version(&self) -> String {
@@ -1547,6 +1675,16 @@ impl Daemon {
     #[zbus(signal)]
     pub async fn update_changed(emitter: &SignalEmitter<'_>, version: &str) -> zbus::Result<()>;
 
+    /// The installed plugin definitions changed: one was imported, replaced or removed.
+    ///
+    /// Carries the whole list rather than the one that changed, because a client renders
+    /// them as a set and a delta it had to reassemble would be one more thing to get wrong.
+    #[zbus(signal)]
+    pub async fn plugins_changed(
+        emitter: &SignalEmitter<'_>,
+        plugins: Vec<PluginInfo>,
+    ) -> zbus::Result<()>;
+
     /// Another client asks the visible one to come forward. A second UI instance on a
     /// platform without session-bus uniqueness calls `RequestActivate` and exits;
     /// this is how the running window hears about it.
@@ -1558,6 +1696,18 @@ fn file_size(path: impl AsRef<std::path::Path>) -> u64 {
     std::fs::metadata(path)
         .map(|metadata| metadata.len())
         .unwrap_or(0)
+}
+
+/// A plugin failure as a D-Bus error.
+///
+/// `InvalidArgs` rather than `Failed`: the message already names the one stage that refused
+/// the file — schema, SVG, Lua compile, limit or semantic output — and a client shows it
+/// beside the file the user chose.
+fn invalid_plugin_argument(error: fdo::Error) -> fdo::Error {
+    match error {
+        fdo::Error::Failed(message) => fdo::Error::InvalidArgs(message),
+        other => other,
+    }
 }
 
 /// The pair an in-progress login is filed under.
@@ -4493,6 +4643,229 @@ mod tests {
             .await
             .expect("task did not panic")
             .expect("accepted");
+    }
+
+    /// One plugin definition as the interface publishes it.
+    fn plugin_info(id: &str) -> PluginInfo {
+        PluginInfo {
+            id: id.to_owned(),
+            name: "Acme AI".into(),
+            plugin_version: "1.0.0".into(),
+            method: "GET".into(),
+            api_key_header: "X-Acme-Key".into(),
+            api_key_prefix: String::new(),
+            has_mark: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn inspecting_a_plugin_reaches_the_engine_and_returns_what_it_declares() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let daemon = Arc::new(daemon);
+        let inspecting = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { daemon.inspect_plugin(b"a file".to_vec()).await })
+        };
+
+        let Command::InspectPlugin { bytes, reply } =
+            commands.recv().await.expect("the file reaches the engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(bytes, b"a file");
+        reply
+            .send(Ok(plugin_info("com.acme.quota")))
+            .expect("caller waits for reply");
+        let info = inspecting
+            .await
+            .expect("task did not panic")
+            .expect("a valid file inspects");
+        assert_eq!(info.id, "com.acme.quota");
+        assert_eq!(info.api_key_header, "X-Acme-Key");
+        assert!(
+            daemon
+                .list_providers()
+                .await
+                .iter()
+                .all(|definition| definition.plugin.is_none()),
+            "inspection is a dry run: nothing became configurable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_plugin_file_is_an_invalid_argument_with_the_stage_named() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let daemon = Arc::new(daemon);
+        let inspecting = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { daemon.inspect_plugin(b"a broken file".to_vec()).await })
+        };
+
+        let Command::InspectPlugin { reply, .. } =
+            commands.recv().await.expect("the file reaches the engine")
+        else {
+            panic!("unexpected command");
+        };
+        reply
+            .send(Err("parser.language: only lua54 is implemented".into()))
+            .expect("caller waits for reply");
+        let error = inspecting
+            .await
+            .expect("task did not panic")
+            .expect_err("an unknown parser language is refused");
+        assert!(
+            matches!(error, fdo::Error::InvalidArgs(_)),
+            "a bad file is the caller's argument, not the daemon's state: {error:?}"
+        );
+        assert!(
+            error.to_string().contains("parser.language"),
+            "the stage is named: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn setting_an_endpoint_for_an_unconfigured_account_is_an_invalid_argument() {
+        let (daemon, _secrets, _commands) = daemon_over(Vec::new()).await;
+        let error = daemon
+            .set_plugin_endpoint("com.acme.quota", "work", "https://a.test/u", false)
+            .await
+            .expect_err("there is no such account");
+        assert!(matches!(error, fdo::Error::InvalidArgs(_)), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_reaches_the_engine_for_a_configured_account() {
+        let (daemon, _secrets, mut commands) =
+            daemon_over(vec![key_account("com.acme.quota")]).await;
+        let daemon = Arc::new(daemon);
+        let setting = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                daemon
+                    .set_plugin_endpoint("com.acme.quota", "default", "https://a.test/u", true)
+                    .await
+            })
+        };
+
+        let Command::SetPluginEndpoint {
+            provider,
+            account,
+            endpoint,
+            allow_insecure_http,
+            reply,
+        } = commands
+            .recv()
+            .await
+            .expect("the endpoint reaches the engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(
+            (provider, account, endpoint, allow_insecure_http),
+            (
+                "com.acme.quota".to_owned(),
+                "default".to_owned(),
+                "https://a.test/u".to_owned(),
+                true
+            )
+        );
+        assert!(!setting.is_finished(), "D-Bus waits for persistence");
+        reply.send(Ok(())).expect("caller waits for reply");
+        setting
+            .await
+            .expect("task did not panic")
+            .expect("the engine accepted it");
+    }
+
+    #[tokio::test]
+    async fn installing_a_plugin_republishes_the_catalog_and_announces_it() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let daemon = Arc::new(daemon);
+        let Ok(connection) = zbus::Connection::session().await else {
+            eprintln!("skipped: no session bus reachable");
+            return;
+        };
+        let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH).expect("a valid path");
+
+        let installing = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { daemon.install_plugin(emitter, b"a file".to_vec()).await })
+        };
+        let Command::InstallPlugin { reply, .. } =
+            commands.recv().await.expect("the file reaches the engine")
+        else {
+            panic!("unexpected command");
+        };
+        let info = plugin_info("com.acme.quota");
+        let definition = ProviderDefinition {
+            provider: "com.acme.quota".into(),
+            title: "Acme AI".into(),
+            credential: "key".into(),
+            credential_hint: "Paste the API key Acme AI issues.".into(),
+            external: None,
+            browser_auth: None,
+            options: Vec::new(),
+            plugin: Some(info.clone()),
+        };
+        reply
+            .send(Ok((
+                info.clone(),
+                PluginChange {
+                    plugins: vec![info],
+                    catalog: vec![definition],
+                },
+            )))
+            .expect("caller waits for reply");
+        let installed = installing
+            .await
+            .expect("task did not panic")
+            .expect("the engine accepted it");
+        assert_eq!(installed.id, "com.acme.quota");
+        assert_eq!(
+            daemon
+                .list_providers()
+                .await
+                .iter()
+                .filter_map(|definition| definition.plugin.as_ref())
+                .map(|info| info.id.clone())
+                .collect::<Vec<_>>(),
+            ["com.acme.quota"],
+            "the catalog is replaced before the signal goes out"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_a_plugin_still_in_use_is_refused_by_the_engine() {
+        let (daemon, _secrets, mut commands) = daemon_over(Vec::new()).await;
+        let daemon = Arc::new(daemon);
+        let Ok(connection) = zbus::Connection::session().await else {
+            eprintln!("skipped: no session bus reachable");
+            return;
+        };
+        let emitter = SignalEmitter::new(&connection, ids::OBJECT_PATH).expect("a valid path");
+
+        let removing = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { daemon.remove_plugin(emitter, "com.acme.quota").await })
+        };
+        let Command::RemovePlugin { provider, reply } = commands
+            .recv()
+            .await
+            .expect("the removal reaches the engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(provider, "com.acme.quota");
+        reply
+            .send(Err(
+                "com.acme.quota still has 2 account(s) configured".into()
+            ))
+            .expect("caller waits for reply");
+        let error = removing
+            .await
+            .expect("task did not panic")
+            .expect_err("a definition in use is not removable");
+        assert!(error.to_string().contains("account"), "{error}");
     }
 
     #[tokio::test]

@@ -241,11 +241,12 @@ pub fn title(provider: &str) -> Option<&'static str> {
 /// follows, one entry per spec in `keyed::CATALOG` — so adding one is a file beside
 /// `keyed.rs` and a line in that table, not a new stanza here. The hand-written
 /// key-authenticated providers come last, from the table above, in the same shape.
-pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
-    catalog_with_plugins(config, &[])
-}
-
 /// The compiled catalog, followed by the installed plugin definitions.
+///
+/// The three OAuth providers come first, written out because each of them acquires its
+/// credential its own way. Every single-request key-authenticated provider follows, one entry
+/// per spec in `keyed::CATALOG` — so adding one is a file beside `keyed.rs` and a line in that
+/// table, not a new stanza here. The hand-written key-authenticated providers come next.
 ///
 /// Plugins come last and in installation order, so adding one never moves a compiled
 /// provider in the settings dialog. A plugin publishes no [`ProviderOption`]: its whole
@@ -318,7 +319,7 @@ fn key_hint(definition: &Definition) -> String {
 
 /// One hand-written provider as the settings dialog sees it.
 ///
-/// Written apart from [`catalog`] so that the mapping can be checked against a spec of a
+/// Written apart from [`catalog_with_plugins`] so that the mapping can be checked against a spec of a
 /// test's own — above all the credential kind, the one field of the table that is not the
 /// same for every entry in it.
 fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderDefinition {
@@ -341,13 +342,6 @@ fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderD
 /// history and its keyring entries, because the id is the storage key for both. Collected
 /// from the same three tables the catalog is built from, so a provider added there is
 /// reserved without anyone remembering to add it here too.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the reserved list every import checks against; wired up by the D-Bus import methods"
-    )
-)]
 pub fn builtin_ids() -> Vec<&'static str> {
     OAUTH
         .iter()
@@ -411,7 +405,7 @@ const NO_ENDPOINT: &str = "this account has no endpoint yet; set the metrics URL
 /// Every configured account the daemon polls, including the ones a plugin owns.
 ///
 /// A configured slug no compiled entry claims is looked for among the installed definitions
-/// before it is given up on, which is the whole difference from [`accounts`].
+/// before it is given up on, which is the whole difference from [`accounts_with_plugins`].
 pub fn accounts_with_plugins(
     secrets: &Arc<dyn Secrets>,
     config: &Config,
@@ -642,13 +636,6 @@ pub(crate) fn browser_auth_selection(provider: &str, config: &Config) -> Option<
 }
 
 /// Every configured account the daemon polls, in the order of `config.toml`.
-pub fn accounts(
-    secrets: &Arc<dyn Secrets>,
-    config: &Config,
-) -> Result<Vec<Account>, ProviderError> {
-    accounts_with_plugins(secrets, config, &[])
-}
-
 /// Which of a provider's windows the user asked to be notified about.
 ///
 /// A list the file holds in a shape this build cannot read is reported and treated as
@@ -1141,7 +1128,7 @@ mod tests {
             "providers = [\"zai\"]\n\n[provider.zai]\naccounts = [\"default\", \"work\"]\n",
         );
         let config = Config::at(path.clone()).expect("config reads");
-        let accounts = accounts(&secrets(), &config).expect("accounts build");
+        let accounts = accounts_with_plugins(&secrets(), &config, &[]).expect("accounts build");
 
         assert_eq!(
             accounts
@@ -1201,7 +1188,7 @@ mod tests {
 
     #[test]
     fn every_oauth_provider_publishes_its_available_credentials() {
-        let published = catalog(&empty_config());
+        let published = catalog_with_plugins(&empty_config(), &[]);
         for entry in OAUTH {
             let definition = published
                 .iter()
@@ -1249,7 +1236,7 @@ mod tests {
     #[test]
     fn unix_publishes_antigravity_oauth_and_local_agy() {
         let config = empty_config();
-        let definition = catalog(&config)
+        let definition = catalog_with_plugins(&config, &[])
             .into_iter()
             .find(|definition| definition.provider == antigravity::PROVIDER_ID)
             .expect("Antigravity remains in the catalog");
@@ -1306,7 +1293,7 @@ mod tests {
             "providers = [\"antigravity\"]\n\n[provider.antigravity]\nsource = \"cli\"\n",
         );
         let config = Config::at(path.clone()).expect("config reads");
-        let definition = catalog(&config)
+        let definition = catalog_with_plugins(&config, &[])
             .into_iter()
             .find(|definition| definition.provider == antigravity::PROVIDER_ID)
             .expect("Antigravity remains in the catalog");
@@ -1360,7 +1347,7 @@ mod tests {
     fn a_provider_publishes_external_login_exactly_when_available() {
         // The absent field is the whole signal a client dispatches on: no external login
         // means no credential choice to draw.
-        for definition in catalog(&empty_config()) {
+        for definition in catalog_with_plugins(&empty_config(), &[]) {
             assert_eq!(
                 definition.external.is_some(),
                 oauth_entry(&definition.provider)
@@ -1373,7 +1360,7 @@ mod tests {
 
     #[test]
     fn cursor_publishes_its_browser_auth_capability_and_stored_selection() {
-        let definition = catalog(&empty_config())
+        let definition = catalog_with_plugins(&empty_config(), &[])
             .into_iter()
             .find(|definition| definition.provider == cursor::PROVIDER_ID)
             .expect("Cursor is in the catalog");
@@ -1422,7 +1409,7 @@ mod tests {
 
     #[test]
     fn qoder_publishes_browser_auth_and_restores_its_selected_profile() {
-        let definition = catalog(&empty_config())
+        let definition = catalog_with_plugins(&empty_config(), &[])
             .into_iter()
             .find(|definition| definition.provider == qoder::PROVIDER_ID)
             .expect("Qoder is in the catalog");
@@ -1472,7 +1459,7 @@ mod tests {
     fn t3chat_publishes_browser_auth_and_restores_its_selected_profile() {
         // Without the selector, the settings dialog cannot write a Firefox choice and the
         // provider necessarily reports NoCredential despite a signed-in browser profile.
-        let definition = catalog(&empty_config())
+        let definition = catalog_with_plugins(&empty_config(), &[])
             .into_iter()
             .find(|definition| definition.provider == t3chat::PROVIDER_ID)
             .expect("T3 Chat is in the catalog");
@@ -1541,7 +1528,7 @@ mod tests {
             t3chat::PROVIDER_ID,
             zoommate::PROVIDER_ID,
         ] {
-            let definition = catalog(&empty_config())
+            let definition = catalog_with_plugins(&empty_config(), &[])
                 .into_iter()
                 .find(|definition| definition.provider == provider)
                 .expect("browser-session provider is in the catalog");
@@ -1566,7 +1553,7 @@ mod tests {
 
     #[test]
     fn zoommate_publishes_browser_auth_and_restores_its_selected_profile() {
-        let definition = catalog(&empty_config())
+        let definition = catalog_with_plugins(&empty_config(), &[])
             .into_iter()
             .find(|definition| definition.provider == zoommate::PROVIDER_ID)
             .expect("ZoomMate is in the catalog");
@@ -1850,11 +1837,11 @@ mod tests {
     fn the_catalog_exists_even_when_no_account_is_configured() {
         let config = empty_config();
         assert!(
-            accounts(&secrets(), &config)
+            accounts_with_plugins(&secrets(), &config, &[])
                 .expect("accounts build")
                 .is_empty()
         );
-        let definitions = catalog(&config);
+        let definitions = catalog_with_plugins(&config, &[]);
         assert_eq!(definitions.len(), 58);
         assert_eq!(definitions[0].provider, "antigravity");
         assert_eq!(definitions[0].credential, CredentialKind::OAuth.as_wire());
@@ -1908,7 +1895,8 @@ mod tests {
             "providers = [\"zai\", \"future\", \"claude\"]\n",
         );
         let config = Config::at(path.clone()).expect("parses");
-        let accounts = accounts(&secrets(), &config).expect("known accounts build");
+        let accounts =
+            accounts_with_plugins(&secrets(), &config, &[]).expect("known accounts build");
         let slugs: Vec<&str> = accounts
             .iter()
             .map(|account| account.provider().as_str())
@@ -1921,7 +1909,8 @@ mod tests {
     fn invalid_configured_providers_are_reported_as_local_errors() {
         let path = scratch_config("invalid-providers", "providers = \"claude\"\n");
         let config = Config::at(path.clone()).expect("parses");
-        let error = accounts(&secrets(), &config).expect_err("providers are invalid");
+        let error =
+            accounts_with_plugins(&secrets(), &config, &[]).expect_err("providers are invalid");
         assert!(
             matches!(error, ProviderError::Local(message) if message.contains("providers must be an array of strings"))
         );
@@ -1966,7 +1955,7 @@ mod tests {
     #[test]
     fn every_keyed_spec_reaches_the_published_catalog() {
         let config = empty_config();
-        let published = catalog(&config);
+        let published = catalog_with_plugins(&config, &[]);
         for spec in keyed::CATALOG {
             let entry = published
                 .iter()
@@ -1985,7 +1974,7 @@ mod tests {
         // same agreement the catalog gets as a whole: same title, the credential the spec
         // itself declares, same hint, same options — and it must build an account at all.
         let config = empty_config();
-        let published = catalog(&config);
+        let published = catalog_with_plugins(&config, &[]);
         for spec in HAND_WRITTEN {
             let entry = published
                 .iter()
@@ -2007,7 +1996,7 @@ mod tests {
 
     #[test]
     fn the_oauth_providers_keep_the_head_of_the_catalog() {
-        let published = catalog(&empty_config());
+        let published = catalog_with_plugins(&empty_config(), &[]);
         let slugs: Vec<&str> = published
             .iter()
             .map(|definition| definition.provider.as_str())
@@ -2023,7 +2012,7 @@ mod tests {
         // slug is worse, because the hand-written stanza and the spec then shadow each
         // other. At two entries neither can happen by accident; across the tables it can,
         // so the invariant is asserted rather than trusted.
-        let published = catalog(&empty_config());
+        let published = catalog_with_plugins(&empty_config(), &[]);
         let mut slugs: Vec<&str> = published
             .iter()
             .map(|definition| definition.provider.as_str())
@@ -2039,7 +2028,7 @@ mod tests {
         // Notifications name providers through `title()`; the settings dialog through
         // `catalog()`. If the two disagreed, a provider's card and its notification would
         // spell its name differently on the same desktop.
-        for definition in catalog(&empty_config()) {
+        for definition in catalog_with_plugins(&empty_config(), &[]) {
             assert_eq!(
                 title(&definition.provider),
                 Some(definition.title.as_str()),
@@ -2076,7 +2065,7 @@ mod tests {
     fn a_published_option_carries_the_users_current_value() {
         let path = scratch_config("zai-region", "[provider.zai]\nregion = \"bigmodel-cn\"\n");
         let config = Config::at(path.clone()).expect("parses");
-        let published = catalog(&config);
+        let published = catalog_with_plugins(&config, &[]);
         let zai = published
             .iter()
             .find(|definition| definition.provider == "zai")
