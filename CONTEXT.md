@@ -236,6 +236,41 @@ entry of a kind we recognize but cannot parse fails the whole fetch. Only an ent
 *unrecognized* kind is skipped, because that is a quota type that did not exist when the
 parser was written rather than a failure to understand one that did.
 
+### User-installed providers
+
+A provider need not ship with Tidemark. A `.tidemark-provider` file — TOML metadata, a
+sandboxed Lua 5.4 transformation and an optional SVG mark — teaches one more endpoint to a
+running installation. `docs/plugin-providers.md` is the author-facing format; what follows
+is who owns which half of it.
+
+**tidemark-core owns the file and the transformation.** Parsing and validating the file,
+sanitizing the mark, the sandbox and its limits, the pure `render(definition, body, account,
+captured_at)`, and the one generic single-request provider built on it. Nothing here reads
+the filesystem or decides where a request goes.
+
+**tidemarkd owns the installation and the request.** The store of installed definitions
+(transactional: validated, then written staged-and-renamed, so a rejected replacement leaves
+the previous definition polling), the materialized mark, the endpoint the account owner
+typed, the key in the keyring, and the single HTTP request. The GUI and `tidemarkctl` own
+neither: they publish and print what the daemon answers, and there is exactly one parser and
+one runtime, both in the daemon's half.
+
+The boundaries that make importing a stranger's file reasonable are ownership boundaries,
+not checks:
+
+- **The file cannot name a host.** There is no endpoint field in the format. The account
+  owner supplies the whole absolute URL, so a shared corporate definition is independent of
+  deployment topology and its author cannot choose where a recipient's key is sent.
+- **The key never enters Lua.** Not in `response`, not in `context`, not in a diagnostic.
+  A plugin is a pure function from a JSON document to a reading.
+- **Tidemark owns the request.** One `GET` or empty-bodied `POST`, the key in the one
+  declared header, redirects off, the shared proxy policy, the response bound, and its own
+  `User-Agent` and `Accept` set last and by replacement.
+
+A plugin's provider id is a persistent storage key exactly as a built-in slug is: accounts,
+keys, history and notification preferences hang off it, replacement keeps them, and removal
+is refused while any account still uses it.
+
 ### Local authentication sources
 
 Some providers hold no key at all — their credential is a session this machine

@@ -218,6 +218,15 @@ Wayfinder
 Some providers need one extra setting alongside the key — a region, an account id, or the
 base URL of your own deployment. The provider's page asks for it.
 
+**Something else**
+
+If the service you use is not listed, you can teach Tidemark to read it without waiting for
+a release. A provider plugin is one `.tidemark-provider` file — metadata, a sandboxed Lua
+transformation and an optional mark — that you import from **Providers → Import a provider
+file**, then point at your own endpoint with your own key. The file cannot name a host and
+never sees the key. See [`docs/plugin-providers.md`](docs/plugin-providers.md) for the
+format, the sandbox and a worked example.
+
 ## Requirements
 
 GTK 4.22 and libadwaita 1.9, which means **Fedora 44+** or **Ubuntu 26.04 LTS+** and their
