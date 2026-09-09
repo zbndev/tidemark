@@ -9,14 +9,20 @@
 //! belongs in `tidemark`. `scripts/check-layering.sh` enforces that.
 
 pub mod present;
+pub mod semantic;
 pub mod snapshot;
 pub mod time;
 pub mod window;
 pub mod wire;
 
-pub use present::{duration, icon_name, percent};
+pub use present::{duration, icon_name, percent, plugin_icon_slug};
+pub use semantic::{
+    Emphasis, Field, Format, Metric, MetricWindow, Presentation, PresentedSection, Widget,
+    WidgetKind,
+};
 pub use snapshot::{
-    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, lead_window_key, provider_label,
+    AccountId, DetailRow, DetailSection, ProviderId, Snapshot, lead_window_key, ordered_windows,
+    provider_label,
 };
 pub use time::{AbsurdTimestamp, Timestamp};
 pub use window::{DANGER_AT, WARNING_AT, Window, WindowKey, WindowLength};

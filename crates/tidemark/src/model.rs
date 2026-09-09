@@ -6,7 +6,11 @@
 
 use std::collections::BTreeMap;
 
-use tidemark_types::{ProviderDefinition, ProviderStatus, Snapshot, Window, WindowLength};
+use tidemark_types::{ProviderDefinition, ProviderStatus};
+
+/// The order a card draws a reading's windows in. Defined in the shared crate, so the
+/// daemon's adapter and this renderer cannot drift apart.
+pub use tidemark_types::ordered_windows;
 
 /// The catalog's spelling of each provider's name, by slug.
 pub type Titles = BTreeMap<String, String>;
@@ -117,29 +121,6 @@ pub fn card_reorder(
     }
 }
 
-/// The windows of a reading, in the order the card draws them.
-///
-/// The dominant window first — placed there by construction, using the one rule in
-/// [`Snapshot::dominant_window`], so the two cannot drift — then shortest first, windows
-/// of unknown length last. A test below still pins the first element to the dominant
-/// window, because two implementations of one rule is exactly how the card ends up
-/// leading with a different window than the one the rest of the program calls dominant.
-///
-/// Nothing is added and nothing is filled in: a provider that reported one window this time
-/// and three the last gets one row, and the card silently rearranges.
-pub fn ordered_windows(snapshot: &Snapshot) -> Vec<Window> {
-    let lead = snapshot.dominant_window().map(|window| window.key.clone());
-    let mut windows = snapshot.windows.clone();
-    windows.sort_by_key(|window| {
-        (
-            !lead.as_ref().is_some_and(|key| *key == window.key),
-            window.length.is_none(),
-            window.length.map(WindowLength::as_secs),
-        )
-    });
-    windows
-}
-
 /// The positions `slugs` take when arranged into `order`.
 ///
 /// The user's order is the only order there is — nothing sorts the grid by urgency or by
@@ -163,7 +144,9 @@ pub fn arrangement(slugs: &[String], order: &[String]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidemark_types::{AccountId, ProviderId, ProviderStatus, Timestamp, WindowKey};
+    use tidemark_types::{
+        AccountId, ProviderId, ProviderStatus, Snapshot, Timestamp, Window, WindowKey, WindowLength,
+    };
 
     fn window(length: Option<u64>, used: f64) -> Window {
         Window {

@@ -78,6 +78,15 @@ pub fn icon_name(slug: &str) -> Option<String> {
     usable.then(|| format!("tidemark-{slug}-symbolic"))
 }
 
+/// The icon-theme slug an installed plugin's mark is filed under.
+pub fn plugin_icon_slug(provider_id: &str) -> Option<String> {
+    let usable = !provider_id.is_empty()
+        && provider_id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-');
+    usable.then(|| provider_id.replace('.', "-"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +133,18 @@ mod tests {
         for slug in ["", "Z.ai", "../../etc", "zai fake", "ZAI"] {
             assert_eq!(icon_name(slug), None, "slug {slug:?} should name no icon");
         }
+    }
+
+    #[test]
+    fn a_plugin_id_names_a_mark_through_the_same_lookup_a_built_in_does() {
+        let slug = plugin_icon_slug("com.acme.quota").expect("usable");
+        assert_eq!(slug, "com-acme-quota");
+        assert_eq!(
+            icon_name(&slug).as_deref(),
+            Some("tidemark-com-acme-quota-symbolic")
+        );
+        assert_eq!(plugin_icon_slug("../../etc/passwd"), None);
+        assert_eq!(plugin_icon_slug("Com.Acme"), None);
     }
 
     #[test]
