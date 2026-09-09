@@ -13,6 +13,7 @@
 
 pub mod limits;
 pub mod schema;
+pub mod svg;
 
 use tidemark_types::{Presentation, Snapshot};
 

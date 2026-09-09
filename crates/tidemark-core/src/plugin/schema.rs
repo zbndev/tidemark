@@ -162,9 +162,7 @@ pub fn parse(bytes: &[u8], reserved: &[&str]) -> Result<Definition, PluginError>
         });
     }
 
-    // Read so a present-but-wrong declaration is refused here rather than at the first poll.
-    // The value itself only becomes a definition once the sanitizer has accepted it.
-    let _declared_icon = optional_string(&document, "icon", "svg")?;
+    let icon = optional_string(&document, "icon", "svg")?;
 
     Ok(Definition {
         format_version: FORMAT_VERSION,
@@ -175,15 +173,14 @@ pub fn parse(bytes: &[u8], reserved: &[&str]) -> Result<Definition, PluginError>
         api_key_header,
         api_key_prefix,
         lua_source,
-        // Sanitized in Task 6; the raw declaration never reaches the definition.
-        icon_svg: None,
+        // Only the rewritten form reaches the definition: what the author wrote stays in
+        // `bytes`, and what Tidemark will ever draw is what the sanitizer produced.
+        icon_svg: match icon {
+            Some(source) => Some(super::svg::sanitize(&source)?),
+            None => None,
+        },
         bytes: bytes.to_vec(),
     })
-}
-
-/// The raw `[icon] svg` declaration, for the sanitizer to accept or refuse.
-pub fn declared_icon(bytes: &[u8]) -> Result<Option<String>, PluginError> {
-    optional_string(&document(bytes)?, "icon", "svg")
 }
 
 /// The plugin file as TOML, or the one failure that says it is not a plugin file at all.
@@ -474,5 +471,24 @@ end
             parse_str(&text),
             Err(PluginError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn a_mark_that_survives_sanitization_reaches_the_definition_canonically() {
+        let text = format!(
+            "{MINIMAL}\n[icon]\nsvg = \'\'\'\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\"><path fill=\"currentColor\" d=\"M0 0h1v1H0z\"/></svg>\n\'\'\'\n"
+        );
+        let icon = parse_str(&text)
+            .expect("parses")
+            .icon_svg
+            .expect("a mark was declared");
+        assert!(icon.contains("currentColor"));
+    }
+
+    #[test]
+    fn a_hostile_mark_refuses_the_whole_file() {
+        let text =
+            format!("{MINIMAL}\n[icon]\nsvg = \'\'\'\n<svg><script>x()</script></svg>\n\'\'\'\n");
+        assert!(matches!(parse_str(&text), Err(PluginError::Svg { .. })));
     }
 }

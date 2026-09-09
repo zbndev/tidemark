@@ -21,6 +21,10 @@ fs4 = "1.1.0"
 hmac = "0.13.0"
 libc = "0.2.180"
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
+# quick-xml: the plugin SVG sanitizer. A pull parser and a writer, no DOM and no network —
+# an XML library that resolved an external entity or a DTD would defeat the point of
+# sanitizing at all.
+quick-xml = { version = "0.42.0", default-features = false }
 sha1 = { version = "0.11.0", default-features = false }
 # `socks`: without it a `socks5://` proxy URL parses and then refuses every connection
 # made through it. `system-proxy`: what "no proxy configured here" falls back to.
