@@ -39,6 +39,63 @@ const LIVE_SHAPE: &str = r#"{
   "rate_limit_reset_credits": {"available_count": 0, "applicable_available_count": 0}
 }"#;
 
+// The response attached to issue #54, with its identifying fields redacted by the reporter.
+// Business sends the enforced spend amounts as JSON strings, unlike the numeric fixture below.
+const BUSINESS_SHAPE: &str = r#"{
+  "user_id": "[REDACTED]",
+  "account_id": "[REDACTED]",
+  "email": "[REDACTED]",
+  "plan_type": "self_serve_business_prolite",
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {
+      "used_percent": 12,
+      "limit_window_seconds": 604800,
+      "reset_after_seconds": 492878,
+      "reset_at": 1789481868
+    },
+    "secondary_window": null
+  },
+  "code_review_rate_limit": null,
+  "additional_rate_limits": null,
+  "model_usage": {
+    "gpt-6-astra": {
+      "available": true,
+      "available_at": null,
+      "credits_would_enable": false
+    }
+  },
+  "credits": {
+    "has_credits": true,
+    "unlimited": false,
+    "overage_limit_reached": false,
+    "balance": null,
+    "approx_local_messages": null,
+    "approx_cloud_messages": null
+  },
+  "spend_control": {
+    "reached": true,
+    "individual_limit": {
+      "source": "account_user_spend_controls",
+      "unit": "credit",
+      "limit": "150",
+      "used": "155.13599956035614",
+      "remaining": "0",
+      "used_percent": 103,
+      "remaining_percent": 0,
+      "reset_after_seconds": 1823810,
+      "reset_at": 1790812801
+    }
+  },
+  "rate_limit_reached_type": null,
+  "promo": null,
+  "rate_limit_reset_credits": {
+    "available_count": 3,
+    "applicable_available_count": 0
+  }
+}"#;
+
 fn captured_at() -> Timestamp {
     Timestamp::from_unix(1_787_255_524).expect("plausible")
 }
@@ -365,6 +422,43 @@ fn a_spend_control_limit_is_kept_as_a_detail() {
 
     assert_eq!(snapshot.details[0].title, "Spend");
     assert_eq!(snapshot.details[0].rows[0].value, "42.5 of 100");
+}
+
+#[test]
+fn the_reported_business_response_draws_its_enforced_monthly_credit_limit() {
+    let snapshot = codex::parse(BUSINESS_SHAPE, captured_at()).expect("business response parses");
+
+    let keys: Vec<&str> = snapshot
+        .windows
+        .iter()
+        .map(|window| window.key.as_str())
+        .collect();
+    assert_eq!(keys, ["w604800", "monthly_credits"]);
+    assert_eq!(snapshot.windows[0].used_percent, 12.0);
+
+    let monthly = &snapshot.windows[1];
+    assert_eq!(monthly.title, "Monthly credits");
+    assert_eq!(monthly.subtitle.as_deref(), Some("155.14 of 150 · Reached"));
+    assert_eq!(monthly.used_percent, 100.0);
+    assert_eq!(
+        monthly.resets_at.map(Timestamp::as_unix),
+        Some(1_790_812_801)
+    );
+    assert_eq!(monthly.length, None);
+
+    let titles: Vec<&str> = snapshot
+        .details
+        .iter()
+        .map(|section| section.title.as_str())
+        .collect();
+    assert_eq!(titles, [DetailSection::PLAN, "Reset credits", "Spend"]);
+    assert_eq!(
+        snapshot.details[0].rows[0].value,
+        "Self Serve Business Prolite"
+    );
+    assert_eq!(snapshot.details[1].rows[0].value, "3");
+    assert_eq!(snapshot.details[1].rows[1].value, "0");
+    assert_eq!(snapshot.details[2].rows[0].value, "155.14 of 150");
 }
 
 #[test]
