@@ -599,3 +599,62 @@ async fn a_plugin_window_can_be_opted_into_notifications_by_its_key() {
         "the fixture does carry the second metric"
     );
 }
+
+#[test]
+fn the_same_fixture_produces_the_same_typed_result_on_every_platform() {
+    // The whole reason `pairs` and `math.random` are gone: two platforms iterating one JSON
+    // object in two orders would publish two card orders. So this asserts the exact ids, the
+    // exact order and the exact numbers, and a platform that disagrees fails here rather than
+    // on somebody's machine.
+    let reading = reading(&definition(), RESPONSE, 1_788_870_896);
+
+    let ids: Vec<&str> = reading
+        .presentation
+        .metrics
+        .iter()
+        .map(|metric| metric.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["month-cost", "month-requests", "model-sonnet-5"],
+        "the model with a null cap is left out, and the rest keep the order the parser built"
+    );
+
+    let card: Vec<(&str, &str)> = reading
+        .presentation
+        .card
+        .iter()
+        .map(|widget| (widget.kind.as_str(), widget.metric.as_str()))
+        .collect();
+    assert_eq!(card, [("gauge", "month-cost"), ("value", "month-requests")]);
+    let details: Vec<(&str, &str)> = reading.presentation.details[0]
+        .items
+        .iter()
+        .map(|widget| (widget.kind.as_str(), widget.metric.as_str()))
+        .collect();
+    assert_eq!(
+        details,
+        [("ratio", "month-cost"), ("ratio", "model-sonnet-5")],
+        "the detail section has an order of its own, and it is the parser's"
+    );
+
+    // The exact numbers, including the ones that came in as a string and as a subtraction.
+    let cost = reading.presentation.metric("month-cost").expect("present");
+    assert_eq!(cost.value, Some(12.5), "a numeric string is a number");
+    assert_eq!(cost.maximum, Some(50.0));
+    assert_eq!(cost.used_percent, Some(25.0));
+    let requests = reading
+        .presentation
+        .metric("month-requests")
+        .expect("present");
+    assert_eq!(requests.value, Some(3760.0), "limit less remaining");
+    assert_eq!(requests.used_percent, Some(75.2));
+
+    assert_eq!(reading.snapshot.windows.len(), 1);
+    assert_eq!(reading.snapshot.windows[0].key.as_str(), "month");
+    assert_eq!(
+        reading.snapshot.windows[0].resets_at.map(|at| at.as_unix()),
+        Some(1_790_812_800),
+        "the RFC 3339 reset is one instant on every platform"
+    );
+}
