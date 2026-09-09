@@ -1340,15 +1340,42 @@ impl Engine {
 
     /// Validates a plugin file, stores it, and republishes the catalog.
     ///
-    /// Nothing is polled by this: a freshly installed definition has no configured account
-    /// and therefore nothing to poll. The account arrives through `AddProvider`, as it does
-    /// for any other provider.
-    pub fn install_plugin(&mut self, bytes: &[u8]) -> Result<(PluginInfo, PluginChange), String> {
-        let definition = self
+    /// Nothing is polled by this for a definition nobody configured: an account arrives
+    /// through `AddProvider`, as it does for any other provider. A definition whose provider
+    /// *is* configured is the replacement case, and there every account of that provider is
+    /// rebuilt the way an endpoint edit rebuilds one — the account's factory captured the
+    /// earlier definition, and without the rebuild the new parser would wait for a daemon
+    /// restart that nothing announces. Options, notification preferences and the endpoint
+    /// come from the config, which a replacement does not touch.
+    pub async fn install_plugin(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(PluginInfo, PluginChange), String> {
+        let installed = self
             .plugins
             .install(bytes, &crate::registry::builtin_ids())
             .map_err(|error| error.to_string())?;
-        Ok((Self::plugin_info(&definition), self.plugin_change()?))
+        let info = Self::plugin_info(&installed);
+        // The store's own copy, so the rebuilt accounts and the published catalog share one
+        // definition rather than two allocations of the same bytes.
+        let definition = self
+            .plugins
+            .get(&installed.id)
+            .expect("the store holds what it just installed");
+        let config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        for index in 0..self.accounts.len() {
+            if self.accounts[index].provider.as_str() != definition.id {
+                continue;
+            }
+            let account = self.accounts[index].account.clone();
+            let options = self.accounts[index].status.options.clone();
+            self.accounts[index] = crate::registry::plugin_account(&definition, &account, &config)
+                .with_options(options)
+                .with_notify(crate::registry::notify(&definition.id, &config));
+            self.accounts[index].due = Instant::now();
+        }
+        self.probe_credentials(Some(&definition.id)).await;
+        Ok((info, self.plugin_change()?))
     }
 
     /// Removes an installed definition, refusing while any account still uses it.
@@ -1714,7 +1741,7 @@ impl Engine {
                         let _ = reply.send(self.inspect_plugin(&bytes));
                     }
                     Some(Command::InstallPlugin { bytes, reply }) => {
-                        let _ = reply.send(self.install_plugin(&bytes));
+                        let _ = reply.send(self.install_plugin(&bytes).await);
                     }
                     Some(Command::RemovePlugin { provider, reply }) => {
                         let _ = reply.send(self.remove_plugin(&provider));
@@ -3097,6 +3124,7 @@ svg = '''
         harness
             .engine
             .install_plugin(PLUGIN_FILE.as_bytes())
+            .await
             .expect("installs");
         harness
             .engine
@@ -3119,6 +3147,7 @@ svg = '''
         let (info, change) = harness
             .engine
             .install_plugin(PLUGIN_FILE.as_bytes())
+            .await
             .expect("installs");
         assert_eq!(info.id, "com.acme.quota");
         assert_eq!(info.api_key_header, "X-Acme-Key");
@@ -3153,6 +3182,53 @@ svg = '''
                 .expect("reads")
                 .is_none(),
             "one account's endpoint is not the other's"
+        );
+    }
+
+    /// A configured account's factory captured the definition it was built from, so a
+    /// replacement that left the account in place would keep polling the old parser until
+    /// the daemon restarted — which is exactly what a user re-importing a fixed plugin
+    /// file would see: the install succeeds, the card does not change.
+    #[tokio::test]
+    async fn replacing_a_definition_rebuilds_the_accounts_that_poll_it() {
+        let mut harness = plugin_harness_with_accounts("replace", &["default", "work"]).await;
+        for account in ["default", "work"] {
+            harness
+                .engine
+                .set_plugin_endpoint("com.acme.quota", account, "https://metrics.test/u", false)
+                .await
+                .expect("endpoint");
+        }
+        harness.engine.ensure_client(1).await;
+        assert!(
+            harness.engine.accounts()[1].client.is_some(),
+            "the account being replaced must first hold a client"
+        );
+
+        let replacement = PLUGIN_FILE.replace(
+            r#"card = { gauge("monthly", {}) }"#,
+            r#"card = { value("monthly", { field = "value" }) }"#,
+        );
+        harness
+            .engine
+            .install_plugin(replacement.as_bytes())
+            .await
+            .expect("replaces");
+
+        for index in 0..2 {
+            assert!(
+                harness.engine.accounts()[index].client.is_none(),
+                "a replaced definition must not leave a client the old one built"
+            );
+            assert!(
+                harness.engine.accounts()[index].due <= Instant::now(),
+                "the replacement is polled at once, not at the old schedule"
+            );
+        }
+        harness.engine.ensure_client(1).await;
+        assert!(
+            harness.engine.accounts()[1].client.is_some(),
+            "the rebuilt account builds a client from the new definition"
         );
     }
 
