@@ -47,6 +47,19 @@ pub fn history_path() -> Result<PathBuf, NoBaseDirectory> {
     Ok(data_dir()?.join(HISTORY_FILE))
 }
 
+/// Where installed plugin definitions live: `<data_dir>/plugins`.
+pub fn plugins_dir() -> Result<PathBuf, NoBaseDirectory> {
+    Ok(data_dir()?.join("plugins"))
+}
+
+/// Where a plugin's sanitized mark is materialized so the icon theme can find it by name:
+/// `<data_dir>/plugins/icons`, laid out as an XDG icon theme root. The GUI adds this one
+/// directory to its search path, and then a plugin mark is looked up exactly the way a
+/// shipped mark is — which is what keeps symbolic recolouring working. See `mark.rs`.
+pub fn plugin_icons_dir() -> Result<PathBuf, NoBaseDirectory> {
+    Ok(plugins_dir()?.join("icons"))
+}
+
 /// Full path of the settings file.
 pub fn config_path() -> Result<PathBuf, NoBaseDirectory> {
     Ok(config_dir()?.join(CONFIG_FILE))

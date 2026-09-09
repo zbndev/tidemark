@@ -23,6 +23,7 @@ mod keyring;
 mod lifecycle;
 mod notify;
 mod peer;
+mod plugins;
 mod registry;
 mod scheduler;
 mod service;
