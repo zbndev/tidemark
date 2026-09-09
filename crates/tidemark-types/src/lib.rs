@@ -30,7 +30,7 @@ pub use time::{AbsurdTimestamp, Timestamp};
 pub use window::{DANGER_AT, WARNING_AT, Window, WindowKey, WindowLength};
 pub use wire::{
     AuthCandidate, AuthCandidateState, AuthMode, AuthSelection, AuthSelector, CredentialKind,
-    DataInfo, ExternalLogin, HistoryPoint, OptionChoice, PluginInfo, Preferences,
+    DataInfo, ExternalLogin, HistoryPoint, OptionChoice, PluginEndpoint, PluginInfo, Preferences,
     ProviderDefinition, ProviderOption, ProviderState, ProviderStatus, Remedy, WindowStatus,
     account_slug_suggestion, valid_account_slug,
 };

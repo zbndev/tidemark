@@ -7,8 +7,8 @@ use tidemark_types::{ProviderDefinition, ProviderStatus, provider_label};
 use super::{model, multi_account_capable, opens_detail_after_add};
 use crate::mark;
 
-type IdentityCallback = Rc<dyn Fn(String, String)>;
-type ProviderCallback = Rc<dyn Fn(String)>;
+pub(super) type IdentityCallback = Rc<dyn Fn(String, String)>;
+pub(super) type ProviderCallback = Rc<dyn Fn(String)>;
 
 /// A provider and its accounts, in the order the list draws them.
 #[derive(Debug, PartialEq)]
@@ -58,12 +58,23 @@ fn structure(groups: &[ProviderGroup]) -> Vec<(&str, Option<&str>)> {
         .collect()
 }
 
-/// The configured rows on the dialog's main page.
+/// The configured rows of one tab of the provider dialog.
 #[derive(Debug)]
 pub(super) struct ConfiguredList {
     pub(super) group: adw::PreferencesGroup,
     empty: adw::StatusPage,
     rows: RefCell<Vec<ProviderRow>>,
+    /// Installed plugin definitions no account uses, drawn as their own rows. Only the
+    /// custom tab passes any; the built-in tab holds an always-empty list.
+    unconfigured: RefCell<Vec<UnconfiguredRow>>,
+}
+
+/// An installed definition nobody has configured: a provider waiting for its first
+/// account, and the only place a definition exists on screen before it has one.
+#[derive(Debug)]
+struct UnconfiguredRow {
+    provider: String,
+    row: adw::ActionRow,
 }
 
 /// A provider row and its accounts. `AdwExpanderRow` owns the nested rows, which gives
@@ -222,37 +233,46 @@ struct AccountRow {
     edit: gtk::Button,
 }
 
+/// Every action a row of either list can ask its owner to take.
+#[derive(Clone)]
+pub(super) struct RowCallbacks {
+    pub(super) on_edit: IdentityCallback,
+    pub(super) on_remove: IdentityCallback,
+    pub(super) on_add_account: ProviderCallback,
+    /// An unconfigured definition's "+": the form that creates its first account.
+    pub(super) on_add_first: ProviderCallback,
+    /// An unconfigured definition's trash.
+    pub(super) on_remove_plugin: ProviderCallback,
+}
+
+impl std::fmt::Debug for RowCallbacks {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RowCallbacks")
+            .finish_non_exhaustive()
+    }
+}
+
 impl ConfiguredList {
-    pub(super) fn new(on_add: Rc<dyn Fn()>, on_import: Rc<dyn Fn()>) -> Self {
+    /// The tab's "+" is the tab's own: the built-in tab's opens the catalog picker, the
+    /// custom tab's imports a file — each empty page names the one it means.
+    pub(super) fn new(
+        add_tooltip: &str,
+        on_add: Rc<dyn Fn()>,
+        empty_title: &str,
+        empty_description: &str,
+    ) -> Self {
         let add = gtk::Button::builder()
             .icon_name("list-add-symbolic")
-            .tooltip_text("Add provider")
+            .tooltip_text(add_tooltip)
             .valign(gtk::Align::Center)
             .build();
         add.connect_clicked(move |_| on_add());
-        // Beside "+" rather than inside the picker: importing a file is how a provider
-        // that is not in the catalog gets there, and it has to be findable before the
-        // user has anything to search the picker for.
-        let import = gtk::Button::builder()
-            .icon_name("document-open-symbolic")
-            .tooltip_text("Import a provider file")
-            .valign(gtk::Align::Center)
-            .build();
-        import.connect_clicked(move |_| on_import());
-        let actions = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(PROVIDER_ACTION_SPACING)
-            .build();
-        actions.append(&import);
-        actions.append(&add);
 
-        let group = adw::PreferencesGroup::builder()
-            .title("Providers")
-            .header_suffix(&actions)
-            .build();
+        let group = adw::PreferencesGroup::builder().header_suffix(&add).build();
         let empty = adw::StatusPage::builder()
-            .title("No providers added")
-            .description("Use + to add a provider.")
+            .title(empty_title)
+            .description(empty_description)
             .build();
         group.add(&empty);
 
@@ -260,6 +280,7 @@ impl ConfiguredList {
             group,
             empty,
             rows: RefCell::new(Vec::new()),
+            unconfigured: RefCell::new(Vec::new()),
         }
     }
 
@@ -267,10 +288,9 @@ impl ConfiguredList {
         &self,
         definitions: &[ProviderDefinition],
         statuses: &[ProviderStatus],
+        unconfigured: &[ProviderDefinition],
         is_waiting: &dyn Fn(&str, &str) -> bool,
-        on_edit: IdentityCallback,
-        on_remove: IdentityCallback,
-        on_add_account: ProviderCallback,
+        callbacks: RowCallbacks,
     ) {
         let groups = group(statuses);
         let shape_held = {
@@ -290,16 +310,37 @@ impl ConfiguredList {
         if shape_held {
             self.update(&groups, definitions, is_waiting);
         } else {
-            self.rebuild(
-                &groups,
-                definitions,
-                is_waiting,
-                &on_edit,
-                &on_remove,
-                &on_add_account,
-            );
+            self.rebuild(&groups, definitions, is_waiting, &callbacks);
         }
-        self.empty.set_visible(groups.is_empty());
+        self.apply_unconfigured(unconfigured, &callbacks);
+        self.empty
+            .set_visible(groups.is_empty() && unconfigured.is_empty());
+    }
+
+    /// Draws the rows of installed definitions no account uses. Rebuilt only when the
+    /// set of them changed, for the same click-stability reason the provider rows are.
+    fn apply_unconfigured(&self, definitions: &[ProviderDefinition], callbacks: &RowCallbacks) {
+        let ids = definitions
+            .iter()
+            .map(|definition| definition.provider.as_str())
+            .collect::<Vec<_>>();
+        let held = {
+            let rows = self.unconfigured.borrow();
+            let held: Vec<&str> = rows.iter().map(|row| row.provider.as_str()).collect();
+            held == ids
+        };
+        if held {
+            return;
+        }
+        let mut rows = self.unconfigured.borrow_mut();
+        for row in std::mem::take(&mut *rows) {
+            self.group.remove(&row.row);
+        }
+        for definition in definitions {
+            let row = unconfigured_row(definition, callbacks);
+            self.group.add(&row.row);
+            rows.push(row);
+        }
     }
 
     /// Draws the whole list fresh. Only reached when the shape changed — an account or a
@@ -310,9 +351,7 @@ impl ConfiguredList {
         groups: &[ProviderGroup],
         definitions: &[ProviderDefinition],
         is_waiting: &dyn Fn(&str, &str) -> bool,
-        on_edit: &IdentityCallback,
-        on_remove: &IdentityCallback,
-        on_add_account: &ProviderCallback,
+        callbacks: &RowCallbacks,
     ) {
         let mut rows = self.rows.borrow_mut();
         for row in std::mem::take(&mut *rows) {
@@ -322,25 +361,12 @@ impl ConfiguredList {
             let definition = definitions
                 .iter()
                 .find(|definition| definition.provider == group.provider);
-            let mut built = provider_row(
-                definition,
-                group,
-                is_waiting,
-                Rc::clone(on_edit),
-                Rc::clone(on_remove),
-                Rc::clone(on_add_account),
-            );
+            let mut built = provider_row(definition, group, is_waiting, callbacks);
             match &built.row {
                 ProviderWidget::Plain(_) => {}
                 ProviderWidget::Nested(row) => {
                     for status in &group.accounts[1..] {
-                        let account = account_row(
-                            definition,
-                            status,
-                            is_waiting,
-                            Rc::clone(on_edit),
-                            Rc::clone(on_remove),
-                        );
+                        let account = account_row(definition, status, is_waiting, callbacks);
                         row.add_row(&account.row);
                         built.accounts.push(account);
                     }
@@ -388,9 +414,7 @@ fn provider_row(
     definition: Option<&ProviderDefinition>,
     group: &ProviderGroup,
     is_waiting: &dyn Fn(&str, &str) -> bool,
-    on_edit: IdentityCallback,
-    on_remove: IdentityCallback,
-    on_add_account: ProviderCallback,
+    callbacks: &RowCallbacks,
 ) -> ProviderRow {
     let status = &group.accounts[0];
     let image = mark::image();
@@ -412,7 +436,7 @@ fn provider_row(
         .valign(gtk::Align::Center)
         .build();
     add.connect_clicked({
-        let on_add_account = Rc::clone(&on_add_account);
+        let on_add_account = Rc::clone(&callbacks.on_add_account);
         let provider = group.provider.clone();
         move |_| on_add_account(provider.clone())
     });
@@ -424,7 +448,7 @@ fn provider_row(
         .sensitive(definition.is_some())
         .build();
     edit.connect_clicked({
-        let on_edit = Rc::clone(&on_edit);
+        let on_edit = Rc::clone(&callbacks.on_edit);
         let provider = status.provider.clone();
         let account = status.account.clone();
         move |_| on_edit(provider.clone(), account.clone())
@@ -437,7 +461,7 @@ fn provider_row(
         .css_classes(["destructive-action"])
         .build();
     remove.connect_clicked({
-        let on_remove = Rc::clone(&on_remove);
+        let on_remove = Rc::clone(&callbacks.on_remove);
         let provider = status.provider.clone();
         let account = status.account.clone();
         move |_| on_remove(provider.clone(), account.clone())
@@ -464,8 +488,7 @@ fn account_row(
     definition: Option<&ProviderDefinition>,
     status: &ProviderStatus,
     is_waiting: &dyn Fn(&str, &str) -> bool,
-    on_edit: IdentityCallback,
-    on_remove: IdentityCallback,
+    callbacks: &RowCallbacks,
 ) -> AccountRow {
     let image = mark::image();
     mark::set(&image, &status.provider);
@@ -478,7 +501,7 @@ fn account_row(
         .valign(gtk::Align::Center)
         .build();
     edit.connect_clicked({
-        let on_edit = Rc::clone(&on_edit);
+        let on_edit = Rc::clone(&callbacks.on_edit);
         let provider = status.provider.clone();
         let account = status.account.clone();
         move |_| on_edit(provider.clone(), account.clone())
@@ -491,7 +514,7 @@ fn account_row(
         .css_classes(["destructive-action"])
         .build();
     remove.connect_clicked({
-        let on_remove = Rc::clone(&on_remove);
+        let on_remove = Rc::clone(&callbacks.on_remove);
         let provider = status.provider.clone();
         let account = status.account.clone();
         move |_| on_remove(provider.clone(), account.clone())
@@ -508,6 +531,53 @@ fn account_row(
     };
     update_account_row(&built, definition, status, is_waiting);
     built
+}
+
+/// An installed plugin nobody has configured: its mark, its name, its id, and the two
+/// things that can happen to it — a first account, or removal of the file.
+///
+/// The id is the subtitle on purpose: it is what the provider's file is named by and
+/// what every refusal the daemon sends will say, so it belongs on the row.
+fn unconfigured_row(definition: &ProviderDefinition, callbacks: &RowCallbacks) -> UnconfiguredRow {
+    let image = mark::image();
+    mark::set(&image, &definition.provider);
+    let row = adw::ActionRow::builder()
+        .title(&definition.title)
+        .subtitle(&definition.provider)
+        .use_markup(false)
+        .build();
+    row.add_prefix(&image);
+
+    let add = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add account")
+        .valign(gtk::Align::Center)
+        .build();
+    add.connect_clicked({
+        let on_add_first = Rc::clone(&callbacks.on_add_first);
+        let provider = definition.provider.clone();
+        move |_| on_add_first(provider.clone())
+    });
+
+    let remove = gtk::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Remove provider")
+        .valign(gtk::Align::Center)
+        .css_classes(["destructive-action"])
+        .build();
+    remove.connect_clicked({
+        let on_remove_plugin = Rc::clone(&callbacks.on_remove_plugin);
+        let provider = definition.provider.clone();
+        move |_| on_remove_plugin(provider.clone())
+    });
+
+    row.add_suffix(&add);
+    row.add_suffix(&remove);
+
+    UnconfiguredRow {
+        provider: definition.provider.clone(),
+        row,
+    }
 }
 
 fn update_provider_row(
@@ -583,7 +653,10 @@ fn status_text(
     }
 }
 
-/// Searchable catalog page pushed from the main provider list.
+/// Searchable catalog page pushed from the built-in tab's "+".
+///
+/// The catalog only: an installed plugin lives on the custom tab, configured or not, so
+/// no plugin definition is ever offered or removed here.
 pub(super) struct Picker {
     page: adw::NavigationPage,
     search: gtk::SearchEntry,
@@ -592,7 +665,6 @@ pub(super) struct Picker {
     definitions: RefCell<Vec<ProviderDefinition>>,
     statuses: RefCell<Vec<ProviderStatus>>,
     on_select: Rc<dyn Fn(String)>,
-    on_remove_plugin: Rc<dyn Fn(String)>,
 }
 
 impl std::fmt::Debug for Picker {
@@ -607,10 +679,7 @@ impl std::fmt::Debug for Picker {
 }
 
 impl Picker {
-    pub(super) fn new(
-        on_select: Rc<dyn Fn(String)>,
-        on_remove_plugin: Rc<dyn Fn(String)>,
-    ) -> Rc<Self> {
+    pub(super) fn new(on_select: Rc<dyn Fn(String)>) -> Rc<Self> {
         let search = gtk::SearchEntry::builder()
             .placeholder_text("Search providers")
             .margin_top(12)
@@ -650,7 +719,6 @@ impl Picker {
             definitions: RefCell::new(Vec::new()),
             statuses: RefCell::new(Vec::new()),
             on_select,
-            on_remove_plugin,
         });
         picker.search.connect_search_changed({
             let weak = Rc::downgrade(&picker);
@@ -700,23 +768,6 @@ impl Picker {
                 .activatable(true)
                 .build();
             row.add_prefix(&image);
-            // An installed definition nothing uses can be deleted, and this row is the
-            // only place it exists on screen: once an account is configured it moves to
-            // the configured list, and the daemon refuses to remove it from there.
-            if definition.plugin.is_some() {
-                let remove = gtk::Button::builder()
-                    .icon_name("user-trash-symbolic")
-                    .tooltip_text("Remove this installed provider")
-                    .valign(gtk::Align::Center)
-                    .css_classes(["flat"])
-                    .build();
-                remove.connect_clicked({
-                    let on_remove_plugin = Rc::clone(&self.on_remove_plugin);
-                    let provider = definition.provider.clone();
-                    move |_| on_remove_plugin(provider.clone())
-                });
-                row.add_suffix(&remove);
-            }
             row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
             row.connect_activated({
                 let on_select = Rc::clone(&self.on_select);

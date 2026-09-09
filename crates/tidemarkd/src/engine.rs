@@ -21,8 +21,8 @@ use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
 use tidemark_types::{
     AccountId, AuthCandidate, AuthCandidateState, AuthSelection, CredentialKind, HistoryPoint,
-    PluginInfo, Preferences, Presentation, ProviderDefinition, ProviderId, ProviderOption,
-    ProviderState, ProviderStatus, Snapshot, Timestamp, WindowKey, WindowStatus,
+    PluginEndpoint, PluginInfo, Preferences, Presentation, ProviderDefinition, ProviderId,
+    ProviderOption, ProviderState, ProviderStatus, Snapshot, Timestamp, WindowKey, WindowStatus,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -483,6 +483,16 @@ impl Account {
     /// fills the missing value in.
     pub fn with_message(mut self, message: &str) -> Self {
         self.set_state(ProviderState::Pending, Some(message.to_owned()));
+        self
+    }
+
+    /// Publishes the Metrics URL a plugin account sends its key to, so a client adding a
+    /// sibling account can inherit it rather than ask for it again.
+    pub fn with_plugin_endpoint(mut self, endpoint: plugin::provider::Endpoint) -> Self {
+        self.status.plugin_endpoint = Some(PluginEndpoint {
+            url: endpoint.url,
+            allow_insecure_http: endpoint.allow_insecure_http,
+        });
         self
     }
 

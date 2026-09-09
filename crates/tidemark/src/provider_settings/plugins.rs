@@ -96,11 +96,16 @@ pub(super) struct AccountForm {
 /// Together rather than in three dialogs because they are one decision: the endpoint says
 /// where the key goes, and agreeing to the second without seeing the first is the mistake
 /// this whole flow exists to prevent. Returns `None` when the dialog was dismissed.
+///
+/// A second account of an already-configured plugin inherits its sibling's endpoint, so
+/// the URL is asked for only when there is nothing to inherit — the first account, or an
+/// older daemon that does not publish endpoints.
 pub(super) async fn account_dialog(
     parent: &impl IsA<gtk::Widget>,
     info: &PluginInfo,
     heading: &str,
     ask_for_name: bool,
+    ask_for_endpoint: bool,
 ) -> Option<AccountForm> {
     let dialog = adw::AlertDialog::builder().heading(heading).build();
     dialog.add_responses(&[("cancel", "Cancel"), ("accept", "Add")]);
@@ -130,8 +135,10 @@ pub(super) async fn account_dialog(
         .placeholder_text("https://example.com/v1/usage")
         .activates_default(true)
         .build();
-    content.append(&label("Metrics URL"));
-    content.append(&endpoint);
+    if ask_for_endpoint {
+        content.append(&label("Metrics URL"));
+        content.append(&endpoint);
+    }
 
     // The one sentence that says where the key is about to be sent, in the shape the
     // request will actually take. It is the whole reason the endpoint and the key are
@@ -200,9 +207,12 @@ pub(super) async fn account_dialog(
                 }
             }
             let acknowledged = endpoint_warning(&typed).is_none() || insecure.is_active();
+            // An inherited endpoint was already validated by the sibling that carries it;
+            // there is nothing typed here to re-validate.
+            let endpoint_ok = !ask_for_endpoint || valid_endpoint(&typed);
             dialog.set_response_enabled(
                 "accept",
-                named && valid_endpoint(&typed) && acknowledged && !key.text().trim().is_empty(),
+                named && endpoint_ok && acknowledged && !key.text().trim().is_empty(),
             );
         }
     };

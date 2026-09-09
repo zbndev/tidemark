@@ -342,6 +342,22 @@ impl AuthCandidate {
     }
 }
 
+/// The Metrics URL a plugin account sends its key to, with the plain-http acknowledgement
+/// that was given for it.
+///
+/// Published so a client adding a second account to the same plugin can inherit the
+/// sibling's endpoint instead of asking for a URL the user has already answered. Absent
+/// for built-in providers, for a plugin account with no endpoint yet, and from an older
+/// daemon — which a client must treat as "ask", never as "no endpoint exists".
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct PluginEndpoint {
+    /// The absolute URL the key is sent to.
+    pub url: String,
+    /// Whether the owner acknowledged that this URL puts the key on the network in clear.
+    pub allow_insecure_http: bool,
+}
+
 /// The explicit local authentication source an account uses.
 #[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
 #[zvariant(signature = "a{sv}")]
@@ -684,6 +700,9 @@ pub struct ProviderStatus {
     /// The daemon-resolved local source selected for browser-cookie authentication.
     /// Absent on providers without this capability and when speaking to an older daemon.
     pub auth_selection: Option<AuthSelection>,
+    /// The Metrics URL this plugin account sends its key to. Absent for built-in
+    /// providers, for a plugin account with no endpoint yet, and from an older daemon.
+    pub plugin_endpoint: Option<PluginEndpoint>,
     /// The provider's own settings, with their current values and alternatives.
     pub options: Vec<ProviderOption>,
     /// Keys of the windows whose notifications the user has switched on.
@@ -714,6 +733,7 @@ impl ProviderStatus {
             external_present: None,
             auth_source: None,
             auth_selection: None,
+            plugin_endpoint: None,
             options: Vec::new(),
             notify: Vec::new(),
         }

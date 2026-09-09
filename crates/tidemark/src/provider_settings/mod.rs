@@ -18,7 +18,7 @@ use tidemark_types::{
 };
 
 use self::detail::ProviderDetail;
-use self::list::{ConfiguredList, Picker};
+use self::list::{ConfiguredList, Picker, RowCallbacks};
 use crate::bus::DaemonProxy;
 
 /// The account a provider's structural first add holds. The daemon will not rename it,
@@ -163,6 +163,14 @@ fn remove_local_provider<T>(
 }
 
 /// Owns every page for one open provider-settings dialog.
+///
+/// The main page is two tabs: built-in providers, whose "+" opens the catalog picker,
+/// and custom providers, whose "+" imports a plugin file. The pill between them is the
+/// same shape the OAuth/CLI credential choice takes, because it answers the same kind of
+/// question — which of two alternative halves of one thing to look at. A plugin lives on
+/// the custom tab in both of its states: configured, where it is drawn exactly like a
+/// built-in provider, and installed-but-unconfigured, where it is a row waiting for its
+/// first account.
 #[derive(Debug)]
 pub struct ProviderSettings {
     dialog: adw::PreferencesDialog,
@@ -170,7 +178,8 @@ pub struct ProviderSettings {
     definitions: RefCell<Vec<ProviderDefinition>>,
     statuses: RefCell<Vec<ProviderStatus>>,
     local_added: RefCell<HashSet<(String, String)>>,
-    configured: ConfiguredList,
+    built_in: ConfiguredList,
+    custom: ConfiguredList,
     picker: Rc<Picker>,
     details: RefCell<DetailCache<Rc<ProviderDetail>>>,
     active_detail: RefCell<ActiveDetail>,
@@ -193,7 +202,8 @@ impl ProviderSettings {
             .build();
 
         let controller: Rc<RefCell<Option<Weak<Self>>>> = Rc::new(RefCell::new(None));
-        let configured = ConfiguredList::new(
+        let built_in = ConfiguredList::new(
+            "Add provider",
             {
                 let controller = Rc::clone(&controller);
                 Rc::new(move || {
@@ -202,6 +212,11 @@ impl ProviderSettings {
                     }
                 })
             },
+            "No providers added",
+            "Use + to add a provider.",
+        );
+        let custom = ConfiguredList::new(
+            "Import a provider file",
             {
                 let controller = Rc::clone(&controller);
                 Rc::new(move || {
@@ -210,36 +225,56 @@ impl ProviderSettings {
                     }
                 })
             },
+            "No custom providers",
+            "Use + to import a provider file.",
         );
+
+        let tabs = adw::ToggleGroup::builder()
+            .hexpand(true)
+            .homogeneous(true)
+            .build();
+        tabs.add(
+            adw::Toggle::builder()
+                .name("built-in")
+                .label("Built-in")
+                .build(),
+        );
+        tabs.add(
+            adw::Toggle::builder()
+                .name("custom")
+                .label("Custom")
+                .build(),
+        );
+        let pill_row = adw::PreferencesRow::builder()
+            .activatable(false)
+            .child(&tabs)
+            .build();
+        pill_row.add_css_class("credential-choice");
+        let pill_group = adw::PreferencesGroup::builder().build();
+        pill_group.add(&pill_row);
+
         let page = adw::PreferencesPage::new();
-        page.add(&configured.group);
+        page.add(&pill_group);
+        page.add(&built_in.group);
+        page.add(&custom.group);
         dialog.add(&page);
 
-        let picker = Picker::new(
-            {
-                let controller = Rc::clone(&controller);
-                Rc::new(move |provider| {
-                    if let Some(settings) = controller.borrow().as_ref().and_then(Weak::upgrade) {
-                        settings.add_provider(provider);
-                    }
-                })
-            },
-            {
-                let controller = Rc::clone(&controller);
-                Rc::new(move |provider| {
-                    if let Some(settings) = controller.borrow().as_ref().and_then(Weak::upgrade) {
-                        settings.confirm_plugin_removal(provider);
-                    }
-                })
-            },
-        );
+        let picker = Picker::new({
+            let controller = Rc::clone(&controller);
+            Rc::new(move |provider| {
+                if let Some(settings) = controller.borrow().as_ref().and_then(Weak::upgrade) {
+                    settings.add_provider(provider);
+                }
+            })
+        });
         let settings = Rc::new(Self {
             dialog: dialog.clone(),
             proxy,
             definitions: RefCell::new(Vec::new()),
             statuses: RefCell::new(Vec::new()),
             local_added: RefCell::new(HashSet::new()),
-            configured,
+            built_in,
+            custom,
             picker,
             details: RefCell::new(DetailCache::default()),
             active_detail: RefCell::new(ActiveDetail::default()),
@@ -248,6 +283,24 @@ impl ProviderSettings {
         });
         *controller.borrow_mut() = Some(Rc::downgrade(&settings));
         *settings.self_weak.borrow_mut() = Rc::downgrade(&settings);
+
+        tabs.connect_active_name_notify({
+            let weak = Rc::downgrade(&settings);
+            move |toggles| {
+                let Some(settings) = weak.upgrade() else {
+                    return;
+                };
+                if let Some(name) = toggles.active_name() {
+                    settings.show_tab(&name);
+                }
+            }
+        });
+
+        // The dialog opens on the built-in tab whatever the catalog holds: the catalog is
+        // the common case, and a custom provider is a destination rather than a default.
+        // Set before the signal is connected, so opening is not a navigation.
+        tabs.set_active_name(Some("built-in"));
+        settings.show_tab("built-in");
 
         settings.apply(definitions, statuses);
         dialog.connect_closed({
@@ -261,6 +314,13 @@ impl ProviderSettings {
         });
         dialog.present(Some(parent));
         settings
+    }
+
+    /// Which tab is showing, and the one group of the two it shows.
+    fn show_tab(&self, name: &str) {
+        let built_in = name == "built-in";
+        self.built_in.group.set_visible(built_in);
+        self.custom.group.set_visible(!built_in);
     }
 
     /// Applies daemon-owned catalog/status state while keeping every existing detail
@@ -304,13 +364,57 @@ impl ProviderSettings {
     fn refresh_views(&self) {
         let definitions = self.definitions.borrow();
         let statuses = self.statuses.borrow();
-        self.configured.apply(
+        // A plugin's provider id is the one spelling its tab membership: statuses carry
+        // no plugin flag of their own, so the definition decides which tab a card is drawn on.
+        let plugins: HashSet<&str> = definitions
+            .iter()
+            .filter(|definition| definition.plugin.is_some())
+            .map(|definition| definition.provider.as_str())
+            .collect();
+        let custom_statuses: Vec<ProviderStatus> = statuses
+            .iter()
+            .filter(|status| plugins.contains(status.provider.as_str()))
+            .cloned()
+            .collect();
+        let built_in_statuses: Vec<ProviderStatus> = statuses
+            .iter()
+            .filter(|status| !plugins.contains(status.provider.as_str()))
+            .cloned()
+            .collect();
+        // Installed definitions no account uses are the custom tab's other state: a
+        // provider waiting for its first account rather than a hidden file.
+        let unconfigured: Vec<ProviderDefinition> = definitions
+            .iter()
+            .filter(|definition| {
+                definition.plugin.is_some()
+                    && !statuses
+                        .iter()
+                        .any(|status| status.provider == definition.provider)
+            })
+            .cloned()
+            .collect();
+
+        let callbacks = RowCallbacks {
+            on_edit: self.identity_callback(Self::open_detail),
+            on_remove: self.identity_callback(Self::confirm_removal),
+            on_add_account: self.provider_callback(Self::add_account),
+            on_add_first: self.provider_callback(Self::add_provider),
+            on_remove_plugin: self.provider_callback(Self::confirm_plugin_removal),
+        };
+        let is_waiting = |provider: &str, account: &str| self.pending.contains(provider, account);
+        self.built_in.apply(
             &definitions,
-            &statuses,
-            &|provider, account| self.pending.contains(provider, account),
-            self.identity_callback(Self::open_detail),
-            self.identity_callback(Self::confirm_removal),
-            self.provider_callback(Self::add_account),
+            &built_in_statuses,
+            &[],
+            &is_waiting,
+            callbacks.clone(),
+        );
+        self.custom.apply(
+            &definitions,
+            &custom_statuses,
+            &unconfigured,
+            &is_waiting,
+            callbacks,
         );
         self.picker.apply(&definitions, &statuses);
     }
@@ -354,11 +458,12 @@ impl ProviderSettings {
             // A plugin has nowhere to send anything until an endpoint is filed, and its
             // detail page has no field for one. So the form comes first and adds the
             // provider itself: a user who changes their mind is left with nothing to
-            // clean up, and one who does not never has to find a second dialog.
+            // clean up, and one who does not never has to find a second dialog. Reached
+            // from the custom tab's unconfigured row, which is the only place a plugin
+            // with no account exists.
             if let Some(definition) = definition.as_ref()
                 && let Some(info) = definition.plugin.clone()
             {
-                settings.dialog.pop_subpage();
                 if let Some(account) = settings
                     .configure_plugin_account(
                         &definition.provider,
@@ -545,13 +650,26 @@ impl ProviderSettings {
         let Some(definition) = definition else {
             return;
         };
+        // A plugin's card is the provider: when the trash takes its last account, the
+        // installed file goes with it, so the confirmation says so and the removal does it.
+        let removes_plugin = definition.plugin.is_some()
+            && self
+                .statuses
+                .borrow()
+                .iter()
+                .filter(|status| status.provider == provider)
+                .count()
+                == 1;
         let settings = Rc::clone(self);
         glib::spawn_future_local(async move {
             let confirmation = adw::AlertDialog::builder()
                 .heading(format!("Remove {}?", definition.title))
-                .body(
-                    "This removes the provider and its saved credentials. Quota history will be kept.",
-                )
+                .body(if removes_plugin {
+                    "This removes the provider, its saved credentials and the installed \
+                     provider file. Quota history will be kept."
+                } else {
+                    "This removes the provider and its saved credentials. Quota history will be kept."
+                })
                 .build();
             confirmation.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
             confirmation.set_default_response(Some("cancel"));
@@ -567,6 +685,13 @@ impl ProviderSettings {
                             &provider,
                             &account,
                         );
+                        if removes_plugin
+                            && let Err(error) = settings.proxy.remove_plugin(&provider).await
+                        {
+                            // The account is already gone; what is left on screen is the
+                            // unconfigured row, whose own trash finishes the job.
+                            settings.toast(&reason(&error));
+                        }
                         settings.refresh_views();
                     }
                     Err(error) => settings.toast(&reason(&error)),
@@ -625,10 +750,10 @@ impl ProviderSettings {
         });
     }
 
-    /// Removes an installed definition, which the daemon refuses while an account uses it.
-    ///
-    /// The refusal is shown as it arrives: the daemon counts the accounts, and a second
-    /// count kept here would be the one that is wrong.
+    /// Removes an installed definition that no account uses — the unconfigured row's
+    /// trash. A configured plugin is removed through its card instead, which takes the
+    /// file with it, so the daemon's refusal of a definition still in use should not be
+    /// reachable from here.
     fn confirm_plugin_removal(self: &Rc<Self>, provider: String) {
         let title = self
             .definitions
@@ -640,9 +765,7 @@ impl ProviderSettings {
         glib::spawn_future_local(async move {
             let confirmation = adw::AlertDialog::builder()
                 .heading(format!("Remove {title}?"))
-                .body(
-                    "This deletes the installed provider file. Any account still using it                      must be removed first.",
-                )
+                .body("This deletes the installed provider file.")
                 .build();
             confirmation.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
             confirmation.set_default_response(Some("cancel"));
@@ -677,7 +800,22 @@ impl ProviderSettings {
             PluginTarget::NewAccount => format!("New {title} account"),
         };
         let naming = matches!(target, PluginTarget::NewAccount);
-        let form = plugins::account_dialog(&self.dialog, info, &heading, naming).await?;
+        // A second account inherits the endpoint a sibling of this provider already sends
+        // its key to — the plain-http acknowledgement comes with the URL, because it was
+        // the same question about the same destination, already answered. Nothing to
+        // inherit (first account, or a daemon that does not publish endpoints) asks.
+        let inherited = if naming {
+            self.statuses
+                .borrow()
+                .iter()
+                .find(|status| status.provider == provider)
+                .and_then(|status| status.plugin_endpoint.clone())
+        } else {
+            None
+        };
+        let form =
+            plugins::account_dialog(&self.dialog, info, &heading, naming, inherited.is_none())
+                .await?;
 
         let slug = match &target {
             PluginTarget::NewProvider => {
@@ -700,9 +838,13 @@ impl ProviderSettings {
             }
         };
 
+        let (endpoint, allow_insecure_http) = match &inherited {
+            Some(endpoint) => (endpoint.url.clone(), endpoint.allow_insecure_http),
+            None => (form.endpoint.clone(), form.allow_insecure_http),
+        };
         if let Err(error) = self
             .proxy
-            .set_plugin_endpoint(provider, &slug, &form.endpoint, form.allow_insecure_http)
+            .set_plugin_endpoint(provider, &slug, &endpoint, allow_insecure_http)
             .await
         {
             self.toast(&reason(&error));

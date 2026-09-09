@@ -5,6 +5,9 @@ use tidemark_types::{
 };
 
 /// Catalog entries which have not already been configured and match the query.
+///
+/// The catalog only — an installed plugin is the custom tab's to show, add and remove,
+/// so no plugin definition is ever offered here.
 pub fn addable<'a>(
     definitions: &'a [ProviderDefinition],
     statuses: &[ProviderStatus],
@@ -13,6 +16,7 @@ pub fn addable<'a>(
     let query = query.trim().to_lowercase();
     definitions
         .iter()
+        .filter(|definition| definition.plugin.is_none())
         .filter(|definition| {
             !statuses
                 .iter()
@@ -328,6 +332,39 @@ mod tests {
             ["codex"]
         );
         assert!(addable(&definitions, &statuses, "claude").is_empty());
+    }
+
+    #[test]
+    fn an_installed_plugin_is_not_offered_by_the_catalog_picker() {
+        // A plugin lives on the custom tab whatever its configuration state; offering it
+        // here would give one provider two homes and two different delete buttons.
+        let mut plugin = definition("com.acme.quota", "Acme AI");
+        plugin.plugin = Some(tidemark_types::PluginInfo {
+            id: "com.acme.quota".into(),
+            name: "Acme AI".into(),
+            plugin_version: "1.0.0".into(),
+            method: "GET".into(),
+            api_key_header: "X-Acme-Key".into(),
+            api_key_prefix: String::new(),
+            has_mark: false,
+            mark_svg: None,
+        });
+        let definitions = vec![definition("codex", "Codex"), plugin];
+
+        assert_eq!(
+            addable(&definitions, &[], "acme")
+                .iter()
+                .map(|item| item.provider.as_str())
+                .collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            addable(&definitions, &[], "")
+                .iter()
+                .map(|item| item.provider.as_str())
+                .collect::<Vec<_>>(),
+            ["codex"]
+        );
     }
 
     #[test]

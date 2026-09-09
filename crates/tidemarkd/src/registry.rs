@@ -377,7 +377,15 @@ pub fn plugin_account(
         // which would tell them to fill in a field they have already filled in.
         Err(error) => Err(error.to_string()),
     };
-    let missing = endpoint.as_ref().err().cloned();
+    // Read before the factory below moves the endpoint into itself. The endpoint is
+    // published so the client can hand a second account the same Metrics URL its sibling
+    // already sends the key to, instead of asking a question twice; the message is the
+    // one the old code published — no endpoint yet, or the user's own file holding one
+    // this build cannot act on.
+    let (published, missing) = match endpoint.as_ref() {
+        Ok(endpoint) => (Some(endpoint.clone()), None),
+        Err(message) => (None, Some(message.clone())),
+    };
     let definition = Arc::clone(definition);
     let built = Account::new(
         ProviderId::new(&definition.id),
@@ -399,9 +407,11 @@ pub fn plugin_account(
     )
     .with_credential(CredentialKind::Key)
     .with_hint(&hint);
-    match missing {
-        Some(message) => built.with_message(&message),
-        None => built,
+    match (published, missing) {
+        (Some(endpoint), _) => built.with_plugin_endpoint(endpoint),
+        (None, Some(message)) => built.with_message(&message),
+        // The match above produced exactly one of the two; this arm is unreachable.
+        (None, None) => built,
     }
 }
 
