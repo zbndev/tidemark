@@ -253,13 +253,14 @@ fn statuses() -> Vec<ProviderStatus> {
         "claude",
         "max",
         vec![
-            // The case the bar is designed around: a window the provider gave no reset
-            // time for, so there is no pace mark to draw.
-            window("5 hours", 18_000, 12.0, None),
-            window("1 week", 604_800, 61.0, Some(3 * 86_400)),
-            opus,
+            // The rolling allowance appears unused, but the full weekly allowance makes it
+            // unusable until that weekly reset.
+            window("5 hours", 18_000, 0.0, Some(4 * 3_600)),
+            window("1 week", 604_800, 100.0, Some(3 * 86_400)),
+            window("1 week (Opus)", 604_800, 4.0, Some(3 * 86_400)),
         ],
     );
+    claude.windows[0].blocked_by = Some("w604800".to_owned());
     claude.next_poll_at = Some(Timestamp::now().as_unix() + 40);
     // Reading Claude Code's own file, which is there and which Tidemark refreshes in
     // place: the case the write-back sentence exists for.

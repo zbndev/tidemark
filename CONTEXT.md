@@ -520,11 +520,12 @@ history that does not exist yet.
 
 ## Interface
 
-- **Grid of provider cards**, one to three columns by width, **in the order the user put
-  them in**. Nothing else ever changes that order: there is no urgency sort underneath it,
-  a new account goes on the end, and the sequence is persisted by the daemon and
-  republished to every client. The grid the tray menu lists and the grid the settings
-  dialog lists are this one.
+- **Grid of provider cards**, columns by width, **in the order the user put them in**.
+  How many columns the width turns into is a preference: Auto (the default) fits as many
+  columns as the window holds, and Manual caps the count at a chosen ceiling. Nothing else
+  ever changes that order: there is no urgency sort underneath it, a new account goes on
+  the end, and the sequence is persisted by the daemon and republished to every client.
+  The grid the tray menu lists and the grid the settings dialog lists are this one.
 - **The grid is a widget of ours, not a `GtkFlowBox`.** Reordering has to be *live* — the
   cards a held card displaces move out of its way before the button is released, and move
   back if the pointer changes its mind — and `gtk_flow_box_invalidate_sort()` sorts a

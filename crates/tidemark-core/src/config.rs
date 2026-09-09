@@ -73,6 +73,9 @@ const PROXY_PORT_KEY: &str = "port";
 const REFRESH_TABLE: &str = "refresh";
 const REFRESH_MODE_KEY: &str = "mode";
 const REFRESH_MINUTES_KEY: &str = "minutes";
+const GRID_TABLE: &str = "grid";
+const COLUMNS_AUTO_KEY: &str = "auto";
+const MAX_COLUMNS_KEY: &str = "max";
 
 /// Why the settings could not be read or written.
 #[derive(Debug, thiserror::Error)]
@@ -277,6 +280,24 @@ impl Config {
                     )
                 })?,
         };
+        // The same refusal for the column ceiling, with no upper bound to check: the
+        // window's own width caps the real count, so only zero (and nonsense types) is
+        // wrong. Absent in the file is still a decided value here — the wire dictionary's
+        // absent-means-unknown is for reading *other* versions, and this is our own store.
+        let max_columns = match self.preference(GRID_TABLE, MAX_COLUMNS_KEY)? {
+            None => 3,
+            Some(item) => item
+                .as_integer()
+                .and_then(|columns| u32::try_from(columns).ok())
+                .filter(|columns| Preferences::valid_max_columns(*columns))
+                .ok_or_else(|| {
+                    self.invalid_preference(
+                        GRID_TABLE,
+                        MAX_COLUMNS_KEY,
+                        "must be a whole number of at least 1".into(),
+                    )
+                })?,
+        };
         Ok(Preferences {
             release_check: self
                 .preference_bool(UPDATES_TABLE, RELEASE_CHECK_KEY)?
@@ -295,6 +316,11 @@ impl Config {
             proxy_port: self.preference_port(PROXY_TABLE, PROXY_PORT_KEY)?,
             refresh_mode,
             refresh_minutes,
+            columns_auto: Some(
+                self.preference_bool(GRID_TABLE, COLUMNS_AUTO_KEY)?
+                    .unwrap_or(true),
+            ),
+            max_columns: Some(max_columns),
         })
     }
 
@@ -397,6 +423,23 @@ impl Config {
             REFRESH_MINUTES_KEY,
             value(i64::from(minutes)),
         )
+    }
+
+    /// Chooses whether the client fits as many card columns as the window allows.
+    pub fn set_columns_auto(&mut self, enabled: bool) -> Result<(), ConfigError> {
+        self.set_preference(GRID_TABLE, COLUMNS_AUTO_KEY, value(enabled))
+    }
+
+    /// Sets the most card columns a window lays out while Auto is off.
+    pub fn set_max_columns(&mut self, columns: u32) -> Result<(), ConfigError> {
+        if !Preferences::valid_max_columns(columns) {
+            return Err(self.invalid_preference(
+                GRID_TABLE,
+                MAX_COLUMNS_KEY,
+                format!("must be at least 1, not {columns}"),
+            ));
+        }
+        self.set_preference(GRID_TABLE, MAX_COLUMNS_KEY, value(i64::from(columns)))
     }
 
     fn preference_bool(
@@ -1949,6 +1992,11 @@ mod tests {
         assert_eq!(config.preferences().expect("readable").proxy_port, 0);
         assert_eq!(config.preferences().expect("readable").refresh_mode, "auto");
         assert_eq!(config.preferences().expect("readable").refresh_minutes, 5);
+        assert_eq!(
+            config.preferences().expect("readable").columns_auto,
+            Some(true)
+        );
+        assert_eq!(config.preferences().expect("readable").max_columns, Some(3));
     }
 
     #[test]
@@ -1996,6 +2044,8 @@ mod tests {
             proxy_port: 1080,
             refresh_mode: "manual".into(),
             refresh_minutes: 30,
+            columns_auto: Some(false),
+            max_columns: Some(7),
         };
 
         config.set_release_check(false).expect("release setting");
@@ -2010,11 +2060,36 @@ mod tests {
             .expect("proxy setting");
         config.set_refresh_mode("manual").expect("refresh mode");
         config.set_refresh_minutes(30).expect("refresh minutes");
+        config.set_columns_auto(false).expect("column mode");
+        config.set_max_columns(7).expect("column ceiling");
 
         let reread = Config::at(path.clone()).expect("reloaded");
         assert_eq!(reread.preferences().expect("readable"), preferences);
         let text = std::fs::read_to_string(path).expect("read back");
         assert!(text.starts_with("# belongs to the user\n"), "{text}");
+    }
+
+    #[test]
+    fn a_column_ceiling_below_one_is_refused_rather_than_clamped() {
+        for (index, wrong) in ["max = 0", "max = -2", "max = \"many\""]
+            .into_iter()
+            .enumerate()
+        {
+            let path = scratch(&format!("preferences-grid-max-{index}"));
+            std::fs::write(&path, format!("[grid]\n{wrong}\n")).expect("seeded");
+            let config = Config::at(path.clone()).expect("valid TOML");
+
+            assert!(
+                config.preferences().is_err(),
+                "{wrong} must not silently become a ceiling"
+            );
+            let _ = std::fs::remove_file(path);
+        }
+
+        let path = scratch("preferences-grid-max-write");
+        std::fs::write(&path, "[grid]\nauto = false\n").expect("seeded");
+        let mut config = Config::at(path).expect("valid TOML");
+        assert!(config.set_max_columns(0).is_err());
     }
 
     #[test]

@@ -16,7 +16,7 @@ use tidemark_core::config::Config;
 use tidemark_core::plugin;
 use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::providers::keyed::session;
-use tidemark_core::providers::{Credential, Provider, ProviderError, Reading, Source};
+use tidemark_core::providers::{Credential, Provider, ProviderError, Reading, Source, blocked_by};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
 use tidemark_types::{
@@ -68,6 +68,9 @@ pub enum Preference {
     HistoryRetention(String),
     RefreshMode(String),
     RefreshMinutes(u32),
+    /// How the client lays out its card columns: fit-to-width, or capped.
+    ColumnsAuto(bool),
+    MaxColumns(u32),
     /// The one preference that changes how this process reaches the network, rather than
     /// what it does with what it reaches.
     Proxy {
@@ -1594,9 +1597,11 @@ impl Engine {
             Preference::MinimizeOnClose(enabled) => config.set_minimize_on_close(enabled),
             Preference::Theme(theme) => config.set_theme(&theme),
             Preference::StartupMode(mode) => config.set_startup_mode(&mode),
-            Preference::HistoryRetention(retention) => config.set_history_retention(&retention),
             Preference::RefreshMode(mode) => config.set_refresh_mode(&mode),
             Preference::RefreshMinutes(minutes) => config.set_refresh_minutes(minutes),
+            Preference::ColumnsAuto(enabled) => config.set_columns_auto(enabled),
+            Preference::MaxColumns(columns) => config.set_max_columns(columns),
+            Preference::HistoryRetention(retention) => config.set_history_retention(&retention),
             Preference::Proxy { mode, host, port } => config.set_proxy(&mode, &host, port),
         }
         .map_err(|error| error.to_string())?;
@@ -1998,6 +2003,14 @@ impl Engine {
                 account.failures = 0;
                 account.retry_after = None;
                 account.status.set_reading(&snapshot, presentation);
+                for published in &mut account.status.windows {
+                    published.blocked_by = snapshot
+                        .windows
+                        .iter()
+                        .find(|window| window.key.as_str() == published.key)
+                        .and_then(|window| blocked_by(&snapshot, window))
+                        .map(|blocker| blocker.key.to_string());
+                }
             }
             Err(error) => {
                 let state = state_for(&error);
@@ -2082,6 +2095,9 @@ impl Engine {
             else {
                 continue;
             };
+            if blocked_by(snapshot, window).is_some() {
+                continue;
+            }
 
             let mut already = Vec::new();
             for kind in notify::Kind::ALL {
@@ -5375,12 +5391,39 @@ svg = '''
         harness.engine.poll_due(Instant::now()).await;
         assert!(harness.notices.summaries().is_empty());
     }
+    #[tokio::test]
+    async fn a_full_week_is_published_as_the_five_hour_window_parent() {
+        let mut reading = two_windows(0.0, 100.0, 3600);
+        reading.provider = ProviderId::new("codex");
+        let mut harness = with_provider(Fake::new(vec![Ok(reading)]));
+
+        harness.engine.poll_due(Instant::now()).await;
+
+        let published = harness.published();
+        let five_hour = published[0]
+            .windows
+            .iter()
+            .find(|window| window.key == "w18000")
+            .expect("five-hour window");
+        assert_eq!(five_hour.blocked_by.as_deref(), Some("w604800"));
+    }
 
     fn notifying(provider: Arc<dyn Provider>) -> Harness {
         Harness::new(
             vec![Account::with_client(provider).with_notify(vec!["w18000".to_owned()])],
             unlocked(),
         )
+    }
+
+    #[tokio::test]
+    async fn a_full_week_silences_notifications_for_its_five_hour_quota() {
+        let mut reading = two_windows(85.0, 100.0, 3600);
+        reading.provider = ProviderId::new("codex");
+        let mut harness = notifying(Fake::new(vec![Ok(reading)]));
+
+        harness.engine.poll_due(Instant::now()).await;
+
+        assert!(harness.notices.summaries().is_empty());
     }
 
     #[tokio::test]
@@ -5584,13 +5627,23 @@ svg = '''
             .set_preference(Preference::StartupMode(Preferences::STARTUP_DAEMON.into()))
             .await
             .expect("startup mode changed");
-        let preferences = harness
+        harness
             .engine
             .set_preference(Preference::HistoryRetention(
                 Preferences::RETENTION_SIX_MONTHS.into(),
             ))
             .await
             .expect("history retention changed");
+        harness
+            .engine
+            .set_preference(Preference::ColumnsAuto(false))
+            .await
+            .expect("column mode changed");
+        let preferences = harness
+            .engine
+            .set_preference(Preference::MaxColumns(7))
+            .await
+            .expect("column ceiling changed");
 
         assert_eq!(
             preferences,
@@ -5605,6 +5658,8 @@ svg = '''
                 proxy_port: 0,
                 refresh_mode: Preferences::REFRESH_AUTO.into(),
                 refresh_minutes: 5,
+                columns_auto: Some(false),
+                max_columns: Some(7),
             }
         );
         assert_eq!(

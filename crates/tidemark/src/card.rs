@@ -147,6 +147,26 @@ fn account_toggle_state(extra_accounts: usize, expanded: bool) -> AccountToggleS
     }
 }
 
+/// The full window that currently makes this status window unavailable.
+fn blocking_key<'a>(status: &'a ProviderStatus, key: &str) -> Option<&'a str> {
+    status
+        .windows
+        .iter()
+        .find(|window| window.key == key)
+        .and_then(|window| window.blocked_by.as_deref())
+}
+
+/// Whether a card row's window is unavailable because another window consumed it.
+///
+/// A row without a window — a plugin's free-form text or a plain value — is never
+/// blocked: it does not describe a quota that could stop being enforced.
+fn row_blocked(status: &ProviderStatus, metric: &Metric) -> bool {
+    metric
+        .window
+        .as_ref()
+        .is_some_and(|window| blocking_key(status, &window.key).is_some())
+}
+
 /// A provider card.
 #[derive(Debug)]
 pub struct Card {
@@ -707,7 +727,7 @@ impl Card {
                     },
                 );
                 self.set_balance_line(balance);
-                self.rebuild_rows(rest)
+                self.rebuild_rows(rest, status)
             }
             (None, Some(balance)) => {
                 self.reading.set_visible(false);
@@ -716,7 +736,7 @@ impl Card {
                 self.footer.set_vexpand(false);
                 self.set_absolutes(None);
                 self.set_balance_line(None);
-                self.rebuild_rows(&[])
+                self.rebuild_rows(&[], status)
             }
             (None, None) => {
                 self.reading.set_visible(false);
@@ -730,7 +750,7 @@ impl Card {
                 // the settings pane.
                 self.blank.set_tooltip_text(Some(&message));
                 self.blank.set_label(&message);
-                self.rebuild_rows(&[])
+                self.rebuild_rows(&[], status)
             }
         };
 
@@ -769,14 +789,25 @@ impl Card {
         } else {
             None
         };
-        match window.and_then(|window| window.seconds_until_reset(now)) {
-            Some(seconds) => {
-                self.reset.set_label(&format::resets_in(seconds));
-                self.reset.set_visible(true);
+        // A window another window has consumed is drawn dimmed, with its reset line gone:
+        // the reset belongs to a quota that is not being enforced right now.
+        let blocked = window
+            .as_ref()
+            .is_some_and(|window| blocking_key(&shown.status, window.key.as_str()).is_some());
+        self.headline.set_opacity(if blocked { 0.5 } else { 1.0 });
+        self.bar.set_blocked(blocked);
+        if blocked {
+            self.reset.set_visible(false);
+        } else {
+            match window.and_then(|window| window.seconds_until_reset(now)) {
+                Some(seconds) => {
+                    self.reset.set_label(&format::resets_in(seconds));
+                    self.reset.set_visible(true);
+                }
+                // No reset time is the ordinary case for the window this card leads with. The
+                // line is removed rather than filled with a guess.
+                None => self.reset.set_visible(false),
             }
-            // No reset time is the ordinary case for the window this card leads with. The
-            // line is removed rather than filled with a guess.
-            None => self.reset.set_visible(false),
         }
 
         for (bar, row) in shown
@@ -854,7 +885,7 @@ impl Card {
     }
 
     /// Replaces the thin rows, returning their bars in the same order.
-    fn rebuild_rows(&self, rows: &[Row<'_>]) -> Vec<QuotaBar> {
+    fn rebuild_rows(&self, rows: &[Row<'_>], status: &ProviderStatus) -> Vec<QuotaBar> {
         while let Some(child) = self.rows.first_child() {
             self.rows.remove(&child);
         }
@@ -871,6 +902,8 @@ impl Card {
                     .ellipsize(gtk::pango::EllipsizeMode::End)
                     .css_classes(["dim-label", "caption"])
                     .build();
+                let blocked = row_blocked(status, &resolved.metric);
+                let opacity = if blocked { 0.5 } else { 1.0 };
                 let value = gtk::Label::builder()
                     .label(resolved.text().unwrap_or_default())
                     .halign(gtk::Align::End)
@@ -880,12 +913,14 @@ impl Card {
                     .xalign(1.0)
                     .css_classes(["dim-label", "caption", "numeric"])
                     .build();
+                value.set_opacity(opacity);
 
                 let row = gtk::Box::builder().spacing(8).build();
                 row.append(&title);
                 let bar = (resolved.kind == WidgetKind::Gauge).then(|| {
                     let bar = QuotaBar::new(ROW_BAR);
                     bar.widget().set_valign(gtk::Align::Center);
+                    bar.set_blocked(blocked);
                     value.set_hexpand(false);
                     row.append(bar.widget());
                     bar
@@ -998,6 +1033,7 @@ mod tests {
             used_percent,
             resets_at: Some(CAPTURED_AT + 3_600),
             length_secs,
+            blocked_by: None,
         }
     }
 
@@ -1006,6 +1042,15 @@ mod tests {
         status.captured_at = Some(CAPTURED_AT);
         status.windows = windows;
         status
+    }
+    #[test]
+    fn a_blocked_five_hour_window_exposes_its_full_parent() {
+        let mut five_hour = window(Some(18_000), 0.0);
+        five_hour.key = "w18000".into();
+        five_hour.blocked_by = Some("w604800".into());
+        let status = status_with(vec![five_hour]);
+
+        assert_eq!(blocking_key(&status, "w18000"), Some("w604800"));
     }
 
     fn numeric_metric(id: &str) -> tidemark_types::Metric {

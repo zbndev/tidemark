@@ -245,6 +245,7 @@ mod tests {
             used_percent: 50.0,
             resets_at: Some(18_000),
             length_secs: Some(18_000),
+            blocked_by: None,
         }
     }
 

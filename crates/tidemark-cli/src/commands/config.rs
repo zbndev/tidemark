@@ -36,6 +36,15 @@ pub async fn run(proxy: &DaemonProxy<'_>, command: ConfigCommand) -> Result<Exit
             }
             proxy.set_refresh_mode(&mode).await?;
         }
+        ConfigCommand::Columns { mode, max } => {
+            // The ceiling first, mirroring the refresh shape: the mode is what the
+            // window reads, and the ceiling it would read should already be the new one.
+            if let Some(max) = max {
+                proxy.set_max_columns(max).await?;
+            }
+            proxy.set_columns_auto(&mode == "auto").await?;
+        }
+
         ConfigCommand::Retention { retention } => proxy.set_history_retention(&retention).await?,
         ConfigCommand::Theme { theme } => proxy.set_theme(&theme).await?,
         ConfigCommand::Startup { mode } => proxy.set_startup_mode(&mode).await?,
@@ -66,12 +75,25 @@ fn show(preferences: &Preferences) -> String {
     row("retention", &preferences.history_retention);
     row("refresh", &preferences.refresh_mode);
     row("refresh-minutes", &preferences.refresh_minutes.to_string());
+    row(
+        "columns",
+        columns_mode(preferences.columns_auto.unwrap_or(true)),
+    );
+    row(
+        "columns-max",
+        &preferences.max_columns.unwrap_or(3).to_string(),
+    );
     row("proxy", &preferences.proxy_mode);
     row("proxy-host", &preferences.proxy_host);
     row("proxy-port", &preferences.proxy_port.to_string());
     out
 }
 
+/// The word `config columns` takes for a switch state, so `show` output feeds back in the
+/// way the refresh rows do.
+const fn columns_mode(auto: bool) -> &'static str {
+    if auto { "auto" } else { "manual" }
+}
 const fn switch(enabled: bool) -> &'static str {
     if enabled { "on" } else { "off" }
 }
@@ -102,5 +124,31 @@ mod tests {
             ..Preferences::default()
         };
         assert!(show(&preferences).contains("theme               system"));
+    }
+
+    #[test]
+    fn the_column_settings_print_as_named_modes_with_a_ceiling() {
+        let preferences = Preferences {
+            columns_auto: Some(false),
+            max_columns: Some(7),
+            ..Preferences::default()
+        };
+        let out = show(&preferences);
+        assert!(out.contains("columns             manual"), "{out}");
+        assert!(out.contains("columns-max         7"), "{out}");
+    }
+
+    /// A daemon too old to publish the column settings sends them absent, which means
+    /// Auto over the ceiling the grid was built around.
+    #[test]
+    fn absent_column_settings_read_as_auto_with_the_builtin_ceiling() {
+        let preferences = Preferences {
+            columns_auto: None,
+            max_columns: None,
+            ..Preferences::default()
+        };
+        let out = show(&preferences);
+        assert!(out.contains("columns             auto"), "{out}");
+        assert!(out.contains("columns-max         3"), "{out}");
     }
 }

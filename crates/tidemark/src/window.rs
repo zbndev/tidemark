@@ -677,6 +677,13 @@ impl MainWindow {
                 .as_deref()
                 .unwrap_or(AppPreferences::THEME_SYSTEM),
         );
+        // Absent means Auto: an older daemon never says, and the grid's uncapped default
+        // is the layout Auto describes. A ceiling of zero cannot arrive — the daemon
+        // refuses it before the dictionary is ever published.
+        let columns_auto = preferences.columns_auto.unwrap_or(true);
+        self.grid.set_max_columns(
+            (!columns_auto).then(|| preferences.max_columns.unwrap_or(3) as usize),
+        );
         *self.preferences.borrow_mut() = preferences;
         if let Some(dialog) = self.preferences_dialog.get() {
             dialog.apply(&self.preferences.borrow(), &self.data_info.borrow());
