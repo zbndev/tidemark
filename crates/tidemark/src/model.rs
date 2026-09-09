@@ -194,6 +194,7 @@ mod tests {
             external: None,
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         }];
         let titles = titles(&definitions);
         assert_eq!(name(&titles, "clinepass"), "ClinePass");

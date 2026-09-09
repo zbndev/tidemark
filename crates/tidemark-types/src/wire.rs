@@ -352,6 +352,31 @@ pub struct AuthSelection {
     pub candidate: Option<String>,
 }
 
+/// What an installed plugin declares about itself, for the import preview and the settings
+/// pane.
+///
+/// Published rather than read from the file by the client: the client has no parser, and the
+/// two facts a user must see before the first request — which header the key goes in, and
+/// what goes in front of it — are exactly the ones a client must not have to guess at.
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct PluginInfo {
+    /// Reverse-DNS provider id.
+    pub id: String,
+    /// The author's display name.
+    pub name: String,
+    /// The author's SemVer string. Informational.
+    pub plugin_version: String,
+    /// `GET` or `POST`.
+    pub method: String,
+    /// The header the account's key is sent in.
+    pub api_key_header: String,
+    /// What precedes the key in that header.
+    pub api_key_prefix: String,
+    /// Whether a sanitized mark was installed for this definition.
+    pub has_mark: bool,
+}
+
 /// Presentation metadata for one provider in the daemon's catalog.
 #[derive(Debug, Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
 #[zvariant(signature = "a{sv}")]
@@ -366,6 +391,9 @@ pub struct ProviderDefinition {
     /// supports one. Its dynamic candidates are fetched separately from the daemon.
     pub browser_auth: Option<AuthSelector>,
     pub options: Vec<ProviderOption>,
+    /// What an installed plugin declares, and absent for every compiled-in provider — which
+    /// is also how a client tells the two apart without a list of built-in slugs.
+    pub plugin: Option<PluginInfo>,
 }
 
 impl ProviderDefinition {
@@ -897,6 +925,7 @@ mod tests {
             }),
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         };
         let encoded = to_bytes(Context::new_dbus(LE, 0), &original).expect("encodes");
         let (decoded, _): (ProviderDefinition, _) = encoded.deserialize().expect("decodes");
@@ -930,6 +959,7 @@ mod tests {
             external: None,
             browser_auth: Some(selector.clone()),
             options: Vec::new(),
+            plugin: None,
         };
         let candidate = AuthCandidate {
             id: "firefox".into(),
@@ -985,6 +1015,7 @@ mod tests {
             external: None,
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         };
         assert_eq!(definition.auth_option(), None);
     }

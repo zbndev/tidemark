@@ -245,6 +245,7 @@ mod tests {
             external: None,
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         }
     }
 
@@ -283,6 +284,7 @@ mod tests {
             external,
             browser_auth: None,
             options,
+            plugin: None,
         }
     }
 
@@ -578,6 +580,7 @@ mod tests {
                     choices: Vec::new(),
                 },
             ],
+            plugin: None,
         }
     }
 

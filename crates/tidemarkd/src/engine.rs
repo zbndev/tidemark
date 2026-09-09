@@ -415,6 +415,18 @@ impl Account {
         self
     }
 
+    /// What this account is waiting on before it can poll at all, published before its
+    /// first poll rather than discovered at it.
+    ///
+    /// For an account whose configuration is genuinely incomplete — a plugin account with no
+    /// endpoint yet. Leaving it `Pending` with no message would show a card that looks like
+    /// it is about to fetch something, when nothing will ever be fetched until the user
+    /// fills the missing value in.
+    pub fn with_message(mut self, message: &str) -> Self {
+        self.set_state(ProviderState::Pending, Some(message.to_owned()));
+        self
+    }
+
     /// Replaces the set of windows this account notifies about.
     pub fn with_notify(mut self, windows: Vec<String>) -> Self {
         self.status.notify = windows;

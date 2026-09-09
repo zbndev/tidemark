@@ -1889,6 +1889,7 @@ mod tests {
             external: None,
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         }]
     }
 
@@ -1904,6 +1905,7 @@ mod tests {
                 external: None,
                 browser_auth: None,
                 options: Vec::new(),
+                plugin: None,
             })
             .collect()
     }
@@ -2002,6 +2004,7 @@ mod tests {
             external: None,
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         };
         let (daemon, _secrets, _commands) =
             daemon_over_catalog(Vec::new(), vec![definition.clone()]).await;

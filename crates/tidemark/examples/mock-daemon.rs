@@ -71,6 +71,7 @@ impl MockDaemon {
                     options: external.iter().map(source_option).collect(),
                     external,
                     browser_auth: None,
+                    plugin: None,
                 }
             })
             .collect()

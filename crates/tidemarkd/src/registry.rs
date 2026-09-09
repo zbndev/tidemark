@@ -24,6 +24,8 @@ use std::sync::Arc;
 
 use tidemark_core::config::Config;
 use tidemark_core::oauth;
+use tidemark_core::plugin::Definition;
+use tidemark_core::plugin::provider::PluginProvider;
 use tidemark_core::providers::keyed::{
     self, abacus, aiand, alibaba, augment, codebuff, commandcode, cursor, deepgram, deepinfra,
     factory, fireworks, gemini, grok, groq, ibmbob, kilo, litellm, llmproxy, longcat, manus, mimo,
@@ -41,7 +43,7 @@ use tidemark_core::providers::{
 use tidemark_core::secrets::Secrets;
 use tidemark_types::{
     AccountId, AuthMode, AuthSelection, AuthSelector, CredentialKind, ExternalLogin, OptionChoice,
-    ProviderDefinition, ProviderId, ProviderOption, ProviderStatus,
+    PluginInfo, ProviderDefinition, ProviderId, ProviderOption, ProviderStatus,
 };
 
 use crate::engine::Account;
@@ -240,6 +242,19 @@ pub fn title(provider: &str) -> Option<&'static str> {
 /// `keyed.rs` and a line in that table, not a new stanza here. The hand-written
 /// key-authenticated providers come last, from the table above, in the same shape.
 pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
+    catalog_with_plugins(config, &[])
+}
+
+/// The compiled catalog, followed by the installed plugin definitions.
+///
+/// Plugins come last and in installation order, so adding one never moves a compiled
+/// provider in the settings dialog. A plugin publishes no [`ProviderOption`]: its whole
+/// configuration is its per-account endpoint, which is not a shared provider setting — see
+/// `Config::plugin_endpoint`.
+pub fn catalog_with_plugins(
+    config: &Config,
+    plugins: &[Arc<Definition>],
+) -> Vec<ProviderDefinition> {
     let mut definitions: Vec<ProviderDefinition> = OAUTH
         .iter()
         .map(|entry| ProviderDefinition {
@@ -256,6 +271,7 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
             }),
             browser_auth: None,
             options: options(entry.slug, config),
+            plugin: None,
         })
         .collect();
     definitions.extend(keyed::CATALOG.iter().map(|spec| ProviderDefinition {
@@ -266,13 +282,38 @@ pub fn catalog(config: &Config) -> Vec<ProviderDefinition> {
         external: None,
         browser_auth: None,
         options: options(spec.id, config),
+        plugin: None,
     }));
     definitions.extend(
         HAND_WRITTEN
             .iter()
             .map(|spec| hand_written_definition(spec, config)),
     );
+    definitions.extend(plugins.iter().map(|definition| ProviderDefinition {
+        provider: definition.id.clone(),
+        title: definition.name.clone(),
+        credential: CredentialKind::Key.as_wire().to_owned(),
+        credential_hint: key_hint(definition),
+        external: None,
+        browser_auth: None,
+        options: Vec::new(),
+        plugin: Some(PluginInfo {
+            id: definition.id.clone(),
+            name: definition.name.clone(),
+            plugin_version: definition.plugin_version.clone(),
+            method: definition.method.as_str().to_owned(),
+            api_key_header: definition.api_key_header.clone(),
+            api_key_prefix: definition.api_key_prefix.clone(),
+            has_mark: definition.icon_svg.is_some(),
+        }),
+    }));
     definitions
+}
+
+/// One sentence on where a plugin account's key comes from. Only the author's own name is
+/// available to say it with: nothing in the file names a host, by design.
+fn key_hint(definition: &Definition) -> String {
+    format!("Paste the API key {} issues.", definition.name)
 }
 
 /// One hand-written provider as the settings dialog sees it.
@@ -289,7 +330,140 @@ fn hand_written_definition(spec: &keyed::HandSpec, config: &Config) -> ProviderD
         external: None,
         browser_auth: browser_auth(spec.id),
         options: options(spec.id, config),
+        plugin: None,
     }
+}
+
+/// Every provider id this build compiles in, and therefore every id a plugin may not claim.
+///
+/// The `reserved` argument every `schema::parse` call takes. A plugin that could take `zai`
+/// would shadow the compiled provider the moment it was installed, and — worse — inherit its
+/// history and its keyring entries, because the id is the storage key for both. Collected
+/// from the same three tables the catalog is built from, so a provider added there is
+/// reserved without anyone remembering to add it here too.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the reserved list every import checks against; wired up by the D-Bus import methods"
+    )
+)]
+pub fn builtin_ids() -> Vec<&'static str> {
+    OAUTH
+        .iter()
+        .map(|entry| entry.slug)
+        .chain(keyed::CATALOG.iter().map(|spec| spec.id))
+        .chain(HAND_WRITTEN.iter().map(|spec| spec.id))
+        .collect()
+}
+
+/// One plugin account.
+///
+/// The endpoint is resolved here rather than inside the factory, the way every
+/// option-dependent provider resolves its URL at build time: an endpoint edit drops this
+/// account's client, and the rebuild reads the file again.
+///
+/// An account with no usable endpoint is still an account — published with a message saying
+/// what is missing rather than omitted, because a provider the user configured and then
+/// cannot see is indistinguishable from one Tidemark forgot about. The same sentence is what
+/// the factory refuses with, so nothing polls on a half-configured account either.
+pub fn plugin_account(
+    definition: &Arc<Definition>,
+    account: &AccountId,
+    config: &Config,
+) -> Account {
+    let hint = key_hint(definition);
+    let endpoint = match config.plugin_endpoint(&definition.id, account.as_str()) {
+        Ok(Some(endpoint)) => Ok(endpoint),
+        Ok(None) => Err(NO_ENDPOINT.to_owned()),
+        // A present-but-invalid endpoint is the user's own file saying something this build
+        // cannot act on. It is reported as it stands rather than treated as unconfigured,
+        // which would tell them to fill in a field they have already filled in.
+        Err(error) => Err(error.to_string()),
+    };
+    let missing = endpoint.as_ref().err().cloned();
+    let definition = Arc::clone(definition);
+    let built = Account::new(
+        ProviderId::new(&definition.id),
+        account.clone(),
+        Box::new(move |account_id, credential, _options| {
+            let endpoint = endpoint.clone().map_err(ProviderError::Local)?;
+            Ok(Arc::new(PluginProvider::new(
+                Arc::clone(&definition),
+                account_id.clone(),
+                endpoint,
+                credential,
+            )?) as Arc<dyn Provider>)
+        }),
+    )
+    .with_credential(CredentialKind::Key)
+    .with_hint(&hint);
+    match missing {
+        Some(message) => built.with_message(&message),
+        None => built,
+    }
+}
+
+/// What an account with nothing to poll says, in one place: the factory refuses with it and
+/// the unconfigured account is published with it, so a card reads the same either way.
+const NO_ENDPOINT: &str = "this account has no endpoint yet; set the metrics URL for it";
+
+/// Every configured account the daemon polls, including the ones a plugin owns.
+///
+/// A configured slug no compiled entry claims is looked for among the installed definitions
+/// before it is given up on, which is the whole difference from [`accounts`].
+pub fn accounts_with_plugins(
+    secrets: &Arc<dyn Secrets>,
+    config: &Config,
+    plugins: &[Arc<Definition>],
+) -> Result<Vec<Account>, ProviderError> {
+    let providers = config
+        .providers()
+        .map_err(|error| ProviderError::Local(error.to_string()))?;
+    let mut accounts = Vec::with_capacity(providers.len());
+    for provider in providers {
+        for account_id in config
+            .accounts(&provider)
+            .map_err(|error| ProviderError::Local(error.to_string()))?
+        {
+            let account_id = AccountId::new(account_id);
+            if let Some(account) = account(&provider, &account_id, secrets, config)? {
+                accounts.push(account);
+                continue;
+            }
+            match plugins.iter().find(|definition| definition.id == provider) {
+                Some(definition) => accounts.push(plugin_account(definition, &account_id, config)),
+                // A definition the user removed, or one that stopped validating on this
+                // build. The config keeps naming it, because the accounts are still theirs
+                // to remove; nothing polls it in the meantime.
+                None => tracing::warn!(
+                    provider,
+                    account = %account_id,
+                    "configured provider is unsupported by this build"
+                ),
+            }
+        }
+    }
+    Ok(accounts)
+}
+
+/// An installed plugin's own name, for the places the daemon speaks to a person with only a
+/// slug in hand — above all a notification, which must say `Acme AI` and not `Com.acme.quota`.
+///
+/// Separate from [`title`] because a plugin's name lives in an installed file rather than in
+/// the binary, so it cannot be `&'static str`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read by the notifier once the engine owns the installed definitions"
+    )
+)]
+pub fn plugin_title<'a>(provider: &str, plugins: &'a [Arc<Definition>]) -> Option<&'a str> {
+    plugins
+        .iter()
+        .find(|definition| definition.id == provider)
+        .map(|definition| definition.name.as_str())
 }
 
 /// Builds one configured account, or returns `None` for a slug this build does not support.
@@ -472,27 +646,7 @@ pub fn accounts(
     secrets: &Arc<dyn Secrets>,
     config: &Config,
 ) -> Result<Vec<Account>, ProviderError> {
-    let providers = config
-        .providers()
-        .map_err(|error| ProviderError::Local(error.to_string()))?;
-    let mut accounts = Vec::with_capacity(providers.len());
-    for provider in providers {
-        for account_id in config
-            .accounts(&provider)
-            .map_err(|error| ProviderError::Local(error.to_string()))?
-        {
-            let account_id = AccountId::new(account_id);
-            match account(&provider, &account_id, secrets, config)? {
-                Some(account) => accounts.push(account),
-                None => tracing::warn!(
-                    provider,
-                    account = %account_id,
-                    "configured provider is unsupported by this build"
-                ),
-            }
-        }
-    }
-    Ok(accounts)
+    accounts_with_plugins(secrets, config, &[])
 }
 
 /// Which of a provider's windows the user asked to be notified about.
@@ -905,6 +1059,7 @@ fn hand_written_account(spec: &'static keyed::HandSpec, account: &AccountId) -> 
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use tidemark_core::plugin::provider::Endpoint;
     use tidemark_core::providers::{BoxFuture, Credential, zai};
     use tidemark_core::secrets::{Kind, SecretError};
 
@@ -1934,5 +2089,168 @@ mod tests {
         assert_eq!(region.value, "bigmodel-cn");
         assert_eq!(region.choices.len(), 2);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A minimal plugin file, with a mark, parsed the way the store parses one.
+    const PLUGIN_FILE: &str = r#"
+format_version = 1
+
+[provider]
+id = "com.acme.quota"
+name = "Acme AI"
+plugin_version = "1.0.0"
+
+[request]
+method = "GET"
+api_key_header = "X-Acme-Key"
+api_key_prefix = ""
+
+[parser]
+language = "lua54"
+source = '''
+function parse(response, context)
+    return { metrics = {}, card = {}, details = {} }
+end
+'''
+
+[icon]
+svg = '''
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><path fill="currentColor" d="M0 0h64v64H0z"/></svg>
+'''
+"#;
+
+    /// One installed definition, validated by the real schema rather than hand-built, so a
+    /// registry test cannot drift from what an actual import produces.
+    fn test_definition(id: &str, name: &str) -> Arc<Definition> {
+        let file = PLUGIN_FILE
+            .replace("id = \"com.acme.quota\"", &format!("id = \"{id}\""))
+            .replace("name = \"Acme AI\"", &format!("name = \"{name}\""));
+        Arc::new(
+            tidemark_core::plugin::schema::parse(file.as_bytes(), &[]).expect("a valid definition"),
+        )
+    }
+
+    #[test]
+    fn the_catalog_lists_installed_plugins_after_the_compiled_providers() {
+        let config = empty_config();
+        let plugins = vec![test_definition("com.acme.quota", "Acme AI")];
+        let catalog = catalog_with_plugins(&config, &plugins);
+        let last = catalog.last().expect("non-empty");
+        assert_eq!(last.provider, "com.acme.quota");
+        assert_eq!(last.title, "Acme AI");
+        assert_eq!(last.credential, CredentialKind::Key.as_wire());
+        let info = last
+            .plugin
+            .as_ref()
+            .expect("a plugin publishes what it declared");
+        assert_eq!(info.method, "GET");
+        assert_eq!(info.api_key_header, "X-Acme-Key");
+        assert_eq!(info.api_key_prefix, "");
+        assert!(info.has_mark);
+    }
+
+    #[test]
+    fn a_compiled_provider_publishes_no_plugin_metadata() {
+        let catalog = catalog_with_plugins(&empty_config(), &[]);
+        assert!(catalog.iter().all(|definition| definition.plugin.is_none()));
+    }
+
+    #[test]
+    fn every_built_in_id_is_reserved_against_a_plugin_claiming_it() {
+        let ids = builtin_ids();
+        for expected in ["zai", "claude", "codex", "antigravity", "nanogpt"] {
+            assert!(ids.contains(&expected), "{expected} must be reserved");
+        }
+        assert_eq!(
+            ids.len(),
+            catalog_with_plugins(&empty_config(), &[]).len(),
+            "the reserved list and the compiled catalog are the same set"
+        );
+    }
+
+    #[test]
+    fn a_plugin_account_is_built_from_its_configured_endpoint() {
+        let path = scratch_config("plugin-endpoint", "");
+        let mut config = Config::at(path.clone()).expect("parses");
+        config.add_provider("com.acme.quota").expect("adds");
+        config
+            .set_plugin_endpoint(
+                "com.acme.quota",
+                "default",
+                &Endpoint {
+                    url: "https://a.test/u".into(),
+                    allow_insecure_http: false,
+                },
+            )
+            .expect("writes");
+        let account = plugin_account(
+            &test_definition("com.acme.quota", "Acme AI"),
+            &AccountId::default(),
+            &config,
+        );
+        assert_eq!(account.provider().as_str(), "com.acme.quota");
+        assert_eq!(account.status().credential.as_deref(), Some("key"));
+        assert_eq!(
+            account.status().message,
+            None,
+            "a configured account is waiting on nothing"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_plugin_account_with_no_endpoint_publishes_what_is_missing_instead_of_polling() {
+        let config = empty_config();
+        let account = plugin_account(
+            &test_definition("com.acme.quota", "Acme AI"),
+            &AccountId::default(),
+            &config,
+        );
+        let message = account.status().message.clone().unwrap_or_default();
+        assert!(
+            message.contains("endpoint"),
+            "the card says what to fill in: {message}"
+        );
+    }
+
+    #[test]
+    fn a_configured_plugin_account_is_among_the_accounts_the_daemon_polls() {
+        let path = scratch_config("plugin-accounts", "");
+        let mut config = Config::at(path.clone()).expect("parses");
+        config.add_provider("com.acme.quota").expect("adds");
+        config
+            .set_plugin_endpoint(
+                "com.acme.quota",
+                "default",
+                &Endpoint {
+                    url: "https://a.test/u".into(),
+                    allow_insecure_http: false,
+                },
+            )
+            .expect("writes");
+        let plugins = vec![test_definition("com.acme.quota", "Acme AI")];
+        let accounts = accounts_with_plugins(&secrets(), &config, &plugins).expect("builds");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].provider().as_str(), "com.acme.quota");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_configured_provider_whose_definition_is_gone_is_warned_about_not_polled() {
+        let path = scratch_config("plugin-missing", "providers = [\"com.acme.quota\"]\n");
+        let config = Config::at(path.clone()).expect("parses");
+        assert!(
+            accounts_with_plugins(&secrets(), &config, &[])
+                .expect("builds")
+                .is_empty()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_plugin_is_titled_by_its_own_name_in_notifications() {
+        let plugins = vec![test_definition("com.acme.quota", "Acme AI")];
+        assert_eq!(plugin_title("com.acme.quota", &plugins), Some("Acme AI"));
+        assert_eq!(plugin_title("zai", &plugins), None);
     }
 }

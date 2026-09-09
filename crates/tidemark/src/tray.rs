@@ -1051,6 +1051,7 @@ mod tests {
             external: None,
             browser_auth: None,
             options: Vec::new(),
+            plugin: None,
         }]);
         assert_eq!(
             entries(&[status], &titles)[0].line(),
