@@ -18,7 +18,7 @@ pub mod provider;
 pub mod schema;
 pub mod svg;
 
-use tidemark_types::{Presentation, Snapshot};
+pub use crate::providers::Reading;
 
 /// The one HTTP verb a plugin may declare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,15 +65,6 @@ pub struct Definition {
     /// The exact validated file bytes, stored unchanged so the definition stays
     /// inspectable and exportable.
     pub bytes: Vec<u8>,
-}
-
-/// What one plugin reading produced.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Reading {
-    /// The windows, for history, pace and notifications.
-    pub snapshot: Snapshot,
-    /// The layout, exactly as the plugin ordered it.
-    pub presentation: Presentation,
 }
 
 /// A plugin failure, naming the one stage it happened in.

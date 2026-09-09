@@ -16,7 +16,7 @@ use tidemark_core::config::Config;
 use tidemark_core::plugin;
 use tidemark_core::providers::http::{self, Proxy};
 use tidemark_core::providers::keyed::session;
-use tidemark_core::providers::{Credential, Provider, ProviderError, Source};
+use tidemark_core::providers::{Credential, Provider, ProviderError, Reading, Source};
 use tidemark_core::secrets::{Kind, SecretError, Secrets};
 use tidemark_core::storage::{History, IngestReport};
 use tidemark_types::{
@@ -1797,7 +1797,7 @@ impl Engine {
         let mut fetches = JoinSet::new();
         for &index in &due {
             if let Some(client) = self.accounts[index].client.clone() {
-                fetches.spawn(async move { (index, client.fetch().await) });
+                fetches.spawn(async move { (index, client.fetch_reading().await) });
             }
         }
 
@@ -1946,11 +1946,13 @@ impl Engine {
         }
     }
     /// Files one fetch result and publishes the account.
-    async fn apply(&mut self, index: usize, result: Result<Snapshot, ProviderError>) {
+    async fn apply(&mut self, index: usize, result: Result<Reading, ProviderError>) {
         match result {
-            Ok(snapshot) => {
+            Ok(Reading {
+                snapshot,
+                presentation,
+            }) => {
                 self.record(index, &snapshot).await;
-                let presentation = tidemark_core::presentation::from_snapshot(&snapshot);
                 let account = &mut self.accounts[index];
                 account.failures = 0;
                 account.retry_after = None;
@@ -2435,8 +2437,10 @@ mod tests {
     use crate::notify::{Notice, Notifier, NotifyError};
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use tidemark_core::providers::BoxFuture;
-    use tidemark_types::{AuthCandidate, AuthSelection, Window, WindowKey, WindowLength};
+    use tidemark_core::providers::{BoxFuture, Reading};
+    use tidemark_types::{
+        AuthCandidate, AuthSelection, Field, Widget, Window, WindowKey, WindowLength,
+    };
 
     #[test]
     fn a_missing_cli_credential_has_its_own_published_state() {
@@ -2565,6 +2569,34 @@ mod tests {
                 .pop()
                 .unwrap_or(Err(ProviderError::Http { status: 503 }));
             Box::pin(async move { answer })
+        }
+    }
+
+    /// A provider whose card cannot be reconstructed from its snapshot: the window still
+    /// belongs in history, while the provider deliberately presents its percentage as a
+    /// plain value rather than a gauge.
+    #[derive(Debug)]
+    struct PresentedFake;
+
+    impl Provider for PresentedFake {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("fake")
+        }
+
+        fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+            Box::pin(async { Ok(snapshot(42.0, 18_000)) })
+        }
+
+        fn fetch_reading(&self) -> BoxFuture<'_, Result<Reading, ProviderError>> {
+            Box::pin(async {
+                let snapshot = snapshot(42.0, 18_000);
+                let mut presentation = tidemark_core::presentation::from_snapshot(&snapshot);
+                presentation.card = vec![Widget::value("w18000", Field::UsedPercent)];
+                Ok(Reading {
+                    snapshot,
+                    presentation,
+                })
+            })
         }
     }
 
@@ -4875,6 +4907,22 @@ svg = '''
             .expect("a successful poll publishes a layout");
         assert_eq!(presentation.card.len(), 1);
         assert_eq!(presentation.card[0].metric, "w18000");
+    }
+
+    #[tokio::test]
+    async fn polling_publishes_the_providers_presentation_without_rebuilding_it() {
+        let mut harness = with_provider(Arc::new(PresentedFake));
+        harness.engine.poll_due(Instant::now()).await;
+
+        let presentation = harness.engine.accounts()[0]
+            .status()
+            .presentation
+            .as_ref()
+            .expect("a successful poll publishes a layout");
+        assert_eq!(
+            presentation.card[0].kind, "value",
+            "a provider's value widget must not be regenerated as a gauge from its window"
+        );
     }
 
     #[tokio::test]

@@ -343,6 +343,22 @@ async fn a_get_sends_the_declared_header_and_nothing_that_was_not_declared() {
     );
 }
 
+/// A plugin's `Snapshot` carries the history window but cannot carry the semantic card
+/// order. Going through the provider trait must therefore keep the companion presentation:
+/// rebuilding one from the snapshot would silently drop the value widget below.
+#[tokio::test]
+async fn a_plugin_poll_keeps_the_card_layout_declared_by_its_parser() {
+    let server = Recording::start(Reply::json(RESPONSE)).await;
+    let provider = plugin_over(&server, "GET", "X-Acme-Key", "").await;
+
+    let reading = provider.fetch_reading().await.expect("polls");
+
+    assert_eq!(reading.presentation.card.len(), 2);
+    assert_eq!(reading.presentation.card[0].kind, "gauge");
+    assert_eq!(reading.presentation.card[1].kind, "value");
+    assert_eq!(reading.presentation.card[1].metric, "month-requests");
+}
+
 #[tokio::test]
 async fn an_empty_post_sends_no_body_and_no_content_type_a_plugin_chose() {
     let server = Recording::start(Reply::json(RESPONSE)).await;

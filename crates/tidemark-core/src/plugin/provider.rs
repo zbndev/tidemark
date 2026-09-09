@@ -157,6 +157,10 @@ impl Provider for PluginProvider {
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
         Box::pin(async move { poll(self).await.map(|reading| reading.snapshot) })
     }
+
+    fn fetch_reading(&self) -> BoxFuture<'_, Result<Reading, ProviderError>> {
+        Box::pin(poll(self))
+    }
 }
 
 /// One reading, and its layout, kept together for the caller that needs both.
