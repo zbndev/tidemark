@@ -67,3 +67,9 @@ wreq-util = "~0.1.0"
 aes-gcm = "0.11.1"
 getrandom = "0.4.3"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
+[dev-dependencies]
+# zvariant, for tests only: `plugin_provider.rs` encodes a published `ProviderStatus` the
+# way the daemon does and searches the bytes for the account's key. Asserting on the struct
+# would only re-read the fields we already know about; the wire form is what leaves.
+zvariant = "5.15.0"

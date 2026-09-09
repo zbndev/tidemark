@@ -1,0 +1,93 @@
+format_version = 1
+
+[provider]
+id = "com.acme.quota"
+name = "Acme AI"
+plugin_version = "1.0.0"
+
+[request]
+method = "GET"
+api_key_header = "X-Acme-Key"
+api_key_prefix = ""
+
+[parser]
+language = "lua54"
+source = '''
+function parse(response, context)
+    local period = response.lastMonth
+
+    -- A numeric string and a number, read the same way: the endpoint spells its money
+    -- either way depending on the field, and `number` is what makes that not matter.
+    local cost_limit = number(period.limits.cost.amount)
+    local cost_used = number(period.cost.total)
+
+    -- The shape with no `used` in it: what was consumed is the limit less what is left.
+    local request_limit = number(period.requests.limit)
+    local requests_used = request_limit - number(period.requests.remaining)
+
+    local metrics = {
+        {
+            id = "month-cost",
+            title = "Monthly cost",
+            value = cost_used,
+            maximum = cost_limit,
+            remaining = number(period.limits.cost.remaining),
+            used_percent = percent(cost_used, cost_limit),
+            unit = "USD",
+            window = {
+                key = "month",
+                resets_at = parse_time(period.resetsAt),
+                length_seconds = 2592000,
+            },
+        },
+        {
+            id = "month-requests",
+            title = "Requests",
+            value = requests_used,
+            maximum = request_limit,
+            remaining = number(period.requests.remaining),
+            used_percent = percent(requests_used, request_limit),
+        },
+    }
+
+    local card = {
+        gauge("month-cost", { field = "used_percent" }),
+        value("month-requests", { field = "value" }),
+    }
+    local items = {
+        ratio("month-cost", { left = "value", right = "maximum" }),
+    }
+
+    -- A model whose cap is `null` has no percentage to draw, so it is left out rather
+    -- than drawn as an empty bar.
+    for _, model in ipairs(period.models) do
+        local cap = model.limits.requests.amount
+        if not is_null(cap) then
+            local id = "model-" .. model.modelId
+            local used = number(model.requests.used)
+            table.insert(metrics, {
+                id = id,
+                title = model.modelName,
+                value = used,
+                maximum = number(cap),
+                remaining = number(model.limits.requests.remaining),
+                used_percent = percent(used, number(cap)),
+            })
+            table.insert(items, ratio(id, { left = "value", right = "maximum" }))
+        end
+    end
+
+    return {
+        metrics = metrics,
+        card = card,
+        details = { { title = "Limits", items = items } },
+    }
+end
+'''
+
+[icon]
+svg = '''
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <path fill="currentColor" d="M32 6 6 58h12l14-28 14 28h12L32 6Z"/>
+</svg>
+'''

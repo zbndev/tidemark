@@ -1,0 +1,22 @@
+{
+  "lastMonth": {
+    "cost": { "total": "12.5", "currency": "USD" },
+    "limits": { "cost": { "amount": 50, "remaining": 37.5 } },
+    "requests": { "limit": 5000, "remaining": 1240 },
+    "resetsAt": "2026-10-01T00:00:00Z",
+    "models": [
+      {
+        "modelId": "sonnet-5",
+        "modelName": "Sonnet 5",
+        "requests": { "used": 320 },
+        "limits": { "requests": { "amount": 1000, "remaining": 680 } }
+      },
+      {
+        "modelId": "haiku-4-5",
+        "modelName": "Haiku 4.5",
+        "requests": { "used": 74 },
+        "limits": { "requests": { "amount": null, "remaining": null } }
+      }
+    ]
+  }
+}
