@@ -13,6 +13,7 @@
 //!
 //! Every execution gets its own `Lua`. Nothing is shared between accounts or polls.
 
+pub mod api;
 pub mod json;
 
 use super::{PluginError, limits};
@@ -58,6 +59,7 @@ pub fn run(
 
     let value = (|| -> mlua::Result<Value> {
         json::install_null(&lua)?;
+        api::install(&lua)?;
         lua.load(source).set_name("plugin").exec()?;
 
         let context = lua.create_table()?;
@@ -331,6 +333,18 @@ mod tests {
             panic!("a plugin error is a runtime failure")
         };
         assert!(reason.len() <= limits::MAX_ERROR_BYTES);
+    }
+
+    #[test]
+    fn the_host_api_is_bound_before_the_chunk_runs() {
+        // The globals are installed ahead of the top-level chunk, not just ahead of `parse`,
+        // so a plugin may build a table of widgets at load time the way an author expects.
+        let source = "local kind = gauge(\"m\").__widget\n\
+                      function parse(response, context) return kind .. number(\" 7 \") end";
+        assert_eq!(
+            text(&run(source, &json!({}), 0).expect("runs").value),
+            "gauge7"
+        );
     }
 
     #[test]
