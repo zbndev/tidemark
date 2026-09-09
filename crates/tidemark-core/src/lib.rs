@@ -23,3 +23,5 @@ pub mod providers;
 pub mod presentation;
 
 pub mod secrets;
+
+pub mod plugin;
