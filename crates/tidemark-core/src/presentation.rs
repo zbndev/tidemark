@@ -6,6 +6,8 @@
 //! drawn them, and the detail sections become ordered status text. Nothing is invented —
 //! a window with no reset time produces a metric with no reset time.
 
+use std::collections::HashSet;
+
 use tidemark_types::{
     DetailSection, Emphasis, Field, Metric, MetricWindow, Presentation, PresentedSection, Snapshot,
     Timestamp, Widget, Window, WindowLength, ordered_windows,
@@ -30,9 +32,14 @@ pub fn from_snapshot(snapshot: &Snapshot) -> Presentation {
         );
     }
 
+    let mut used_ids: HashSet<String> = snapshot
+        .windows
+        .iter()
+        .map(|window| window.key.to_string())
+        .collect();
     let mut details = Vec::with_capacity(snapshot.details.len());
     for (section_index, section) in snapshot.details.iter().enumerate() {
-        let (section, rows) = detail_section(section_index, section);
+        let (section, rows) = detail_section(section_index, section, &mut used_ids);
         metrics.extend(rows);
         details.push(section);
     }
@@ -67,17 +74,24 @@ fn window_metric(window: &Window) -> Metric {
 
 /// One detail section, with a metric per row.
 ///
-/// The ids are positional — `detail/<section>/<row>` — because a row's label is the
-/// provider's prose and two sections may legitimately use the same one, and a duplicate id
-/// is the one thing the validated model refuses.
+/// The ids are positional because a row's label is the provider's prose and two sections may
+/// legitimately use the same one. A numeric suffix is added only if the natural positional id
+/// is already occupied by a window or an earlier detail row.
 fn detail_section(
     section_index: usize,
     section: &DetailSection,
+    used_ids: &mut HashSet<String>,
 ) -> (PresentedSection, Vec<Metric>) {
     let mut metrics = Vec::with_capacity(section.rows.len());
     let mut items = Vec::with_capacity(section.rows.len());
     for (row_index, row) in section.rows.iter().enumerate() {
-        let id = format!("detail/{section_index}/{row_index}");
+        let base_id = format!("detail/{section_index}/{row_index}");
+        let mut id = base_id.clone();
+        let mut suffix = 1;
+        while !used_ids.insert(id.clone()) {
+            id = format!("{base_id}/{suffix}");
+            suffix += 1;
+        }
         metrics.push(Metric {
             id: id.clone(),
             title: row.label.clone(),
@@ -256,6 +270,27 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), count, "every metric id in one reading is unique");
+    }
+
+    #[test]
+    fn detail_metric_id_cannot_collide_with_a_valid_window_key() {
+        let p = from_snapshot(&snapshot(
+            vec![window("detail/0/0", 60, 1.0, None)],
+            vec![DetailSection {
+                title: "Plan".into(),
+                rows: vec![DetailRow {
+                    label: "Level".into(),
+                    value: "pro".into(),
+                }],
+            }],
+        ));
+        let detail_id = &p.details[0].items[0].metric;
+        let detail = p.metric(detail_id).expect("detail metric is present");
+        assert_eq!(detail.text.as_deref(), Some("pro"));
+        assert!(
+            detail.window.is_none(),
+            "the detail widget must resolve its own metric"
+        );
     }
 
     #[test]
