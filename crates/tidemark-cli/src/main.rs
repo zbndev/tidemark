@@ -122,6 +122,10 @@ async fn run(cli: cli::Cli) -> Result<Exit, Failure> {
                 .await?;
             Ok(Exit::Ok)
         }
+        cli::Command::Plugin { command } => {
+            let proxy = connect::daemon().await?;
+            commands::plugin::run(&proxy, command).await
+        }
         cli::Command::Config { command } => {
             let proxy = connect::daemon().await?;
             commands::config::run(&proxy, command).await
