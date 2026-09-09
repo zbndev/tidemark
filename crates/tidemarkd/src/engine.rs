@@ -1677,10 +1677,11 @@ impl Engine {
         match result {
             Ok(snapshot) => {
                 self.record(index, &snapshot).await;
+                let presentation = tidemark_core::presentation::from_snapshot(&snapshot);
                 let account = &mut self.accounts[index];
                 account.failures = 0;
                 account.retry_after = None;
-                account.status.set_reading(&snapshot);
+                account.status.set_reading(&snapshot, presentation);
             }
             Err(error) => {
                 let state = state_for(&error);
@@ -4364,6 +4365,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_successful_poll_publishes_the_presentation_of_its_reading() {
+        let mut harness = with_provider(Fake::new(vec![Ok(snapshot(42.0, 18_000))]));
+        harness.engine.poll_due(Instant::now()).await;
+
+        let presentation = harness.engine.accounts()[0]
+            .status()
+            .presentation
+            .clone()
+            .expect("a successful poll publishes a layout");
+        assert_eq!(presentation.card.len(), 1);
+        assert_eq!(presentation.card[0].metric, "w18000");
+    }
+
+    #[tokio::test]
     async fn a_failed_poll_keeps_the_numbers_and_changes_the_state() {
         let mut harness = with_provider(Fake::new(vec![
             Ok(snapshot(42.0, 4 * 3600)),
@@ -4380,6 +4395,23 @@ mod tests {
             "the last good reading stays on screen behind the state chip"
         );
         assert!(status.message.is_some(), "and says what went wrong");
+    }
+
+    #[tokio::test]
+    async fn a_failed_poll_keeps_the_last_good_presentation() {
+        let mut harness = with_provider(Fake::new(vec![
+            Ok(snapshot(42.0, 18_000)),
+            Err(ProviderError::Http { status: 500 }),
+        ]));
+        harness.engine.poll_due(Instant::now()).await;
+        harness.poll_again().await;
+
+        let status = harness.engine.accounts()[0].status();
+        assert_eq!(status.state(), Some(ProviderState::Unreachable));
+        assert!(
+            status.presentation.is_some(),
+            "the card keeps showing the last known numbers behind a failure chip"
+        );
     }
 
     #[tokio::test]

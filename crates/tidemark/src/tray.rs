@@ -885,8 +885,8 @@ impl Tray {
 mod tests {
     use super::*;
     use tidemark_types::{
-        AccountId, ProviderDefinition, ProviderId, Snapshot, Timestamp, Window, WindowKey,
-        WindowLength,
+        AccountId, Field, Metric, MetricWindow, Presentation, ProviderDefinition, ProviderId,
+        Snapshot, Timestamp, Widget, Window, WindowKey, WindowLength,
     };
 
     fn window(seconds: u64, used: f64) -> Window {
@@ -903,13 +903,42 @@ mod tests {
     fn reading(provider: &str, account: &str, windows: Vec<Window>) -> ProviderStatus {
         let mut status =
             ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account));
-        status.set_reading(&Snapshot {
+        let snapshot = Snapshot {
             provider: ProviderId::new(provider),
             account: AccountId::new(account),
             captured_at: Timestamp::from_unix(1_785_700_000).expect("plausible"),
             windows,
             details: Vec::new(),
-        });
+        };
+        let presentation = Presentation {
+            metrics: snapshot
+                .windows
+                .iter()
+                .map(|window| Metric {
+                    id: window.key.to_string(),
+                    title: window.title.clone(),
+                    subtitle: window.subtitle.clone(),
+                    value: None,
+                    maximum: None,
+                    remaining: None,
+                    used_percent: Some(window.used_percent),
+                    text: None,
+                    unit: None,
+                    window: Some(MetricWindow {
+                        key: window.key.to_string(),
+                        resets_at: window.resets_at.map(Timestamp::as_unix),
+                        length_secs: window.length.map(WindowLength::as_secs),
+                    }),
+                })
+                .collect(),
+            card: snapshot
+                .windows
+                .iter()
+                .map(|window| Widget::gauge(window.key.as_str(), Field::UsedPercent))
+                .collect(),
+            details: Vec::new(),
+        };
+        status.set_reading(&snapshot, presentation);
         status
     }
 

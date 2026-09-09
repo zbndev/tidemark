@@ -25,6 +25,7 @@
 //! The same derives give serde a map, so `tidemark usage --json` is the same struct
 //! serialized to JSON rather than a second definition to keep in step.
 
+use crate::semantic::Presentation;
 use crate::snapshot::{AccountId, DetailSection, ProviderId, Snapshot};
 use crate::time::Timestamp;
 use crate::window::{Window, WindowKey, WindowLength};
@@ -611,6 +612,13 @@ pub struct ProviderStatus {
     pub windows: Vec<WindowStatus>,
     /// Everything from the last good reading that does not fit the window model.
     pub details: Vec<DetailSection>,
+    /// How the last good reading is laid out: its metrics, and the card and detail orders
+    /// over them. **Survives a failed poll**, exactly as `windows` does.
+    ///
+    /// Absent while the account has never been polled successfully, and absent from a
+    /// daemon older than the semantic presentation — which a client must draw as "an older
+    /// daemon", never as "a reading with nothing in it".
+    pub presentation: Option<Presentation>,
     /// A [`CredentialKind`] as a string, saying what the credentials dialog should offer
     /// for this account. Absent from a daemon older than the credentials interface.
     pub credential: Option<String>,
@@ -661,6 +669,7 @@ impl ProviderStatus {
             next_poll_at: None,
             windows: Vec::new(),
             details: Vec::new(),
+            presentation: None,
             credential: None,
             has_credential: None,
             credential_hint: None,
@@ -714,8 +723,12 @@ impl ProviderStatus {
         self.message = message;
     }
 
-    /// Replaces the reading, and sets the state to [`ProviderState::Ok`].
-    pub fn set_reading(&mut self, snapshot: &Snapshot) {
+    /// Replaces the reading and its layout, and sets the state to [`ProviderState::Ok`].
+    ///
+    /// The presentation is a parameter rather than something derived here: deriving it
+    /// would put provider conventions in the contract crate, and a plugin's layout is not
+    /// derivable from a `Snapshot` at all.
+    pub fn set_reading(&mut self, snapshot: &Snapshot, presentation: Presentation) {
         self.captured_at = Some(snapshot.captured_at.as_unix());
         self.windows = snapshot
             .windows
@@ -723,6 +736,7 @@ impl ProviderStatus {
             .map(WindowStatus::from_window)
             .collect();
         self.details = snapshot.details.clone();
+        self.presentation = Some(presentation);
         self.set_state(ProviderState::Ok, None);
     }
 
@@ -781,6 +795,7 @@ pub fn account_slug_suggestion(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semantic::{Field, Metric, Presentation, Widget};
     use crate::snapshot::DetailRow;
     use std::collections::HashMap;
     use zvariant::serialized::{Context, Data};
@@ -799,7 +814,7 @@ mod tests {
 
     fn status() -> ProviderStatus {
         let mut status = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::default());
-        status.set_reading(&Snapshot {
+        let snapshot = Snapshot {
             provider: ProviderId::new("zai"),
             account: AccountId::default(),
             captured_at: Timestamp::from_unix(1_785_700_000).expect("plausible"),
@@ -811,13 +826,59 @@ mod tests {
                     value: "pro".into(),
                 }],
             }],
-        });
+        };
+        let presentation = Presentation {
+            metrics: snapshot
+                .windows
+                .iter()
+                .map(|window| Metric {
+                    id: window.key.to_string(),
+                    title: window.title.clone(),
+                    subtitle: None,
+                    value: None,
+                    maximum: None,
+                    remaining: None,
+                    used_percent: Some(window.used_percent),
+                    text: None,
+                    unit: None,
+                    window: None,
+                })
+                .collect(),
+            card: snapshot
+                .windows
+                .iter()
+                .map(|window| Widget::gauge(window.key.as_str(), Field::UsedPercent))
+                .collect(),
+            details: Vec::new(),
+        };
+        status.set_reading(&snapshot, presentation);
         status.next_poll_at = Some(1_785_700_300);
         status
     }
 
     fn encode(status: &ProviderStatus) -> Data<'static, 'static> {
         to_bytes(Context::new_dbus(LE, 0), status).expect("the published shape encodes")
+    }
+
+    #[test]
+    fn a_published_reading_carries_its_presentation_and_survives_a_round_trip() {
+        let status = status();
+        let decoded: HashMap<String, OwnedValue> =
+            encode(&status).deserialize().expect("decodes").0;
+        assert!(decoded.contains_key("presentation"));
+        let presentation = status
+            .presentation
+            .expect("the reading was published with one");
+        assert_eq!(presentation.card.len(), 2, "one gauge per published window");
+    }
+
+    #[test]
+    fn a_status_that_has_never_had_a_reading_publishes_no_presentation() {
+        let pending = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::default());
+        assert!(pending.presentation.is_none());
+        let decoded: HashMap<String, OwnedValue> =
+            encode(&pending).deserialize().expect("decodes").0;
+        assert!(!decoded.contains_key("presentation"), "absent means absent");
     }
 
     #[test]
