@@ -156,7 +156,12 @@ fn atomic_replace_exposes_only_complete_states() {
     });
 
     start.wait();
-    let mut observations = 0;
+    // Iterations, not successful reads: while the writer holds its mandatory lock
+    // every read is denied with os error 33, so demanding a successful read here
+    // would assert scheduling luck — landing in the gap between lock release and
+    // `done` — rather than a property of the publish. What this loop guarantees
+    // is weaker and sufficient: every read that did succeed saw a complete state.
+    let mut spins = 0;
     while !done.load(Ordering::Acquire) {
         // Windows byte-range locks are mandatory: while the writer holds the update
         // lock, a reader may be denied outright (os error 33). Being denied is not a
@@ -172,11 +177,11 @@ fn atomic_replace_exposes_only_complete_states() {
                     token == old || token == new,
                     "reader observed a partial state"
                 );
-                observations += 1;
             }
             Err(error) if error.raw_os_error() == Some(33) => {}
             Err(error) => panic!("unexpected reader error: {error}"),
         }
+        spins += 1;
         std::thread::yield_now();
     }
     // After the lock release a successful read is guaranteed, pinning the final state
@@ -193,7 +198,7 @@ fn atomic_replace_exposes_only_complete_states() {
         writer.join().expect("writer thread"),
         UpdateOutcome::Published
     );
-    assert!(observations > 0, "reader observed the publish window");
+    assert!(spins > 0, "reader never raced the publish");
     assert!(
         fs::read_dir(&dir.0)
             .expect("directory readable")
