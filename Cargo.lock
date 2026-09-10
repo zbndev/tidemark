@@ -1376,7 +1376,7 @@ dependencies = [
  "gio 0.22.8",
  "glib 0.22.8",
  "libc",
- "pango 0.22.8",
+ "pango 0.22.9",
 ]
 
 [[package]]
@@ -1667,7 +1667,7 @@ dependencies = [
  "graphene-rs",
  "gsk4-sys",
  "libc",
- "pango 0.22.8",
+ "pango 0.22.9",
 ]
 
 [[package]]
@@ -1756,7 +1756,7 @@ dependencies = [
  "gtk4-macros",
  "gtk4-sys",
  "libc",
- "pango 0.22.8",
+ "pango 0.22.9",
 ]
 
 [[package]]
@@ -2309,7 +2309,7 @@ dependencies = [
  "glib 0.22.8",
  "gtk4",
  "libadwaita-sys",
- "pango 0.22.8",
+ "pango 0.22.9",
 ]
 
 [[package]]
@@ -2883,9 +2883,9 @@ dependencies = [
 
 [[package]]
 name = "pango"
-version = "0.22.8"
+version = "0.22.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d800d8d0de2ad5d0fb046f5344dbaba14a003cf3dd27cc21d85893d35ea316c"
+checksum = "0b2022dbbd82e1c42bd950a6f1df9b98c796e725dce5ec275e03cbf9772e4efa"
 dependencies = [
  "gio 0.22.8",
  "glib 0.22.8",
@@ -2924,7 +2924,7 @@ checksum = "bd199a0fef965b3ebda91a929a1ab5e7729538882c68e8de38e1904d2e094757"
 dependencies = [
  "cairo-rs 0.22.0",
  "glib 0.22.8",
- "pango 0.22.8",
+ "pango 0.22.9",
  "pangocairo-sys",
 ]
 
@@ -4033,7 +4033,7 @@ dependencies = [
  "gtk4",
  "ksni",
  "libadwaita",
- "pango 0.22.8",
+ "pango 0.22.9",
  "pangocairo",
  "semver",
  "tidemark-ipc",
