@@ -109,6 +109,15 @@ fn a_shape_without_limits_fails_loudly() {
 }
 
 #[test]
+fn a_model_row_without_an_id_fails_loudly() {
+    // A model row that cannot be named cannot be filed: empty and absent ids
+    // are recognized malformations (round-2 adversarial finding), refusing the
+    // whole reading instead of publishing an unnamed `model-` metric.
+    let idless = r#"{"activity":{"cost":"1.0","period":{"ending_at":"2026-09-09T23:05:51Z"},"models":[{"usage":1}]},"limits":{"monthly":{"usage":0}}}"#;
+    refused(idless);
+}
+
+#[test]
 fn a_limits_table_without_usage_fails_loudly() {
     // `usage` is present in every shape this endpoint has served; a monthly
     // table without it is a recognized malformation, and the direct number()

@@ -75,6 +75,12 @@ function parse(response, context)
     table.insert(items, value("cost-4w", { field = "value", format = "currency" }))
 
     for _, model in ipairs(response.activity.models) do
+        -- A model row without a usable id cannot be named, and two rows cannot
+        -- share one: both are recognized malformations of this endpoint's shape
+        -- and refuse the reading, rather than filing an unnamed or colliding row.
+        if model.id == nil or model.id == "" then
+            error("a model row has no id")
+        end
         local id = "model-" .. model.id
         local title = tostring(model.id)
         local used_m = number(model.usage)
