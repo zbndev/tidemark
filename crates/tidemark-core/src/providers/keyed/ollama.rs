@@ -1,13 +1,14 @@
 //! Ollama Cloud usage, read from the browser session that signs in to ollama.com.
 //!
-//! The site meters its cloud plans on the settings page itself: there is no JSON API
-//! behind it, so the numbers are scraped out of server-rendered HTML. The parser is
-//! deliberately shallow — labels, a `data-time` attribute, a percent — rather than a
-//! document model, because the page is HTML and can move; when it moves, the fetch fails
-//! loudly as a malformed page instead of quietly inventing numbers. An expired session
-//! shows up as a bounce to a sign-in landing — recognised by where the request finally
-//! lands, or by the sign-in form served on a 200 — and is reported as a rejected session,
-//! not a broken provider.
+//! The site meters its cloud plans on the settings page itself, so the numbers are
+//! scraped out of server-rendered HTML. (A JSON `/api/usage` endpoint exists, but it is
+//! Bearer-API-key-only and reports no session windows, so the cookie path stays on the
+//! page.) The parser is deliberately shallow — labels, a `data-time` attribute, a
+//! percent — rather than a document model, because the page is HTML and can move; when
+//! it moves, the fetch fails loudly as a malformed page instead of quietly inventing
+//! numbers. An expired session shows up as a bounce to a sign-in landing — recognised
+//! by where the request finally lands, or by the sign-in form served on a 200 — and is
+//! reported as a rejected session, not a broken provider.
 
 use super::{HandSpec, Options, ProviderError, http, redact_query, session};
 #[cfg(test)]
@@ -46,6 +47,8 @@ const SESSION_COOKIE_NAMES: &[&str] = &[
 const SESSION: u64 = 5 * 60 * 60;
 const HOURLY: u64 = 3_600;
 const WEEKLY: u64 = 7 * 24 * 60 * 60;
+/// The free plan's included usage, which the page renews monthly.
+const MONTHLY: u64 = 30 * 24 * 60 * 60;
 
 /// Ollama as the settings dialog sees it.
 pub static SPEC: HandSpec = HandSpec {
@@ -290,6 +293,7 @@ fn parse_for_account(
     }
     let primary = usage_block(html, "Session usage")
         .or_else(|| usage_block(html, "Hourly usage"))
+        .or_else(|| usage_block(html, "Free usage"))
         .ok_or_else(|| {
             ProviderError::malformed("the Ollama settings page rendered no usage numbers")
         })?;
@@ -328,7 +332,12 @@ fn parse_for_account(
 }
 
 /// Every usage label the page renders, in page order; a block runs until the next one.
-const USAGE_LABELS: [&str; 3] = ["Session usage", "Hourly usage", "Weekly usage"];
+const USAGE_LABELS: [&str; 4] = [
+    "Session usage",
+    "Hourly usage",
+    "Weekly usage",
+    "Free usage",
+];
 
 /// One labelled meter: a percent, maybe a reset instant, and the span it meters.
 #[derive(Debug)]
@@ -370,11 +379,13 @@ fn usage_block(html: &str, label: &str) -> Option<UsageBlock> {
         title: match label {
             "Session usage" => "Session",
             "Hourly usage" => "Hourly",
+            "Free usage" => "Free",
             _ => "Weekly",
         },
         length_secs: match label {
             "Session usage" => SESSION,
             "Hourly usage" => HOURLY,
+            "Free usage" => MONTHLY,
             _ => WEEKLY,
         },
         used_percent,
@@ -457,9 +468,17 @@ fn parse_data_time(text: &str) -> Option<Timestamp> {
         .and_then(|parsed| Timestamp::from_unix(parsed.unix_timestamp()).ok())
 }
 
-/// The plan badge beside the "Cloud Usage" heading, when the page carries one.
+/// The plan badge beside the usage heading, when the page carries one: the older
+/// "Cloud Usage" heading, or the current "Included usage" one.
 fn plan_name(html: &str) -> Option<&str> {
-    let after = html.split_once("Cloud Usage")?.1;
+    ["Cloud Usage", "Included usage"]
+        .into_iter()
+        .filter_map(|heading| plan_after(html, heading))
+        .next()
+}
+
+fn plan_after<'a>(html: &'a str, heading: &str) -> Option<&'a str> {
+    let after = html.split_once(heading)?.1;
     let after = after.trim_start().strip_prefix("</span>")?.trim_start();
     let after = after.strip_prefix("<span")?;
     let inner = &after[after.find('>')? + 1..];
@@ -632,6 +651,7 @@ mod tests {
     }
 
     const SETTINGS: &str = include_str!("../../../tests/fixtures/ollama/settings.html");
+    const SETTINGS_FREE: &str = include_str!("../../../tests/fixtures/ollama/settings-free.html");
     const CAPTURED_AT: i64 = 1_700_000_000;
 
     fn session_key() -> WindowKey {
@@ -641,6 +661,12 @@ mod tests {
     fn weekly_key() -> WindowKey {
         WindowKey::for_length(
             WindowLength::from_secs(7 * 24 * 60 * 60).expect("a span is not zero"),
+        )
+    }
+
+    fn monthly_key() -> WindowKey {
+        WindowKey::for_length(
+            WindowLength::from_secs(30 * 24 * 60 * 60).expect("a span is not zero"),
         )
     }
 
@@ -667,6 +693,29 @@ mod tests {
         assert_eq!(
             weekly.resets_at,
             Some(Timestamp::from_unix(1_769_990_400).expect("2026-02-02T00:00:00Z"))
+        );
+        assert_eq!(snapshot.details[0].title, "Plan");
+        assert_eq!(snapshot.details[0].rows[0].value, "free");
+        assert_eq!(snapshot.details[1].title, "Account");
+        assert_eq!(snapshot.details[1].rows[0].value, "user@example.com");
+    }
+
+    #[test]
+    fn the_free_plan_meter_draws_a_monthly_window() {
+        let snapshot = parse(
+            SETTINGS_FREE,
+            Timestamp::from_unix(CAPTURED_AT).expect("plausible"),
+        )
+        .expect("parses the free-plan page");
+
+        assert_eq!(snapshot.windows.len(), 1);
+        let free = &snapshot.windows[0];
+        assert_eq!(free.title, "Free");
+        assert_eq!(free.key, monthly_key());
+        assert!((free.used_percent - 0.0).abs() < 0.000_001);
+        assert_eq!(
+            free.resets_at,
+            Some(Timestamp::from_unix(1_791_625_542).expect("2026-10-10T09:45:42Z"))
         );
         assert_eq!(snapshot.details[0].title, "Plan");
         assert_eq!(snapshot.details[0].rows[0].value, "free");
