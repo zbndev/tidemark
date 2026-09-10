@@ -68,3 +68,57 @@ fn the_paid_plan_renders_a_windowed_gauge() {
     assert_eq!(oss.value, Some(74.0));
     assert!(oss.maximum.is_none(), "null limit stays uncapped");
 }
+
+#[test]
+fn a_rejected_credential_body_fails_loudly() {
+    // The endpoint answers 401 with a JSON error body; polling never hands that
+    // to the parser (it is a transport failure), but render must refuse the same
+    // body just the same — nothing may be read out of an error document.
+    let rejected = include_str!("fixtures/plugin/ollama-rejected-response.json");
+    let account = AccountId::new("default".to_string());
+    let definition = schema::parse(FILE.as_bytes(), &[]).unwrap();
+    let outcome = provider::render(
+        &definition,
+        rejected.as_bytes(),
+        &account,
+        Timestamp::from_unix(1_800_000_000).expect("a reasonable test timestamp"),
+    );
+    assert!(outcome.is_err(), "an error document renders nothing");
+}
+
+#[test]
+fn a_truncated_body_fails_loudly() {
+    // A cut-off response (connection dropped mid-body) is not valid JSON: the
+    // parse must fail rather than half-render.
+    let truncated = r#"{"activity":{"cost":"0.00000""#;
+    let account = AccountId::new("default".to_string());
+    let definition = schema::parse(FILE.as_bytes(), &[]).unwrap();
+    let outcome = provider::render(
+        &definition,
+        truncated.as_bytes(),
+        &account,
+        Timestamp::from_unix(1_800_000_000).expect("a reasonable test timestamp"),
+    );
+    assert!(outcome.is_err(), "a truncated body renders nothing");
+}
+
+#[test]
+fn a_shape_without_limits_fails_loudly() {
+    // The parser indexes response.limits.monthly directly; a document that lost
+    // the limits table must raise inside the sandbox (the documented "fail on
+    // purpose" recipe), surfacing as a refused reading — never a partial card.
+    let limits_less =
+        r#"{"activity":{"cost":"1.0","period":{"ending_at":"2026-09-09T23:05:51Z"},"models":[]}}"#;
+    let account = AccountId::new("default".to_string());
+    let definition = schema::parse(FILE.as_bytes(), &[]).unwrap();
+    let outcome = provider::render(
+        &definition,
+        limits_less.as_bytes(),
+        &account,
+        Timestamp::from_unix(1_800_000_000).expect("a reasonable test timestamp"),
+    );
+    assert!(
+        outcome.is_err(),
+        "a document without limits renders nothing"
+    );
+}
