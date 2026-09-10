@@ -12,12 +12,13 @@ This plugin is the keyed complement — no browser profile, no HTML.
 
 ```bash
 tidemarkctl plugin install ollama-cloud.tidemark-provider
-tidemarkctl provider add com.ollama.cloud
-tidemarkctl plugin endpoint com.ollama.cloud https://ollama.com/api/usage
-printf '%s' "$OLLAMA_API_KEY" | tidemarkctl auth set-key com.ollama.cloud
-tidemarkctl refresh com.ollama.cloud
+tidemarkctl provider add io.github.riccelso.ollama-cloud
+tidemarkctl plugin endpoint io.github.riccelso.ollama-cloud https://ollama.com/api/usage
+printf '%s' "$OLLAMA_API_KEY" | tidemarkctl auth set-key io.github.riccelso.ollama-cloud
+tidemarkctl refresh io.github.riccelso.ollama-cloud
 ```
 
-The response fixture (`ollama-cloud-response.json`) shows the paid-plan shape; the
-parser also handles the free plan, whose `limits.monthly` carries no absolute cap —
-in that shape the reading reports usage without a window, and nothing is invented.
+Only the free-plan shape has been observed live; the paid-plan branches
+(`usage_limit`, per-model rows) are a hypothesis the parser spells out and the
+fixture pins — nothing is invented on the free plan, and a wrong guess degrades to
+the honest uncapped reading instead of failing.

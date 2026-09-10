@@ -1,9 +1,9 @@
 format_version = 1
 
 [provider]
-id = "com.ollama.cloud"
+id = "io.github.riccelso.ollama-cloud"
 name = "Ollama Cloud"
-plugin_version = "1.0.0"
+plugin_version = "1.1.0"
 
 [request]
 method = "GET"
@@ -18,31 +18,34 @@ function parse(response, context)
     --   activity — cost and per-model usage over the trailing four weeks
     --   limits   — the plan's monthly included usage
     --
-    -- The endpoint reports no absolute cap on the free plan: limits.monthly carries
-    -- only `usage`. A paid plan is expected to spell its cap `usage_limit`; when the
-    -- field is absent the reading stays honest — a value with no maximum, no
-    -- percentage — rather than fabricating one.
+    -- The endpoint reports no reset time and no window length for the monthly
+    -- figure, so none is declared: the reading stays a plain number rather
+    -- than borrowing the activity period's end as an invented rollover.
     --
-    -- The 5-hour/weekly session windows the settings page renders are not part of
-    -- this endpoint; the built-in `ollama` provider (browser session) tracks those.
+    -- Only the free-plan shape has been observed live (2026-09-09):
+    -- limits.monthly carries `usage` and no cap, activity.models is empty.
+    -- The paid-plan branches (usage_limit, per-model usage/limit) are a
+    -- hypothesis this example spells out; if the real paid shape names its
+    -- cap differently, those branches never fire and the reading stays the
+    -- honest uncapped one instead of failing on a guess.
+    --
+    -- The 5-hour/weekly session windows the settings page renders are not
+    -- part of this endpoint; the built-in `ollama` provider (browser
+    -- session) tracks those.
 
     local monthly = response.limits.monthly
+    local used = number(monthly.usage)
 
     local metrics = {}
     local card = {}
     local items = {}
-
-    local used = nil
-    if monthly.usage ~= nil then
-        used = number(monthly.usage)
-    end
 
     local limit = nil
     if monthly.usage_limit ~= nil then
         limit = number(monthly.usage_limit)
     end
 
-    if used ~= nil and limit ~= nil then
+    if limit ~= nil then
         table.insert(metrics, {
             id = "monthly-usage",
             title = "Monthly usage",
@@ -50,17 +53,10 @@ function parse(response, context)
             maximum = limit,
             remaining = limit - used,
             used_percent = percent(used, limit),
-            window = {
-                key = "month",
-                resets_at = parse_time(response.activity.period.ending_at),
-                length_seconds = 2592000,
-            },
         })
         table.insert(card, gauge("monthly-usage"))
         table.insert(items, ratio("monthly-usage", { left = "value", right = "maximum" }))
-    elseif used ~= nil then
-        -- No cap on this plan: report the raw usage without a window, so nothing is
-        -- invented and the card says what the endpoint actually said.
+    else
         table.insert(metrics, {
             id = "monthly-usage",
             title = "Monthly usage",
@@ -69,52 +65,42 @@ function parse(response, context)
         table.insert(card, value("monthly-usage", { field = "value" }))
     end
 
-    local cost = nil
-    if response.activity.cost ~= nil then
-        cost = number(response.activity.cost)
-    end
-    if cost ~= nil then
-        table.insert(metrics, {
-            id = "cost-4w",
-            title = "Cost (4 weeks)",
-            value = cost,
-            unit = "USD",
-        })
-        table.insert(items, value("cost-4w", { field = "value", format = "currency" }))
-    end
+    local cost = number(response.activity.cost)
+    table.insert(metrics, {
+        id = "cost-4w",
+        title = "Cost (4 weeks)",
+        value = cost,
+        unit = "USD",
+    })
+    table.insert(items, value("cost-4w", { field = "value", format = "currency" }))
 
-    if response.activity.models ~= nil then
-        for _, model in ipairs(response.activity.models) do
-            local used_m = nil
-            if model.usage ~= nil then
-                used_m = number(model.usage)
-            end
-            local cap = nil
-            if model.limit ~= nil and not is_null(model.limit) then
-                cap = number(model.limit)
-            end
+    for _, model in ipairs(response.activity.models) do
+        local id = "model-" .. model.id
+        local title = tostring(model.id)
+        local used_m = number(model.usage)
 
-            local id = "model-" .. tostring(model.id)
-            local title = tostring(model.name or model.id)
+        local cap = nil
+        if model.limit ~= nil and not is_null(model.limit) then
+            cap = number(model.limit)
+        end
 
-            if used_m ~= nil and cap ~= nil then
-                table.insert(metrics, {
-                    id = id,
-                    title = title,
-                    value = used_m,
-                    maximum = cap,
-                    remaining = cap - used_m,
-                    used_percent = percent(used_m, cap),
-                })
-                table.insert(items, ratio(id, { left = "value", right = "maximum" }))
-            elseif used_m ~= nil then
-                table.insert(metrics, {
-                    id = id,
-                    title = title,
-                    value = used_m,
-                })
-                table.insert(items, value(id, { field = "value" }))
-            end
+        if cap ~= nil then
+            table.insert(metrics, {
+                id = id,
+                title = title,
+                value = used_m,
+                maximum = cap,
+                remaining = cap - used_m,
+                used_percent = percent(used_m, cap),
+            })
+            table.insert(items, ratio(id, { left = "value", right = "maximum" }))
+        else
+            table.insert(metrics, {
+                id = id,
+                title = title,
+                value = used_m,
+            })
+            table.insert(items, value(id, { field = "value" }))
         end
     end
 
