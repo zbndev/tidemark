@@ -1,12 +1,10 @@
 //! Which accounts this build watches, and how each of them is signed in to.
 //!
-//! Registration is a spec in `keyed::CATALOG`, for every single-request
-//! key-authenticated provider. The three OAuth providers — Antigravity, Claude and Codex
-//! — are registered by hand here, because each of them acquires its credential its own
-//! way; so are the hand-written key providers below, whose fetch is more than one
-//! request or whose build refuses a required option's value, neither of which a
-//! `keyed::Spec` can say. Nothing else in the daemon names a key-authenticated
-//! provider.
+//! Registration is a spec in `keyed::CATALOG` for every single-request key provider. The
+//! three OAuth providers — Antigravity, Claude and Codex — are registered by hand here,
+//! together with providers whose fetch needs several requests, a browser session, no
+//! credential, or validation that `keyed::Spec` cannot express. Nothing else in the daemon
+//! names a compiled provider.
 //!
 //! An entry says three things beyond how to build a client. **How the account is
 //! authenticated** decides what the credentials dialog offers — a key field, a sign-in
@@ -135,10 +133,10 @@ fn credential_hint(entry: &OAuthEntry) -> &'static str {
     }
 }
 
-/// The hand-written key-authenticated providers: those whose fetch is more than one
-/// request, so a `keyed::Spec` cannot describe them — ai& pages a request log,
-/// Alibaba Coding Plan retries its one quota POST across the international and
-/// China-mainland gateways,
+/// The hand-written providers: those whose fetch or authentication cannot be described by
+/// one `keyed::Spec` request — ai& pages a request log, Alibaba Coding Plan bootstraps a
+/// browser session's `SEC_TOKEN` before calling OneConsole across the international and
+/// China-mainland deployments,
 /// Codebuff posts for credits and then reads a subscription it can do without,
 /// Cursor reads a usage summary and then the identity, legacy request quota and weekly Bot
 /// allowance an account may or may not have, signing every request with the session cookie
@@ -161,11 +159,11 @@ fn credential_hint(entry: &OAuthEntry) -> &'static str {
 /// Wayfinder, a router on this machine that answers without a credential at all and reads
 /// health, routes and savings in three requests. Each
 /// entry is the provider's own [`keyed::HandSpec`], which carries everything a
-/// `Spec` carries except the single endpoint, and says how to build a client from
-/// the stored key and the account's settings. An ordinary entry says it uses the same
-/// pasted key as the catalog's, `CredentialKind::Key`; a browser-session provider says
-/// `CredentialKind::External`; and a provider that answers without a credential says
-/// `CredentialKind::None` and is published, and built, with no key field at all.
+/// `Spec` carries except the single endpoint, and says how to build a client from the
+/// stored credential and account settings. An ordinary key entry uses
+/// `CredentialKind::Key`; a browser-session provider says `CredentialKind::External`; and
+/// a provider that answers without a credential says `CredentialKind::None` and is
+/// published, and built, with no key field at all.
 static HAND_WRITTEN: &[&keyed::HandSpec] = &[
     &abacus::SPEC,
     &aiand::SPEC,
@@ -562,6 +560,7 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
             ],
         }),
         abacus::PROVIDER_ID
+        | alibaba::PROVIDER_ID
         | augment::PROVIDER_ID
         | commandcode::PROVIDER_ID
         | longcat::PROVIDER_ID
@@ -1459,6 +1458,51 @@ mod tests {
         )
         .expect("builds")
         .expect("Qoder account builds");
+        assert_eq!(
+            account.status().auth_selection,
+            Some(tidemark_types::AuthSelection {
+                mode: cursor::BROWSER_SOURCE.into(),
+                candidate: Some("firefox/Default".into()),
+            })
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn alibaba_publishes_cookie_auth_and_restores_its_selected_profile() {
+        let definition = catalog_with_plugins(&empty_config(), &[])
+            .into_iter()
+            .find(|definition| definition.provider == alibaba::PROVIDER_ID)
+            .expect("Alibaba is in the catalog");
+        assert_eq!(definition.credential_kind(), Some(CredentialKind::External));
+        let selector = definition
+            .browser_auth
+            .expect("Alibaba has local source selection");
+        assert_eq!(
+            selector
+                .modes
+                .iter()
+                .map(|mode| (mode.value.as_str(), mode.title.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (cursor::BROWSER_SOURCE, "Browser"),
+                (keyed::session::PASTE_SOURCE, "Paste session"),
+            ]
+        );
+
+        let path = scratch_config(
+            "alibaba-browser-selection",
+            "providers = [\"alibaba\"]\n\n[provider.alibaba]\nauth-source = \"browser\"\nauth-browser = \"firefox\"\nauth-profile = \"Default\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        let account = account(
+            alibaba::PROVIDER_ID,
+            &AccountId::default(),
+            &secrets(),
+            &config,
+        )
+        .expect("builds")
+        .expect("Alibaba account builds");
         assert_eq!(
             account.status().auth_selection,
             Some(tidemark_types::AuthSelection {

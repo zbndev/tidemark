@@ -1,47 +1,36 @@
-//! The Alibaba Coding Plan quota, read with a DashScope API key.
+//! Alibaba Coding Plan quota, read from an explicitly selected browser session.
 //!
-//! One POST to the Model Studio gateway's `queryCodingPlanInstanceInfoV2` RPC answers with
-//! the plan's three allowance windows — five hours, a week, a billing month — as used and
-//! total request figures with their own reset instants, plus the plan's display name. The
-//! same RPC lives on two gateways: the international one
-//! (`modelstudio.console.alibabacloud.com`) and the China-mainland one
-//! (`bailian.console.aliyun.com`), and an account lives on one or the other. A first POST
-//! to the international host is therefore retried whole against the China-mainland one
-//! when the failure says "region", not "account": the host unreachable, the key rejected,
-//! an HTTP 404, or a well-formed envelope with no quota windows in it. A console sign-in
-//! envelope, a gateway error message and unparseable JSON are terminal — the other region
-//! would answer the same thing. The key travels in both shapes the gateway accepts,
-//! `Authorization: Bearer` and `X-DashScope-API-Key`, and the request carries the `Origin`
-//! and `Referer` the console itself would send, as upstream's client sends them; the
-//! browser `User-Agent` upstream also sends stays off, the shared client owning identity.
+//! Alibaba exposes the quota through a OneConsole RPC, not through DashScope's inference
+//! API. A session fetch therefore has three steps: read `SEC_TOKEN` from the region's
+//! dashboard (falling back to `/tool/user/info.json` and then the cookie itself), send the
+//! console's form-encoded RPC with the same cookie jar, and parse the returned plan
+//! instance. International and China-mainland accounts use different dashboards and RPC
+//! gateways, so a region-shaped failure is retried against the other pair.
 //!
-//! The envelope is not trusted to keep its shape. The China console double-stringifies its
-//! payloads — `successResponse.body` holding a whole JSON document as a string — so every
-//! string that itself parses as JSON is expanded in place before the keys are read, and
-//! the keys are then searched wherever they hide: `codingPlanQuotaInfo` by name, the
-//! per-window figures by their `per5Hour*`/`perWeek*`/`perBillMonth*` spellings (snake_case
-//! aliases included), the plan name across the plan instances and the envelope both. When
-//! several instances are listed, the active one — a `VALID`/`ACTIVE` status, an `isActive`
-//! flag, or an end time still ahead — owns the quota and the name; an expired instance
-//! must not lend its figures to the card.
+//! Browser profiles are explicit credentials. On Unix the shared browser reader finds and
+//! decrypts matching cookies from every supported browser; on Windows the paste-session
+//! mode remains the reliable path for Chromium's App-Bound cookies. The copied header is
+//! normalized by `keyed::session` before it is sent. Tidemark never stores cookies imported
+//! from a browser profile.
 //!
-//! Not ported, on purpose: upstream's cookie/OneConsole mode with its `SEC_TOKEN`
-//! bootstrap — this port is key mode only — and a pinned region, the two gateways being
-//! tried in a fixed order instead of chosen. Two upstream graces are also not ported. A
-//! five-hour reset that is not in the future upstream shifts itself forward by the
-//! window's length; a Tidemark card never invents a reset instant, so an overdue reset is
-//! drawn as the overdue instant it is. And a plan that is visibly active but reports no
-//! figures upstream keeps as a non-quantitative card; here a card without a number is
-//! malformed, the same call `Grok` makes.
+//! The RPC form contains `SEC_TOKEN`, so its request and bootstrap responses deliberately do
+//! not pass through the raw-response recorder: recording that body would persist a live
+//! console credential. The final quota body is parsed in memory only.
 
-use super::{HandSpec, Options, ProviderError, redact_query};
+use super::{HandSpec, Options, ProviderError, http, redact_query, session};
+use crate::browser::{self, Keyring, SafeStorage};
 use crate::providers::{BoxFuture, Credential, Provider};
 use serde_json::{Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tidemark_types::{
-    AccountId, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot, Timestamp, Window,
-    WindowKey, WindowLength,
+    AccountId, AuthCandidate, AuthCandidateState, CredentialKind, DetailRow, DetailSection,
+    ProviderId, Snapshot, Timestamp, Window, WindowKey, WindowLength,
 };
 use time::{
     Date, OffsetDateTime, PrimitiveDateTime, format_description,
@@ -51,14 +40,25 @@ use time::{
 /// The slug this provider's history is filed under. Never changes once shipped.
 pub const PROVIDER_ID: &str = "alibaba";
 
-/// The gateway RPC both regions serve.
 const ACTION: &str = "zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2";
-const PRODUCT: &str = "broadscope-bailian";
-const API: &str = "queryCodingPlanInstanceInfoV2";
-/// The international gateway, tried first.
-const INTL_BASE: &str = "https://modelstudio.console.alibabacloud.com";
-/// The China-mainland gateway a region-shaped failure is retried against.
-const CN_BASE: &str = "https://bailian.console.aliyun.com";
+const RPC_PRODUCT: &str = "sfm_bailian";
+const SESSION_COOKIE: &str = "login_aliyunid_ticket";
+const ACCOUNT_COOKIES: &[&str] = &["login_aliyunid_pk", "login_current_pk", "login_aliyunid"];
+const COOKIE_DOMAINS: &[&str] = &[
+    "bailian-singapore-cs.alibabacloud.com",
+    "bailian-cs.console.aliyun.com",
+    "bailian-beijing-cs.aliyuncs.com",
+    "modelstudio.console.alibabacloud.com",
+    "bailian.console.aliyun.com",
+    "free.aliyun.com",
+    "account.aliyun.com",
+    "signin.aliyun.com",
+    "passport.alibabacloud.com",
+    "console.alibabacloud.com",
+    "console.aliyun.com",
+    "alibabacloud.com",
+    "aliyun.com",
+];
 
 /// The three windows' lengths: five hours, a week, and upstream's 30-day spelling of a
 /// billing month.
@@ -83,32 +83,25 @@ const QUOTA_FIGURE_KEYS: &[&str] = &[
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "Alibaba Coding Plan",
-    credential: CredentialKind::Key,
-    credential_hint: "A DashScope API key (Model Studio console).",
-    options: &[],
+    credential: CredentialKind::External,
+    credential_hint: "Linux reads a signed-in supported browser; Windows accepts a Google Chrome Cookie header.",
+    options: session::OPTIONS,
     build,
 };
 
 fn build(
     account: AccountId,
     credential: Credential,
-    _options: &Options,
+    options: &Options,
 ) -> Result<Arc<dyn Provider>, ProviderError> {
-    if credential.expose().trim().is_empty() {
-        return Err(ProviderError::Local(
-            "an empty key is not a DashScope API key; paste one from the Model Studio console"
-                .into(),
-        ));
-    }
     Ok(Arc::new(Alibaba::new_for_account(
         account,
-        credential.expose(),
+        &credential,
+        options,
     )?))
 }
 
-/// One of the two gateways the same RPC lives on, with everything about the request the
-/// region changes: the query's region id, the commodity in the body, the console headers.
-/// No user-facing choice — the gateways are tried in a fixed order, international first.
+/// One of the two console deployments the same plan RPC lives on.
 #[derive(Debug, Clone, Copy)]
 enum Region {
     International,
@@ -116,7 +109,6 @@ enum Region {
 }
 
 impl Region {
-    /// The `currentRegionId` the RPC expects, upstream's region ids verbatim.
     fn region_id(self) -> &'static str {
         match self {
             Self::International => "ap-southeast-1",
@@ -124,16 +116,14 @@ impl Region {
         }
     }
 
-    /// The console host the `Origin` names.
-    fn gateway(self) -> &'static str {
+    fn origin(self) -> &'static str {
         match self {
             Self::International => "https://modelstudio.console.alibabacloud.com",
             Self::ChinaMainland => "https://bailian.console.aliyun.com",
         }
     }
 
-    /// The console page the `Referer` names, upstream's dashboard URL verbatim.
-    fn referer(self) -> &'static str {
+    fn dashboard(self) -> &'static str {
         match self {
             Self::International => {
                 "https://modelstudio.console.alibabacloud.com/ap-southeast-1/?tab=coding-plan#/efm/coding_plan"
@@ -144,87 +134,378 @@ impl Region {
         }
     }
 
-    /// Which plan catalogue the region sells.
+    fn rpc_base(self) -> &'static str {
+        match self {
+            Self::International => "https://bailian-singapore-cs.alibabacloud.com",
+            Self::ChinaMainland => "https://bailian-cs.console.aliyun.com",
+        }
+    }
+
+    fn rpc_action(self) -> &'static str {
+        match self {
+            Self::International => "IntlBroadScopeAspnGateway",
+            Self::ChinaMainland => "BroadScopeAspnGateway",
+        }
+    }
+
+    fn console_domain(self) -> &'static str {
+        match self {
+            Self::International => "modelstudio.console.alibabacloud.com",
+            Self::ChinaMainland => "bailian.console.aliyun.com",
+        }
+    }
+
+    fn console_site(self) -> &'static str {
+        match self {
+            Self::International => "MODELSTUDIO_ALIBABACLOUD",
+            Self::ChinaMainland => "BAILIAN_ALIYUN",
+        }
+    }
+
     fn commodity_code(self) -> &'static str {
         match self {
             Self::International => "sfm_codingplan_public_intl",
             Self::ChinaMainland => "sfm_codingplan_public_cn",
         }
     }
-
-    /// The fixed body the RPC takes: which commodity to look up, nothing else.
-    fn body(self) -> String {
-        serde_json::json!({
-            "queryCodingPlanInstanceInfoRequest": { "commodityCode": self.commodity_code() },
-        })
-        .to_string()
-    }
 }
 
-/// One DashScope key against the Coding Plan RPC.
+/// One Alibaba account, authenticated by one explicitly chosen browser profile or paste.
 pub struct Alibaba {
     tidemark_account: AccountId,
     client: reqwest::Client,
-    key: String,
-    /// The two gateways, kept as fields so a test can point each at a loopback.
-    intl_base: String,
-    cn_base: String,
+    browser_home: Option<PathBuf>,
+    storage: Arc<dyn SafeStorage>,
+    source: Option<session::Source>,
+    #[cfg(test)]
+    bases: Option<(String, String)>,
 }
 
 impl Alibaba {
-    /// Builds the account against the real gateways.
-    pub fn new(key: &str) -> Result<Self, ProviderError> {
-        Self::new_for_account(AccountId::default(), key)
+    /// Builds the default account against the real console gateways.
+    pub fn new(options: &Options) -> Result<Self, ProviderError> {
+        Self::new_for_account(
+            AccountId::default(),
+            &Credential::new(String::new()),
+            options,
+        )
     }
 
-    fn new_for_account(account_id: AccountId, key: &str) -> Result<Self, ProviderError> {
+    fn new_for_account(
+        account_id: AccountId,
+        credential: &Credential,
+        options: &Options,
+    ) -> Result<Self, ProviderError> {
         Ok(Self {
-            tidemark_account: account_id.clone(),
-            client: super::http::client()?,
-            key: key.trim().to_owned(),
-            intl_base: INTL_BASE.to_owned(),
-            cn_base: CN_BASE.to_owned(),
+            tidemark_account: account_id,
+            client: http::client()?,
+            browser_home: None,
+            storage: Arc::new(Keyring),
+            source: session::source(credential, options),
+            #[cfg(test)]
+            bases: None,
         })
     }
 
     #[cfg(test)]
-    fn for_test(intl_base: &str, cn_base: &str, key: &str) -> Result<Self, ProviderError> {
+    fn for_test(intl_base: &str, cn_base: &str, cookie: &str) -> Result<Self, ProviderError> {
         Ok(Self {
             tidemark_account: AccountId::default(),
-            client: super::http::client()?,
-            key: key.to_owned(),
-            intl_base: intl_base.trim_end_matches('/').to_owned(),
-            cn_base: cn_base.trim_end_matches('/').to_owned(),
+            client: http::client()?,
+            browser_home: None,
+            storage: Arc::new(Keyring),
+            source: Some(session::Source::Pasted(cookie.to_owned())),
+            bases: Some((
+                intl_base.trim_end_matches('/').to_owned(),
+                cn_base.trim_end_matches('/').to_owned(),
+            )),
         })
     }
 
-    /// The region's POST: the RPC's fixed path and query, both key headers, and the
-    /// console's own `Origin` and `Referer` for the region.
-    fn post(&self, region: Region) -> Result<reqwest::Request, ProviderError> {
-        let base = match region {
-            Region::International => &self.intl_base,
-            Region::ChinaMainland => &self.cn_base,
-        };
+    #[cfg(test)]
+    fn for_browser_test(
+        home: &Path,
+        storage: Arc<dyn SafeStorage>,
+        intl_base: &str,
+        cn_base: &str,
+    ) -> Result<Self, ProviderError> {
+        use crate::browser::auth::Selection;
+        Ok(Self {
+            tidemark_account: AccountId::default(),
+            client: http::client()?,
+            browser_home: Some(home.to_path_buf()),
+            storage,
+            source: Some(session::Source::Browser(Selection {
+                browser: "firefox".into(),
+                profile: None,
+            })),
+            bases: Some((
+                intl_base.trim_end_matches('/').to_owned(),
+                cn_base.trim_end_matches('/').to_owned(),
+            )),
+        })
+    }
+
+    fn base(&self, _region: Region) -> Option<&str> {
+        #[cfg(test)]
+        if let Some((international, china)) = &self.bases {
+            return Some(match _region {
+                Region::International => international,
+                Region::ChinaMainland => china,
+            });
+        }
+        None
+    }
+
+    fn dashboard_url(&self, region: Region) -> String {
+        self.base(region)
+            .map(|base| format!("{base}/dashboard"))
+            .unwrap_or_else(|| region.dashboard().to_owned())
+    }
+
+    fn rpc_base(&self, region: Region) -> String {
+        self.base(region)
+            .map(str::to_owned)
+            .unwrap_or_else(|| region.rpc_base().to_owned())
+    }
+
+    fn user_info_url(&self, region: Region) -> String {
+        format!(
+            "{}/tool/user/info.json",
+            self.base(region).unwrap_or_else(|| region.origin())
+        )
+    }
+
+    fn rpc_url(&self, region: Region) -> String {
+        format!(
+            "{}/data/api.json?action={}&product={RPC_PRODUCT}&api={ACTION}&_v=undefined",
+            self.rpc_base(region),
+            region.rpc_action()
+        )
+    }
+
+    fn stores(&self) -> Vec<browser::Store> {
+        self.browser_home
+            .as_deref()
+            .map(browser::stores_in)
+            .unwrap_or_else(browser::stores)
+    }
+
+    async fn cookie_header(&self) -> Result<String, ProviderError> {
+        let source = self.source.as_ref().ok_or(ProviderError::NoCredential)?;
+        match source {
+            session::Source::Pasted(_) => {
+                let parsed = session::session(
+                    self.browser_home.as_deref(),
+                    self.storage.as_ref(),
+                    source,
+                    &[SESSION_COOKIE],
+                    &cookie_query(),
+                    Region::International.dashboard(),
+                )
+                .await?
+                .ok_or(ProviderError::NoCredential)?;
+                if header_is_authenticated(&parsed.header) {
+                    Ok(parsed.header)
+                } else {
+                    Err(ProviderError::NoCredential)
+                }
+            }
+            session::Source::Browser(selection) => {
+                let now = Timestamp::now();
+                let mut keyring_locked = false;
+                for store in self.stores().into_iter().filter(|store| {
+                    store.browser.slug == selection.browser
+                        && selection
+                            .profile
+                            .as_ref()
+                            .is_none_or(|profile| profile == &store.profile)
+                }) {
+                    let cookies = match store.cookies(&cookie_query(), self.storage.as_ref()).await
+                    {
+                        Ok(cookies) => cookies,
+                        Err(browser::CookieError::KeyringLocked) => {
+                            keyring_locked = true;
+                            continue;
+                        }
+                        Err(_) => continue,
+                    };
+                    let live: Vec<_> = cookies
+                        .into_iter()
+                        .filter(|cookie| cookie.is_live(now))
+                        .collect();
+                    if cookies_are_authenticated(&live) {
+                        return Ok(jar_header(&live));
+                    }
+                }
+                if keyring_locked {
+                    Err(ProviderError::KeyringLocked)
+                } else {
+                    Err(ProviderError::NoCredential)
+                }
+            }
+        }
+    }
+
+    fn dashboard_request(
+        &self,
+        region: Region,
+        cookie: &str,
+    ) -> Result<reqwest::Request, ProviderError> {
         self.client
-            .post(format!(
-                "{base}/data/api.json?action={ACTION}&product={PRODUCT}&api={API}&currentRegionId={}",
-                region.region_id()
-            ))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT, "application/json")
-            .bearer_auth(&self.key)
-            .header("X-DashScope-API-Key", &self.key)
-            .header(reqwest::header::ORIGIN, region.gateway())
-            .header(reqwest::header::REFERER, region.referer())
-            .body(region.body())
+            .get(self.dashboard_url(region))
+            .header(
+                reqwest::header::ACCEPT,
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header(reqwest::header::COOKIE, cookie)
             .build()
             .map_err(|error| ProviderError::Client(redact_query(error)))
     }
 
+    fn user_info_request(
+        &self,
+        region: Region,
+        cookie: &str,
+    ) -> Result<reqwest::Request, ProviderError> {
+        self.client
+            .get(self.user_info_url(region))
+            .header(reqwest::header::ACCEPT, "application/json, text/plain, */*")
+            .header(reqwest::header::COOKIE, cookie)
+            .header(reqwest::header::ORIGIN, region.origin())
+            .header(reqwest::header::REFERER, region.dashboard())
+            .build()
+            .map_err(|error| ProviderError::Client(redact_query(error)))
+    }
+
+    async fn sec_token(&self, region: Region, cookie: &str) -> Result<String, Attempt> {
+        let mut last_error = None;
+        match self.dashboard_request(region, cookie) {
+            Ok(request) => match super::validate_body(&self.client, request).await {
+                Ok(body) => {
+                    if let Some(token) = token_from_html(&body) {
+                        return Ok(token);
+                    }
+                }
+                Err(error) => last_error = Some(error),
+            },
+            Err(error) => last_error = Some(error),
+        }
+
+        match self.user_info_request(region, cookie) {
+            Ok(request) => match super::validate_body(&self.client, request).await {
+                Ok(body) => {
+                    if let Ok(document) = serde_json::from_str::<Value>(&body)
+                        && let Some(token) =
+                            find_text(&expand(document), &["secToken", "sec_token", "SEC_TOKEN"])
+                    {
+                        return Ok(token);
+                    }
+                }
+                Err(error) => last_error = Some(error),
+            },
+            Err(error) => last_error = Some(error),
+        }
+
+        if let Some(token) = cookie_value(cookie, "sec_token") {
+            return Ok(token);
+        }
+        match last_error {
+            Some(ProviderError::Credential { .. }) | None => Err(Attempt::LoginRequired),
+            Some(error) => Err(Attempt::Exchange(error)),
+        }
+    }
+
+    fn quota_request(
+        &self,
+        region: Region,
+        cookie: &str,
+        sec_token: &str,
+    ) -> Result<reqwest::Request, ProviderError> {
+        static TRACE: AtomicU64 = AtomicU64::new(0);
+        let mut cornerstone = Map::from_iter([
+            (
+                "feTraceId".into(),
+                Value::String(format!(
+                    "tidemark-{}-{}",
+                    std::process::id(),
+                    TRACE.fetch_add(1, Ordering::Relaxed)
+                )),
+            ),
+            ("feURL".into(), Value::String(region.dashboard().into())),
+            ("protocol".into(), Value::String("V2".into())),
+            ("console".into(), Value::String("ONECONSOLE".into())),
+            ("productCode".into(), Value::String("p_efm".into())),
+            (
+                "domain".into(),
+                Value::String(region.console_domain().into()),
+            ),
+            (
+                "consoleSite".into(),
+                Value::String(region.console_site().into()),
+            ),
+            ("userNickName".into(), Value::String(String::new())),
+            ("userPrincipalName".into(), Value::String(String::new())),
+            ("xsp-lang".into(), Value::String("en-US".into())),
+        ]);
+        if let Some(cna) = cookie_value(cookie, "cna") {
+            cornerstone.insert("X-Anonymous-Id".into(), Value::String(cna));
+        }
+        let params = serde_json::json!({
+            "Api": ACTION,
+            "V": "1.0",
+            "Data": {
+                "queryCodingPlanInstanceInfoRequest": {
+                    "commodityCode": region.commodity_code(),
+                    "onlyLatestOne": true,
+                }
+            },
+            "region": region.region_id(),
+            "cornerstoneParam": cornerstone,
+        })
+        .to_string();
+
+        let mut request = self
+            .client
+            .post(self.rpc_url(region))
+            .header(reqwest::header::ACCEPT, "*/*")
+            .header(reqwest::header::COOKIE, cookie)
+            .header(reqwest::header::ORIGIN, region.origin())
+            .header(reqwest::header::REFERER, region.dashboard())
+            .header("X-Request-With", "XMLHttpRequest");
+        if let Some(csrf) =
+            cookie_value(cookie, "login_aliyunid_csrf").or_else(|| cookie_value(cookie, "csrf"))
+        {
+            request = request
+                .header("x-csrf-token", &csrf)
+                .header("x-xsrf-token", csrf);
+        }
+        request
+            .form(&[
+                ("params", params.as_str()),
+                ("region", region.region_id()),
+                ("sec_token", sec_token),
+            ])
+            .build()
+            .map_err(|error| ProviderError::Client(redact_query(error)))
+    }
+
+    async fn attempt(&self, region: Region, cookie: &str) -> Result<Snapshot, Attempt> {
+        let sec_token = self.sec_token(region, cookie).await?;
+        let request = self
+            .quota_request(region, cookie, &sec_token)
+            .map_err(Attempt::Exchange)?;
+        let body = super::validate_body(&self.client, request)
+            .await
+            .map_err(Attempt::Exchange)?;
+        parse_quota_for_account(&body, Timestamp::now(), &self.tidemark_account)
+    }
+
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
+        let cookie = self.cookie_header().await?;
         let mut last = None;
         for region in [Region::International, Region::ChinaMainland] {
-            let error = match self.attempt(region).await {
+            let error = match self.attempt(region, &cookie).await {
                 Ok(snapshot) => return Ok(snapshot),
                 Err(attempt) => attempt.into_provider_error(),
             };
@@ -236,13 +517,99 @@ impl Alibaba {
         Err(last.expect("the second attempt ran"))
     }
 
-    /// One region's whole exchange: request, status mapping, envelope parse.
-    async fn attempt(&self, region: Region) -> Result<Snapshot, Attempt> {
-        let request = self.post(region).map_err(Attempt::Exchange)?;
-        let body = super::request(PROVIDER_ID, &self.client, request)
-            .await
-            .map_err(Attempt::Exchange)?;
-        parse_quota_for_account(&body, Timestamp::now(), &self.tidemark_account)
+    async fn validate_header(&self, cookie: &str) -> crate::browser::auth::Validation {
+        use crate::browser::auth::Validation;
+        let mut rejected = false;
+        for region in [Region::International, Region::ChinaMainland] {
+            match self.attempt(region, cookie).await {
+                Ok(_) | Err(Attempt::NoQuota | Attempt::PlanWithoutFigures(_)) => {
+                    return Validation::Ready;
+                }
+                Err(Attempt::Rejected { .. } | Attempt::LoginRequired) => rejected = true,
+                Err(_) => {}
+            }
+        }
+        if rejected {
+            Validation::Rejected
+        } else {
+            Validation::Unreachable
+        }
+    }
+
+    async fn validate_pasted_header(&self, header: &str) -> crate::browser::auth::Validation {
+        use crate::browser::auth::Validation;
+        let source = session::Source::Pasted(header.to_owned());
+        match session::session(
+            self.browser_home.as_deref(),
+            self.storage.as_ref(),
+            &source,
+            &[SESSION_COOKIE],
+            &cookie_query(),
+            Region::International.dashboard(),
+        )
+        .await
+        {
+            Ok(Some(session)) if header_is_authenticated(&session.header) => {
+                self.validate_header(&session.header).await
+            }
+            Ok(_) => Validation::Rejected,
+            Err(_) => Validation::Unreachable,
+        }
+    }
+
+    async fn inspect_sources(&self) -> Vec<AuthCandidate> {
+        let now = Timestamp::now();
+        let mut browsers: Vec<(browser::Browser, Vec<AuthCandidate>)> = Vec::new();
+        for store in self.stores() {
+            let state = match store.cookies(&cookie_query(), self.storage.as_ref()).await {
+                Ok(cookies) => {
+                    let live: Vec<_> = cookies
+                        .into_iter()
+                        .filter(|cookie| cookie.is_live(now))
+                        .collect();
+                    if !cookies_are_authenticated(&live) {
+                        AuthCandidateState::Missing
+                    } else {
+                        validation_state(self.validate_header(&jar_header(&live)).await)
+                    }
+                }
+                Err(browser::CookieError::KeyringLocked) => AuthCandidateState::WaitingForKeyring,
+                Err(_) => AuthCandidateState::Unreachable,
+            };
+            let child = AuthCandidate {
+                id: crate::browser::auth::Selection {
+                    browser: store.browser.slug.into(),
+                    profile: Some(store.profile.clone()),
+                }
+                .candidate_id(),
+                title: store.profile,
+                subtitle: None,
+                state: state.as_wire().into(),
+                children: Vec::new(),
+            };
+            match browsers.last_mut() {
+                Some((browser, children)) if browser.slug == store.browser.slug => {
+                    children.push(child);
+                }
+                _ => browsers.push((store.browser, vec![child])),
+            }
+        }
+        let browser_sources = browsers
+            .into_iter()
+            .map(|(browser, children)| AuthCandidate {
+                id: browser.slug.into(),
+                title: browser.title.into(),
+                subtitle: None,
+                state: aggregate_state(&children).as_wire().into(),
+                children,
+            })
+            .collect();
+        session::modes(
+            browser_sources,
+            self.source.as_ref().and_then(session::Source::pasted),
+            |header| async move { self.validate_pasted_header(&header).await },
+        )
+        .await
     }
 }
 
@@ -250,6 +617,7 @@ impl fmt::Debug for Alibaba {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Alibaba")
             .field("id", &PROVIDER_ID)
+            .field("source", &self.source)
             .finish_non_exhaustive()
     }
 }
@@ -266,22 +634,126 @@ impl Provider for Alibaba {
     fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
         Box::pin(self.fetch_inner())
     }
+
+    fn inspect_auth_sources(&self) -> BoxFuture<'_, Result<Vec<AuthCandidate>, ProviderError>> {
+        Box::pin(async { Ok(self.inspect_sources().await) })
+    }
 }
 
-/// One attempt's failure, in the gateway's own vocabulary — what the failover reads
-/// before the error becomes the card's [`ProviderError`].
+fn cookie_query() -> browser::Query {
+    browser::Query::new(COOKIE_DOMAINS.iter().copied(), Vec::<String>::new())
+}
+
+fn cookies_are_authenticated(cookies: &[browser::Cookie]) -> bool {
+    let names: BTreeSet<_> = cookies.iter().map(|cookie| cookie.name.as_str()).collect();
+    names.contains(SESSION_COOKIE)
+        && ACCOUNT_COOKIES
+            .iter()
+            .any(|account| names.contains(account))
+}
+
+fn header_is_authenticated(header: &str) -> bool {
+    let names: BTreeSet<_> = cookie_pairs(header).map(|(name, _)| name).collect();
+    names.contains(SESSION_COOKIE)
+        && ACCOUNT_COOKIES
+            .iter()
+            .any(|account| names.contains(account))
+}
+
+fn jar_header(cookies: &[browser::Cookie]) -> String {
+    let mut jar = BTreeMap::new();
+    for cookie in cookies {
+        jar.insert(cookie.name.as_str(), cookie.value.as_str());
+    }
+    jar.into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn cookie_pairs(header: &str) -> impl Iterator<Item = (&str, &str)> {
+    header.split(';').filter_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        Some((name.trim(), value.trim()))
+    })
+}
+
+fn cookie_value(header: &str, wanted: &str) -> Option<String> {
+    cookie_pairs(header)
+        .find(|(name, value)| *name == wanted && !value.is_empty())
+        .map(|(_, value)| value.to_owned())
+}
+
+fn token_from_html(body: &str) -> Option<String> {
+    for key in ["SEC_TOKEN", "secToken", "sec_token"] {
+        let mut remaining = body;
+        while let Some(position) = remaining.find(key) {
+            let after = &remaining[position + key.len()..];
+            let Some(colon) = after.find(':').filter(|colon| *colon <= 8) else {
+                remaining = after;
+                continue;
+            };
+            let value = after[colon + 1..].trim_start();
+            if let Some(value) = value.strip_prefix("\\\"")
+                && let Some(end) = value.find("\\\"")
+                && end > 0
+            {
+                return Some(value[..end].to_owned());
+            }
+            if let Some(quote) = value
+                .chars()
+                .next()
+                .filter(|quote| matches!(quote, '"' | '\''))
+            {
+                let value = &value[quote.len_utf8()..];
+                if let Some(end) = value.find(quote)
+                    && end > 0
+                {
+                    return Some(value[..end].to_owned());
+                }
+            }
+            remaining = after;
+        }
+    }
+    None
+}
+
+fn validation_state(validation: crate::browser::auth::Validation) -> AuthCandidateState {
+    match validation {
+        crate::browser::auth::Validation::Ready => AuthCandidateState::Ready,
+        crate::browser::auth::Validation::Rejected => AuthCandidateState::Rejected,
+        crate::browser::auth::Validation::Unreachable => AuthCandidateState::Unreachable,
+        crate::browser::auth::Validation::Challenged => AuthCandidateState::Challenged,
+    }
+}
+
+fn aggregate_state(children: &[AuthCandidate]) -> AuthCandidateState {
+    let states = children.iter().filter_map(AuthCandidate::state);
+    for candidate in [
+        AuthCandidateState::Ready,
+        AuthCandidateState::WaitingForKeyring,
+        AuthCandidateState::Challenged,
+        AuthCandidateState::Unreachable,
+        AuthCandidateState::Rejected,
+    ] {
+        if states.clone().any(|state| state == candidate) {
+            return candidate;
+        }
+    }
+    AuthCandidateState::Missing
+}
+/// One region attempt's failure, classified before it becomes a card error.
 enum Attempt {
-    /// The exchange itself failed: transport, a rejected key, an HTTP status.
+    /// The HTTP exchange itself failed.
     Exchange(ProviderError),
-    /// The gateway rejected the key: a numeric 401/403 envelope, or one whose message
-    /// names the key or an unauthorised call.
+    /// The gateway rejected the browser session: a numeric 401/403 envelope, or one whose
+    /// message names an unauthorised call.
     Rejected {
         /// The status the envelope named, where it named one.
         status: u16,
     },
-    /// The gateway answered a console sign-in: key mode cannot read this account here,
-    /// and the other region would say the same.
-    KeyUnavailable,
+    /// The gateway answered a console sign-in, so this region did not accept the session.
+    LoginRequired,
     /// The gateway named an API error of its own.
     Gateway(String),
     /// A recognised envelope with no quota windows in it — the shape the other region may
@@ -299,16 +771,13 @@ impl Attempt {
         match self {
             Self::Exchange(error) => error,
             Self::Rejected { status } => ProviderError::Credential { status },
-            Self::KeyUnavailable => ProviderError::malformed(
-                "the Alibaba gateway answered a console sign-in: Coding Plan quota is not \
-                 available through an API key for this account or region",
-            ),
+            Self::LoginRequired => ProviderError::Credential { status: 401 },
             Self::Gateway(message) => ProviderError::malformed(format!(
                 "the Alibaba gateway reported an error: {message}"
             )),
-            Self::NoQuota => {
-                ProviderError::malformed("the Alibaba Coding Plan response named no quota windows")
-            }
+            Self::NoQuota => ProviderError::malformed(
+                "the Alibaba account has no active Coding Plan with quota windows",
+            ),
             Self::PlanWithoutFigures(plan) => ProviderError::malformed(format!(
                 "the Alibaba Coding Plan reports {plan} without any quota figures"
             )),
@@ -317,16 +786,15 @@ impl Attempt {
     }
 }
 
-/// Whether the other region is worth asking: the failure says something about *where*,
-/// not about the account. A rejected key is retried there, exactly as upstream retries
-/// its invalid-credentials error; an unparseable body or a console sign-in envelope is
-/// not, and neither is a gateway error message.
+/// Whether the other region is worth asking: transport, authentication, a missing endpoint,
+/// or an authenticated account with no plan can all differ between the international and
+/// China-mainland console deployments.
 fn region_shaped(error: &ProviderError) -> bool {
     match error {
         ProviderError::Transport(_)
         | ProviderError::Credential { .. }
         | ProviderError::Http { status: 404, .. } => true,
-        ProviderError::Malformed(message) => message.contains("named no quota windows"),
+        ProviderError::Malformed(message) => message.contains("no active Coding Plan"),
         _ => false,
     }
 }
@@ -374,18 +842,18 @@ fn parse_quota_for_account(
     if let Some(code) = find_text(&payload, &["code", "status", "statusCode"]) {
         let lowered = code.to_lowercase();
         if lowered.contains("needlogin") || lowered.contains("login") {
-            return Err(Attempt::KeyUnavailable);
+            return Err(Attempt::LoginRequired);
         }
     }
     if let Some(message) = find_text(&payload, &["message", "msg", "statusMessage"]) {
         let lowered = message.to_lowercase();
         if lowered.contains("log in") || lowered.contains("login") {
-            return Err(Attempt::KeyUnavailable);
+            return Err(Attempt::LoginRequired);
         }
         if lowered.contains("console session")
             || lowered.contains("api key mode may be unavailable")
         {
-            return Err(Attempt::KeyUnavailable);
+            return Err(Attempt::LoginRequired);
         }
     }
 
@@ -857,7 +1325,9 @@ fn contains_instances(payload: &Value) -> bool {
 mod tests {
     use super::*;
     use crate::providers::Provider;
-    use std::io::{BufRead, BufReader, Write};
+    use crate::secrets::SecretError;
+    use rusqlite::Connection;
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
 
@@ -867,7 +1337,51 @@ mod tests {
     /// The recorded wrapped body of `parses wrapped JSON string payload`: the China
     /// console's double-stringified envelope, five-hour figures only.
     const CN: &str = include_str!("../../../tests/fixtures/alibaba/cn.json");
-    /// A recorded console sign-in envelope: what key mode cannot read past.
+    #[derive(Debug)]
+    struct NoKeyring;
+
+    impl SafeStorage for NoKeyring {
+        fn password(
+            &self,
+            _application: &str,
+        ) -> BoxFuture<'_, Result<Option<String>, SecretError>> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    fn gecko_home() -> crate::browser::tests::TestHome {
+        let home = crate::browser::tests::TestHome::new();
+        let connection = Connection::open(home.gecko(".mozilla/firefox/Default")).expect("opens");
+        connection
+            .execute_batch(
+                "CREATE TABLE moz_cookies (
+                    id INTEGER PRIMARY KEY,
+                    baseDomain TEXT,
+                    originAttributes TEXT NOT NULL DEFAULT '',
+                    name TEXT, value TEXT, host TEXT, path TEXT,
+                    expiry INTEGER, lastAccessed INTEGER, creationTime INTEGER,
+                    isSecure INTEGER, isHttpOnly INTEGER
+                );",
+            )
+            .expect("creates");
+        for (domain, name, value) in [
+            (".aliyun.com", SESSION_COOKIE, "browser-session"),
+            (".alibabacloud.com", "login_aliyunid_pk", "browser-account"),
+            (".alibabacloud.com", "cna", "anonymous-id"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO moz_cookies (
+                        host, name, value, path, expiry, isSecure, lastAccessed,
+                        creationTime, isHttpOnly
+                    ) VALUES (?1, ?2, ?3, '/', 0, 1, 0, 0, 0)",
+                    (domain, name, value),
+                )
+                .expect("inserts a cookie");
+        }
+        home
+    }
+    /// A recorded console sign-in envelope: what a browser session cannot read past.
     const NEED_LOGIN: &str = r#"{
           "code": "ConsoleNeedLogin",
           "message": "You need to log in.",
@@ -883,9 +1397,13 @@ mod tests {
           },
           "status_code": 0
         }"#;
-
-    const INTL_REQUEST: &str = "POST /data/api.json?action=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2&product=broadscope-bailian&api=queryCodingPlanInstanceInfoV2&currentRegionId=ap-southeast-1";
-    const CN_REQUEST: &str = "POST /data/api.json?action=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2&product=broadscope-bailian&api=queryCodingPlanInstanceInfoV2&currentRegionId=cn-beijing";
+    const COOKIE_HEADER: &str =
+        "login_aliyunid_ticket=session; login_aliyunid_pk=account; csrf=csrf-value";
+    const TOKEN_HTML: &str = r#"<script>window.bootstrap={"SEC_TOKEN":"sec-token"}</script>"#;
+    const DASHBOARD_REQUEST: &str = "GET /dashboard";
+    const USER_INFO_REQUEST: &str = "GET /tool/user/info.json";
+    const INTL_REQUEST: &str = "POST /data/api.json?action=IntlBroadScopeAspnGateway&product=sfm_bailian&api=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2&_v=undefined";
+    const CN_REQUEST: &str = "POST /data/api.json?action=BroadScopeAspnGateway&product=sfm_bailian&api=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2&_v=undefined";
 
     /// A loopback server answering the given routes in order, asserting each request
     /// opens with its expected request line and handing the raw exchange back.
@@ -900,13 +1418,25 @@ mod tests {
                 let (mut stream, _) = listener.accept().expect("request accepted");
                 let mut reader = BufReader::new(&mut stream);
                 let mut request = String::new();
+                let mut content_length = 0;
                 loop {
                     let mut line = String::new();
                     reader.read_line(&mut line).expect("reads request line");
                     if line == "\r\n" || line.is_empty() {
                         break;
                     }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse().expect("numeric content length");
+                    }
                     request.push_str(&line);
+                }
+                if content_length > 0 {
+                    let mut body = vec![0; content_length];
+                    reader.read_exact(&mut body).expect("reads request body");
+                    request.push_str("\r\n");
+                    request.push_str(std::str::from_utf8(&body).expect("UTF-8 request body"));
                 }
                 drop(reader);
                 assert!(
@@ -1075,13 +1605,13 @@ mod tests {
     }
 
     #[test]
-    fn a_body_with_no_quota_and_no_active_signal_is_a_region_shaped_malformed() {
+    fn a_body_with_no_quota_and_no_active_signal_names_the_missing_plan() {
         // The shape the other region may still answer with figures in, which is why the
         // fetch retries it there.
         let error = parse(NO_QUOTA, at(1_700_000_000)).expect_err("no window can be drawn");
 
         assert!(
-            error.to_string().contains("named no quota windows"),
+            error.to_string().contains("no active Coding Plan"),
             "{error}"
         );
         assert!(region_shaped(&error), "{error}");
@@ -1117,12 +1647,12 @@ mod tests {
     }
 
     #[test]
-    fn a_console_login_envelope_refuses_an_api_key_read() {
+    fn a_console_login_envelope_rejects_the_browser_session() {
         let error =
             parse(NEED_LOGIN, at(1_700_000_000)).expect_err("the gateway wants a console session");
 
-        assert!(error.to_string().contains("API key"), "{error}");
-        assert!(!region_shaped(&error), "{error}");
+        assert!(matches!(error, ProviderError::Credential { status: 401 }));
+        assert!(region_shaped(&error), "{error}");
     }
 
     #[test]
@@ -1131,7 +1661,7 @@ mod tests {
             r#"{"statusCode":401,"message":"unauthorized"}"#,
             at(1_700_000_000),
         )
-        .expect_err("the key was rejected");
+        .expect_err("the session was rejected");
         assert!(
             matches!(rejected, ProviderError::Credential { status: 401 }),
             "{rejected}"
@@ -1148,204 +1678,291 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_key_is_refused_at_build() {
-        let error = (SPEC.build)(
-            AccountId::default(),
-            Credential::new("   "),
-            &Options::new(),
-        )
-        .expect_err("an empty key is not a credential");
-        assert!(
-            matches!(error, ProviderError::Local(ref message) if message.contains("key")),
-            "{error:?}"
+    fn the_spec_is_cookie_only_and_builds_without_a_stored_secret() {
+        assert_eq!(SPEC.credential, CredentialKind::External);
+        assert_eq!(
+            SPEC.options
+                .iter()
+                .map(|option| option.name)
+                .collect::<Vec<_>>(),
+            ["auth-browser", "auth-profile"]
         );
-
         assert!(
             (SPEC.build)(
                 AccountId::default(),
-                Credential::new("cpk-live"),
+                Credential::new(String::new()),
                 &Options::new()
             )
             .is_ok(),
-            "a pasted key builds"
+            "a browser-session provider is built before a source is selected"
         );
     }
 
     #[test]
-    fn the_international_request_carries_both_key_headers_and_the_region() {
-        let provider = Alibaba::for_test("http://127.0.0.1:9", "http://127.0.0.1:9", "cpk-test")
-            .expect("builds");
-        let request = provider.post(Region::International).expect("builds");
+    fn a_signed_in_firefox_profile_is_offered_without_exposing_its_cookie() {
+        let home = gecko_home();
+        let (base, requests, server) = chained_server(vec![
+            route(DASHBOARD_REQUEST, 200, TOKEN_HTML),
+            route(INTL_REQUEST, 200, INTL),
+        ]);
+        let provider = Alibaba::for_browser_test(
+            home.path(),
+            Arc::new(NoKeyring),
+            &base,
+            "http://127.0.0.1:9",
+        )
+        .expect("builds");
 
-        assert_eq!(request.method(), reqwest::Method::POST);
-        let url = request.url().as_str();
-        assert!(
-            url.starts_with("http://127.0.0.1:9/data/api.json?"),
-            "{url}"
-        );
-        assert!(
-            url.contains(
-                "action=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2"
-            ),
-            "{url}"
-        );
-        assert!(url.contains("product=broadscope-bailian"), "{url}");
-        assert!(url.contains("api=queryCodingPlanInstanceInfoV2"), "{url}");
-        assert!(url.contains("currentRegionId=ap-southeast-1"), "{url}");
+        let report = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(provider.inspect_auth_sources())
+            .expect("inspection succeeds");
+        server.join().expect("server exits");
 
+        let browsers = report
+            .iter()
+            .find(|candidate| candidate.id == session::BROWSER_SOURCE)
+            .expect("browser mode");
+        assert_eq!(browsers.state(), Some(AuthCandidateState::Ready));
+        let firefox = browsers
+            .children
+            .iter()
+            .find(|candidate| candidate.id == "firefox")
+            .expect("Firefox");
+        assert_eq!(firefox.state(), Some(AuthCandidateState::Ready));
+        let quota = requests.into_iter().last().expect("quota request");
+        assert!(quota.contains("login_aliyunid_ticket=browser-session"));
+        assert!(quota.contains("login_aliyunid_pk=browser-account"));
+    }
+
+    #[test]
+    fn the_international_sec_token_fallback_uses_the_model_studio_gateway() {
+        let provider = Alibaba::new(&Options::new()).expect("builds");
         assert_eq!(
+            provider.user_info_url(Region::International),
+            "https://modelstudio.console.alibabacloud.com/tool/user/info.json"
+        );
+    }
+
+    #[test]
+    fn pasted_cookie_header_lines_are_normalized_before_validation() {
+        let pasted = format!("Cookie: {COOKIE_HEADER}");
+        let (base, requests, server) = chained_server(vec![
+            route(DASHBOARD_REQUEST, 200, TOKEN_HTML),
+            route(INTL_REQUEST, 200, INTL),
+        ]);
+        let mut provider = Alibaba::for_test(&base, "http://127.0.0.1:9", &pasted).expect("builds");
+        let empty_home = crate::browser::tests::TestHome::new();
+        provider.browser_home = Some(empty_home.path().to_path_buf());
+
+        let report = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(provider.inspect_auth_sources())
+            .expect("inspection succeeds");
+        server.join().expect("server exits");
+
+        let paste = report
+            .iter()
+            .find(|candidate| candidate.id == session::PASTE_SOURCE)
+            .expect("paste mode");
+        assert_eq!(paste.state(), Some(AuthCandidateState::Ready));
+        let dashboard = requests.recv().expect("dashboard request");
+        assert!(
+            dashboard.contains(&format!("cookie: {COOKIE_HEADER}\r\n")),
+            "{dashboard}"
+        );
+        assert!(!dashboard.contains("cookie: Cookie:"), "{dashboard}");
+    }
+    #[test]
+    fn the_quota_request_uses_the_browser_session_instead_of_api_key_headers() {
+        let cookie = "login_aliyunid_ticket=session; login_aliyunid_pk=account; csrf=csrf-value";
+        let provider =
+            Alibaba::for_test("http://127.0.0.1:9", "http://127.0.0.1:9", cookie).expect("builds");
+        let request = provider
+            .quota_request(Region::International, cookie, "secret-token")
+            .expect("builds");
+
+        assert!(
             request
                 .headers()
                 .get(reqwest::header::AUTHORIZATION)
-                .expect("present"),
-            "Bearer cpk-test"
+                .is_none()
         );
+        assert!(request.headers().get("x-dashscope-api-key").is_none());
         assert_eq!(
             request
                 .headers()
-                .get("x-dashscope-api-key")
-                .expect("present"),
-            "cpk-test"
+                .get(reqwest::header::COOKIE)
+                .expect("cookie header"),
+            cookie
         );
         assert_eq!(
             request
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
-                .expect("present"),
-            "application/json"
+                .expect("form content type"),
+            "application/x-www-form-urlencoded"
         );
         assert_eq!(
             request
                 .headers()
-                .get(reqwest::header::ORIGIN)
-                .expect("present"),
-            "https://modelstudio.console.alibabacloud.com"
+                .get("x-request-with")
+                .expect("OneConsole request marker"),
+            "XMLHttpRequest"
         );
         assert_eq!(
+            request.headers().get("x-csrf-token").expect("CSRF token"),
+            "csrf-value"
+        );
+        let body = std::str::from_utf8(
             request
-                .headers()
-                .get(reqwest::header::REFERER)
-                .expect("present"),
-            "https://modelstudio.console.alibabacloud.com/ap-southeast-1/?tab=coding-plan#/efm/coding_plan"
-        );
-
-        let body = request
-            .body()
-            .expect("present")
-            .as_bytes()
-            .expect("in memory");
-        assert_eq!(
-            body,
-            br#"{"queryCodingPlanInstanceInfoRequest":{"commodityCode":"sfm_codingplan_public_intl"}}"#
-        );
+                .body()
+                .and_then(reqwest::Body::as_bytes)
+                .expect("in-memory form"),
+        )
+        .expect("UTF-8 form");
+        assert!(body.contains("sec_token=secret-token"), "{body}");
+        assert!(body.contains("region=ap-southeast-1"), "{body}");
+        assert!(body.contains("onlyLatestOne%22%3Atrue"), "{body}");
+        assert!(body.contains("cornerstoneParam"), "{body}");
     }
 
     #[test]
-    fn a_dead_international_host_sends_the_whole_post_to_the_china_host() {
-        // A bound-then-dropped listener: the port refuses, which is the transport failure
-        // the failover exists for.
+    fn the_full_cookie_flow_bootstraps_sec_token_and_parses_quota() {
+        let (base, requests, server) = chained_server(vec![
+            route(DASHBOARD_REQUEST, 200, TOKEN_HTML),
+            route(INTL_REQUEST, 200, INTL),
+        ]);
+        let provider =
+            Alibaba::for_test(&base, "http://127.0.0.1:9", COOKIE_HEADER).expect("builds");
+
+        let snapshot = fetch(&provider).expect("the authenticated console answers quota");
+        server.join().expect("server exits");
+
+        let dashboard = requests.recv().expect("dashboard request");
+        assert!(
+            dashboard.contains(&format!("cookie: {COOKIE_HEADER}")),
+            "{dashboard}"
+        );
+        let quota = requests.recv().expect("quota request");
+        assert!(quota.starts_with(INTL_REQUEST), "{quota}");
+        assert!(
+            quota.contains(&format!("cookie: {COOKIE_HEADER}")),
+            "{quota}"
+        );
+        assert!(quota.contains("sec_token=sec-token"), "{quota}");
+        assert!(quota.contains("onlyLatestOne%22%3Atrue"), "{quota}");
+        assert!(!quota.contains("authorization:"), "{quota}");
+        assert_eq!(snapshot.windows.len(), 3);
+    }
+
+    #[test]
+    fn user_info_supplies_sec_token_when_the_dashboard_does_not_embed_it() {
+        let (base, requests, server) = chained_server(vec![
+            route(DASHBOARD_REQUEST, 200, "<html></html>"),
+            route(USER_INFO_REQUEST, 200, r#"{"secToken":"from-user-info"}"#),
+            route(INTL_REQUEST, 200, INTL),
+        ]);
+        let provider =
+            Alibaba::for_test(&base, "http://127.0.0.1:9", COOKIE_HEADER).expect("builds");
+
+        let snapshot = fetch(&provider).expect("the user-info token authenticates quota");
+        server.join().expect("server exits");
+
+        assert!(
+            requests
+                .recv()
+                .expect("dashboard")
+                .starts_with(DASHBOARD_REQUEST)
+        );
+        assert!(
+            requests
+                .recv()
+                .expect("user info")
+                .starts_with(USER_INFO_REQUEST)
+        );
+        let quota = requests.recv().expect("quota");
+        assert!(quota.contains("sec_token=from-user-info"), "{quota}");
+        assert_eq!(snapshot.windows.len(), 3);
+    }
+
+    #[test]
+    fn a_dead_international_console_retries_the_cookie_flow_in_china() {
         let doomed = TcpListener::bind("127.0.0.1:0").expect("bind");
         let dead = doomed.local_addr().expect("address");
         drop(doomed);
 
-        let (base, requests, server) = chained_server(vec![route(CN_REQUEST, 200, INTL)]);
+        let (base, requests, server) = chained_server(vec![
+            route(DASHBOARD_REQUEST, 200, TOKEN_HTML),
+            route(CN_REQUEST, 200, INTL),
+        ]);
         let provider =
-            Alibaba::for_test(&format!("http://{dead}"), &base, "cpk-live").expect("builds");
+            Alibaba::for_test(&format!("http://{dead}"), &base, COOKIE_HEADER).expect("builds");
 
-        let snapshot = fetch(&provider).expect("the china host answers");
+        let snapshot = fetch(&provider).expect("the China console answers");
         server.join().expect("server exits");
 
-        let request = requests.recv().expect("china request");
         assert!(
-            request.contains("authorization: Bearer cpk-live"),
-            "{request}"
+            requests
+                .recv()
+                .expect("dashboard")
+                .starts_with(DASHBOARD_REQUEST)
         );
-        assert!(
-            request.contains("x-dashscope-api-key: cpk-live"),
-            "{request}"
-        );
-        assert!(
-            request.contains("origin: https://bailian.console.aliyun.com"),
-            "{request}"
-        );
-        assert!(
-            request.contains(
-                "referer: https://bailian.console.aliyun.com/cn-beijing/?tab=model#/efm/coding_plan"
-            ),
-            "{request}"
-        );
+        let quota = requests.recv().expect("quota");
+        assert!(quota.starts_with(CN_REQUEST), "{quota}");
+        assert!(quota.contains("region=cn-beijing"), "{quota}");
         assert_eq!(snapshot.windows.len(), 3);
     }
 
     #[test]
-    fn a_rejected_key_on_the_international_host_is_tried_against_the_china_host() {
-        let (intl, intl_requests, intl_server) = chained_server(vec![route(
-            INTL_REQUEST,
-            401,
-            r#"{"message":"unauthorized"}"#,
-        )]);
-        let (cn, cn_requests, cn_server) = chained_server(vec![route(CN_REQUEST, 200, INTL)]);
-        let provider = Alibaba::for_test(&intl, &cn, "cpk-live").expect("builds");
+    fn console_login_envelopes_reject_the_browser_session() {
+        let routes = || {
+            vec![
+                route(DASHBOARD_REQUEST, 200, TOKEN_HTML),
+                route(INTL_REQUEST, 200, NEED_LOGIN),
+            ]
+        };
+        let (intl, intl_requests, intl_server) = chained_server(routes());
+        let (cn, cn_requests, cn_server) = chained_server(vec![
+            route(DASHBOARD_REQUEST, 200, TOKEN_HTML),
+            route(CN_REQUEST, 200, NEED_LOGIN),
+        ]);
+        let provider = Alibaba::for_test(&intl, &cn, COOKIE_HEADER).expect("builds");
 
-        let snapshot = fetch(&provider).expect("the second region answers");
+        let error = fetch(&provider).expect_err("neither console accepts the session");
+        intl_server.join().expect("intl server exits");
+        cn_server.join().expect("cn server exits");
+
+        assert!(matches!(error, ProviderError::Credential { status: 401 }));
+        assert_eq!(intl_requests.into_iter().count(), 2);
+        assert_eq!(cn_requests.into_iter().count(), 2);
+    }
+
+    #[test]
+    fn an_authenticated_account_without_a_plan_says_so_after_both_regions() {
+        let (intl, intl_requests, intl_server) = chained_server(vec![
+            route(DASHBOARD_REQUEST, 200, TOKEN_HTML),
+            route(INTL_REQUEST, 200, NO_QUOTA),
+        ]);
+        let (cn, cn_requests, cn_server) = chained_server(vec![
+            route(DASHBOARD_REQUEST, 200, TOKEN_HTML),
+            route(CN_REQUEST, 200, NO_QUOTA),
+        ]);
+        let provider = Alibaba::for_test(&intl, &cn, COOKIE_HEADER).expect("builds");
+
+        let error = fetch(&provider).expect_err("neither account view has a plan");
         intl_server.join().expect("intl server exits");
         cn_server.join().expect("cn server exits");
 
         assert!(
-            intl_requests
-                .recv()
-                .expect("intl request")
-                .contains("currentRegionId=ap-southeast-1")
-        );
-        assert!(
-            cn_requests
-                .recv()
-                .expect("cn request")
-                .contains("currentRegionId=cn-beijing")
-        );
-        assert_eq!(snapshot.windows.len(), 3);
-    }
-
-    #[test]
-    fn a_console_login_envelope_is_not_retried_on_the_other_region() {
-        let (intl, intl_requests, intl_server) =
-            chained_server(vec![route(INTL_REQUEST, 200, NEED_LOGIN)]);
-        let provider = Alibaba::for_test(&intl, "http://127.0.0.1:9", "cpk-live").expect("builds");
-
-        let result = fetch(&provider);
-        intl_server.join().expect("server exits");
-
-        let error = result.expect_err("key mode cannot read this account");
-        assert!(error.to_string().contains("API key"), "{error}");
-        assert!(
-            intl_requests
-                .recv()
-                .expect("the one request")
-                .contains("currentRegionId=ap-southeast-1")
-        );
-        assert!(
-            intl_requests.try_recv().is_err(),
-            "the other region was never asked"
-        );
-    }
-
-    #[test]
-    fn a_missing_quota_envelope_on_both_hosts_ends_malformed() {
-        let (intl, intl_requests, intl_server) =
-            chained_server(vec![route(INTL_REQUEST, 200, NO_QUOTA)]);
-        let (cn, cn_requests, cn_server) = chained_server(vec![route(CN_REQUEST, 200, NO_QUOTA)]);
-        let provider = Alibaba::for_test(&intl, &cn, "cpk-live").expect("builds");
-
-        let result = fetch(&provider);
-        intl_server.join().expect("intl server exits");
-        cn_server.join().expect("cn server exits");
-
-        let error = result.expect_err("neither region named figures");
-        assert!(
-            error.to_string().contains("named no quota windows"),
+            error.to_string().contains("no active Coding Plan"),
             "{error}"
         );
-        assert!(!intl_requests.recv().expect("intl request").is_empty());
-        assert!(!cn_requests.recv().expect("cn request").is_empty());
+        assert_eq!(intl_requests.into_iter().count(), 2);
+        assert_eq!(cn_requests.into_iter().count(), 2);
     }
 }

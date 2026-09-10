@@ -986,7 +986,10 @@ mod tests {
                 "../../tests/fixtures/claude-credentials.json"
             ))
             .expect("fixture JSON");
-            document["claudeAiOauth"]["expiresAt"] = json!(1_i64);
+            // The fixture's own refresh expiry is a wall-clock date: leave it and this
+            // helper starts refusing the refresh the day that date passes.
+            document["claudeAiOauth"]["refreshTokenExpiresAt"] =
+                json!(now_millis() + 365 * 24 * 60 * 60 * 1_000);
             fs::write(
                 &path,
                 serde_json::to_vec_pretty(&document).expect("serialize fixture"),
