@@ -55,7 +55,7 @@ use crate::oauth_file::{
 };
 use crate::secrets::{self, Secrets};
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tidemark_types::{
@@ -590,6 +590,15 @@ fn parse_for_account(
             &mut windows,
         )?;
     }
+    if let Some(window) = envelope
+        .spend_control
+        .as_ref()
+        .map(|control| control.window(captured_at))
+        .transpose()?
+        .flatten()
+    {
+        windows.push(window);
+    }
 
     Ok(Snapshot {
         provider: ProviderId::new(PROVIDER_ID),
@@ -718,15 +727,89 @@ struct Credits {
 #[derive(Debug, Deserialize)]
 struct SpendControl {
     #[serde(default)]
+    reached: bool,
+    #[serde(default)]
     individual_limit: Option<IndividualLimit>,
+}
+
+impl SpendControl {
+    fn window(&self, captured_at: Timestamp) -> Result<Option<Window>, ProviderError> {
+        let Some(limit) = self.individual_limit.as_ref() else {
+            return Ok(None);
+        };
+        let Some((used, maximum)) = limit.amounts() else {
+            return Ok(None);
+        };
+        if used < 0.0 || maximum < 0.0 {
+            return Err(ProviderError::malformed(
+                "a Codex spend limit contains a negative amount",
+            ));
+        }
+        let used_percent = if maximum > 0.0 {
+            used / maximum * 100.0
+        } else if self.reached {
+            100.0
+        } else {
+            0.0
+        };
+        let resets_at = limit
+            .reset_at
+            .and_then(|seconds| Timestamp::from_unix(seconds).ok())
+            .or_else(|| {
+                limit
+                    .reset_after_seconds
+                    .filter(|seconds| *seconds >= 0)
+                    .map(|seconds| captured_at.saturating_add_seconds(seconds))
+            });
+        let mut subtitle = format!("{} of {}", trim_number(used), trim_number(maximum));
+        if self.reached {
+            subtitle.push_str(" · Reached");
+        }
+        Ok(Some(Window {
+            key: WindowKey::named("monthly_credits"),
+            title: "Monthly credits".to_owned(),
+            subtitle: Some(subtitle),
+            used_percent: used_percent.clamp(0.0, 100.0),
+            resets_at,
+            length: None,
+        }))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Numeric(f64);
+
+impl<'de> Deserialize<'de> for Numeric {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let number = match &value {
+            serde_json::Value::Number(number) => number.as_f64(),
+            serde_json::Value::String(raw) => raw.trim().parse::<f64>().ok(),
+            _ => None,
+        };
+        number
+            .filter(|number| number.is_finite())
+            .map(Self)
+            .ok_or_else(|| de::Error::custom(format!("{value} is not a finite number")))
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct IndividualLimit {
     #[serde(default)]
-    limit: Option<f64>,
+    limit: Option<Numeric>,
     #[serde(default)]
-    used: Option<f64>,
+    used: Option<Numeric>,
+    #[serde(default)]
+    reset_after_seconds: Option<i64>,
+    #[serde(default)]
+    reset_at: Option<i64>,
+}
+
+impl IndividualLimit {
+    fn amounts(&self) -> Option<(f64, f64)> {
+        Some((self.used?.0, self.limit?.0))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -750,16 +833,18 @@ fn details(envelope: &Envelope) -> Vec<DetailSection> {
         });
     }
 
-    if let Some(credits) = envelope
+    if let Some(value) = envelope
         .credits
         .as_ref()
         .filter(|credits| credits.has_credits || credits.unlimited)
+        .and_then(|credits| {
+            if credits.unlimited {
+                Some("Unlimited".to_owned())
+            } else {
+                number_text(credits.balance.as_ref())
+            }
+        })
     {
-        let value = if credits.unlimited {
-            "Unlimited".to_owned()
-        } else {
-            number_text(credits.balance.as_ref()).unwrap_or_else(|| "0".to_owned())
-        };
         sections.push(DetailSection {
             title: "Credits".to_owned(),
             rows: vec![DetailRow {
@@ -796,7 +881,7 @@ fn details(envelope: &Envelope) -> Vec<DetailSection> {
         .spend_control
         .as_ref()
         .and_then(|control| control.individual_limit.as_ref())
-        .and_then(|limit| Some((limit.used?, limit.limit?)))
+        .and_then(IndividualLimit::amounts)
     {
         sections.push(DetailSection {
             title: "Spend".to_owned(),
