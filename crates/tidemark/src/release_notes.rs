@@ -40,6 +40,17 @@ pub(crate) fn present(parent: &impl IsA<gtk::Widget>, version: &str, notes: &str
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
         .child(&body(notes))
+        // The notes are content, not chrome: `view` puts them on the surface a document is
+        // read on — a step darker than the dialog in a dark theme, a step lighter in a
+        // light one — so the block reads as one thing inside the dialog rather than as the
+        // dialog's own text. `release-notes` only rounds its corners; see `style::STYLE`.
+        .css_classes(["view", "release-notes"])
+        // Scrolled content is painted to the viewport's square edges, so the rounded
+        // corners the class gives the surface have to be clipped to as well.
+        .overflow(gtk::Overflow::Hidden)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(6)
         .build();
 
     let cancel = gtk::Button::with_label("Cancel");
@@ -83,6 +94,11 @@ pub(crate) fn present(parent: &impl IsA<gtk::Widget>, version: &str, notes: &str
         });
     });
 
+    // Focus starts on a button, not in the notes. GTK selects the whole of a selectable
+    // label the moment it takes focus, so the dialog would open with its first line
+    // highlighted; Cancel rather than Download, because the key that then works by itself
+    // must not be the one that opens a browser.
+    dialog.set_focus(Some(&cancel));
     dialog.present(Some(parent));
 }
 
@@ -91,10 +107,10 @@ fn body(notes: &str) -> gtk::Box {
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
-        .margin_start(18)
-        .margin_end(18)
-        .margin_top(6)
-        .margin_bottom(18)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(12)
+        .margin_bottom(12)
         .build();
     for block in markdown::blocks(notes) {
         content.append(&widget(&block));
@@ -206,5 +222,12 @@ mod tests {
         assert_eq!(heading_class(1), "title-2");
         assert_eq!(heading_class(2), "title-3");
         assert_eq!(heading_class(6), "heading");
+    }
+
+    #[test]
+    fn the_notes_surface_is_rounded_by_the_stylesheet_it_names() {
+        // The dialog asks for `release-notes`; a stylesheet that stopped defining it would
+        // leave a square block of notes inside a rounded dialog, and nothing would fail.
+        assert!(crate::style::STYLE.contains(".release-notes {\n    border-radius:"));
     }
 }

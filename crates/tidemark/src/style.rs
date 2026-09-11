@@ -235,6 +235,14 @@ pub(crate) const STYLE: &str = "
 .credential-choice {
     padding: 8px;
 }
+
+/* The release notes scroll on a `view` surface inset from the dialog's edges, so the
+   surface needs corners of its own: a square block inside a rounded dialog reads as a
+   drawing mistake. The radius is libadwaita's own card radius, and the overflow clip is
+   what keeps the first line of notes from painting outside it. */
+.release-notes {
+    border-radius: 12px;
+}
 ";
 
 /// Adds the stylesheet to the display, above the theme and below the user's own overrides.
