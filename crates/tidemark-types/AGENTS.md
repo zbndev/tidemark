@@ -15,6 +15,7 @@ Domain vocabulary and compatible IPC dictionaries; score 9, a distinct public-co
 
 ## CONVENTIONS
 - `Snapshot` represents a provider reading; `ProviderStatus` also carries account state and its last good reading.
+- An account id is the name the user typed and the card shows: `valid_account_id` allows letters and digits in any script, plus spaces, hyphens and underscores, with alphanumeric edges and case kept. Never transliterate it, never lowercase it, never assume ASCII.
 - Wire structures derive dictionary serialization and encode as `a{sv}`, not positional D-Bus structs.
 - Optional values are omitted dictionary keys; JSON uses the same shapes rather than a parallel schema.
 - Extend payloads so older dictionaries with missing fields still decode.

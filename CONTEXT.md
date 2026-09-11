@@ -41,9 +41,14 @@ conventional fallback and is what desktop files, D-Bus, and Flatpak all expect t
   what can be added; it does not say what the daemon currently polls.
 - **Configured account** — a catalog provider the user has added. v1 creates its single
   `default` account and persists the provider slug in `config.toml`.
-- **Account** — one set of credentials for a provider. v1 shows exactly one per provider,
-  but every key in storage carries an account id so multi-account is a UI change, not a
-  migration.
+- **Account** — one set of credentials for a provider. Every key in storage carries an
+  account id, which is also the name the card shows above the provider's own: it is the
+  name the user typed, in any script — letters, digits, spaces, hyphens and underscores,
+  beginning and ending on a letter or a digit, case kept. Nothing transliterates it, and
+  nothing downstream needs it to be ASCII: it is a TOML value in `accounts`, a quoted key
+  where a plugin's per-account table needs one, a bound SQLite parameter, a Secret Service
+  attribute and a D-Bus string. `default` is the provider's own structural first account
+  and stays unlabelled.
 - **Window** — one rate-limit period a provider reports: `{id, title, used_percent,
   resets_at, length}`. A provider returns however many it wants; the set can change
   between responses. Windows are first-class, not display strings — the pace mark and the
