@@ -20,6 +20,7 @@ use tidemark_types::{
 use self::detail::ProviderDetail;
 use self::list::{ConfiguredList, Picker, RowCallbacks};
 use crate::bus::DaemonProxy;
+use crate::card::CardAction;
 
 /// The account a provider's structural first add holds. The daemon will not rename it,
 /// so the label pen stays off its page.
@@ -174,6 +175,7 @@ fn remove_local_provider<T>(
 #[derive(Debug)]
 pub struct ProviderSettings {
     dialog: adw::PreferencesDialog,
+    tabs: adw::ToggleGroup,
     proxy: DaemonProxy<'static>,
     definitions: RefCell<Vec<ProviderDefinition>>,
     statuses: RefCell<Vec<ProviderStatus>>,
@@ -269,6 +271,7 @@ impl ProviderSettings {
         });
         let settings = Rc::new(Self {
             dialog: dialog.clone(),
+            tabs: tabs.clone(),
             proxy,
             definitions: RefCell::new(Vec::new()),
             statuses: RefCell::new(Vec::new()),
@@ -438,6 +441,42 @@ impl ProviderSettings {
                 action(&settings, provider);
             }
         })
+    }
+
+    /// The three shortcuts a quota card's context menu takes into this dialog. Each is
+    /// the row's own control, reached with the row's identity instead of its button, so
+    /// there is one implementation of adding, editing and removing an account.
+    ///
+    /// The tab is settled first: a subpage covers the list while it is open, and going
+    /// back from a custom provider's page has to land on the tab that provider is on.
+    pub fn shortcut_add_account(self: &Rc<Self>, provider: &str) {
+        self.show_provider_tab(provider);
+        self.add_account(provider.to_owned());
+    }
+
+    pub fn shortcut_open_detail(self: &Rc<Self>, provider: &str, account: &str) {
+        self.show_provider_tab(provider);
+        self.open_detail(provider.to_owned(), account.to_owned());
+    }
+
+    pub fn shortcut_remove(self: &Rc<Self>, provider: &str, account: &str) {
+        self.show_provider_tab(provider);
+        self.confirm_removal(provider.to_owned(), account.to_owned());
+    }
+
+    /// Selects the tab this provider is drawn on. A plugin lives on the custom tab in both
+    /// of its states; everything else is built-in.
+    fn show_provider_tab(&self, provider: &str) {
+        let custom = self
+            .definitions
+            .borrow()
+            .iter()
+            .any(|definition| definition.provider == provider && definition.plugin.is_some());
+        let name = if custom { "custom" } else { "built-in" };
+        // Setting the toggle fires `show_tab` through the notify handler; the explicit
+        // call is what keeps the groups right if the toggle was already on that name.
+        self.tabs.set_active_name(Some(name));
+        self.show_tab(name);
     }
 
     fn open_picker(&self) {
@@ -933,6 +972,21 @@ pub(super) fn opens_detail_after_add(definition: &ProviderDefinition) -> bool {
 /// Whether a user can give this provider another account: a key or a browser login is
 /// something a second account can hold its own copy of, while an external or
 /// credential-free provider reads whatever one thing this machine already has.
+/// The entries a quota card's context menu offers for one provider. The same three rules
+/// the configured row's buttons follow: a second account where the credential can hold
+/// one, a pen where there is something to configure, and removal always.
+pub fn card_actions(definition: Option<&ProviderDefinition>) -> Vec<CardAction> {
+    let mut actions = Vec::new();
+    if definition.is_some_and(multi_account_capable) {
+        actions.push(CardAction::AddAccount);
+    }
+    if definition.is_some_and(opens_detail_after_add) {
+        actions.push(CardAction::Modify);
+    }
+    actions.push(CardAction::Remove);
+    actions
+}
+
 pub(super) fn multi_account_capable(definition: &ProviderDefinition) -> bool {
     matches!(
         definition.credential_kind(),
@@ -1047,8 +1101,8 @@ mod tests {
 
     use super::detail::{AfterBeginAction, after_begin_action};
     use super::{
-        ActiveDetail, DEFAULT_ACCOUNT, DetailCache, PendingLogins, multi_account_capable,
-        name_suggests_usable, opens_detail_after_add, remove_local_provider,
+        ActiveDetail, CardAction, DEFAULT_ACCOUNT, DetailCache, PendingLogins, card_actions,
+        multi_account_capable, name_suggests_usable, opens_detail_after_add, remove_local_provider,
     };
 
     fn definition(credential: CredentialKind) -> ProviderDefinition {
@@ -1109,6 +1163,38 @@ mod tests {
             choices: Vec::new(),
         });
         assert!(opens_detail_after_add(&with_options));
+    }
+
+    #[test]
+    fn a_cards_menu_offers_what_the_settings_row_draws_buttons_for() {
+        // A key provider's row has all three controls, so its card offers all three.
+        assert_eq!(
+            card_actions(Some(&definition(CredentialKind::Key))),
+            [
+                CardAction::AddAccount,
+                CardAction::Modify,
+                CardAction::Remove
+            ]
+        );
+        // Nothing to configure and no second account to hold a credential: the row draws
+        // only its trash, and so the menu is only removal.
+        assert_eq!(
+            card_actions(Some(&definition(CredentialKind::None))),
+            [CardAction::Remove]
+        );
+        // A local source to pick is something to modify, without being something a second
+        // account can hold its own copy of.
+        assert_eq!(
+            card_actions(Some(&keyless_with_browser_auth())),
+            [CardAction::Modify, CardAction::Remove]
+        );
+    }
+
+    #[test]
+    fn a_card_with_no_definition_can_still_be_removed() {
+        // A configured provider the catalog no longer offers: nothing can be added to it
+        // or configured on it, but it is exactly the one a user wants gone.
+        assert_eq!(card_actions(None), [CardAction::Remove]);
     }
 
     #[test]

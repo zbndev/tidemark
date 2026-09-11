@@ -23,12 +23,12 @@ use tidemark_types::{
 
 use crate::about;
 use crate::bus::{self, DaemonProxy, Update};
-use crate::card::{Card, CardExpansion, CardTitle};
+use crate::card::{Card, CardAction, CardExpansion, CardMenu, CardTitle};
 use crate::detail::DetailDialog;
 use crate::grid::CardGrid;
 use crate::model;
 use crate::preferences::PreferencesDialog;
-use crate::provider_settings::ProviderSettings;
+use crate::provider_settings::{self, ProviderSettings};
 use crate::tray::{self, Tray};
 use crate::update::{self, UpdateNotice};
 
@@ -549,17 +549,59 @@ impl MainWindow {
         expansion: Option<CardExpansion>,
     ) -> Rc<Card> {
         let weak = Rc::downgrade(self);
+        let menu = CardMenu {
+            entries: {
+                let weak = weak.clone();
+                Rc::new(move |provider, _| {
+                    let Some(main) = weak.upgrade() else {
+                        return Vec::new();
+                    };
+                    let definitions = main.definitions.borrow();
+                    provider_settings::card_actions(
+                        definitions
+                            .iter()
+                            .find(|definition| definition.provider == provider),
+                    )
+                })
+            },
+            on_choose: {
+                let weak = weak.clone();
+                Rc::new(move |action, provider, account| {
+                    if let Some(main) = weak.upgrade() {
+                        main.run_card_action(action, &provider, &account);
+                    }
+                })
+            },
+        };
         Rc::new(Card::new(
             status,
             now,
             title,
-            Rc::new(move |provider, account| {
-                if let Some(main) = weak.upgrade() {
-                    main.open_detail(&provider, &account);
+            Rc::new({
+                let weak = weak.clone();
+                move |provider, account| {
+                    if let Some(main) = weak.upgrade() {
+                        main.open_detail(&provider, &account);
+                    }
                 }
             }),
+            menu,
             expansion,
         ))
+    }
+
+    /// A card's context menu is a shortcut into the provider settings dialog, never a
+    /// second way of doing what it does: the dialog is opened (or reused) and asked to
+    /// take the row's own action on this account.
+    fn run_card_action(self: &Rc<Self>, action: CardAction, provider: &str, account: &str) {
+        let Some(dialog) = self.open_provider_settings() else {
+            return;
+        };
+        match action {
+            CardAction::AddAccount => dialog.shortcut_add_account(provider),
+            CardAction::Modify => dialog.shortcut_open_detail(provider, account),
+            CardAction::Remove => dialog.shortcut_remove(provider, account),
+        }
     }
 
     /// Opens one dimmed detail dialog and refuses a second until the first closes.
@@ -608,32 +650,36 @@ impl MainWindow {
     fn connect_providers_button(self: &Rc<Self>) {
         let weak: Weak<Self> = Rc::downgrade(self);
         self.providers.connect_clicked(move |_| {
-            let Some(main) = weak.upgrade() else {
-                return;
-            };
-            if !main.provider_settings.is_empty() {
-                return;
+            if let Some(main) = weak.upgrade() {
+                main.open_provider_settings();
             }
-            let Some(proxy) = main.daemon.borrow().clone() else {
-                return;
-            };
-            let on_closed = {
-                let weak = weak.clone();
-                move || {
-                    if let Some(main) = weak.upgrade() {
-                        main.provider_settings.clear();
-                    }
-                }
-            };
-            let dialog = ProviderSettings::present(
-                &main.window,
-                proxy,
-                &main.definitions.borrow(),
-                &main.statuses(),
-                on_closed,
-            );
-            assert!(main.provider_settings.insert_if_empty(dialog));
         });
+    }
+
+    /// Opens the one provider settings dialog, or hands back the open one. `None` means
+    /// there is no daemon to configure anything against.
+    fn open_provider_settings(self: &Rc<Self>) -> Option<Rc<ProviderSettings>> {
+        if let Some(dialog) = self.provider_settings.get() {
+            return Some(dialog);
+        }
+        let proxy = self.daemon.borrow().clone()?;
+        let on_closed = {
+            let weak: Weak<Self> = Rc::downgrade(self);
+            move || {
+                if let Some(main) = weak.upgrade() {
+                    main.provider_settings.clear();
+                }
+            }
+        };
+        let dialog = ProviderSettings::present(
+            &self.window,
+            proxy,
+            &self.definitions.borrow(),
+            &self.statuses(),
+            on_closed,
+        );
+        assert!(self.provider_settings.insert_if_empty(Rc::clone(&dialog)));
+        Some(dialog)
     }
 
     fn connect_preferences_action(self: &Rc<Self>) {

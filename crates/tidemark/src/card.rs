@@ -26,6 +26,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use gtk::gio;
 use gtk::prelude::*;
 use tidemark_types::{
     DetailSection, Emphasis, Field, Metric, MetricWindow, Presentation, ProviderState,
@@ -103,6 +104,110 @@ pub(crate) struct CardExpansion {
     pub(crate) expanded: bool,
     pub(crate) on_toggled: Rc<dyn Fn(bool)>,
 }
+
+/// The name the card's own action group is installed under. Menu items address it, so
+/// the group name and the prefix in every `card.*` action string are the same string.
+const CARD_ACTIONS: &str = "card";
+
+/// One entry of a card's secondary-click menu. Each is a shortcut to the control the
+/// provider settings row draws for the same account — never a second implementation of it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CardAction {
+    AddAccount,
+    Modify,
+    Remove,
+}
+
+impl CardAction {
+    /// The action's name inside the card's group.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::AddAccount => "add-account",
+            Self::Modify => "modify",
+            Self::Remove => "remove",
+        }
+    }
+
+    /// What the menu item says, in the words the settings row's tooltip uses.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::AddAccount => "Add new account",
+            Self::Modify => "Modify",
+            Self::Remove => "Remove",
+        }
+    }
+
+    fn detailed(self) -> String {
+        format!("{CARD_ACTIONS}.{}", self.name())
+    }
+}
+
+/// Removal is the one entry that undoes rather than configures, so it sits in a section of
+/// its own and the menu draws a separator above it.
+fn menu_sections(entries: &[CardAction]) -> Vec<Vec<CardAction>> {
+    let (destructive, configuring): (Vec<CardAction>, Vec<CardAction>) = entries
+        .iter()
+        .partition(|action| matches!(action, CardAction::Remove));
+    [configuring, destructive]
+        .into_iter()
+        .filter(|section| !section.is_empty())
+        .collect()
+}
+
+fn menu_model(entries: &[CardAction]) -> gio::Menu {
+    let menu = gio::Menu::new();
+    for section in menu_sections(entries) {
+        let group = gio::Menu::new();
+        for action in section {
+            group.append(Some(action.label()), Some(&action.detailed()));
+        }
+        menu.append_section(None, &group);
+    }
+    menu
+}
+
+/// The two keyboard ways to ask for a context menu, which GTK does not route for a plain
+/// widget the way it does for a text view.
+fn menu_key(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> bool {
+    key == gtk::gdk::Key::Menu
+        || (key == gtk::gdk::Key::F10 && modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK))
+}
+
+/// Installs one action per entry on the card itself. The identity is fixed for the life of
+/// the card, so the actions are too; only which of them the menu offers changes.
+fn install_card_actions(slot: &gtk::Overlay, identity: &CardIdentity, menu: &CardMenu) {
+    let actions = gio::SimpleActionGroup::new();
+    for action in [
+        CardAction::AddAccount,
+        CardAction::Modify,
+        CardAction::Remove,
+    ] {
+        let entry = gio::SimpleAction::new(action.name(), None);
+        entry.connect_activate({
+            let on_choose = Rc::clone(&menu.on_choose);
+            let identity = identity.clone();
+            move |_, _| {
+                on_choose(action, identity.provider.clone(), identity.account.clone());
+            }
+        });
+        actions.add_action(&entry);
+    }
+    slot.insert_action_group(CARD_ACTIONS, Some(&actions));
+}
+
+/// A card's secondary-click menu. Which entries a provider offers is asked when the menu
+/// opens, not when the card is built, so a catalog that arrives later is already answered
+/// for; what a chosen entry does belongs to the window, exactly as activation does.
+#[derive(Clone)]
+pub(crate) struct CardMenu {
+    pub(crate) entries: CardEntries,
+    pub(crate) on_choose: CardChoice,
+}
+
+/// Which entries one account's menu currently offers, by provider and account id.
+pub(crate) type CardEntries = Rc<dyn Fn(&str, &str) -> Vec<CardAction>>;
+/// What a chosen entry does, with the identity of the card it was chosen on.
+pub(crate) type CardChoice = Rc<dyn Fn(CardAction, String, String)>;
 
 /// The provider context and account name shown at the top of a quota card.
 #[derive(Debug)]
@@ -190,6 +295,19 @@ pub struct Card {
     balance_fraction: gtk::Label,
     footer: gtk::Label,
     shown: RefCell<Shown>,
+    /// Built on the first secondary click and reparented to nothing when the card goes.
+    menu: Rc<RefCell<Option<gtk::PopoverMenu>>>,
+}
+
+impl Drop for Card {
+    /// A `GtkPopoverMenu` is parented to the slot rather than packed into it, so nothing
+    /// takes it away when the slot is dropped. Unparenting here is what keeps a removed
+    /// card from leaving a popover behind.
+    fn drop(&mut self) {
+        if let Some(menu) = self.menu.borrow_mut().take() {
+            menu.unparent();
+        }
+    }
 }
 
 /// A drawable widget resolved against its metric. Only old-daemon rows own their data.
@@ -358,6 +476,7 @@ impl Card {
         now: Timestamp,
         title: CardTitle,
         on_activate: Rc<dyn Fn(String, String)>,
+        menu: CardMenu,
         expansion: Option<CardExpansion>,
     ) -> Self {
         // All three ellipsize. None of them is expected to: a provider's name, its plan and
@@ -605,23 +724,77 @@ impl Card {
         let identity = CardIdentity::from(status);
         let invoke: Rc<dyn Fn()> = Rc::new({
             let on_activate = Rc::clone(&on_activate);
+            let identity = identity.clone();
             move || identity.activate(on_activate.as_ref())
         });
         let click = gtk::GestureClick::new();
+        // The primary button only. Without this the same gesture answers the secondary
+        // one too, and a right-click would open the detail dialog under its own menu.
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
         click.connect_released({
             let invoke = Rc::clone(&invoke);
             move |_, _, _, _| invoke()
         });
         slot.add_controller(click);
+
+        let popover: Rc<RefCell<Option<gtk::PopoverMenu>>> = Rc::new(RefCell::new(None));
+        install_card_actions(&slot, &identity, &menu);
+        let popup: Rc<dyn Fn(f64, f64)> = Rc::new({
+            let slot = slot.clone();
+            let popover = Rc::clone(&popover);
+            let entries = Rc::clone(&menu.entries);
+            let identity = identity.clone();
+            move |x, y| {
+                let shown = entries(&identity.provider, &identity.account);
+                if shown.is_empty() {
+                    return;
+                }
+                let mut held = popover.borrow_mut();
+                let menu = held.get_or_insert_with(|| {
+                    let menu = gtk::PopoverMenu::from_model(None::<&gio::MenuModel>);
+                    menu.set_parent(&slot);
+                    menu.set_has_arrow(false);
+                    menu.set_halign(gtk::Align::Start);
+                    menu
+                });
+                menu.set_menu_model(Some(&menu_model(&shown)));
+                menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                menu.popup();
+            }
+        });
+
+        let secondary = gtk::GestureClick::new();
+        secondary.set_button(gtk::gdk::BUTTON_SECONDARY);
+        // On press, not release: that is when every other menu on this desktop appears,
+        // and claiming the sequence keeps the grid's drag out of it.
+        secondary.connect_pressed({
+            let popup = Rc::clone(&popup);
+            move |gesture, _, x, y| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                popup(x, y);
+            }
+        });
+        slot.add_controller(secondary);
+
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed({
             let invoke = Rc::clone(&invoke);
-            move |_, key, _, _| {
+            let popup = Rc::clone(&popup);
+            let slot = slot.clone();
+            move |_, key, _, modifiers| {
                 if matches!(
                     key,
                     gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::space
                 ) {
                     invoke();
+                    gtk::glib::Propagation::Stop
+                } else if menu_key(key, modifiers) {
+                    // No pointer to point at: the keyboard's menu opens against the middle
+                    // of the card it belongs to.
+                    popup(
+                        f64::from(slot.width()) / 2.0,
+                        f64::from(slot.height()) / 2.0,
+                    );
                     gtk::glib::Propagation::Stop
                 } else {
                     gtk::glib::Propagation::Proceed
@@ -650,6 +823,7 @@ impl Card {
             balance_whole,
             balance_fraction,
             footer,
+            menu: popover,
             shown: RefCell::new(Shown {
                 status: status.clone(),
                 secondary: Vec::new(),
@@ -1256,6 +1430,60 @@ mod tests {
 
         identity.activate(activate.as_ref());
         assert_eq!(calls.borrow().as_slice(), [("zai".into(), "work".into())]);
+    }
+
+    #[test]
+    fn a_card_menu_separates_removal_from_the_entries_that_configure() {
+        let sections = menu_sections(&[
+            CardAction::AddAccount,
+            CardAction::Modify,
+            CardAction::Remove,
+        ]);
+
+        assert_eq!(
+            sections,
+            [
+                vec![CardAction::AddAccount, CardAction::Modify],
+                vec![CardAction::Remove],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_menu_of_removal_alone_draws_no_empty_section_above_it() {
+        assert_eq!(
+            menu_sections(&[CardAction::Remove]),
+            [vec![CardAction::Remove]]
+        );
+    }
+
+    #[test]
+    fn every_card_menu_entry_addresses_the_cards_own_action_group() {
+        // The group is installed under this name on the card, so an item addressing any
+        // other prefix would draw insensitive.
+        for action in [
+            CardAction::AddAccount,
+            CardAction::Modify,
+            CardAction::Remove,
+        ] {
+            assert_eq!(
+                action.detailed(),
+                format!("{CARD_ACTIONS}.{}", action.name())
+            );
+        }
+        assert_eq!(CardAction::AddAccount.label(), "Add new account");
+        assert_eq!(CardAction::Modify.label(), "Modify");
+        assert_eq!(CardAction::Remove.label(), "Remove");
+    }
+
+    #[test]
+    fn the_keyboard_asks_for_a_card_menu_the_two_ways_the_desktop_does() {
+        use gtk::gdk::{Key, ModifierType};
+
+        assert!(menu_key(Key::Menu, ModifierType::empty()));
+        assert!(menu_key(Key::F10, ModifierType::SHIFT_MASK));
+        assert!(!menu_key(Key::F10, ModifierType::empty()));
+        assert!(!menu_key(Key::space, ModifierType::SHIFT_MASK));
     }
 
     #[test]
