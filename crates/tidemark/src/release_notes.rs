@@ -40,18 +40,22 @@ pub(crate) fn present(parent: &impl IsA<gtk::Widget>, version: &str, notes: &str
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
         .child(&body(notes))
-        // The notes are content, not chrome: `view` puts them on the surface a document is
-        // read on — a step darker than the dialog in a dark theme, a step lighter in a
-        // light one — so the block reads as one thing inside the dialog rather than as the
-        // dialog's own text. `release-notes` only rounds its corners; see `style::STYLE`.
-        .css_classes(["view", "release-notes"])
-        // Scrolled content is painted to the viewport's square edges, so the rounded
-        // corners the class gives the surface have to be clipped to as well.
-        .overflow(gtk::Overflow::Hidden)
+        .build();
+
+    // The container is the box around the scroll, not the scroll itself: it draws the
+    // recessed surface and the rounded corners, while the scroll clips its own square
+    // viewport inside it. Rounding the scroll instead needs `Overflow::Hidden`, and that
+    // clip lands on the text — the first line loses its top pixels to it. A box rather
+    // than a `GtkFrame`, whose separate `border` node would draw the theme's border
+    // beneath ours.
+    let framed = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .css_classes(["release-notes"])
         .margin_start(12)
         .margin_end(12)
         .margin_top(6)
         .build();
+    framed.append(&scroll);
 
     let cancel = gtk::Button::with_label("Cancel");
     let download = gtk::Button::builder()
@@ -69,7 +73,7 @@ pub(crate) fn present(parent: &impl IsA<gtk::Widget>, version: &str, notes: &str
     actions.append(&cancel);
     actions.append(&download);
 
-    let toolbar = adw::ToolbarView::builder().content(&scroll).build();
+    let toolbar = adw::ToolbarView::builder().content(&framed).build();
     toolbar.add_top_bar(&adw::HeaderBar::new());
     toolbar.add_bottom_bar(&actions);
     dialog.set_child(Some(&toolbar));
@@ -225,9 +229,14 @@ mod tests {
     }
 
     #[test]
-    fn the_notes_surface_is_rounded_by_the_stylesheet_it_names() {
-        // The dialog asks for `release-notes`; a stylesheet that stopped defining it would
-        // leave a square block of notes inside a rounded dialog, and nothing would fail.
-        assert!(crate::style::STYLE.contains(".release-notes {\n    border-radius:"));
+    fn the_notes_sit_on_a_surface_darker_than_the_dialog_in_either_theme() {
+        // The container asks for `release-notes`, and what makes it a container is the
+        // shade: a stylesheet that stopped defining it, or that reached for libadwaita's
+        // `view` — white in a light theme, and so invisible against the dialog — would
+        // leave a plain block of text and nothing would fail.
+        assert!(
+            crate::style::STYLE
+                .contains(".release-notes {\n    background-color: shade(@window_bg_color,")
+        );
     }
 }

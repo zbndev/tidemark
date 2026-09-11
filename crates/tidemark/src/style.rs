@@ -236,11 +236,15 @@ pub(crate) const STYLE: &str = "
     padding: 8px;
 }
 
-/* The release notes scroll on a `view` surface inset from the dialog's edges, so the
-   surface needs corners of its own: a square block inside a rounded dialog reads as a
-   drawing mistake. The radius is libadwaita's own card radius, and the overflow clip is
-   what keeps the first line of notes from painting outside it. */
+/* The release notes are read inside the dialog rather than off its own background, so they
+   sit on a surface that is a step *darker* in both themes. libadwaita's `view` class is
+   the wrong tool for that: in a light theme it is white, which is lighter than the dialog
+   and all but invisible. Shading the window colour is derived rather than picked, so it
+   follows a recoloured theme, and the hairline keeps the container's edge legible where
+   the shade alone is subtle. */
 .release-notes {
+    background-color: shade(@window_bg_color, 0.93);
+    border: 1px solid alpha(currentColor, 0.12);
     border-radius: 12px;
 }
 ";
