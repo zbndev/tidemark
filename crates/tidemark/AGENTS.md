@@ -34,7 +34,7 @@ GTK/libadwaita presentation and desktop lifecycle; score 12, a distinct IPC-clie
 ## ANTI-PATTERNS
 - Do not infer authentication capabilities from provider/browser names or inspect credential files in widgets.
 - Do not replace `CardGrid` with FlowBox sorting or detached drag-source icons.
-- Do not interpret daemon strings as markup or use color as the only status explanation.
+- Do not interpret daemon strings as markup or use color as the only status explanation; release notes are the one exception, and `src/markdown.rs` escapes them before adding markup of its own.
 - Do not coerce unknown server choices into known ones; keep them visible and disabled.
 - Do not let stale history replies update a newer selection; preserve `RequestGeneration` checks.
 - Do not close to tray unless a host accepted the icon; tray failure is nonfatal.
@@ -45,4 +45,5 @@ GTK/libadwaita presentation and desktop lifecycle; score 12, a distinct IPC-clie
 - `cargo test -p tidemark` covers colocated model, geometry, and state-machine tests.
 - Manual GUI data: stop the real user service with `systemctl --user stop tidemarkd`, then run `cargo run -p tidemark --example mock-daemon`.
 - In another terminal of the same graphical/bus session, run `cargo run -p tidemark`.
+- Update-button dialog: the mock daemon above already offers a release with notes. Against the real release instead, lower `[workspace.package] version` in the root `Cargo.toml` — the check compares `tidemarkd`'s own version to GitHub's latest — then run `cargo run -p tidemarkd` and wait 60 s for the first check.
 - Package asset lists in this crate's Cargo metadata mirror `PKGBUILD`; package both daemon and GUI from a prior workspace release build.
