@@ -4,7 +4,7 @@
 
 # Tidemark
 
-**See how much of your AI quota is left — on your Linux desktop.**
+**See how much of your AI quota is left in one GUI app**
 
 ![Release](https://www.shieldcn.dev/github/release/zbndev/tidemark.svg?size=sm&theme=zinc)
 ![GitHub Downloads](https://shieldcn.dev/github/downloads/zbndev/tidemark.svg?variant=secondary)
