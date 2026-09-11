@@ -529,7 +529,8 @@ impl MainWindow {
         self.redraw_cards();
     }
 
-    /// The title a card shows: provider title for the main account, account label otherwise.
+    /// The title a card shows: the provider on every card, with an extra account's label —
+    /// or, unnamed, its id — captioned above it.
     fn card_title(&self, status: &ProviderStatus, main: bool) -> CardTitle {
         let provider = model::name(&self.titles(), &status.provider);
         if main {

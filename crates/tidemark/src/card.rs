@@ -210,6 +210,11 @@ pub(crate) type CardEntries = Rc<dyn Fn(&str, &str) -> Vec<CardAction>>;
 pub(crate) type CardChoice = Rc<dyn Fn(CardAction, String, String)>;
 
 /// The provider context and account name shown at the top of a quota card.
+///
+/// The heading is always the provider: it stands on the card's baseline beside the mark and
+/// the plan, on every card, so a group of cards reads as one provider rather than as a list
+/// of account names. An account's own identity — its label, or its id — sits above that
+/// heading as a caption, present only on the extra accounts that need distinguishing.
 #[derive(Debug)]
 pub(crate) struct CardTitle {
     heading: String,
@@ -226,8 +231,8 @@ impl CardTitle {
 
     pub(crate) fn child(provider: &str, account: &str) -> Self {
         Self {
-            heading: account.into(),
-            caption: Some(provider.into()),
+            heading: provider.into(),
+            caption: Some(account.into()),
         }
     }
 }
@@ -523,8 +528,14 @@ impl Card {
         // at the tighter of the two and the plan makes up the difference. GTK margins cannot
         // be negative, which is why it is this way round.
         let title_row = gtk::Box::builder().spacing(MARK_GAP).build();
+        // Bottom-aligned, not filled: the caption an extra account adds grows the row
+        // *upwards*, leaving the name where it is. A filled box packs its children from the
+        // top instead, which drops the name off the mark's and the plan's baseline by
+        // whatever slack the row has — the whole point of the stack is that it is invisible
+        // on the cards that have no caption and lifts nothing on the cards that do.
         let title_stack = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
+            .valign(gtk::Align::End)
             .spacing(0)
             .build();
         title_stack.append(&caption);
@@ -1487,11 +1498,16 @@ mod tests {
     }
 
     #[test]
-    fn a_child_card_title_keeps_the_provider_and_account_identity_without_card_chrome() {
-        let title = CardTitle::child("Claude", "Work");
+    fn a_child_card_headlines_the_provider_and_captions_the_account_above_it() {
+        let main = CardTitle::main("Claude".to_owned());
+        let child = CardTitle::child("Claude", "Work");
 
-        assert_eq!(title.caption.as_deref(), Some("Claude"));
-        assert_eq!(title.heading, "Work");
+        // Same heading on both, so the mark, the name and the plan sit on one baseline
+        // whether or not the card belongs to an extra account; the account's own identity
+        // is the caption that grows the row upwards.
+        assert_eq!(child.heading, main.heading);
+        assert_eq!(child.caption.as_deref(), Some("Work"));
+        assert_eq!(main.caption, None);
         assert!(
             !crate::style::STYLE.contains(".quota-child-card"),
             "nested identity belongs in the provider settings list, not card chrome"
