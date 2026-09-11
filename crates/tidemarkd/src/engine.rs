@@ -334,8 +334,8 @@ pub struct Account {
 /// account's name reads it too; this is the daemon-side spelling of it, shared by the
 /// engine and the D-Bus service so a call rejected here is rejected for the same reason
 /// there.
-pub(crate) fn valid_account_slug(account: &str) -> bool {
-    tidemark_types::valid_account_slug(account)
+pub(crate) fn valid_account_id(account: &str) -> bool {
+    tidemark_types::valid_account_id(account)
 }
 
 /// Everything about an account that is fixed at registration, kept together so both
@@ -671,8 +671,8 @@ impl Engine {
     }
     /// Adds one account to a configured provider without restarting the loop.
     pub async fn add_account(&mut self, provider: &str, account: &str) -> Result<(), String> {
-        if !valid_account_slug(account) {
-            return Err(format!("account {account:?} is not a valid lowercase slug"));
+        if !valid_account_id(account) {
+            return Err(format!("account {account:?} is not a valid account id"));
         }
 
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
@@ -1049,8 +1049,8 @@ impl Engine {
         if new == account {
             return Err(format!("account {provider}/{new} is already named that"));
         }
-        if !valid_account_slug(new) {
-            return Err(format!("account {new:?} is not a valid lowercase slug"));
+        if !valid_account_id(new) {
+            return Err(format!("account {new:?} is not a valid account id"));
         }
         let Some(index) = self.accounts.iter().position(|configured| {
             configured.provider.as_str() == provider && configured.account.as_str() == account
@@ -3960,6 +3960,67 @@ svg = '''
         let _ = std::fs::remove_file(config_path);
     }
 
+    /// The account id is also the name the card shows above the provider, so it is whatever
+    /// the user typed — including a script with no ASCII in it at all. Everything it is a
+    /// key for has to survive that: the config file it is written to and read back from,
+    /// the credential slot, and the history rows.
+    #[tokio::test]
+    async fn an_account_named_in_another_script_is_stored_and_read_back_as_typed() {
+        let config_path = std::env::temp_dir().join(format!(
+            "tidemark-engine-unicode-{}.toml",
+            std::process::id()
+        ));
+        let (mut harness, secrets) = stored_harness(config_path.clone(), &["default", "work"]);
+        secrets.insert(Kind::Key, "kimi", "work", "work-key");
+        let mut reading = snapshot(50.0, 3600);
+        reading.provider = ProviderId::new("kimi");
+        reading.account = AccountId::new("work");
+        harness
+            .engine
+            .history
+            .ingest(&reading)
+            .expect("history written");
+
+        harness
+            .engine
+            .rename_account("kimi", "work", "Личный аккаунт")
+            .await
+            .expect("renamed");
+
+        assert_eq!(
+            Config::at(config_path.clone())
+                .expect("parses")
+                .accounts("kimi")
+                .expect("accounts readable"),
+            ["default", "Личный аккаунт"],
+            "the daemon has to read back the file it just wrote"
+        );
+        assert_eq!(
+            secrets.held(),
+            vec![(
+                "key".to_owned(),
+                "kimi".to_owned(),
+                "Личный аккаунт".to_owned(),
+                "work-key".to_owned()
+            )]
+        );
+        assert_eq!(
+            harness
+                .engine
+                .history
+                .points("kimi", "Личный аккаунт", &reading.windows[0].key, 1)
+                .expect("points read")
+                .len(),
+            1
+        );
+        assert_eq!(
+            harness.engine.accounts()[1].status.account_label.as_deref(),
+            Some("Личный аккаунт"),
+            "the caption over the provider's name is the name as typed"
+        );
+        let _ = std::fs::remove_file(config_path);
+    }
+
     #[tokio::test]
     async fn a_rename_publishes_the_retired_id_first_and_replaces_it_with_the_new_one() {
         let config_path = std::env::temp_dir().join(format!(
@@ -4045,7 +4106,7 @@ svg = '''
         for (account, new) in [
             ("default", "team"),
             ("work", "work"),
-            ("work", "Team"),
+            ("work", "-team"),
             ("work", "default"),
             ("missing", "team"),
         ] {

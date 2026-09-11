@@ -831,42 +831,72 @@ impl ProviderStatus {
 }
 
 /// Whether a string can serve as an account id in `config.toml`, the Secret Service and
-/// the history: lowercase letters, digits and hyphens, non-empty, and not starting or
-/// ending with a hyphen.
+/// the history: letters, digits, spaces, hyphens and underscores, beginning and ending on
+/// a letter or a digit.
+///
+/// Letters and digits in **any script**, because the id is also the name the card shows
+/// above the provider: an account called `Работа` is named that on the card, not
+/// transliterated, and not refused. Nothing here restricts the id to ASCII, because
+/// nothing downstream needs it to be — the id is a TOML *value* in `accounts`, a quoted
+/// key where a plugin's per-account table needs one, a bound SQLite parameter, a Secret
+/// Service attribute and a D-Bus string, all of which hold arbitrary UTF-8.
+///
+/// What is excluded is everything that would make two ids that look the same behave
+/// differently, or make one unprintable: control characters, tabs and newlines, the
+/// invisible edges a trailing space would leave, and punctuation that reads as structure
+/// (`/`, `.`, quotes) in a path, a file or a shell.
+///
+/// Case is **kept**, and so ids differ by case: `Work` and `work` are two accounts, the
+/// same way `work` and `work-2` are. They are two cards with two names, which is what
+/// someone who typed both would expect; what is not allowed is one account whose name
+/// cannot be read back as it was typed.
 ///
 /// Wire vocabulary because both halves of the bus speak it: the daemon refuses an id the
 /// config cannot hold, and a client typing a new account's name wants to disable its own
 /// confirm button for the same ids rather than learn each refusal by round trip.
-pub fn valid_account_slug(account: &str) -> bool {
-    !account.is_empty()
-        && !account.starts_with('-')
-        && !account.ends_with('-')
-        && account
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+pub fn valid_account_id(account: &str) -> bool {
+    let mut characters = account.chars();
+    let edges_are_letters = characters.next().is_some_and(char::is_alphanumeric)
+        && characters.next_back().is_none_or(char::is_alphanumeric);
+    edges_are_letters && account.chars().all(account_id_character)
 }
 
-/// The account id a display name suggests: lowercased, everything the config cannot hold
-/// becomes a hyphen, a run of those becomes one, and the edges are trimmed away.
+/// Whether one character may appear inside an account id.
+fn account_id_character(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, ' ' | '-' | '_')
+}
+
+/// The account id a display name suggests: everything the config cannot hold becomes a
+/// hyphen, a run of those becomes one, and the edges are trimmed away.
+///
+/// Case, spaces and script are kept, so nearly every name suggests itself — the
+/// suggestion exists for the punctuation that has to go somewhere, not to transliterate a
+/// name into ASCII.
 ///
 /// This is the live preview while a name is typed. It never suggests an id
-/// [`valid_account_slug`] refuses — only the empty string, which is a name that has not
+/// [`valid_account_id`] refuses — only the empty string, which is a name that has not
 /// been typed yet.
-pub fn account_slug_suggestion(name: &str) -> String {
+pub fn account_id_suggestion(name: &str) -> String {
     let mut suggestion = String::new();
     let mut hyphen_pending = false;
     for character in name.chars() {
-        if character.is_ascii_alphanumeric() {
-            if hyphen_pending && !suggestion.is_empty() {
+        if account_id_character(character) {
+            // `Team (QA)` is `Team QA`, not `Team -QA`: the hyphen stands in for what was
+            // dropped only where there is no separator there already.
+            if hyphen_pending && suggestion.ends_with(char::is_alphanumeric) {
                 suggestion.push('-');
             }
             hyphen_pending = false;
-            suggestion.push(character.to_ascii_lowercase());
+            suggestion.push(character);
         } else {
             hyphen_pending = true;
         }
     }
+    // An id begins and ends on a letter or a digit: a name typed with a trailing space, or
+    // wrapped in dashes, suggests the name inside them rather than nothing.
     suggestion
+        .trim_matches(|character: char| !character.is_alphanumeric())
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -1128,49 +1158,79 @@ mod tests {
     }
 
     #[test]
-    fn an_account_slug_is_lowercase_letters_digits_and_inner_hyphens() {
-        for slug in ["work", "w", "work-2", "w-o-r-k"] {
-            assert!(
-                valid_account_slug(slug),
-                "{slug:?} is an id the config can hold"
-            );
+    fn an_account_id_is_a_name_in_any_script_with_readable_edges() {
+        for id in [
+            "work",
+            "w",
+            "work-2",
+            "Work",
+            "Работа",
+            "Личный аккаунт",
+            "team_lead",
+            "工作",
+        ] {
+            assert!(valid_account_id(id), "{id:?} is an id the config can hold");
         }
-        // The refusals the daemon answered with before the rule moved here; kept beside
-        // the rule so the two cannot drift apart again.
-        for slug in ["", "Work", "work-", "-work", "two words", "work_1", "wörk"] {
+        // An id that cannot be read back as it was typed, or that reads as structure
+        // somewhere it is stored: the edges are invisible, and the punctuation is not.
+        for id in [
+            "",
+            " ",
+            "work-",
+            "-work",
+            "work ",
+            " work",
+            "_work",
+            "work/2",
+            "work.2",
+            "\"work\"",
+            "work\ttwo",
+            "work\n",
+        ] {
             assert!(
-                !valid_account_slug(slug),
-                "{slug:?} is not an id the config can hold"
+                !valid_account_id(id),
+                "{id:?} is not an id the config can hold"
             );
         }
     }
 
     #[test]
-    fn a_name_suggests_the_slug_the_config_holds() {
-        assert_eq!(account_slug_suggestion("My Work"), "my-work");
-        // Leading, trailing and repeated separators all collapse to one inner hyphen.
-        assert_eq!(account_slug_suggestion("  Team   Lead  "), "team-lead");
-        assert_eq!(account_slug_suggestion("-My--Work-"), "my-work");
-        assert_eq!(account_slug_suggestion("work_1"), "work-1");
+    fn a_name_suggests_itself_unless_it_carries_punctuation() {
+        // Case, spaces and script survive: the id is the name the card shows.
+        assert_eq!(account_id_suggestion("My Work"), "My Work");
+        assert_eq!(account_id_suggestion("Работа"), "Работа");
+        assert_eq!(account_id_suggestion("work_1"), "work_1");
+        // Edges an id cannot have are trimmed rather than refused.
+        assert_eq!(account_id_suggestion("  Team   Lead  "), "Team   Lead");
+        assert_eq!(account_id_suggestion("-My--Work-"), "My--Work");
         // What the config cannot hold becomes a hyphen rather than being dropped, so a
         // name never suggests an id silently different from what was typed.
-        assert_eq!(account_slug_suggestion("wörk"), "w-rk");
-        assert_eq!(account_slug_suggestion("Team (QA)"), "team-qa");
+        assert_eq!(account_id_suggestion("Team (QA)"), "Team QA");
+        assert_eq!(account_id_suggestion("Q&A"), "Q-A");
     }
 
     #[test]
     fn a_name_with_nothing_the_config_holds_suggests_nothing() {
-        assert_eq!(account_slug_suggestion(""), "");
-        assert_eq!(account_slug_suggestion("   "), "");
-        assert_eq!(account_slug_suggestion("—😀"), "");
+        assert_eq!(account_id_suggestion(""), "");
+        assert_eq!(account_id_suggestion("   "), "");
+        assert_eq!(account_id_suggestion("—😀"), "");
     }
 
     #[test]
-    fn a_suggestion_is_always_a_slug_the_config_holds_or_empty() {
-        for name in ["", "My Work", "Q&A Team", "Ünternehmen", "—", "😀"] {
-            let suggested = account_slug_suggestion(name);
+    fn a_suggestion_is_always_an_id_the_config_holds_or_empty() {
+        for name in [
+            "",
+            "My Work",
+            "Q&A Team",
+            "Ünternehmen",
+            "Работа/2",
+            "—",
+            "😀",
+            "work.",
+        ] {
+            let suggested = account_id_suggestion(name);
             assert!(
-                suggested.is_empty() || valid_account_slug(&suggested),
+                suggested.is_empty() || valid_account_id(&suggested),
                 "{name:?} suggested {suggested:?}, which the config cannot hold"
             );
         }

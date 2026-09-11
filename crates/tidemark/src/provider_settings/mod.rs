@@ -14,7 +14,7 @@ use adw::prelude::*;
 use gtk::glib;
 use tidemark_types::{
     AccountId, CredentialKind, PluginInfo, ProviderDefinition, ProviderId, ProviderStatus,
-    account_slug_suggestion, valid_account_slug,
+    account_id_suggestion, valid_account_id,
 };
 
 use self::detail::ProviderDetail;
@@ -997,8 +997,8 @@ pub(super) fn multi_account_capable(definition: &ProviderDefinition) -> bool {
 /// Whether a typed name can be confirmed: it must suggest an id the config can hold, and
 /// a rename must suggest one the account does not already have.
 pub(super) fn name_suggests_usable(name: &str, current: Option<&str>) -> bool {
-    let slug = account_slug_suggestion(name);
-    valid_account_slug(&slug) && current.is_none_or(|held| held != slug)
+    let id = account_id_suggestion(name);
+    valid_account_id(&id) && current.is_none_or(|held| held != id)
 }
 
 /// The name-to-id entry dialog the provider row's "+" and the account label's pen share.
@@ -1038,8 +1038,8 @@ pub(super) async fn name_dialog(
         let dialog = dialog.clone();
         move || {
             let name = entry.text().to_string();
-            let slug = account_slug_suggestion(&name);
-            preview.set_text(&format!("Account id: {slug}"));
+            let id = account_id_suggestion(&name);
+            preview.set_text(&format!("Account id: {id}"));
             dialog.set_response_enabled("accept", name_suggests_usable(&name, current.as_deref()));
         }
     };
@@ -1058,7 +1058,7 @@ pub(super) async fn name_dialog(
     dialog.set_extra_child(Some(&content));
 
     (dialog.choose_future(Some(parent)).await == "accept")
-        .then(|| account_slug_suggestion(&entry.text()))
+        .then(|| account_id_suggestion(&entry.text()))
 }
 
 /// What confirming a plugin's account form would create.
@@ -1221,10 +1221,12 @@ mod tests {
         assert!(!name_suggests_usable("", None));
         assert!(!name_suggests_usable("   ", None));
         assert!(name_suggests_usable("My Work", None));
+        // Any script, because the id is the name the card shows.
+        assert!(name_suggests_usable("Работа", None));
         // A rename to the id the account already has is the daemon's no-op refusal, and
         // the confirm button is where the user should hear that from.
-        assert!(!name_suggests_usable("My Work", Some("my-work")));
-        assert!(name_suggests_usable("My Team", Some("my-work")));
+        assert!(!name_suggests_usable("My Work", Some("My Work")));
+        assert!(name_suggests_usable("My Team", Some("My Work")));
     }
 
     #[test]

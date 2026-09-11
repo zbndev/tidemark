@@ -12,7 +12,7 @@
 
 use adw::prelude::*;
 use gtk::gio;
-use tidemark_types::{PluginInfo, account_slug_suggestion};
+use tidemark_types::{PluginInfo, account_id_suggestion};
 
 use super::{name_suggests_usable, reason};
 use crate::bus::DaemonProxy;
@@ -187,7 +187,7 @@ pub(super) async fn account_dialog(
             let typed = endpoint.text().to_string();
             let named = if ask_for_name {
                 let text = name.text().to_string();
-                name_preview.set_text(&format!("Account id: {}", account_slug_suggestion(&text)));
+                name_preview.set_text(&format!("Account id: {}", account_id_suggestion(&text)));
                 name_suggests_usable(&text, None)
             } else {
                 true
@@ -235,7 +235,7 @@ pub(super) async fn account_dialog(
     refresh();
 
     (dialog.choose_future(Some(parent)).await == "accept").then(|| AccountForm {
-        slug: ask_for_name.then(|| account_slug_suggestion(&name.text())),
+        slug: ask_for_name.then(|| account_id_suggestion(&name.text())),
         endpoint: endpoint.text().trim().to_owned(),
         allow_insecure_http: insecure.is_active(),
         key: key.text().trim().to_owned(),

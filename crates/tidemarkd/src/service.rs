@@ -880,10 +880,10 @@ impl Daemon {
                 "provider {provider} is not supported by this build"
             )));
         }
-        if !crate::engine::valid_account_slug(account) {
+        if !crate::engine::valid_account_id(account) {
             return Err(fdo::Error::InvalidArgs(format!(
-                "account {account:?} is not a valid account id: lowercase letters, digits \
-                 and hyphens"
+                "account {account:?} is not a valid account id: letters, digits, spaces, \
+                 hyphens and underscores, beginning and ending on a letter or a digit"
             )));
         }
         if self
@@ -929,9 +929,10 @@ impl Daemon {
                 "account {provider}/{new} is already named that"
             )));
         }
-        if !crate::engine::valid_account_slug(new) {
+        if !crate::engine::valid_account_id(new) {
             return Err(fdo::Error::InvalidArgs(format!(
-                "account {new:?} is not a valid account id: lowercase letters, digits \n                 and hyphens"
+                "account {new:?} is not a valid account id: letters, digits, spaces, \
+                 hyphens and underscores, beginning and ending on a letter or a digit"
             )));
         }
         if self.configured.read().await.contains(&key(provider, new)) {
@@ -2518,14 +2519,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adding_a_malformed_account_slug_is_an_invalid_argument() {
+    async fn a_malformed_account_id_is_an_invalid_argument() {
         let (daemon, _secrets, mut commands) = daemon_over_catalog(Vec::new(), catalog()).await;
 
-        for slug in ["", "Work", "work-", "-work", "two words", "work_1", "wörk"] {
-            let error = daemon.add_account("zai", slug).await.unwrap_err();
+        for id in [
+            "", " ", "work-", "-work", "work ", "work/2", "work.2", "work\n",
+        ] {
+            let error = daemon.add_account("zai", id).await.unwrap_err();
             assert!(
                 matches!(error, fdo::Error::InvalidArgs(_)),
-                "{slug:?} is not an id the config can hold"
+                "{id:?} is not an id the config can hold"
             );
         }
         assert!(matches!(
@@ -3307,7 +3310,7 @@ mod tests {
             ("zai", "missing", "team"),
             ("zai", "default", "team"),
             ("zai", "work", "work"),
-            ("zai", "work", "Team"),
+            ("zai", "work", "team "),
             ("zai", "work", "default"),
         ] {
             let error = daemon

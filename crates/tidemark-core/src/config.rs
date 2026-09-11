@@ -2233,6 +2233,34 @@ mod tests {
         );
     }
 
+    /// An account id is a name the user typed, so it may be a word in any script — and
+    /// this is the one place it becomes a TOML *key* rather than a value. A key that is
+    /// not bare ASCII has to be written quoted, or the file the daemon writes is a file it
+    /// cannot parse.
+    #[test]
+    fn an_account_named_in_another_script_is_written_as_a_quoted_table_key() {
+        let (path, mut config) = seeded("endpoint-unicode", "");
+        let endpoint = Endpoint {
+            url: "https://a.test/u".into(),
+            allow_insecure_http: false,
+        };
+        config
+            .set_plugin_endpoint("com.acme.quota", "Личный аккаунт", &endpoint)
+            .expect("writes");
+        let text = std::fs::read_to_string(&path).expect("readable");
+        assert!(
+            text.contains("[provider.\"com.acme.quota\".account.\"Личный аккаунт\"]"),
+            "a key with a space and no ASCII in it has to be quoted: {text}"
+        );
+        let reloaded = Config::at(path).expect("reloads");
+        assert_eq!(
+            reloaded
+                .plugin_endpoint("com.acme.quota", "Личный аккаунт")
+                .unwrap(),
+            Some(endpoint)
+        );
+    }
+
     #[test]
     fn an_endpoint_write_preserves_the_rest_of_the_file_and_its_decoration() {
         let (path, mut config) = seeded(

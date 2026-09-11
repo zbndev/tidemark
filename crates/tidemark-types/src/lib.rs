@@ -32,7 +32,7 @@ pub use wire::{
     AuthCandidate, AuthCandidateState, AuthMode, AuthSelection, AuthSelector, CredentialKind,
     DataInfo, ExternalLogin, HistoryPoint, OptionChoice, PluginEndpoint, PluginInfo, Preferences,
     ProviderDefinition, ProviderOption, ProviderState, ProviderStatus, Remedy, WindowStatus,
-    account_slug_suggestion, valid_account_slug,
+    account_id_suggestion, valid_account_id,
 };
 
 /// Identity constants. Changing any of these is a breaking change for installed units,
