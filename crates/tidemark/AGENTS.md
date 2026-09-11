@@ -15,6 +15,7 @@ GTK/libadwaita presentation and desktop lifecycle; score 12, a distinct IPC-clie
 | Quota rendering | `src/card.rs`, `src/bar.rs` | Incremental card updates, pure bar geometry |
 | History detail | `src/detail.rs`, `src/chart.rs` | Async history selection and pure chart geometry |
 | Pure presentation | `src/model.rs`, `src/format.rs` | Ordering, catalog titles, chips, relative times |
+| Release notes preview | `src/release_notes.rs`, `src/markdown.rs`, `src/update.rs` | Changelog dialog, Markdown to Pango markup, release URL |
 | Theme and marks | `src/style.rs`, `src/theme.rs`, `src/mark.rs` | Semantic CSS and optional provider icons |
 | Tray integration | `src/tray.rs` | Shared model with ksni / Windows backends |
 | Windows lifetime and fonts | `src/daemon_job.rs`, `src/single_instance.rs`, `src/font.rs` | Safe ownership around platform APIs |

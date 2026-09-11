@@ -10,6 +10,24 @@ pub(crate) fn update_tooltip(version: &str) -> Option<String> {
     (!version.is_empty()).then(|| format!("Tidemark {version} is available"))
 }
 
+/// Where the release notes dialog's download button goes.
+///
+/// A published release has its own page, and that is the one to land on: the list makes a
+/// reader find the release they were just reading about. The version comes from the daemon
+/// and is `X.X.X` by the time it is published, but this builds a URL, so anything else
+/// falls back to the list rather than being pasted into a path.
+pub(crate) fn release_url(version: &str) -> String {
+    let canonical = !version.is_empty()
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.');
+    if canonical {
+        format!("{RELEASES_URL}/tag/v{version}")
+    } else {
+        RELEASES_URL.to_owned()
+    }
+}
+
 /// Remembers which daemon release this client has already offered to restart into.
 #[derive(Debug)]
 pub struct UpdateNotice {
@@ -115,7 +133,7 @@ fn restart_sibling(command: &Command) -> io::Result<Command> {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{UpdateNotice, restart_command, update_tooltip};
+    use super::{UpdateNotice, release_url, restart_command, update_tooltip};
 
     #[test]
     fn an_empty_update_has_no_button_copy() {
@@ -128,6 +146,26 @@ mod tests {
             update_tooltip("0.12.3").as_deref(),
             Some("Tidemark 0.12.3 is available")
         );
+    }
+
+    #[test]
+    fn the_download_button_goes_to_the_release_being_previewed() {
+        assert_eq!(
+            release_url("0.12.3"),
+            "https://github.com/zbndev/tidemark/releases/tag/v0.12.3"
+        );
+    }
+
+    #[test]
+    fn a_version_that_is_not_one_falls_back_to_the_release_list() {
+        // Nothing but the daemon's own canonical version reaches a URL path.
+        for version in ["", "latest", "0.1.0/../..", "0.1.0?x=y"] {
+            assert_eq!(
+                release_url(version),
+                "https://github.com/zbndev/tidemark/releases",
+                "accepted {version:?}"
+            );
+        }
     }
 
     #[test]

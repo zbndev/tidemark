@@ -39,6 +39,11 @@ pub trait Daemon {
 
     /// A newer published application release, or an empty string when none is known.
     fn get_update(&self) -> zbus::Result<String>;
+
+    /// That release's notes as its publisher wrote them — Markdown, unrendered — or an
+    /// empty string when no newer release is known or it carried none.
+    fn get_release_notes(&self) -> zbus::Result<String>;
+
     /// Application-wide preferences stored by the daemon.
     fn get_preferences(&self) -> zbus::Result<Preferences>;
 

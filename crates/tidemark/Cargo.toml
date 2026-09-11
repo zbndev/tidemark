@@ -23,6 +23,10 @@ gtk = { version = "0.11.4", package = "gtk4", features = ["v4_22"] }
 # Pango 1.56 adds FontMap::add_font_file, which lets the Windows build make its
 # bundled Rubik available to GTK without installing it for the user.
 pango = { version = "0.22.3", features = ["v1_56"] }
+# CommonMark for the release-notes dialog: the notes come from whoever published the
+# release, so the shape of `**bold**` and `[text](url)` is a parser's decision rather than
+# ours. Parser only — no HTML writer, no SIMD — because what it feeds is Pango markup.
+pulldown-cmark = { version = "0.13.4", default-features = false }
 semver = "1.0.28"
 tidemark-ipc = { path = "../tidemark-ipc" }
 tidemark-types = { path = "../tidemark-types" }
