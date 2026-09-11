@@ -9,9 +9,17 @@ on:
       - '**/*.md'
       - 'docs/**'
   push:
-    # Every branch, and tags excluded by saying so: a tag push belongs to the release
-    # workflow, which runs this same Linux gate itself before it builds anything.
-    branches: ['**']
+    # `main` only, and so tags too are excluded by saying so: a tag push belongs to the
+    # release workflow, which runs this same Linux gate itself before it builds anything.
+    #
+    # A branch push is deliberately not here. A branch with a pull request open is already
+    # covered by the `pull_request` event above, and better: that event builds the merge
+    # commit, so it answers "does this pass *on top of main*" rather than "did it pass on
+    # a branch cut some time ago". Listing every branch here ran both for every push, one
+    # of them redundantly — the two events produce different refs, so `concurrency` below
+    # never collapsed them. Before a pull request exists, the local gate in `CLAUDE.md` is
+    # the one that matters. `nix.yml` has always been shaped this way.
+    branches: [main]
     paths-ignore:
       - '*.md'
       - '**/*.md'
