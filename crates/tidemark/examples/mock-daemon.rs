@@ -85,6 +85,25 @@ impl MockDaemon {
         "0.2.0".into()
     }
 
+    /// The shape GitHub's generated notes have, plus the hand-written parts a release
+    /// usually opens with: this is what the release-notes dialog is looked at against.
+    async fn get_release_notes(&self) -> String {
+        [
+            "Cards keep the provider name on one baseline again, and the changelog is now",
+            "readable *without* leaving the window.",
+            "",
+            "## What's Changed",
+            "* fix(ui): keep the provider name on the card baseline by @zbndev in https://github.com/zbndev/tidemark/pull/69",
+            "* feat(gui): preview the changelog before downloading by @zbndev in https://github.com/zbndev/tidemark/pull/70",
+            "",
+            "### Known issues",
+            "* `tidemarkctl update` still prints the version only.",
+            "",
+            "**Full Changelog**: https://github.com/zbndev/tidemark/compare/v0.1.0...v0.2.0",
+        ]
+        .join("\n")
+    }
+
     async fn refresh(&self, provider: &str) -> fdo::Result<()> {
         println!("refresh({provider:?})");
         Ok(())

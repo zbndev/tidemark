@@ -5,6 +5,8 @@ use std::time::Duration;
 use reqwest::header::{ACCEPT, HeaderMap, HeaderName, HeaderValue};
 use semver::Version;
 
+use crate::service::Release;
+
 pub(crate) const INITIAL_DELAY: Duration = Duration::from_secs(60);
 pub(crate) const INTERVAL: Duration = Duration::from_secs(60 * 60);
 const MAX_BODY: usize = 64 * 1024;
@@ -24,6 +26,8 @@ pub(crate) enum CheckError {
     Version,
 }
 
+/// The published shape of a release lives with the state that publishes it: this module
+/// only fills it in.
 #[derive(Debug)]
 pub(crate) struct Checker {
     client: reqwest::Client,
@@ -66,7 +70,7 @@ impl Checker {
         })
     }
 
-    pub(crate) async fn check(&self) -> Result<Option<String>, CheckError> {
+    pub(crate) async fn check(&self) -> Result<Option<Release>, CheckError> {
         let mut response = self
             .client
             .get(&self.endpoint)
@@ -90,7 +94,16 @@ impl Checker {
             .get("tag_name")
             .and_then(serde_json::Value::as_str)
             .ok_or(CheckError::Version)?;
-        newer(tag, &self.current)
+        // The body is optional on GitHub's side and absent on a release published without
+        // notes, which is not a reason to fail a check that already knows the version.
+        let notes = response
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Ok(
+            newer(tag, &self.current)?
+                .map(|version| Release::new(version, notes.trim().to_owned())),
+        )
     }
 }
 
@@ -154,7 +167,7 @@ mod tests {
         format!("http://{address}/latest")
     }
 
-    async fn check_response(status: &str, body: &[u8]) -> Result<Option<String>, CheckError> {
+    async fn check_response(status: &str, body: &[u8]) -> Result<Option<Release>, CheckError> {
         let endpoint = serve_once(status, body).await;
         Checker::at(endpoint, "0.1.0").unwrap().check().await
     }
@@ -188,12 +201,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_latest_tag_is_read_from_a_small_success_response() {
+    async fn the_latest_tag_and_its_notes_are_read_from_a_small_success_response() {
+        let body = serde_json::json!({
+            "tag_name": "v0.2.0",
+            "body": "## What's Changed\n* a fix\n",
+        })
+        .to_string();
+
         assert_eq!(
-            check_response("200 OK", br#"{"tag_name":"v0.2.0"}"#)
+            check_response("200 OK", body.as_bytes()).await.unwrap(),
+            Some(Release {
+                version: "0.2.0".into(),
+                notes: "## What's Changed\n* a fix".into(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_release_published_without_notes_is_still_available() {
+        assert_eq!(
+            check_response("200 OK", br#"{"tag_name":"v0.2.0","body":null}"#)
                 .await
                 .unwrap(),
-            Some("0.2.0".into())
+            Some(Release {
+                version: "0.2.0".into(),
+                notes: String::new(),
+            })
         );
     }
 

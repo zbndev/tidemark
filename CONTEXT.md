@@ -157,6 +157,12 @@ the credential on the way, and looks again for the vendor login a provider can r
 of ours — a refresh is what a user reaches for straight after running `claude` in a
 terminal. `Version` says what is on the other end.
 
+`GetUpdate` says whether a newer release was found and `UpdateChanged(version)` announces
+it; `GetReleaseNotes` returns that release's notes as its publisher wrote them — Markdown,
+unrendered. The notes are a separate call rather than a second field on the announcement
+because a client needs the version to decide whether to offer anything at all, and the
+notes only once a reader asks for them.
+
 Credentials are the daemon's, so changing them is the daemon's too: `SetKey`, `SignOut`,
 `SetOption`, `SetWindowNotify`, and the two halves of a login. Nothing there is specific to the GUI — a
 `busctl` line does the same thing — which is why it is on the interface rather than inside
@@ -680,6 +686,13 @@ history that does not exist yet.
   request at runtime and clears any published update notice. The daemon's `update-check`
   Cargo feature is enabled by default for upstream builds; a distribution can build with
   `--no-default-features`, in which case Preferences shows the switch off and unavailable.
+- **An update offer is a preview, not an updater.** The header button opens the release
+  notes in a dialog — Markdown rendered into Pango markup, bare URLs linked, raw HTML
+  dropped — and its two buttons are Cancel and Download on GitHub. Tidemark is installed by
+  a package manager, an installer or a distribution, so the dialog ends at the release page
+  rather than pretending this process can replace itself. A release published without notes
+  opens that page directly: a dialog whose only content is "no notes" is a click that told
+  the reader nothing.
 - **`libayatana-appindicator-glib` is GPL-3** and cannot be linked into an MIT project. The
   protocol is spoken through `ksni`, which is Unlicense — public domain, so compatible —
   and which is built on the same zbus the interface already reaches the daemon over.

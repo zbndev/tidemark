@@ -31,9 +31,11 @@ mod font;
 mod format;
 mod grid;
 mod mark;
+mod markdown;
 mod model;
 mod preferences;
 mod provider_settings;
+mod release_notes;
 #[cfg(windows)]
 mod single_instance;
 mod style;

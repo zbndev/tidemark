@@ -98,7 +98,7 @@ async fn wait_for_release_check(
 #[cfg(feature = "update-check")]
 async fn publish_result(
     published: &PublishedUpdate,
-    result: Result<Option<String>, update::CheckError>,
+    result: Result<Option<service::Release>, update::CheckError>,
 ) -> Result<Option<String>, update::CheckError> {
     Ok(published.publish(result?).await)
 }
@@ -533,7 +533,9 @@ mod tests {
         let published = PublishedUpdate::default();
         published.set_enabled(true).await;
         assert_eq!(
-            published.publish(Some("0.2.0".into())).await,
+            published
+                .publish(Some(service::Release::new("0.2.0", "")))
+                .await,
             Some("0.2.0".into())
         );
 
@@ -548,13 +550,13 @@ mod tests {
         let published = PublishedUpdate::default();
         published.set_enabled(true).await;
         assert_eq!(
-            publish_result(&published, Ok(Some("0.3.0".into())))
+            publish_result(&published, Ok(Some(service::Release::new("0.3.0", ""))))
                 .await
                 .unwrap(),
             Some("0.3.0".into())
         );
         assert_eq!(
-            publish_result(&published, Ok(Some("0.3.0".into())))
+            publish_result(&published, Ok(Some(service::Release::new("0.3.0", ""))))
                 .await
                 .unwrap(),
             None
@@ -584,7 +586,9 @@ mod tests {
         let published = PublishedUpdate::default();
         published.set_enabled(true).await;
         assert_eq!(
-            published.publish(Some("0.2.0".into())).await,
+            published
+                .publish(Some(service::Release::new("0.2.0", "")))
+                .await,
             Some("0.2.0".into())
         );
 
@@ -594,7 +598,7 @@ mod tests {
         assert!(published.set_enabled(false).await);
 
         assert_eq!(
-            publish_result(&published, Ok(Some("0.3.0".into())))
+            publish_result(&published, Ok(Some(service::Release::new("0.3.0", ""))))
                 .await
                 .expect("the check itself succeeded"),
             None

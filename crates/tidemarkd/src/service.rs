@@ -132,16 +132,55 @@ impl Published {
 #[derive(Debug, Clone, Default)]
 pub struct PublishedUpdate(Arc<RwLock<UpdateState>>);
 
+/// A published release this daemon is older than, with the release notes GitHub carries
+/// beside the tag.
+///
+/// The notes are Markdown, unrendered: rendering belongs to whichever client shows it,
+/// and a daemon reformatting them would be inventing presentation for a surface it cannot
+/// see. A release published without notes is an empty string rather than an absent field,
+/// so the wire has one shape and a client has one fallback.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Release {
+    pub version: String,
+    pub notes: String,
+}
+
+impl Release {
+    pub fn new(version: impl Into<String>, notes: impl Into<String>) -> Self {
+        Self {
+            version: version.into(),
+            notes: notes.into(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct UpdateState {
     enabled: bool,
-    release: Option<String>,
+    release: Option<Release>,
 }
 
 impl PublishedUpdate {
     /// The D-Bus representation: an empty string means no newer release is known.
     pub async fn get(&self) -> String {
-        self.0.read().await.release.clone().unwrap_or_default()
+        self.0
+            .read()
+            .await
+            .release
+            .as_ref()
+            .map(|release| release.version.clone())
+            .unwrap_or_default()
+    }
+
+    /// The known release's notes, empty when there is no release or it carried none.
+    pub async fn notes(&self) -> String {
+        self.0
+            .read()
+            .await
+            .release
+            .as_ref()
+            .map(|release| release.notes.clone())
+            .unwrap_or_default()
     }
 
     /// Switches release checks on or off. Disabling forgets any known release in the
@@ -156,13 +195,28 @@ impl PublishedUpdate {
     /// Applies one finished check and returns the signal payload only when clients need
     /// one. A result that reaches this after checks were disabled is dropped here, under
     /// the same lock the disable took.
-    pub async fn publish(&self, next: Option<String>) -> Option<String> {
+    ///
+    /// The version decides whether clients are told, not the notes: GitHub's release body
+    /// is editable after publication, and an author fixing a typo in it is not news for a
+    /// window that is already showing the button. The newer notes are still stored, so the
+    /// next client to ask for them gets the corrected text.
+    pub async fn publish(&self, next: Option<Release>) -> Option<String> {
         let mut held = self.0.write().await;
-        if !held.enabled || held.release == next {
+        if !held.enabled {
             return None;
         }
+        let announce = held
+            .release
+            .as_ref()
+            .map(|release| release.version.as_str())
+            != next.as_ref().map(|release| release.version.as_str());
         held.release = next;
-        Some(held.release.clone().unwrap_or_default())
+        announce.then(|| {
+            held.release
+                .as_ref()
+                .map(|release| release.version.clone())
+                .unwrap_or_default()
+        })
     }
 }
 
@@ -947,6 +1001,16 @@ impl Daemon {
     /// The newer published application release, or an empty string when none is known.
     async fn get_update(&self) -> String {
         self.update.get().await
+    }
+
+    /// The known release's notes as GitHub published them — Markdown, unrendered — or an
+    /// empty string when no newer release is known or that release carried none.
+    ///
+    /// Separate from `GetUpdate` and asked for on demand: a client needs the version to
+    /// decide whether to offer anything at all, and the notes only once a user asks to
+    /// read them.
+    async fn get_release_notes(&self) -> String {
+        self.update.notes().await
     }
 
     /// Application-wide preferences persisted in `config.toml`.
@@ -1936,18 +2000,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_publication_changes_only_when_the_value_changes() {
+    async fn update_publication_changes_only_when_the_version_changes() {
         let update = PublishedUpdate::default();
         assert_eq!(update.get().await, "");
         update.set_enabled(true).await;
         assert_eq!(
-            update.publish(Some("0.2.0".into())).await,
+            update
+                .publish(Some(Release::new("0.2.0", "the notes")))
+                .await,
             Some("0.2.0".into())
         );
-        assert_eq!(update.publish(Some("0.2.0".into())).await, None);
+        assert_eq!(
+            update
+                .publish(Some(Release::new("0.2.0", "the notes")))
+                .await,
+            None
+        );
         assert_eq!(update.get().await, "0.2.0");
+        assert_eq!(update.notes().await, "the notes");
+
+        // The author edited the release body: clients already showing 0.2.0 are not told
+        // again, and the next one to read the notes gets the corrected text.
+        assert_eq!(
+            update
+                .publish(Some(Release::new("0.2.0", "the fixed notes")))
+                .await,
+            None
+        );
+        assert_eq!(update.notes().await, "the fixed notes");
+
         assert_eq!(update.publish(None).await, Some(String::new()));
         assert_eq!(update.get().await, "");
+        assert_eq!(update.notes().await, "");
     }
 
     #[tokio::test]
@@ -1955,15 +2039,18 @@ mod tests {
         let update = PublishedUpdate::default();
         update.set_enabled(true).await;
         assert_eq!(
-            update.publish(Some("0.2.0".into())).await,
+            update
+                .publish(Some(Release::new("0.2.0", "the notes")))
+                .await,
             Some("0.2.0".into())
         );
 
         // Disabling both latches the flag and forgets the release in one write...
         assert!(update.set_enabled(false).await);
         assert_eq!(update.get().await, "");
+        assert_eq!(update.notes().await, "");
         // ...and a result that was already in flight lands nowhere.
-        assert_eq!(update.publish(Some("0.3.0".into())).await, None);
+        assert_eq!(update.publish(Some(Release::new("0.3.0", ""))).await, None);
         assert_eq!(update.get().await, "");
 
         // Re-enabling starts from nothing until a check succeeds again.
@@ -4076,7 +4163,9 @@ mod tests {
         let published_update = PublishedUpdate::default();
         published_update.set_enabled(true).await;
         assert_eq!(
-            published_update.publish(Some("0.2.0".into())).await,
+            published_update
+                .publish(Some(Release::new("0.2.0", "## What's Changed\n* a fix")))
+                .await,
             Some("0.2.0".into())
         );
         let (commands, mut command_queue) = mpsc::channel(4);
@@ -4143,6 +4232,22 @@ mod tests {
             .deserialize()
             .expect("the available version is a string");
         assert_eq!(update, "0.2.0");
+
+        let reply = client
+            .call_method(
+                Some(TEST_BUS_NAME),
+                ids::OBJECT_PATH,
+                Some(ids::DAEMON_INTERFACE),
+                "GetReleaseNotes",
+                &(),
+            )
+            .await
+            .expect("GetReleaseNotes answers");
+        let notes: String = reply
+            .body()
+            .deserialize()
+            .expect("the release notes are a string");
+        assert_eq!(notes, "## What's Changed\n* a fix");
 
         call("Refresh", "zai")
             .await
