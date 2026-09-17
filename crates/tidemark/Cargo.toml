@@ -43,7 +43,7 @@ pangocairo = "0.22.9"
 # The Windows tray backend (todo 15). tray-icon drives Win32 tray APIs on its own
 # event-loop thread; `windows` supplies only the message pump that thread must run for
 # menu events to be delivered. Current version pinned per plan §15 via `cargo search`.
-tray-icon = "0.24.2"
+tray-icon = "0.25.0"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     # SECURITY_ATTRIBUTES on the mutex signature.
