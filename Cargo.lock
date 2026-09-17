@@ -1388,7 +1388,7 @@ dependencies = [
  "glib-sys 0.22.8",
  "gobject-sys 0.22.6",
  "libc",
- "pango-sys 0.22.0",
+ "pango-sys 0.22.9",
  "pkg-config",
  "system-deps 7.0.8",
 ]
@@ -1679,7 +1679,7 @@ dependencies = [
  "gobject-sys 0.22.6",
  "graphene-sys",
  "libc",
- "pango-sys 0.22.0",
+ "pango-sys 0.22.9",
  "system-deps 7.0.8",
 ]
 
@@ -1783,7 +1783,7 @@ dependencies = [
  "graphene-sys",
  "gsk4-sys",
  "libc",
- "pango-sys 0.22.0",
+ "pango-sys 0.22.9",
  "system-deps 7.0.8",
 ]
 
@@ -2320,7 +2320,7 @@ dependencies = [
  "gobject-sys 0.22.6",
  "gtk4-sys",
  "libc",
- "pango-sys 0.22.0",
+ "pango-sys 0.22.9",
  "system-deps 7.0.8",
 ]
 
@@ -2885,7 +2885,7 @@ checksum = "0b2022dbbd82e1c42bd950a6f1df9b98c796e725dce5ec275e03cbf9772e4efa"
 dependencies = [
  "gio 0.22.8",
  "glib 0.22.8",
- "pango-sys 0.22.0",
+ "pango-sys 0.22.9",
 ]
 
 [[package]]
@@ -2902,14 +2902,14 @@ dependencies = [
 
 [[package]]
 name = "pango-sys"
-version = "0.22.0"
+version = "0.22.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd111a20ca90fedf03e09c59783c679c00900f1d8491cca5399f5e33609d5d6"
+checksum = "ca02d64761b74d56cdd4b437db6d73dc95e6c0d40f27e1c707952c0f09052948"
 dependencies = [
  "glib-sys 0.22.8",
  "gobject-sys 0.22.6",
  "libc",
- "system-deps 7.0.8",
+ "system-deps 9.0.0",
 ]
 
 [[package]]
@@ -2933,7 +2933,7 @@ dependencies = [
  "cairo-sys-rs 0.22.0",
  "glib-sys 0.22.8",
  "libc",
- "pango-sys 0.22.0",
+ "pango-sys 0.22.9",
  "system-deps 9.0.0",
 ]
 
