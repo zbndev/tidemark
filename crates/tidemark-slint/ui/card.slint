@@ -1,0 +1,357 @@
+// One account, as a card. Draws what `view.rs` decided and nothing else: every string
+// here arrived from the daemon, so every line elides or wraps and none of them sizes the card.
+
+import { Theme } from "theme.slint";
+
+export struct GaugeData {
+    percent: float,
+    // Negative when the provider gave nothing to place a pace mark with — the usual case.
+    pace: float,
+    // 0 normal, 1 warning, 2 danger.
+    tone: int,
+    blocked: bool,
+}
+
+export struct RowData {
+    title: string,
+    value: string,
+    has-gauge: bool,
+    gauge: GaugeData,
+    blocked: bool,
+}
+
+export struct CardData {
+    id: string,
+    has-mark: bool,
+    mark: image,
+    name: string,
+    caption: string,
+    plan: string,
+    chip: string,
+    // 0 neutral, 1 attention, 2 danger.
+    chip-tone: int,
+    // 0 a reading, 1 a balance and nothing else, 2 nothing to show yet.
+    body: int,
+    headline: string,
+    compact: bool,
+    dominant-title: string,
+    has-gauge: bool,
+    gauge: GaugeData,
+    blocked: bool,
+    reset: string,
+    absolutes: string,
+    rows: [RowData],
+    balance: string,
+    balance-whole: string,
+    balance-fraction: string,
+    blank: string,
+    footer: string,
+    // Where the grid puts it: the visible position, whether it is shown at all (an account
+    // of a collapsed group rests under its provider's card), and the group badge.
+    slot: int,
+    shown: bool,
+    main: bool,
+    badge: string,
+    expanded: bool,
+}
+
+// A track, a fill, and — only when the provider said enough — the pace mark.
+export component QuotaBar inherits Rectangle {
+    in property <GaugeData> gauge;
+    in property <length> thickness;
+    height: thickness;
+
+    property <color> fill-colour: gauge.tone == 2 ? Theme.error-bg : gauge.tone == 1 ? Theme.warning-bg : Theme.accent;
+    property <float> fraction: clamp(gauge.percent / 100, 0, 1);
+
+    Rectangle {
+        opacity: gauge.blocked ? 0.5 : 1;
+
+        Rectangle {
+            border-radius: self.height / 2;
+            background: Theme.ink(0.15);
+        }
+
+        // Never narrower than it is tall: 0.3% is a dot, not a sliver or nothing at all.
+        if root.fraction > 0: Rectangle {
+            x: 0;
+            width: min(max(root.fraction * parent.width, min(parent.height, parent.width)), parent.width);
+            border-radius: self.height / 2;
+            background: root.fill-colour;
+            animate width { duration: 300ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
+        }
+
+        if root.gauge.pace >= 0: Rectangle {
+            x: clamp(root.gauge.pace * parent.width, 1px, max(parent.width - 1px, 1px)) - 1px;
+            width: 2px;
+            background: Theme.ink(0.85);
+        }
+    }
+
+    if gauge.blocked: Image {
+        source: @image-url("icons/changes-prevent-symbolic.svg");
+        colorize: Theme.fg;
+        width: 16px;
+        height: 16px;
+    }
+}
+
+component Pill inherits Rectangle {
+    in property <string> text;
+    in property <color> ink: Theme.fg;
+    in property <float> tint;
+    in property <length> pad-y;
+    in property <int> weight: 400;
+    border-radius: self.height / 2;
+    background: ink.transparentize(1 - tint);
+
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        padding-top: root.pad-y;
+        padding-bottom: root.pad-y;
+        Text {
+            text: root.text;
+            color: root.ink;
+            font-size: Theme.caption;
+            font-weight: root.weight;
+            overflow: elide;
+        }
+    }
+}
+
+component Dim inherits Text {
+    color: Theme.ink(Theme.dim);
+    overflow: elide;
+}
+
+export component Card inherits Rectangle {
+    in property <CardData> data;
+    // Raised under the pointer, and further while carried.
+    in property <bool> lifted;
+    in property <bool> carried;
+    out property <length> natural-height: body.preferred-height;
+
+    // The mark, the name and the plan share one baseline. Each text box ends at its
+    // font's descent, the pill adds its padding, the mark adds nothing: the line sits as
+    // deep as the deepest of them and each is lifted by what it does not use.
+    property <length> name-descent: Theme.body * Theme.descent;
+    property <length> plan-descent: Theme.caption * Theme.descent + 2px;
+    property <length> title-line: max(name-descent, plan-descent);
+    property <length> headline-size: data.compact ? Theme.body : Theme.title-1;
+
+    border-radius: 12px;
+    background: carried ? Theme.popover-bg : Theme.card-bg;
+    border-width: 1px;
+    border-color: Theme.card-outline;
+    drop-shadow-color: carried ? #00000070 : lifted ? #00000057 : Theme.card-shadow;
+    drop-shadow-blur: carried ? 36px : lifted ? 20px : 4px;
+    drop-shadow-offset-y: carried ? 16px : lifted ? 8px : 1px;
+    animate drop-shadow-blur, drop-shadow-offset-y, drop-shadow-color {
+        duration: 150ms;
+        easing: ease-out;
+    }
+
+    body := VerticalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 16px;
+        padding-bottom: 10px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            spacing: 6px;
+
+            if root.data.has-mark: VerticalLayout {
+                alignment: end;
+                padding-bottom: root.title-line;
+                Image {
+                    source: root.data.mark;
+                    colorize: Theme.fg;
+                    width: 28px;
+                    height: 28px;
+                }
+            }
+
+            // An extra account's own name is a caption above the provider, so the row
+            // grows upwards and the provider stays on the shared baseline.
+            VerticalLayout {
+                alignment: end;
+                padding-bottom: root.title-line - root.name-descent;
+                if root.data.caption != "": Dim {
+                    text: root.data.caption;
+                    font-size: Theme.caption;
+                }
+                Text {
+                    text: root.data.name;
+                    color: Theme.fg;
+                    font-size: Theme.body;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+            }
+
+            if root.data.plan != "": VerticalLayout {
+                alignment: end;
+                padding-left: 2px;
+                padding-bottom: root.title-line - root.plan-descent;
+                Pill {
+                    text: root.data.plan;
+                    tint: 0.14;
+                    pad-y: 2px;
+                    opacity: 0.75;
+                }
+            }
+
+            HorizontalLayout {
+                horizontal-stretch: 1;
+                alignment: end;
+                if root.data.chip != "": VerticalLayout {
+                    alignment: center;
+                    Pill {
+                        text: root.data.chip;
+                        ink: root.data.chip-tone == 2 ? Theme.error : root.data.chip-tone == 1 ? Theme.warning : Theme.fg;
+                        opacity: root.data.chip-tone == 0 ? Theme.dim : 1;
+                        tint: 0.13;
+                        pad-y: 1px;
+                        weight: 700;
+                    }
+                }
+            }
+        }
+
+        if root.data.body == 0: VerticalLayout {
+            spacing: 6px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.data.headline;
+                    color: Theme.fg;
+                    opacity: root.data.blocked ? 0.5 : 1;
+                    font-size: root.headline-size;
+                    font-weight: root.data.compact ? 700 : 800;
+                    vertical-alignment: bottom;
+                    overflow: elide;
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: end;
+                    padding-bottom: (root.headline-size - Theme.body) * Theme.descent;
+                    Dim {
+                        text: root.data.dominant-title;
+                        font-size: Theme.body;
+                        horizontal-alignment: right;
+                    }
+                }
+            }
+
+            if root.data.has-gauge: QuotaBar {
+                gauge: root.data.gauge;
+                thickness: 9px;
+            }
+
+            // No reset time is the ordinary case for the window a card leads with. The line
+            // is removed rather than filled with a guess.
+            if root.data.reset != "": Dim {
+                text: root.data.reset;
+                font-size: Theme.caption;
+            }
+
+            if root.data.absolutes != "": Dim {
+                text: root.data.absolutes;
+                font-size: Theme.caption;
+            }
+        }
+
+        if root.data.body == 0 && root.data.rows.length > 0: VerticalLayout {
+            spacing: 6px;
+            for row in root.data.rows: HorizontalLayout {
+                spacing: 8px;
+                Dim {
+                    text: row.title;
+                    font-size: Theme.caption;
+                    width: Theme.caption * 8;
+                    vertical-alignment: center;
+                }
+                if row.has-gauge: VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    QuotaBar {
+                        gauge: row.gauge;
+                        thickness: 6px;
+                    }
+                }
+                Dim {
+                    text: row.value;
+                    font-size: Theme.caption;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                    min-width: Theme.caption * 3;
+                    horizontal-stretch: row.has-gauge ? 0 : 1;
+                    opacity: row.blocked ? 0.5 : 1;
+                }
+            }
+        }
+
+        // Money is not a rate: no bar, no percentage, but it outranks the rows above it.
+        if root.data.body == 0 && root.data.balance != "": Text {
+            text: root.data.balance;
+            color: Theme.fg;
+            font-size: Theme.body * 1.2;
+            font-weight: 700;
+            overflow: elide;
+        }
+
+        if root.data.body == 1: VerticalLayout {
+            vertical-stretch: 1;
+            alignment: center;
+            HorizontalLayout {
+                alignment: start;
+                Text {
+                    text: root.data.balance-whole;
+                    color: Theme.fg;
+                    font-size: Theme.body * 2.5;
+                    font-weight: 700;
+                    vertical-alignment: bottom;
+                    overflow: elide;
+                }
+                if root.data.balance-fraction != "": VerticalLayout {
+                    alignment: end;
+                    padding-bottom: Theme.body * 0.5 * Theme.descent;
+                    Text {
+                        text: root.data.balance-fraction;
+                        color: Theme.fg;
+                        font-size: Theme.body * 2;
+                        font-weight: 700;
+                    }
+                }
+            }
+            Dim {
+                text: "Balance";
+                font-size: Theme.body;
+            }
+        }
+
+        // The one place daemon prose is printed whole: wrapped, and cut after three lines
+        // so a paragraph cannot decide how tall every card in the grid is.
+        if root.data.body == 2: Dim {
+            text: root.data.blank;
+            font-size: Theme.body;
+            wrap: word-wrap;
+            max-height: Theme.body * 1.25 * 3;
+        }
+
+        // Pinned to the bottom, so cards sharing a row line their footers up.
+        VerticalLayout {
+            vertical-stretch: root.data.body == 1 ? 0 : 1;
+            alignment: end;
+            if root.data.footer != "": Text {
+                text: root.data.footer;
+                color: Theme.ink(0.45);
+                font-size: Theme.footer;
+                overflow: elide;
+            }
+        }
+    }
+}

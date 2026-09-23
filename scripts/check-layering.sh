@@ -53,6 +53,9 @@ forbid tidemark-core 'core must build on a machine with no display stack' \
 forbid tidemark 'the client talks to tidemarkd over D-Bus, not to providers' \
     tidemark-core reqwest hyper rusqlite libsqlite3-sys
 
+forbid tidemark-slint 'the prototype client talks to tidemarkd over D-Bus, like the GTK one' \
+    tidemark-core reqwest hyper rusqlite libsqlite3-sys gtk4 libadwaita
+
 if [ "$status" -eq 0 ]; then
     echo 'layering ok'
 fi

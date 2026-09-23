@@ -7,6 +7,7 @@ members = [
     "crates/tidemarkd",
     "crates/tidemark",
     "crates/tidemark-cli",
+    "crates/tidemark-slint",
 ]
 
 [workspace.package]
