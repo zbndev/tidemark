@@ -42,7 +42,9 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
 - Cards: mark, name, account caption, plan pill, state chip, headline and bar with pace
   mark, blocked windows with a padlock, reset line, absolutes, secondary rows, wallet
   balance, balance-only and blank cards, footer; redrawn every 30 s.
-- Grid: 300 px cells, Auto or capped columns from preferences, centred, uniform height.
+- Grid: fixed 300 × 220 px cells, Auto or capped columns from preferences, centred.
+  Status changes and account expansion keep the same geometry; overflowing card content
+  scrolls inside its card.
 - Hover lift; drag to reorder with displaced cards moving out of the way, settle on
   release, autoscroll near the edges; provider and account reorders sent to the daemon,
   optimistic, rolled back on refusal.

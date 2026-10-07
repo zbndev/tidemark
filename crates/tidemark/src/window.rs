@@ -136,8 +136,6 @@ pub struct MainWindow {
     rows: RefCell<Vec<(String, String)>>,
     /// Every account, in card order, provider groups contiguous.
     statuses: RefCell<Vec<ProviderStatus>>,
-    /// Each row's natural height, as the markup measured it.
-    heights: RefCell<Vec<f32>>,
     /// Provider groups expanded in this window. Deliberately forgotten on the next launch.
     expanded: RefCell<BTreeSet<String>>,
     definitions: RefCell<Vec<ProviderDefinition>>,
@@ -193,7 +191,6 @@ impl MainWindow {
             cards,
             rows: RefCell::default(),
             statuses: RefCell::default(),
-            heights: RefCell::default(),
             expanded: RefCell::default(),
             definitions: RefCell::default(),
             daemon: RefCell::default(),
@@ -267,14 +264,6 @@ impl MainWindow {
             move |index| {
                 if let Some(main) = weak.upgrade() {
                     main.toggle_group(index as usize);
-                }
-            }
-        });
-        ui.on_card_height({
-            let weak = weak.clone();
-            move |index, height| {
-                if let Some(main) = weak.upgrade() {
-                    main.measured(index as usize, height);
                 }
             }
         });
@@ -691,13 +680,11 @@ impl MainWindow {
             .collect();
         for index in gone.into_iter().rev() {
             self.rows.borrow_mut().remove(index);
-            self.heights.borrow_mut().remove(index);
             self.cards.remove(index);
         }
         for row in wanted {
             if !self.rows.borrow().contains(&row) {
                 self.rows.borrow_mut().push(row);
-                self.heights.borrow_mut().push(0.0);
                 self.cards.push(CardData::default());
             }
         }
@@ -748,7 +735,6 @@ impl MainWindow {
                 .filter(|placement| placement.shown)
                 .count() as i32,
         );
-        self.update_cell_height();
         self.update_tray();
     }
 
@@ -834,28 +820,6 @@ impl MainWindow {
             }
         }
         data
-    }
-
-    fn measured(&self, row: usize, height: f32) {
-        if let Some(held) = self.heights.borrow_mut().get_mut(row) {
-            *held = height;
-        }
-        self.update_cell_height();
-    }
-
-    /// Every cell is as tall as the tallest shown card, so cards sharing a row line up.
-    fn update_cell_height(&self) {
-        let Some(ui) = self.ui.upgrade() else {
-            return;
-        };
-        let heights = self.heights.borrow();
-        let tallest = (0..self.cards.row_count())
-            .filter(|row| self.cards.row_data(*row).is_some_and(|card| card.shown))
-            .filter_map(|row| heights.get(row).copied())
-            .fold(0.0_f32, f32::max);
-        if tallest > 0.0 && (ui.get_cell_height() - tallest).abs() > 0.5 {
-            ui.set_cell_height(tallest);
-        }
     }
 
     fn toggle_group(&self, row: usize) {

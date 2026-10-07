@@ -120,7 +120,6 @@ export component AppWindow inherits Window {
     // Zero means Auto: as many columns as fit.
     in property <int> max-columns: 0;
     in property <int> shown-count: 0;
-    in property <length> cell-height: 200px;
     // The window draws its own title bar and frame: the header moves the window
     // and carries its controls, and Slint hands presses near the edges to the system's
     // resize. `maximized` and `minimized` are the window's own, kept in step with the
@@ -134,7 +133,6 @@ export component AppWindow inherits Window {
     callback close-window();
     callback open-release();
     callback toggle-group(int);
-    callback card-height(int, length);
     // A completed drag, in visible positions. The window decides what it means.
     callback reorder(int, int);
     // A card's secondary-click menu: which entries it offers is asked as it opens, and
@@ -161,6 +159,8 @@ export component AppWindow inherits Window {
 
     // Grid geometry, in the GTK grid's numbers.
     property <length> cell-width: 300px;
+    // Statuses, errors and account expansion never change the grid's geometry.
+    property <length> cell-height: 220px;
     property <length> spacing: 12px;
     property <length> margin: 12px;
     property <length> available-width: scroller.visible-width - 2 * margin;
@@ -496,13 +496,6 @@ export component AppWindow inherits Window {
                         data: card;
                         lifted: touch.has-hover && !root.carrying;
                         carried: slot.grabbed;
-
-                        init => {
-                            root.card-height(index, self.natural-height);
-                        }
-                        changed natural-height => {
-                            root.card-height(index, self.natural-height);
-                        }
                     }
 
                     // A notification-style counter on the provider's card, outside the title
