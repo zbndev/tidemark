@@ -5,7 +5,7 @@
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Alert } from "alert.slint";
-import { ActionRow, BoxedList, Button, Caption, ComboRow, Entry, EntryRow, GroupHeading, Spinner, Switch, Toast, ToggleGroup } from "adw.slint";
+import { ActionRow, BoxedList, Button, Caption, ComboRow, ContextMenu, Entry, EntryRow, GroupHeading, MenuEntry, Spinner, Switch, Toast, ToggleGroup } from "adw.slint";
 
 // 0 a provider and its first account, 1 a further account under it, 2 an installed plugin
 // nobody has configured.
@@ -17,8 +17,6 @@ export struct ProviderRowData {
     subtitle: string,
     has-mark: bool,
     mark: image,
-    can-add: bool,
-    can-edit: bool,
     // A provider row with further accounts, and whether they are showing.
     nested: bool,
     expanded: bool,
@@ -118,11 +116,8 @@ export global ProviderSettings {
     callback add();
     callback search(string);
     callback pick(string);
-    callback edit(string, string);
-    callback remove(string, string);
-    callback add-account(string);
-    callback add-first(string);
-    callback remove-plugin(string);
+    callback row-menu(string, bool) -> [MenuEntry];
+    callback row-action(string, string, string, bool);
     callback toggle-expanded(string);
 
     callback rename();
@@ -173,6 +168,7 @@ component Pill inherits Rectangle {
 }
 
 component ListPage inherits ScrollView {
+    callback show-menu(string, string, bool, length, length);
     VerticalLayout {
         alignment: start;
         padding: 24px;
@@ -231,42 +227,22 @@ component ListPage inherits ScrollView {
                     elbow: row.kind == 1;
                     indent: row.kind == 1 ? 12px : 0px;
 
-                    if row.kind != 1 && row.can-add: Button {
-                        has-icon: true;
-                        icon: @image-url("icons/list-add-symbolic.svg");
-                        clicked => {
-                            if (row.kind == 2) {
-                                ProviderSettings.add-first(row.provider);
-                            } else {
-                                ProviderSettings.add-account(row.provider);
-                            }
-                        }
-                    }
-                    if row.kind != 2 && row.can-edit: Button {
-                        has-icon: true;
-                        icon: @image-url("icons/document-edit-symbolic.svg");
-                        clicked => {
-                            ProviderSettings.edit(row.provider, row.account);
-                        }
-                    }
-                    Button {
-                        has-icon: true;
-                        kind: 2;
-                        icon: @image-url("icons/user-trash-symbolic.svg");
-                        clicked => {
-                            if (row.kind == 2) {
-                                ProviderSettings.remove-plugin(row.provider);
-                            } else {
-                                ProviderSettings.remove(row.provider, row.account);
-                            }
-                        }
-                    }
                     if row.nested: Button {
                         kind: 3;
                         has-icon: true;
                         icon: row.expanded ? @image-url("icons/pan-down-symbolic.svg") : @image-url("icons/pan-end-symbolic.svg");
                         clicked => {
                             ProviderSettings.toggle-expanded(row.provider);
+                        }
+                    }
+                    Button {
+                        has-icon: true;
+                        kind: 3;
+                        icon: @image-url("icons/view-more-symbolic.svg");
+                        clicked => {
+                            root.show-menu(row.provider, row.account, row.kind == 2,
+                                self.absolute-position.x + self.width,
+                                self.absolute-position.y + self.height + 4px);
                         }
                     }
                 }
@@ -566,6 +542,13 @@ component DetailPage inherits ScrollView {
 // and a back button on every page but the list.
 export component ProviderDialog inherits Rectangle {
     background: Theme.dark ? #00000080 : #00000040;
+    property <bool> menu-open: false;
+    property <[MenuEntry]> menu-entries;
+    property <string> menu-provider;
+    property <string> menu-account;
+    property <bool> menu-unconfigured;
+    property <length> menu-x;
+    property <length> menu-y;
 
     // Swallows presses meant for the window underneath.
     TouchArea { }
@@ -715,6 +698,15 @@ export component ProviderDialog inherits Rectangle {
 
                 if ProviderSettings.page == 0: ListPage {
                     vertical-stretch: 1;
+                    show-menu(provider, account, unconfigured, x, y) => {
+                        root.menu-entries = ProviderSettings.row-menu(provider, unconfigured);
+                        root.menu-provider = provider;
+                        root.menu-account = account;
+                        root.menu-unconfigured = unconfigured;
+                        root.menu-x = x;
+                        root.menu-y = y;
+                        root.menu-open = root.menu-entries.length > 0;
+                    }
                 }
                 if ProviderSettings.page == 1: PickerPage {
                     vertical-stretch: 1;
@@ -731,6 +723,24 @@ export component ProviderDialog inherits Rectangle {
                 text: ProviderSettings.toast;
                 serial: ProviderSettings.toast-serial;
             }
+        }
+    }
+
+    if root.menu-open: ContextMenu {
+        width: root.width;
+        height: root.height;
+        entries: root.menu-entries;
+        anchor-x: root.menu-x;
+        anchor-y: root.menu-y;
+        align-right: true;
+        chosen(id) => {
+            root.menu-open = false;
+            scope.focus();
+            ProviderSettings.row-action(id, root.menu-provider, root.menu-account, root.menu-unconfigured);
+        }
+        dismissed => {
+            root.menu-open = false;
+            scope.focus();
         }
     }
 }

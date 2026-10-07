@@ -551,15 +551,7 @@ impl MainWindow {
                 .find(|definition| definition.provider == provider),
         );
         self.menu_target.replace(Some((provider, account)));
-        actions
-            .into_iter()
-            .map(|action| MenuEntry {
-                id: action.id().into(),
-                label: action.label().into(),
-                section: action.starts_section(),
-                enabled: true,
-            })
-            .collect()
+        provider_settings::menu_entries(actions)
     }
 
     /// A card's context menu is a shortcut into the provider dialog, never a second way of

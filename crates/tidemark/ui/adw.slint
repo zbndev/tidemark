@@ -779,6 +779,8 @@ export component Toast inherits Rectangle {
 export struct MenuEntry {
     id: string,
     label: string,
+    icon: image,
+    has-icon: bool,
     // A separator above it: the start of a new section.
     section: bool,
     enabled: bool,
@@ -792,6 +794,7 @@ export component ContextMenu inherits Rectangle {
     // Where it was asked for, in window coordinates.
     in property <length> anchor-x;
     in property <length> anchor-y;
+    in property <bool> align-right: false;
     callback chosen(string);
     callback dismissed();
     property <int> highlighted: -1;
@@ -820,6 +823,10 @@ export component ContextMenu inherits Rectangle {
                 if (root.highlighted >= 0 && root.entries[root.highlighted].enabled) {
                     root.chosen(root.entries[root.highlighted].id);
                 }
+            } else if (event.text == Key.Tab || event.text == Key.Backtab) {
+                // Keep focus here until selection or dismissal. Otherwise Slint's
+                // default traversal reaches controls underneath the open menu.
+                return accept;
             } else {
                 return reject;
             }
@@ -829,7 +836,7 @@ export component ContextMenu inherits Rectangle {
 
     // Opens down and to the right of the point, and flips where the window has no room.
     popover := Rectangle {
-        x: root.anchor-x + self.width > root.width - 6px ? max(6px, root.anchor-x - self.width) : root.anchor-x;
+        x: root.align-right || root.anchor-x + self.width > root.width - 6px ? max(6px, root.anchor-x - self.width) : root.anchor-x;
         y: root.anchor-y + self.height > root.height - 6px ? max(6px, root.anchor-y - self.height) : root.anchor-y;
         width: max(160px, column.preferred-width);
         height: column.preferred-height;
@@ -862,6 +869,16 @@ export component ContextMenu inherits Rectangle {
                     HorizontalLayout {
                         padding-left: 12px;
                         padding-right: 12px;
+                        spacing: 8px;
+                        if entry.has-icon: VerticalLayout {
+                            alignment: center;
+                            Image {
+                                source: entry.icon;
+                                colorize: Theme.fg.transparentize(entry.enabled ? 0 : 0.5);
+                                width: 16px;
+                                height: 16px;
+                            }
+                        }
                         Text {
                             text: entry.label;
                             color: Theme.fg.transparentize(entry.enabled ? 0 : 0.5);

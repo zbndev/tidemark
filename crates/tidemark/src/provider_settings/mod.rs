@@ -30,7 +30,7 @@ use crate::bus::DaemonProxy;
 use crate::marks::Marks;
 use crate::window::spawn;
 use crate::{
-    AppWindow, CandidateData, DetailData, OptionData, PickerRowData, ProviderRowData,
+    AppWindow, CandidateData, DetailData, MenuEntry, OptionData, PickerRowData, ProviderRowData,
     ProviderSettings, SwitchData,
 };
 
@@ -222,14 +222,6 @@ impl ProviderDialog {
                 }
             }
         };
-        let identified = |action: fn(&Rc<Self>, String, String)| {
-            let weak = weak.clone();
-            move |provider: SharedString, account: SharedString| {
-                if let Some(dialog) = weak.upgrade() {
-                    action(&dialog, provider.into(), account.into());
-                }
-            }
-        };
         let indexed = |action: fn(&Rc<Self>, usize)| {
             let weak = weak.clone();
             move |index: i32| {
@@ -262,11 +254,38 @@ impl ProviderDialog {
             dialog.render();
         }));
         settings.on_pick(with(Self::add_provider));
-        settings.on_edit(identified(Self::open_detail));
-        settings.on_remove(identified(Self::confirm_removal));
-        settings.on_add_account(with(Self::add_account));
-        settings.on_add_first(with(Self::add_provider));
-        settings.on_remove_plugin(with(Self::confirm_plugin_removal));
+        settings.on_row_menu({
+            let weak = weak.clone();
+            move |provider, unconfigured| {
+                let Some(dialog) = weak.upgrade() else {
+                    return ModelRc::default();
+                };
+                let actions = if unconfigured {
+                    vec![CardAction::AddAccount, CardAction::Remove]
+                } else {
+                    card_actions(dialog.definition(&provider).as_ref())
+                };
+                ModelRc::from(menu_entries(actions).as_slice())
+            }
+        });
+        settings.on_row_action({
+            let weak = weak.clone();
+            move |id, provider, account, unconfigured| {
+                let (Some(dialog), Some(action)) = (weak.upgrade(), CardAction::from_id(&id))
+                else {
+                    return;
+                };
+                if unconfigured {
+                    match action {
+                        CardAction::AddAccount => dialog.add_provider(provider.into()),
+                        CardAction::Remove => dialog.confirm_plugin_removal(provider.into()),
+                        CardAction::Modify => {}
+                    }
+                } else {
+                    dialog.shortcut(action, &provider, &account);
+                }
+            }
+        });
         settings.on_toggle_expanded(with(|dialog, provider| {
             {
                 let mut collapsed = dialog.collapsed.borrow_mut();
@@ -499,8 +518,6 @@ impl ProviderDialog {
                     subtitle: row.subtitle.into(),
                     has_mark: mark.is_some(),
                     mark: mark.unwrap_or_default(),
-                    can_add: row.can_add,
-                    can_edit: row.can_edit,
                     nested: row.nested,
                     expanded: row.expanded,
                 }
@@ -823,10 +840,9 @@ impl ProviderDialog {
         }
     }
 
-    /// A quota card's context menu, taken into this dialog: the row's own control, reached
-    /// with the row's identity instead of its button, so there is one implementation of
-    /// adding, editing and removing an account. The tab is settled first, so going back
-    /// from the account's page lands on the tab its provider is on.
+    /// A card or configured row's menu action, taken with the account's identity so
+    /// adding, editing and removing have one implementation. The tab is settled first,
+    /// so going back from the account's page lands on the tab its provider is on.
     pub fn shortcut(self: &Rc<Self>, action: CardAction, provider: &str, account: &str) {
         let custom = self
             .definition(provider)
@@ -1490,8 +1506,7 @@ pub(crate) fn opens_detail_after_add(definition: &ProviderDefinition) -> bool {
         || !definition.options.is_empty()
 }
 
-/// One entry of a quota card's secondary-click menu. Each is a shortcut to the control the
-/// configured row draws for the same account — never a second implementation of it.
+/// An action shared by a quota card's context menu and its provider settings row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardAction {
     AddAccount,
@@ -1514,7 +1529,7 @@ impl CardAction {
         Self::ALL.into_iter().find(|action| action.id() == id)
     }
 
-    /// What the menu item says, in the words the settings row's tooltip uses.
+    /// What both menus call the action.
     pub const fn label(self) -> &'static str {
         match self {
             Self::AddAccount => "Add new account",
@@ -1530,8 +1545,30 @@ impl CardAction {
     }
 }
 
+/// The same labels, icons and sections in the card and provider-row menus.
+pub(crate) fn menu_entries(actions: impl IntoIterator<Item = CardAction>) -> Vec<MenuEntry> {
+    actions
+        .into_iter()
+        .map(|action| {
+            let svg: &[u8] = match action {
+                CardAction::AddAccount => include_bytes!("../../ui/icons/list-add-symbolic.svg"),
+                CardAction::Modify => include_bytes!("../../ui/icons/document-edit-symbolic.svg"),
+                CardAction::Remove => include_bytes!("../../ui/icons/user-trash-symbolic.svg"),
+            };
+            MenuEntry {
+                id: action.id().into(),
+                label: action.label().into(),
+                icon: slint::Image::load_from_svg_data(svg).unwrap_or_default(),
+                has_icon: true,
+                section: action.starts_section(),
+                enabled: true,
+            }
+        })
+        .collect()
+}
+
 /// The entries a quota card's context menu offers for one provider. The same three rules
-/// the configured row's buttons follow: a second account where the credential can hold
+/// the configured row's menu follows: a second account where the credential can hold
 /// one, a pen where there is something to configure, and removal always.
 pub fn card_actions(definition: Option<&ProviderDefinition>) -> Vec<CardAction> {
     let mut actions = Vec::new();

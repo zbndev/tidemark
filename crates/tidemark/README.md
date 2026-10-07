@@ -54,7 +54,9 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
   add/rename/remove, keys, OAuth sign-in, local sources and browser sessions, options and
   notifications, plugin import (file chooser through `rfd`, the XDG portal on Linux) and
   removal; alerts awaited as futures.
-- Card context menu: add an account, modify, remove — shortcuts into provider settings.
+- Card context menu with icons: add an account, modify, remove — shortcuts into provider
+  settings. Each configured row's trailing menu offers the same actions; an unconfigured
+  plugin's menu adds its first account or removes its file.
 - Primary menu with Preferences (General, Network and Data pages, every value the
   daemon's, a refused change put back) and About (details, issue link, legal, and a
   troubleshooting page with the daemon's version, the renderer, the desktop and session,
