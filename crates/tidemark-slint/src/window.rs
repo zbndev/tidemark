@@ -86,6 +86,20 @@ fn gauge_data(gauge: &Gauge) -> GaugeData {
     }
 }
 
+/// Equal by content. `ModelRc` compares by identity, and every redraw builds new rows; an
+/// empty `Image` is never equal to anything, itself included, so a card without a mark
+/// would always differ.
+fn same_card(a: &CardData, b: &CardData) -> bool {
+    let placeholder = slint::Image::from_rgba8(slint::SharedPixelBuffer::new(1, 1));
+    let rows = |card: &CardData| card.rows.iter().collect::<Vec<RowData>>();
+    let bare = |card: &CardData| CardData {
+        rows: ModelRc::default(),
+        mark: placeholder.clone(),
+        ..card.clone()
+    };
+    bare(a) == bare(b) && rows(a) == rows(b) && (!a.has_mark || a.mark == b.mark)
+}
+
 fn account_badge(extra_accounts: usize, expanded: bool) -> String {
     if expanded {
         "−".into()
@@ -409,7 +423,14 @@ impl MainWindow {
                 .borrow()
                 .iter()
                 .position(|row| *row == identity(status));
-            if let Some(row) = row {
+            // Setting a row rebuilds its card, rows and text included; most redraws change
+            // nothing, and one landing mid-drag is a dropped frame.
+            if let Some(row) = row
+                && self
+                    .cards
+                    .row_data(row)
+                    .is_none_or(|shown| !same_card(&shown, &data))
+            {
                 self.cards.set_row_data(row, data);
             }
         }
@@ -699,6 +720,24 @@ mod tests {
 
     fn status(provider: &str, account: &str) -> ProviderStatus {
         ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))
+    }
+
+    fn card_with_row(value: &str) -> CardData {
+        CardData {
+            headline: "42%".into(),
+            rows: ModelRc::new(VecModel::from(vec![RowData {
+                title: "7 days".into(),
+                value: value.into(),
+                ..RowData::default()
+            }])),
+            ..CardData::default()
+        }
+    }
+
+    #[test]
+    fn cards_with_equal_rows_in_different_models_are_the_same() {
+        assert!(same_card(&card_with_row("2%"), &card_with_row("2%")));
+        assert!(!same_card(&card_with_row("2%"), &card_with_row("3%")));
     }
 
     #[test]

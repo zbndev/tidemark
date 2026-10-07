@@ -300,6 +300,9 @@ export component AppWindow inherits Window {
 
                 for card[index] in root.cards: slot := Rectangle {
                     property <bool> carried: root.carrying && root.drag-index == index;
+                    // Pressed with a drag possible: raised at once, before the pointer has
+                    // travelled far enough to start carrying it.
+                    property <bool> grabbed: root.drag-index == index;
                     property <bool> settling: root.settle-index == index;
                     // The slot in index units, so a window resize repositions instantly
                     // while a reorder animates.
@@ -313,13 +316,13 @@ export component AppWindow inherits Window {
                     y: carried ? root.whole-y(root.drag-slot) + root.drag-dy : settling ? root.settle-y + root.settle-progress() * (root.whole-y(card.slot) - root.settle-y) : root.slot-y(position);
                     width: root.cell-width;
                     height: root.cell-height;
-                    z: carried || settling ? 10 : card.main ? 1 : 0;
+                    z: grabbed || settling ? 10 : card.main ? 1 : 0;
                     opacity: card.shown ? 1 : 0;
                     animate opacity { duration: 180ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
 
                     touch := TouchArea {
                         enabled: card.shown;
-                        mouse-cursor: slot.carried ? MouseCursor.grabbing : MouseCursor.default;
+                        mouse-cursor: slot.grabbed ? MouseCursor.grabbing : MouseCursor.default;
 
                         pointer-event(event) => {
                             if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down && root.shown-count > 1) {
@@ -361,7 +364,7 @@ export component AppWindow inherits Window {
                         height: parent.height;
                         data: card;
                         lifted: touch.has-hover && !root.carrying;
-                        carried: slot.carried;
+                        carried: slot.grabbed;
 
                         init => {
                             root.card-height(index, self.natural-height);

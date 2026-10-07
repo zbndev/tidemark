@@ -140,16 +140,41 @@ export component Card inherits Rectangle {
     property <length> title-line: max(name-descent, plan-descent);
     property <length> headline-size: data.compact ? Theme.body : Theme.title-1;
 
-    border-radius: 12px;
-    background: carried ? Theme.popover-bg : Theme.card-bg;
-    border-width: 1px;
-    border-color: Theme.card-outline;
-    drop-shadow-color: carried ? #00000070 : lifted ? #00000057 : Theme.card-shadow;
-    drop-shadow-blur: carried ? 36px : lifted ? 20px : 4px;
-    drop-shadow-offset-y: carried ? 16px : lifted ? 8px : 1px;
-    animate drop-shadow-blur, drop-shadow-offset-y, drop-shadow-color {
-        duration: 150ms;
-        easing: ease-out;
+    // Three fixed shadows crossfaded rather than one animated: FemtoVG bakes a shadow into a
+    // blurred texture and redoes it whenever colour, blur or offset change, so an animated
+    // shadow is a fresh Gaussian blur on every frame of the lift.
+    Rectangle {
+        border-radius: 12px;
+        drop-shadow-color: Theme.card-shadow;
+        drop-shadow-blur: 4px;
+        drop-shadow-offset-y: 1px;
+        opacity: root.carried || root.lifted ? 0 : 1;
+        animate opacity { duration: 150ms; easing: ease-out; }
+    }
+
+    Rectangle {
+        border-radius: 12px;
+        drop-shadow-color: #00000057;
+        drop-shadow-blur: 20px;
+        drop-shadow-offset-y: 8px;
+        opacity: root.lifted && !root.carried ? 1 : 0;
+        animate opacity { duration: 150ms; easing: ease-out; }
+    }
+
+    Rectangle {
+        border-radius: 12px;
+        drop-shadow-color: #00000070;
+        drop-shadow-blur: 36px;
+        drop-shadow-offset-y: 16px;
+        opacity: root.carried ? 1 : 0;
+        animate opacity { duration: 150ms; easing: ease-out; }
+    }
+
+    Rectangle {
+        border-radius: 12px;
+        background: root.carried ? Theme.popover-bg : Theme.card-bg;
+        border-width: 1px;
+        border-color: Theme.card-outline;
     }
 
     body := VerticalLayout {
