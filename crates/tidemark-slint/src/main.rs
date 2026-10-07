@@ -40,14 +40,16 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
 
-    // Skia draws text the way the platform's own toolkit does, which is the point of the
-    // exercise on Windows. SLINT_BACKEND still overrides this for comparisons.
+    // FemtoVG on wgpu: Direct3D 12 on Windows, Vulkan on Linux. Not Skia — Slint's Skia
+    // renderer hints each glyph's outline while parley places it at unhinted advances, so
+    // small text comes out with letters crowding or drifting apart. SLINT_BACKEND still
+    // overrides this for comparisons.
     if std::env::var_os("SLINT_BACKEND").is_none()
         && let Err(error) = slint::BackendSelector::new()
-            .renderer_name("skia".into())
+            .renderer_name("femtovg-wgpu".into())
             .select()
     {
-        tracing::warn!(%error, "Skia is unavailable; using Slint's default renderer");
+        tracing::warn!(%error, "wgpu is unavailable; using Slint's default renderer");
     }
 
     let ui = AppWindow::new()?;

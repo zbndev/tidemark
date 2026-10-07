@@ -7,7 +7,7 @@ unchanged, and `src/view.rs` holds the pure half of the GTK `card.rs`.
 
 ```bash
 cargo run -p tidemark-slint              # against the running tidemarkd
-SLINT_BACKEND=winit-femtovg cargo run -p tidemark-slint   # compare renderers
+SLINT_BACKEND=winit-software cargo run -p tidemark-slint  # compare renderers
 ```
 
 ## In the prototype

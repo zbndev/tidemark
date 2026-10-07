@@ -17,7 +17,7 @@ workspace = true
 [dependencies]
 async-io = "2.6.0"
 semver = "1.0.28"
-slint = { version = "1.18.1", features = ["renderer-skia"] }
+slint = { version = "1.18.1", features = ["renderer-femtovg-wgpu"] }
 tidemark-ipc = { path = "../tidemark-ipc" }
 tidemark-types = { path = "../tidemark-types" }
 tracing = "0.1.44"
