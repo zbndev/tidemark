@@ -74,6 +74,12 @@ fn main() -> Result<(), slint::PlatformError> {
     // tray icon can bring it back (CONTEXT.md § Interface).
     let background = args.iter().any(|argument| argument == "--background");
 
+    #[cfg(windows)]
+    if let Err(error) = single_instance::wait_for_restart() {
+        tracing::error!(%error, "could not wait for the previous desktop client");
+        return Err(format!("could not restart Tidemark: {error}").into());
+    }
+
     #[cfg(unix)]
     let instance = match async_io::block_on(application::claim(!background)) {
         Ok(application::Claim::First(connection)) => Some(connection),
