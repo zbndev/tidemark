@@ -20,6 +20,8 @@ export global Theme {
     out property <color> warning: dark ? #f8e45c : #9c6e03;
     out property <color> error: dark ? #ff938c : #c30000;
     out property <color> success: dark ? #78e9ab : #007c3d;
+    // `@accent_color`: the accent made readable as text, lighter on dark and darker on light.
+    out property <color> link: dark ? accent.mix(#ffffff, 0.65) : accent.mix(#000000, 0.8);
 
     // The text colour, and how much of it libadwaita lets through.
     property <color> fg-rgb: dark ? #ffffff : #000006;

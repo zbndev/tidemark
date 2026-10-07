@@ -6,10 +6,6 @@ use semver::{Error, Version};
 
 pub(crate) const RELEASES_URL: &str = "https://github.com/zbndev/tidemark/releases";
 
-pub(crate) fn update_tooltip(version: &str) -> Option<String> {
-    (!version.is_empty()).then(|| format!("Tidemark {version} is available"))
-}
-
 /// Where the release notes dialog's download button goes.
 ///
 /// A published release has its own page, and that is the one to land on: the list makes a
@@ -133,20 +129,7 @@ fn restart_sibling(command: &Command) -> io::Result<Command> {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{UpdateNotice, release_url, restart_command, update_tooltip};
-
-    #[test]
-    fn an_empty_update_has_no_button_copy() {
-        assert_eq!(update_tooltip(""), None);
-    }
-
-    #[test]
-    fn an_available_update_names_the_daemon_selected_version() {
-        assert_eq!(
-            update_tooltip("0.12.3").as_deref(),
-            Some("Tidemark 0.12.3 is available")
-        );
-    }
+    use super::{UpdateNotice, release_url, restart_command};
 
     #[test]
     fn the_download_button_goes_to_the_release_being_previewed() {

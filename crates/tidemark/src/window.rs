@@ -14,12 +14,13 @@ use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use tidemark_types::{DataInfo, Preferences, ProviderDefinition, ProviderStatus, Timestamp, ids};
 
-use crate::alert::Alerts;
+use crate::alert::{Alerts, Appearance as Look, Content, Question};
 use crate::bus::{self, DaemonProxy, Update};
 use crate::marks::Marks;
 use crate::preferences::PreferencesDialog;
 use crate::provider_settings::{self, CardAction, ProviderDialog};
 use crate::tray::{self, Tray};
+use crate::update::UpdateNotice;
 use crate::view::{self, Body, Gauge, Tone};
 use crate::{AppWindow, CardData, GaugeData, MenuEntry, RowData, Theme, format, model, update};
 
@@ -159,6 +160,8 @@ pub struct MainWindow {
     daemon_version: RefCell<Option<String>>,
     /// The renderer the window is drawn with, for the same page.
     renderer: String,
+    /// Which daemon releases the restart prompt has already been offered for.
+    update_notice: RefCell<UpdateNotice>,
     /// The panel icon, once a status-notifier host has accepted it. `None` in a session
     /// that has none, which is also what leaves the close button closing the program.
     tray: RefCell<Option<Tray>>,
@@ -214,6 +217,7 @@ impl MainWindow {
             preferences_dialog: RefCell::default(),
             daemon_version: RefCell::default(),
             renderer,
+            update_notice: RefCell::new(UpdateNotice::new(env!("CARGO_PKG_VERSION"))),
             tray: RefCell::default(),
             minimize_on_close: Cell::new(true),
             clock: slint::Timer::default(),
@@ -418,6 +422,7 @@ impl MainWindow {
             } => {
                 tracing::info!(accounts = statuses.len(), "connected to the daemon");
                 self.daemon.replace(Some(proxy));
+                self.offer_restart(&ui, version.as_deref());
                 self.daemon_version.replace(version);
                 self.definitions.replace(definitions);
                 self.marks.set_plugin_root(&data.plugin_icons_path);
@@ -985,13 +990,83 @@ impl MainWindow {
         }
     }
 
-    /// Straight to the release page, which is what the release-notes preview's own button
-    /// does, until that preview is drawn here.
+    /// Previews the release before anyone leaves for a browser: the notes come from the
+    /// daemon that found the release, rendered by [`crate::release_notes`].
+    ///
+    /// A release with no notes — or a daemon that went away, or one too old to know the
+    /// call — opens the release page directly, which is all this button ever did before
+    /// there was anything to preview.
     fn open_release(&self) {
-        let url = update::release_url(&self.available.borrow());
-        if let Err(error) = webbrowser::open(&url) {
-            tracing::warn!(%error, "could not open the Tidemark release page");
+        let version = self.available.borrow().clone();
+        let proxy = self.daemon.borrow().clone();
+        let ui = self.ui.clone();
+        spawn(async move {
+            let notes = match proxy {
+                Some(proxy) => proxy.get_release_notes().await.unwrap_or_else(|error| {
+                    tracing::info!(
+                        %error,
+                        "the daemon did not answer GetReleaseNotes; opening the release page"
+                    );
+                    String::new()
+                }),
+                None => String::new(),
+            };
+            if notes.trim().is_empty() {
+                let url = update::release_url(&version);
+                if let Err(error) = webbrowser::open(&url) {
+                    tracing::warn!(%error, "could not open the Tidemark release page");
+                }
+                return;
+            }
+            if let Some(ui) = ui.upgrade() {
+                crate::release_notes::present(&ui, &version, &notes);
+            }
+        });
+    }
+
+    /// A daemon newer than this window means the package was upgraded underneath it: the
+    /// window is brought forward and offers to restart into the new client, once for each
+    /// newer release.
+    fn offer_restart(&self, ui: &AppWindow, daemon: Option<&str>) {
+        let Some(daemon) = daemon else {
+            return;
+        };
+        match self.update_notice.borrow_mut().consider(daemon) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(daemon, %error, "the daemon reported an invalid version");
+                return;
+            }
         }
+        present(ui);
+        let alerts = Rc::clone(&self.alerts);
+        spawn(async move {
+            let answer = alerts
+                .ask(Question {
+                    heading: "Tidemark has been updated".to_owned(),
+                    body: "Restart the app to finish the update.".to_owned(),
+                    responses: vec![
+                        ("later", "Later", Look::Plain),
+                        ("restart", "Restart", Look::Suggested),
+                    ],
+                    default: "restart",
+                    close: "later",
+                    content: Content::None,
+                })
+                .await;
+            if answer.response != "restart" {
+                return;
+            }
+            let error = update::restart();
+            tracing::error!(%error, "could not restart the desktop client");
+            alerts
+                .ask(Question::notice(
+                    "Tidemark could not restart",
+                    format!("Restart the app manually. {error}"),
+                ))
+                .await;
+        });
     }
 
     fn refresh_now(&self) {

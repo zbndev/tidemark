@@ -19,6 +19,7 @@ mod frame;
 // still to come.
 #[allow(dead_code)]
 mod format;
+mod markdown;
 mod marks;
 #[allow(dead_code)]
 mod model;
@@ -28,12 +29,12 @@ mod preferences;
 mod provider_settings;
 #[cfg(windows)]
 mod registry;
+mod release_notes;
 #[cfg(windows)]
 mod single_instance;
 mod tray;
 #[cfg(windows)]
 mod tray_icon_rgba;
-#[allow(dead_code)]
 mod update;
 mod view;
 mod window;
@@ -45,8 +46,8 @@ mod ui {
 }
 use ui::{
     About, Alert, AlertForm, AlertResponse, AppWindow, CandidateData, CardData, DetailData,
-    GaugeData, MenuEntry, OptionData, PickerRowData, Prefs, PreviewRow, ProviderRowData,
-    ProviderSettings, RowData, SwitchData, Theme,
+    GaugeData, MenuEntry, NoteBlock, OptionData, PickerRowData, Prefs, PreviewRow, ProviderRowData,
+    ProviderSettings, ReleaseNotes, RowData, SwitchData, Theme,
 };
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -131,6 +132,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     frame::install(&ui);
     about::install(&ui);
+    release_notes::install(&ui);
     let _main = window::MainWindow::start(&ui, renderer, background);
     #[cfg(unix)]
     if let Some(connection) = &instance

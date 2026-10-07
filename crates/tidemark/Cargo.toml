@@ -19,6 +19,7 @@ workspace = true
 # zbus's async-io backend; named here because this crate uses it directly.
 async-channel = "2.5.0"
 async-io = "2.6.0"
+pulldown-cmark = { version = "0.13.4", default-features = false }
 rfd = "0.17.2"
 semver = "1.0.28"
 # `~`: the winit accessor behind `unstable-winit-030` may change in any minor release.

@@ -6527,6 +6527,7 @@ dependencies = [
  "async-channel",
  "async-io",
  "ksni",
+ "pulldown-cmark",
  "rfd",
  "semver",
  "slint",

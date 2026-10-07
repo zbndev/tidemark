@@ -1,0 +1,197 @@
+// The changelog preview behind the header's update button, as the GTK client's AdwDialog
+// laid it out: the version in the title bar, the notes on a recessed surface, and Cancel
+// beside Download on GitHub. The blocks are `markdown.rs`'s.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Button } from "adw.slint";
+
+// 0 heading, 1 paragraph, 2 list item, 3 code, 4 rule.
+export struct NoteBlock {
+    kind: int,
+    level: int,
+    depth: int,
+    marker: string,
+    text: styled-text,
+}
+
+export global ReleaseNotes {
+    in-out property <bool> open;
+    in property <string> version;
+    in property <[NoteBlock]> blocks;
+
+    callback close();
+    callback download();
+    callback open-link(string);
+}
+
+component Prose inherits StyledText {
+    default-color: Theme.fg;
+    link-color: Theme.link;
+    link-clicked(url) => {
+        ReleaseNotes.open-link(url);
+    }
+}
+
+export component ReleaseNotesDialog inherits Rectangle {
+    background: Theme.dark ? #00000080 : #00000040;
+
+    // Swallows presses meant for the window underneath.
+    TouchArea { }
+
+    scope := FocusScope {
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                ReleaseNotes.close();
+                return accept;
+            }
+            reject
+        }
+
+        Rectangle {
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            // A changelog is read in lines, so it gets a comfortable measure rather than
+            // the width of its longest URL.
+            width: min(560px, root.width - 24px);
+            height: min(620px, root.height - 24px);
+            background: Theme.window-bg;
+            border-radius: 14px;
+            drop-shadow-blur: 24px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: #00000050;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 47px;
+                    Text {
+                        text: "Tidemark " + ReleaseNotes.version;
+                        color: Theme.fg;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        alignment: end;
+                        VerticalLayout {
+                            alignment: center;
+                            Button {
+                                kind: 3;
+                                has-icon: true;
+                                icon: @image-url("icons/window-close-symbolic.svg");
+                                clicked => {
+                                    ReleaseNotes.close();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    vertical-stretch: 1;
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    padding-top: 6px;
+                    // The recessed surface is drawn here, around the scroll rather than by
+                    // it: the scroll's own viewport stays square inside the rounded corners.
+                    Rectangle {
+                        background: Theme.window-bg.darker(0.075);
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: Theme.ink(0.12);
+
+                        ScrollView {
+                            x: 1px;
+                            y: 1px;
+                            width: parent.width - 2px;
+                            height: parent.height - 2px;
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+                                alignment: start;
+
+                                for block in ReleaseNotes.blocks: VerticalLayout {
+                                    // A heading belongs to what follows it, so the air goes
+                                    // above. The dialog's title already names the release,
+                                    // so the scale starts one step below a document's.
+                                    if block.kind == 0: VerticalLayout {
+                                        padding-top: 8px;
+                                        Prose {
+                                            text: block.text;
+                                            default-font-size: block.level <= 2 ? 15pt : block.level == 3 ? 13pt : Theme.body;
+                                        }
+                                    }
+                                    if block.kind == 1: Prose {
+                                        text: block.text;
+                                    }
+                                    if block.kind == 2: HorizontalLayout {
+                                        padding-left: 4px + 18px * block.depth;
+                                        spacing: 8px;
+                                        Text {
+                                            text: block.marker;
+                                            color: Theme.ink(Theme.dim);
+                                        }
+                                        Prose {
+                                            horizontal-stretch: 1;
+                                            text: block.text;
+                                        }
+                                    }
+                                    if block.kind == 3: Rectangle {
+                                        background: Theme.card-bg;
+                                        border-radius: 12px;
+                                        border-width: 1px;
+                                        border-color: Theme.card-outline;
+                                        VerticalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            padding-top: 8px;
+                                            padding-bottom: 8px;
+                                            Prose {
+                                                text: block.text;
+                                            }
+                                        }
+                                    }
+                                    if block.kind == 4: VerticalLayout {
+                                        padding-top: 4px;
+                                        padding-bottom: 4px;
+                                        Rectangle {
+                                            height: 1px;
+                                            background: Theme.ink(0.15);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-left: 18px;
+                    padding-right: 18px;
+                    padding-top: 6px;
+                    padding-bottom: 12px;
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            ReleaseNotes.close();
+                        }
+                    }
+                    Button {
+                        text: "Download on GitHub";
+                        kind: 1;
+                        clicked => {
+                            ReleaseNotes.download();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
