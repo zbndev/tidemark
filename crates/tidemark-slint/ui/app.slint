@@ -32,6 +32,30 @@ component HeaderButton inherits Rectangle {
     }
 }
 
+// libadwaita's window controls: a small round button with a faint fill, for windows that
+// draw their own title bar.
+component WindowButton inherits Rectangle {
+    in property <image> icon;
+    callback clicked();
+    width: 24px;
+    height: 24px;
+    border-radius: self.height / 2;
+    background: touch.pressed ? Theme.ink(0.3) : touch.has-hover ? Theme.ink(0.15) : Theme.ink(0.1);
+
+    Image {
+        source: root.icon;
+        colorize: Theme.fg;
+        width: 16px;
+        height: 16px;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 // libadwaita's status page: a large dim icon, a title, and what to do about it.
 component StatusPage inherits Rectangle {
     in property <image> icon;
@@ -88,8 +112,17 @@ export component AppWindow inherits Window {
     in property <int> max-columns: 0;
     in property <int> shown-count: 0;
     in property <length> cell-height: 200px;
+    // The window draws its own title bar and frame (Windows): the header moves the window
+    // and carries its controls, and Slint hands presses near the edges to the system's
+    // resize. `maximized` and `minimized` are the window's own, kept in step with the
+    // system, so a snap or a keyboard shortcut shows on the maximize button too.
+    in property <bool> custom-frame: false;
+    no-frame: custom-frame;
+    resize-border-width: custom-frame && !self.maximized ? 6px : 0px;
 
     callback refresh();
+    callback move-window();
+    callback close-window();
     callback open-release();
     callback toggle-group(int);
     callback card-height(int, length);
@@ -222,6 +255,27 @@ export component AppWindow inherits Window {
             height: 47px;
             background: Theme.header-bg;
 
+            // Under everything else in the header, so its buttons keep their presses. A
+            // move starts once the pointer has travelled, so a double click can still
+            // maximize.
+            if root.custom-frame: TouchArea {
+                property <bool> moving;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        self.moving = false;
+                    }
+                }
+                moved => {
+                    if (self.pressed && !self.moving && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px)) {
+                        self.moving = true;
+                        root.move-window();
+                    }
+                }
+                double-clicked => {
+                    root.maximized = !root.maximized;
+                }
+            }
+
             HorizontalLayout {
                 padding-left: 6px;
                 padding-right: 6px;
@@ -259,6 +313,38 @@ export component AppWindow inherits Window {
                         HeaderButton {
                             icon: @image-url("icons/open-menu-symbolic.svg");
                             enabled: false;
+                        }
+                    }
+                    if root.custom-frame: HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 4px;
+                        spacing: 12px;
+                        VerticalLayout {
+                            alignment: center;
+                            WindowButton {
+                                icon: @image-url("icons/window-minimize-symbolic.svg");
+                                clicked => {
+                                    root.minimized = true;
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            WindowButton {
+                                icon: root.maximized ? @image-url("icons/window-restore-symbolic.svg") : @image-url("icons/window-maximize-symbolic.svg");
+                                clicked => {
+                                    root.maximized = !root.maximized;
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            WindowButton {
+                                icon: @image-url("icons/window-close-symbolic.svg");
+                                clicked => {
+                                    root.close-window();
+                                }
+                            }
                         }
                     }
                 }

@@ -13,6 +13,7 @@ mod bus;
 mod daemon_job;
 #[cfg(windows)]
 mod file_log;
+mod frame;
 // Carried over from the GTK client whole; the parts nothing reads yet are the dialogs'.
 #[allow(dead_code)]
 mod format;
@@ -82,12 +83,31 @@ fn main() -> Result<(), slint::PlatformError> {
     if std::env::var_os("SLINT_BACKEND").is_none()
         && let Err(error) = slint::BackendSelector::new()
             .renderer_name("femtovg-wgpu".into())
+            .with_winit_window_attributes_hook(window_attributes)
             .select()
     {
         tracing::warn!(%error, "wgpu is unavailable; using Slint's default renderer");
     }
+    // The Wayland app ID and X11 class: the desktop file's name, so compositors' rules
+    // and the dock treat this window as Tidemark.
+    if let Err(error) = slint::set_xdg_app_id(tidemark_types::ids::APP_ID) {
+        tracing::warn!(%error, "could not set the application ID");
+    }
 
     let ui = AppWindow::new()?;
+    frame::install(&ui);
     let _main = window::MainWindow::start(&ui);
     slint::ComponentHandle::run(&ui)
+}
+
+/// A window that draws its own frame still wants the system's shadow around it.
+fn window_attributes(
+    attributes: slint::winit_030::winit::window::WindowAttributes,
+) -> slint::winit_030::winit::window::WindowAttributes {
+    #[cfg(windows)]
+    let attributes = {
+        use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
+        attributes.with_undecorated_shadow(frame::CUSTOM)
+    };
+    attributes
 }

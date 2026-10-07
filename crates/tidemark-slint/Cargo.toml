@@ -17,7 +17,8 @@ workspace = true
 [dependencies]
 async-io = "2.6.0"
 semver = "1.0.28"
-slint = { version = "1.18.1", features = ["renderer-femtovg-wgpu"] }
+# `~`: the winit accessor behind `unstable-winit-030` may change in any minor release.
+slint = { version = "~1.18.1", features = ["renderer-femtovg-wgpu", "unstable-winit-030"] }
 tidemark-ipc = { path = "../tidemark-ipc" }
 tidemark-types = { path = "../tidemark-types" }
 tracing = "0.1.44"
