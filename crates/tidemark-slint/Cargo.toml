@@ -24,5 +24,20 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zbus = { version = "5.13.2", features = ["p2p"] }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    # The desktop's light/dark choice and accent colour.
+    "Win32_System_Registry",
+    # SECURITY_ATTRIBUTES on the mutex signature.
+    "Win32_Security",
+    # The kill-on-close job that ties a client-spawned daemon to this process.
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+# AF_UNIX on Windows: std has no sockets there. The daemon serves its p2p endpoint with
+# the same crate.
+uds_windows = "1.2.1"
+
 [build-dependencies]
 slint-build = "1.18.1"

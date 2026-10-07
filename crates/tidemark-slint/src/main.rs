@@ -1,24 +1,34 @@
 //! Tidemark's desktop client, drawn with Slint.
 //!
-//! A prototype beside the GTK client: the same daemon, the same D-Bus contract, the same
-//! decisions about what a card says and where it goes — `model`, `format` and `update` are
-//! the GTK client's own files, compiled in unchanged — and a different toolkit drawing them.
+//! The successor to the GTK client: the same daemon, the same D-Bus contract, the same
+//! decisions about what a card says and where it goes — `model`, `format` and `update`
+//! started as copies of the GTK client's — and a different toolkit drawing them.
+
+// A desktop client must not keep a console window: on Windows the GUI subsystem detaches
+// it at link time. Gated off tests so failures still print.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod bus;
+#[cfg(windows)]
+mod daemon_job;
+#[cfg(windows)]
+mod file_log;
+// Carried over from the GTK client whole; the parts nothing reads yet are the dialogs'.
+#[allow(dead_code)]
+mod format;
 mod marks;
+#[allow(dead_code)]
+mod model;
+#[cfg(unix)]
 mod portal;
+#[cfg(windows)]
+mod registry;
+#[cfg(windows)]
+mod single_instance;
+#[allow(dead_code)]
+mod update;
 mod view;
 mod window;
-
-#[allow(dead_code, unused_imports)]
-#[path = "../../tidemark/src/format.rs"]
-mod format;
-#[allow(dead_code, unused_imports)]
-#[path = "../../tidemark/src/model.rs"]
-mod model;
-#[allow(dead_code, unused_imports)]
-#[path = "../../tidemark/src/update.rs"]
-mod update;
 
 // The code slint-build generates from `ui/`, which does not derive Debug.
 #[allow(missing_debug_implementations, clippy::all, clippy::todo)]
@@ -28,17 +38,42 @@ mod ui {
 use ui::{AppWindow, CardData, GaugeData, RowData, Theme};
 
 fn main() -> Result<(), slint::PlatformError> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "tidemark_slint=info".into()),
-        )
-        .init();
+    #[cfg(windows)]
+    let sink = file_log::init()
+        .map(file_log::Sink::File)
+        .unwrap_or(file_log::Sink::Stderr);
+    let subscriber = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "tidemark_slint=info".into()),
+    );
+    // No console on Windows (GUI subsystem above): without the file the client would be
+    // mute anywhere.
+    #[cfg(windows)]
+    let subscriber = subscriber.with_writer(sink).with_ansi(false);
+    subscriber.init();
 
     if std::env::args().any(|argument| argument == "--version") {
         println!("tidemark-slint {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+
+    // No session bus on Windows, so nothing like GApplication's single instance: a second
+    // launch asks the running window to come forward through the daemon and leaves.
+    // The guard lives until `main` returns; the kernel releases it if the process dies.
+    #[cfg(windows)]
+    let _singleton = match single_instance::Guard::acquire() {
+        Ok(Some(guard)) => Some(guard),
+        Ok(None) => {
+            if let Err(error) = async_io::block_on(bus::request_activation()) {
+                tracing::warn!(%error, "could not ask the running window to come forward");
+            }
+            return Ok(());
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the client singleton mutex is unusable; starting unguarded");
+            None
+        }
+    };
 
     // FemtoVG on wgpu: Direct3D 12 on Windows, Vulkan on Linux. Not Skia — Slint's Skia
     // renderer hints each glyph's outline while parley places it at unhinted advances, so

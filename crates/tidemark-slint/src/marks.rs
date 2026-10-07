@@ -1,7 +1,7 @@
 //! Provider logos. The GTK client asks the icon theme; Slint has none, so this looks in the
 //! same places the theme would — the plugin marks the daemon materializes, the installed
-//! hicolor theme, and the source tree in a development build — and colours the symbolic
-//! SVG itself in the markup.
+//! hicolor theme (on Windows, `share\icons` beside the executable), and the source tree in
+//! a development build — and colours the symbolic SVG itself in the markup.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -50,6 +50,12 @@ impl Marks {
         }
         if let Some(home) = std::env::var_os("HOME") {
             roots.push(Path::new(&home).join(".local/share/icons"));
+        }
+        if let Some(installed) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("share").join("icons")))
+        {
+            roots.push(installed);
         }
         roots.push(PathBuf::from("/usr/share/icons"));
         roots.push(PathBuf::from("/usr/local/share/icons"));

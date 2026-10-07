@@ -6966,6 +6966,8 @@ dependencies = [
  "tidemark-types",
  "tracing",
  "tracing-subscriber",
+ "uds_windows",
+ "windows",
  "zbus",
 ]
 

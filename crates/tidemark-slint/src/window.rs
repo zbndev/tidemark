@@ -15,12 +15,21 @@ use tidemark_types::{Preferences, ProviderDefinition, ProviderStatus, Timestamp}
 
 use crate::bus::{self, DaemonProxy, Update};
 use crate::marks::Marks;
-use crate::portal::{self, Appearance};
 use crate::view::{self, Body, Gauge, Tone};
 use crate::{AppWindow, CardData, GaugeData, RowData, Theme, format, model, update};
 
 /// How often the clock-dependent parts of every card are redrawn.
 const TICK: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One appearance setting as the desktop reports it: the XDG portal on Linux, the
+/// registry on Windows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Appearance {
+    /// The user prefers a dark style.
+    Dark(bool),
+    /// sRGB in 0..=1, or `None` when the desktop has no accent to offer.
+    Accent(Option<[f64; 3]>),
+}
 
 const PAGE_WAITING: i32 = 0;
 const PAGE_WELCOME: i32 = 1;
@@ -197,7 +206,11 @@ impl MainWindow {
             }
         });
 
-        portal::watch({
+        #[cfg(unix)]
+        let watch = crate::portal::watch;
+        #[cfg(windows)]
+        let watch = crate::registry::watch;
+        watch({
             let weak = weak.clone();
             move |appearance| {
                 if let Some(main) = weak.upgrade() {
@@ -256,6 +269,13 @@ impl MainWindow {
                 self.definitions.replace(definitions);
                 self.marks.forget();
                 self.redraw();
+            }
+            Update::Activate => {
+                let window = ui.window();
+                window.set_minimized(false);
+                if let Err(error) = window.show() {
+                    tracing::warn!(%error, "could not bring the window forward");
+                }
             }
             Update::Waiting(reason) => {
                 self.daemon.replace(None);

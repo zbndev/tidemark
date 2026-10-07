@@ -1,18 +1,26 @@
-# tidemark-slint — Slint client prototype
+# tidemark-slint — the Slint desktop client
 
-The main window of the desktop client, drawn with Slint instead of GTK/libadwaita. The
-daemon, the D-Bus contract and the decisions about what a card says are the GTK client's:
-`model.rs`, `format.rs` and `update.rs` are compiled in from `crates/tidemark/src`
-unchanged, and `src/view.rs` holds the pure half of the GTK `card.rs`.
+The desktop client drawn with Slint, replacing the GTK/libadwaita one in `crates/tidemark`,
+which goes once this reaches parity. The daemon and the D-Bus contract are unchanged.
+`model.rs`, `format.rs`, `update.rs` and the Windows modules (`daemon_job.rs`,
+`single_instance.rs`, `file_log.rs`, the reconnect protocol in `bus.rs`) started as copies
+of the GTK client's and are this crate's own now; `src/view.rs` holds the pure half of the
+GTK `card.rs`.
 
 ```bash
 cargo run -p tidemark-slint              # against the running tidemarkd
 SLINT_BACKEND=winit-software cargo run -p tidemark-slint  # compare renderers
 ```
 
+On Windows, build `tidemark-slint` and `tidemarkd` together: the client looks for
+`tidemarkd.exe` beside itself and starts it when nothing serves the endpoint. Logs go to
+`%LOCALAPPDATA%\tidemark\logs\ui.log`.
+
 ## In the prototype
 
 - Connection, reconnect and bus-name watch; waiting and welcome pages.
+- Windows: the p2p endpoint, spawning the daemon into a kill-on-close job, one client per
+  session with a second launch raising the first, file log, no console window.
 - Cards: mark, name, account caption, plan pill, state chip, headline and bar with pace
   mark, blocked windows with a padlock, reset line, absolutes, secondary rows, wallet
   balance, balance-only and blank cards, footer; redrawn every 30 s.
@@ -22,11 +30,11 @@ SLINT_BACKEND=winit-software cargo run -p tidemark-slint  # compare renderers
   optimistic, rolled back on refusal.
 - Account groups: `+N` / `−` badge, accounts slide out from and back under their provider.
 - Refresh, update button (opens the release page), theme preference, and the desktop's
-  dark style and accent from the XDG settings portal.
+  dark style and accent from the XDG settings portal, or the registry on Windows.
 - Bundled Rubik and embedded symbolic icons, so nothing depends on a system theme.
 
 ## Not yet
 
 Provider settings, preferences, about and detail dialogs; card context menu; release
-notes preview and the restart prompt; tray; close-to-tray; Windows connection (p2p
-endpoint, daemon spawn, single instance).
+notes preview and the restart prompt; tray; close-to-tray; `--background` start;
+packaging.

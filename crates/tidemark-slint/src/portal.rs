@@ -8,18 +8,11 @@ use std::pin::pin;
 use zbus::export::futures_core::Stream;
 use zbus::zvariant::{OwnedValue, Value};
 
+use crate::window::Appearance;
+
 const NAMESPACE: &str = "org.freedesktop.appearance";
 const COLOR_SCHEME: &str = "color-scheme";
 const ACCENT_COLOR: &str = "accent-color";
-
-/// One appearance setting as the portal reports it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Appearance {
-    /// The user prefers a dark style.
-    Dark(bool),
-    /// sRGB in 0..=1, or `None` when the desktop has no accent to offer.
-    Accent(Option<[f64; 3]>),
-}
 
 /// Reports the current appearance, then every change to it. Silently gives up on a desktop
 /// without the portal: the window keeps libadwaita's defaults.
