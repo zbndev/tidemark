@@ -1563,7 +1563,7 @@ pub fn name_suggests_usable(name: &str, current: Option<&str>) -> bool {
 }
 
 /// A D-Bus error as one sentence for a toast.
-fn reason(error: &zbus::Error) -> String {
+pub(crate) fn reason(error: &zbus::Error) -> String {
     match error {
         zbus::Error::MethodError(_, Some(detail), _) => detail.clone(),
         other => other.to_string(),

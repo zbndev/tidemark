@@ -40,9 +40,13 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
   notifications, plugin import (file chooser through `rfd`, the XDG portal on Linux) and
   removal; alerts awaited as futures.
 - Card context menu: add an account, modify, remove — shortcuts into provider settings.
+- Primary menu with Preferences (General, Network and Data pages, every value the
+  daemon's, a refused change put back) and About (details, issue link, legal, and a
+  troubleshooting page with the daemon's version, the renderer, the desktop and session,
+  copied or saved through the file chooser).
 
 ## Not yet
 
-The GTK client had these; they are still to be drawn here: preferences, about and detail
-(history chart) dialogs; release notes preview and the restart prompt; tray and
-close-to-tray; keyboard focus on cards.
+The GTK client had these; they are still to be drawn here: the detail (history chart)
+dialog; release notes preview and the restart prompt; tray and close-to-tray; keyboard
+focus on cards, and F10 for the primary menu.

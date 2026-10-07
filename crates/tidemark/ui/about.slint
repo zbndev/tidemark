@@ -1,0 +1,349 @@
+// The About dialog, as AdwAboutDialog lays it out: the icon over the name, the developer,
+// the version pill, then Details, Report an Issue, Legal and Troubleshooting. The texts
+// and links are `about.rs`'s.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ActionRow, BoxedList, Button, Toast } from "adw.slint";
+
+export global About {
+    in-out property <bool> open;
+    // 0 the summary, 1 Details, 2 Legal, 3 Troubleshooting.
+    in-out property <int> page;
+    in property <string> version;
+    in property <string> comments;
+    in property <string> developer;
+    in property <string> copyright;
+    in property <string> debug-info;
+    in-out property <string> toast;
+    in-out property <int> toast-serial;
+
+    callback close();
+    // "website", "issues" or "license".
+    callback open-link(string);
+    callback save-debug-info();
+
+    public function show-toast(message: string) {
+        self.toast = message;
+        self.toast-serial += 1;
+    }
+}
+
+component LinkRow inherits ActionRow {
+    activatable: true;
+    Image {
+        source: @image-url("icons/adw-external-link-symbolic.svg");
+        colorize: Theme.fg;
+        width: 16px;
+        height: 16px;
+    }
+}
+
+component PageRow inherits ActionRow {
+    activatable: true;
+    Image {
+        source: @image-url("icons/go-next-symbolic.svg");
+        colorize: Theme.fg;
+        width: 16px;
+        height: 16px;
+    }
+}
+
+component Paragraph inherits Text {
+    color: Theme.fg;
+    wrap: word-wrap;
+    horizontal-alignment: center;
+}
+
+component SummaryPage inherits ScrollView {
+    callback copy-version();
+    VerticalLayout {
+        alignment: start;
+        padding: 24px;
+        padding-top: 0px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: @image-url("../../../data/icons/hicolor/256x256/apps/io.github.zbndev.Tidemark.png");
+                width: 128px;
+                height: 128px;
+            }
+        }
+        Text {
+            text: "Tidemark";
+            color: Theme.fg;
+            font-size: Theme.title-1;
+            font-weight: 800;
+            horizontal-alignment: center;
+        }
+        Paragraph {
+            text: About.developer;
+        }
+        HorizontalLayout {
+            alignment: center;
+            padding-top: 6px;
+            Rectangle {
+                height: 26px;
+                width: version.preferred-width + 24px;
+                border-radius: 13px;
+                background: Theme.accent.with-alpha(touch.pressed ? 0.25 : touch.has-hover ? 0.18 : 0.12);
+                version := Text {
+                    text: About.version;
+                    color: Theme.accent;
+                    font-weight: 700;
+                }
+                touch := TouchArea {
+                    clicked => {
+                        root.copy-version();
+                    }
+                }
+            }
+        }
+
+        VerticalLayout {
+            padding-top: 18px;
+            spacing: 18px;
+            BoxedList {
+                PageRow {
+                    title: "Details";
+                    activated => {
+                        About.page = 1;
+                    }
+                }
+                LinkRow {
+                    title: "Report an Issue";
+                    first: false;
+                    last: true;
+                    activated => {
+                        About.open-link("issues");
+                    }
+                }
+            }
+            BoxedList {
+                PageRow {
+                    title: "Legal";
+                    last: true;
+                    activated => {
+                        About.page = 2;
+                    }
+                }
+            }
+            BoxedList {
+                PageRow {
+                    title: "Troubleshooting";
+                    last: true;
+                    activated => {
+                        About.page = 3;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component DetailsPage inherits ScrollView {
+    VerticalLayout {
+        alignment: start;
+        padding: 24px;
+        spacing: 18px;
+        Paragraph {
+            text: About.comments;
+        }
+        BoxedList {
+            LinkRow {
+                title: "Website";
+                last: true;
+                activated => {
+                    About.open-link("website");
+                }
+            }
+        }
+    }
+}
+
+component LegalPage inherits ScrollView {
+    VerticalLayout {
+        alignment: start;
+        padding: 24px;
+        spacing: 12px;
+        Text {
+            text: "Tidemark";
+            color: Theme.fg;
+            font-weight: 800;
+            horizontal-alignment: center;
+        }
+        Paragraph {
+            text: About.copyright;
+        }
+        Paragraph {
+            text: "This application comes with absolutely no warranty. See the MIT License for details.";
+        }
+        HorizontalLayout {
+            alignment: center;
+            Button {
+                text: "MIT License";
+                kind: 3;
+                clicked => {
+                    About.open-link("license");
+                }
+            }
+        }
+    }
+}
+
+component TroubleshootingPage inherits VerticalLayout {
+    callback copy-info();
+    padding: 24px;
+    spacing: 18px;
+    Paragraph {
+        text: "To assist in troubleshooting, you can view your debugging information. Providing this information to the application developers can help diagnose any problems you encounter when you report an issue.";
+    }
+    BoxedList {
+        vertical-stretch: 1;
+        VerticalLayout {
+            padding: 12px;
+            TextInput {
+                text: About.debug-info;
+                read-only: true;
+                single-line: false;
+                wrap: char-wrap;
+                font-size: Theme.footer;
+                color: Theme.fg;
+                selection-background-color: Theme.accent.with-alpha(0.3);
+                selection-foreground-color: Theme.fg;
+            }
+        }
+    }
+    HorizontalLayout {
+        alignment: center;
+        spacing: 12px;
+        Button {
+            text: "Copy";
+            has-icon: true;
+            icon: @image-url("icons/edit-copy-symbolic.svg");
+            clicked => {
+                root.copy-info();
+            }
+        }
+        Button {
+            text: "Save…";
+            has-icon: true;
+            icon: @image-url("icons/document-save-symbolic.svg");
+            clicked => {
+                About.save-debug-info();
+            }
+        }
+    }
+}
+
+export component AboutDialog inherits Rectangle {
+    background: Theme.dark ? #00000080 : #00000040;
+
+    TouchArea { }
+
+    // Slint has no clipboard API of its own: a hidden text input copies what it holds.
+    clipboard := TextInput {
+        visible: false;
+        read-only: true;
+    }
+    function copy(text: string) {
+        clipboard.text = text;
+        clipboard.select-all();
+        clipboard.copy();
+        About.show-toast("Copied to clipboard");
+    }
+
+    scope := FocusScope {
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                if (About.page == 0) {
+                    About.close();
+                } else {
+                    About.page = 0;
+                }
+                return accept;
+            }
+            reject
+        }
+
+        sheet := Rectangle {
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            width: min(420px, root.width - 24px);
+            height: min(620px, root.height - 24px);
+            background: Theme.window-bg;
+            border-radius: 14px;
+            drop-shadow-blur: 24px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: #00000050;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 47px;
+                    if About.page != 0: Text {
+                        text: About.page == 1 ? "Details" : About.page == 2 ? "Legal" : "Troubleshooting";
+                        color: Theme.fg;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        alignment: space-between;
+                        VerticalLayout {
+                            alignment: center;
+                            if About.page != 0: Button {
+                                kind: 3;
+                                has-icon: true;
+                                icon: @image-url("icons/go-previous-symbolic.svg");
+                                clicked => {
+                                    About.page = 0;
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Button {
+                                kind: 3;
+                                has-icon: true;
+                                icon: @image-url("icons/window-close-symbolic.svg");
+                                clicked => {
+                                    About.close();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if About.page == 0: SummaryPage {
+                    vertical-stretch: 1;
+                    copy-version => {
+                        root.copy(About.version);
+                    }
+                }
+                if About.page == 1: DetailsPage {
+                    vertical-stretch: 1;
+                }
+                if About.page == 2: LegalPage {
+                    vertical-stretch: 1;
+                }
+                if About.page == 3: TroubleshootingPage {
+                    vertical-stretch: 1;
+                    copy-info => {
+                        root.copy(About.debug-info);
+                    }
+                }
+            }
+
+            Toast {
+                text: About.toast;
+                serial: About.toast-serial;
+            }
+        }
+    }
+}

@@ -5,6 +5,7 @@
 // it at link time. Gated off tests so failures still print.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+mod about;
 mod alert;
 #[cfg(unix)]
 mod application;
@@ -23,6 +24,7 @@ mod marks;
 mod model;
 #[cfg(unix)]
 mod portal;
+mod preferences;
 mod provider_settings;
 #[cfg(windows)]
 mod registry;
@@ -39,9 +41,9 @@ mod ui {
     slint::include_modules!();
 }
 use ui::{
-    Alert, AlertForm, AlertResponse, AppWindow, CandidateData, CardData, DetailData, GaugeData,
-    MenuEntry, OptionData, PickerRowData, PreviewRow, ProviderRowData, ProviderSettings, RowData,
-    SwitchData, Theme,
+    About, Alert, AlertForm, AlertResponse, AppWindow, CandidateData, CardData, DetailData,
+    GaugeData, MenuEntry, OptionData, PickerRowData, Prefs, PreviewRow, ProviderRowData,
+    ProviderSettings, RowData, SwitchData, Theme,
 };
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -104,14 +106,20 @@ fn main() -> Result<(), slint::PlatformError> {
     // renderer hints each glyph's outline while parley places it at unhinted advances, so
     // small text comes out with letters crowding or drifting apart. SLINT_BACKEND still
     // overrides this for comparisons.
-    if std::env::var_os("SLINT_BACKEND").is_none()
-        && let Err(error) = slint::BackendSelector::new()
+    let renderer = match std::env::var("SLINT_BACKEND") {
+        Ok(backend) => format!("SLINT_BACKEND={backend}"),
+        Err(_) => match slint::BackendSelector::new()
             .renderer_name("femtovg-wgpu".into())
             .with_winit_window_attributes_hook(window_attributes)
             .select()
-    {
-        tracing::warn!(%error, "wgpu is unavailable; using Slint's default renderer");
-    }
+        {
+            Ok(()) => "femtovg-wgpu".to_owned(),
+            Err(error) => {
+                tracing::warn!(%error, "wgpu is unavailable; using Slint's default renderer");
+                format!("Slint's default (femtovg-wgpu failed: {error})")
+            }
+        },
+    };
     // The Wayland app ID and X11 class: the desktop file's name, so compositors' rules
     // and the dock treat this window as Tidemark.
     if let Err(error) = slint::set_xdg_app_id(tidemark_types::ids::APP_ID) {
@@ -120,7 +128,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let ui = AppWindow::new()?;
     frame::install(&ui);
-    let _main = window::MainWindow::start(&ui);
+    about::install(&ui);
+    let _main = window::MainWindow::start(&ui, renderer);
     #[cfg(unix)]
     if let Some(connection) = &instance
         && let Err(error) = async_io::block_on(application::serve(connection, &ui))

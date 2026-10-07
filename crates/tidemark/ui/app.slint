@@ -6,9 +6,11 @@ import { Card, CardData, GaugeData, RowData } from "card.slint";
 import { ProviderDialog, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData } from "providers.slint";
 import { Alert, AlertDialog, AlertForm, AlertResponse, PreviewRow } from "alert.slint";
 import { ContextMenu, MenuEntry } from "adw.slint";
+import { Prefs, PreferencesDialog } from "preferences.slint";
+import { About, AboutDialog } from "about.slint";
 import "../../../data/fonts/rubik/Rubik%5Bwght%5D.ttf";
 
-export { Theme, CardData, GaugeData, RowData, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData, Alert, AlertForm, AlertResponse, PreviewRow, MenuEntry }
+export { Theme, CardData, GaugeData, RowData, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData, Alert, AlertForm, AlertResponse, PreviewRow, MenuEntry, Prefs, About }
 
 component HeaderButton inherits Rectangle {
     in property <image> icon;
@@ -137,9 +139,13 @@ export component AppWindow inherits Window {
     // what a chosen one does belongs to the window.
     callback card-menu(int) -> [MenuEntry];
     callback card-action(string);
+    callback open-preferences();
+    callback open-about();
 
     property <[MenuEntry]> menu-entries;
     property <bool> menu-open: false;
+    // Which menu is open: a card's, or the header's primary menu.
+    property <bool> menu-primary: false;
     property <length> menu-x;
     property <length> menu-y;
 
@@ -327,9 +333,20 @@ export component AppWindow inherits Window {
                     }
                     VerticalLayout {
                         alignment: center;
-                        HeaderButton {
+                        // The platform's primary menu: rightmost, where a GNOME user looks for
+                        // About without being told where it is.
+                        primary := HeaderButton {
                             icon: @image-url("icons/open-menu-symbolic.svg");
-                            enabled: false;
+                            clicked => {
+                                root.menu-entries = [
+                                    { id: "preferences", label: "Preferences", enabled: root.connected },
+                                    { id: "about", label: "About Tidemark", section: true, enabled: true },
+                                ];
+                                root.menu-primary = true;
+                                root.menu-x = self.absolute-position.x + self.width;
+                                root.menu-y = self.absolute-position.y + self.height + 4px;
+                                root.menu-open = true;
+                            }
                         }
                     }
                     if root.custom-frame: HorizontalLayout {
@@ -442,6 +459,7 @@ export component AppWindow inherits Window {
                             // desktop appears.
                             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.drag-index < 0) {
                                 root.menu-entries = root.card-menu(index);
+                                root.menu-primary = false;
                                 if (root.menu-entries.length > 0) {
                                     root.menu-x = self.absolute-position.x + self.mouse-x;
                                     root.menu-y = self.absolute-position.y + self.mouse-y;
@@ -529,11 +547,27 @@ export component AppWindow inherits Window {
         anchor-y: root.menu-y;
         chosen(id) => {
             root.menu-open = false;
-            root.card-action(id);
+            if (!root.menu-primary) {
+                root.card-action(id);
+            } else if (id == "preferences") {
+                root.open-preferences();
+            } else {
+                root.open-about();
+            }
         }
         dismissed => {
             root.menu-open = false;
         }
+    }
+
+    if Prefs.open: PreferencesDialog {
+        width: root.width;
+        height: root.height;
+    }
+
+    if About.open: AboutDialog {
+        width: root.width;
+        height: root.height;
     }
 
     if ProviderSettings.open: ProviderDialog {

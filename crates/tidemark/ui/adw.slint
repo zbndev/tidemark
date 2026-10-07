@@ -85,8 +85,8 @@ export component Switch inherits Rectangle {
     width: 48px;
     height: 26px;
     border-radius: self.height / 2;
-    opacity: root.enabled ? 1 : 0.5;
-    background: root.checked ? Theme.accent : touch.has-hover ? Theme.ink(0.2) : Theme.ink(0.15);
+    property <float> fade: root.enabled ? 0 : 0.5;
+    background: (root.checked ? Theme.accent : touch.has-hover && root.enabled ? Theme.ink(0.2) : Theme.ink(0.15)).transparentize(self.fade);
     animate background { duration: 150ms; }
 
     Rectangle {
@@ -95,7 +95,7 @@ export component Switch inherits Rectangle {
         width: 20px;
         height: 20px;
         border-radius: self.height / 2;
-        background: #ffffff;
+        background: #ffffff.transparentize(root.fade);
         drop-shadow-blur: 2px;
         drop-shadow-offset-y: 1px;
         drop-shadow-color: #00000033;
@@ -262,6 +262,8 @@ export component ActionRow inherits Rectangle {
     in property <length> indent: 0px;
     // The tree elbow an account row hangs from its provider by.
     in property <bool> elbow: false;
+    // A subtitle with no spaces to break at, such as a path.
+    in property <bool> wrap-anywhere: false;
     callback activated();
 
     min-height: 50px;
@@ -328,7 +330,7 @@ export component ActionRow inherits Rectangle {
                 text: root.subtitle;
                 color: Theme.ink(Theme.dim).transparentize(root.enabled ? 0 : 0.5);
                 font-size: Theme.footer;
-                wrap: word-wrap;
+                wrap: root.wrap-anywhere ? TextWrap.char-wrap : TextWrap.word-wrap;
             }
         }
 
@@ -347,16 +349,26 @@ export component ActionRow inherits Rectangle {
 export component EntryRow inherits Rectangle {
     in property <string> title;
     in property <bool> password: false;
+    in property <bool> number: false;
     in property <bool> first: true;
+    in property <bool> enabled: true;
+    // AdwEntryRow's `.error`: the field says it is the one that is wrong.
+    in property <bool> error: false;
     in-out property <string> text <=> input.text;
     callback accepted();
 
+    public function focus-input() {
+        input.focus();
+    }
+
     property <bool> raised: input.has-focus || input.text != "";
+    property <float> fade: root.enabled ? 0 : 0.5;
     min-height: 54px;
 
     if !root.first: Separator { }
 
     TouchArea {
+        enabled: root.enabled;
         mouse-cursor: MouseCursor.text;
         clicked => {
             input.focus();
@@ -375,7 +387,7 @@ export component EntryRow inherits Rectangle {
                 x: 0;
                 y: root.raised ? 7px : (parent.height - self.height) / 2;
                 text: root.title;
-                color: root.raised && input.has-focus ? Theme.accent : Theme.ink(Theme.dim);
+                color: (root.error ? Theme.error : root.raised && input.has-focus ? Theme.accent : Theme.ink(Theme.dim)).transparentize(root.fade);
                 font-size: root.raised ? Theme.caption : Theme.body;
                 animate y, font-size { duration: 120ms; easing: ease-out; }
             }
@@ -384,11 +396,12 @@ export component EntryRow inherits Rectangle {
                 y: 24px;
                 width: parent.width;
                 height: parent.height - 30px;
-                opacity: root.raised ? 1 : 0;
-                color: Theme.fg;
+                // Hidden while the title sits in it, by colour: `opacity` would be a layer.
+                color: (root.error ? Theme.error : Theme.fg).transparentize(root.raised ? root.fade : 1);
+                enabled: root.enabled;
                 vertical-alignment: center;
                 single-line: true;
-                input-type: root.password ? InputType.password : InputType.text;
+                input-type: root.password ? InputType.password : root.number ? InputType.number : InputType.text;
                 selection-background-color: Theme.accent.with-alpha(0.3);
                 selection-foreground-color: Theme.fg;
                 accepted => {
@@ -410,14 +423,23 @@ export component EntryRow inherits Rectangle {
 // AdwComboRow: the title, the chosen value, and a menu of the choices.
 export component ComboRow inherits Rectangle {
     in property <string> title;
+    // Shown under the title when the choice is not, or when there is no choice to show.
+    in property <string> subtitle;
     in property <[string]> choices;
+    // -1: a value this build does not know, which is shown rather than guessed at.
     in property <int> selected;
+    // AdwComboRow's `use-subtitle`: the choice under the title rather than at the end.
+    in property <bool> value-as-subtitle: false;
+    in property <bool> enabled: true;
     in property <bool> first: true;
     in property <bool> last: false;
     callback chosen(int);
 
+    property <bool> known: root.selected >= 0 && root.selected < root.choices.length;
+    property <float> fade: root.enabled ? 0 : 0.5;
+    property <string> under: root.value-as-subtitle && root.known ? root.choices[root.selected] : root.subtitle;
     min-height: 50px;
-    background: touch.pressed ? Theme.ink(0.1) : touch.has-hover ? Theme.ink(0.04) : transparent;
+    background: !root.enabled ? transparent : touch.pressed ? Theme.ink(0.1) : touch.has-hover ? Theme.ink(0.04) : transparent;
     border-top-left-radius: root.first ? 12px : 0px;
     border-top-right-radius: root.first ? 12px : 0px;
     border-bottom-left-radius: root.last ? 12px : 0px;
@@ -426,6 +448,7 @@ export component ComboRow inherits Rectangle {
     if !root.first: Separator { }
 
     touch := TouchArea {
+        enabled: root.enabled;
         clicked => {
             menu.show();
         }
@@ -434,17 +457,28 @@ export component ComboRow inherits Rectangle {
     HorizontalLayout {
         padding-left: 12px;
         padding-right: 12px;
+        padding-top: 8px;
+        padding-bottom: 8px;
         spacing: 12px;
-        Text {
-            text: root.title;
-            color: Theme.fg;
-            vertical-alignment: center;
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
             horizontal-stretch: 1;
-            wrap: word-wrap;
+            Text {
+                text: root.title;
+                color: Theme.fg.transparentize(root.fade);
+                wrap: word-wrap;
+            }
+            if root.under != "": Text {
+                text: root.under;
+                color: Theme.ink(Theme.dim).transparentize(root.fade);
+                font-size: Theme.footer;
+                wrap: word-wrap;
+            }
         }
-        Text {
+        if !root.value-as-subtitle && root.known: Text {
             text: root.choices[root.selected];
-            color: Theme.ink(Theme.dim);
+            color: Theme.ink(Theme.dim).transparentize(root.fade);
             vertical-alignment: center;
             horizontal-alignment: right;
             overflow: elide;
@@ -453,7 +487,7 @@ export component ComboRow inherits Rectangle {
             alignment: center;
             Image {
                 source: @image-url("icons/pan-down-symbolic.svg");
-                colorize: Theme.fg;
+                colorize: Theme.fg.transparentize(root.fade);
                 width: 16px;
                 height: 16px;
             }
@@ -511,6 +545,163 @@ export component ComboRow inherits Rectangle {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+// AdwSpinRow: a whole number, typed or stepped, between two bounds.
+export component SpinRow inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <int> value;
+    in property <int> minimum: 0;
+    in property <int> maximum: 100;
+    in property <bool> enabled: true;
+    in property <bool> first: true;
+    in property <bool> last: false;
+    callback changed(int);
+
+    property <float> fade: root.enabled ? 0 : 0.5;
+    min-height: 50px;
+
+    // Back to the value it was given when an edit is abandoned or refused.
+    changed value => {
+        field.text = root.value;
+    }
+    function commit() {
+        if (!field.text.is-float()) {
+            field.text = root.value;
+            return;
+        }
+        root.step(round(field.text.to-float()) - root.value);
+    }
+    function step(by: int) {
+        if (by == 0) {
+            field.text = root.value;
+            return;
+        }
+        root.changed(max(root.minimum, min(root.maximum, root.value + by)));
+    }
+
+    if !root.first: Separator { }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title;
+                color: Theme.fg.transparentize(root.fade);
+                wrap: word-wrap;
+            }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                color: Theme.ink(Theme.dim).transparentize(root.fade);
+                font-size: Theme.footer;
+                wrap: word-wrap;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            HorizontalLayout {
+                spacing: 6px;
+                Rectangle {
+                    width: 52px;
+                    height: 34px;
+                    border-radius: 6px;
+                    background: field.has-focus ? Theme.ink(0.1) : transparent;
+                    field := TextInput {
+                        width: parent.width - 8px;
+                        text: root.value;
+                        enabled: root.enabled;
+                        color: Theme.fg.transparentize(root.fade);
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                        single-line: true;
+                        input-type: InputType.number;
+                        selection-background-color: Theme.accent.with-alpha(0.3);
+                        selection-foreground-color: Theme.fg;
+                        accepted => {
+                            root.commit();
+                        }
+                        changed has-focus => {
+                            if (!self.has-focus) {
+                                root.commit();
+                            }
+                        }
+                    }
+                }
+                Button {
+                    kind: 3;
+                    circular: true;
+                    has-icon: true;
+                    icon: @image-url("icons/list-remove-symbolic.svg");
+                    enabled: root.enabled && root.value > root.minimum;
+                    clicked => {
+                        root.step(-1);
+                    }
+                }
+                Button {
+                    kind: 3;
+                    circular: true;
+                    has-icon: true;
+                    icon: @image-url("icons/list-add-symbolic.svg");
+                    enabled: root.enabled && root.value < root.maximum;
+                    clicked => {
+                        root.step(1);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// AdwViewSwitcher in a header bar: flat toggles, each an icon beside its page's name.
+export component ViewSwitcher inherits HorizontalLayout {
+    in property <[string]> labels;
+    in property <[image]> icons;
+    in property <int> active;
+    callback chosen(int);
+    spacing: 3px;
+
+    for label[index] in root.labels: Rectangle {
+        height: 34px;
+        border-radius: 6px;
+        background: index == root.active ? Theme.ink(touch.pressed ? 0.2 : 0.13) : touch.pressed ? Theme.ink(0.16) : touch.has-hover ? Theme.ink(0.07) : transparent;
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            spacing: 6px;
+            VerticalLayout {
+                alignment: center;
+                Image {
+                    source: root.icons[index];
+                    colorize: Theme.fg;
+                    width: 16px;
+                    height: 16px;
+                }
+            }
+            Text {
+                text: label;
+                color: Theme.fg;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        touch := TouchArea {
+            clicked => {
+                if (index != root.active) {
+                    root.chosen(index);
                 }
             }
         }
@@ -590,6 +781,7 @@ export struct MenuEntry {
     label: string,
     // A separator above it: the start of a new section.
     section: bool,
+    enabled: bool,
 }
 
 // A GtkPopoverMenu opened at a point: drawn over the whole window, so a press anywhere
@@ -625,7 +817,7 @@ export component ContextMenu inherits Rectangle {
             } else if (event.text == Key.UpArrow) {
                 root.highlighted = root.highlighted <= 0 ? root.entries.length - 1 : root.highlighted - 1;
             } else if (event.text == Key.Return || event.text == " ") {
-                if (root.highlighted >= 0) {
+                if (root.highlighted >= 0 && root.entries[root.highlighted].enabled) {
                     root.chosen(root.entries[root.highlighted].id);
                 }
             } else {
@@ -665,14 +857,14 @@ export component ContextMenu inherits Rectangle {
                 Rectangle {
                     height: 32px;
                     border-radius: 6px;
-                    background: index == root.highlighted ? (item.pressed ? Theme.ink(0.16) : Theme.ink(0.07)) : transparent;
+                    background: index == root.highlighted && entry.enabled ? (item.pressed ? Theme.ink(0.16) : Theme.ink(0.07)) : transparent;
 
                     HorizontalLayout {
                         padding-left: 12px;
                         padding-right: 12px;
                         Text {
                             text: entry.label;
-                            color: Theme.fg;
+                            color: Theme.fg.transparentize(entry.enabled ? 0 : 0.5);
                             vertical-alignment: center;
                         }
                     }
@@ -686,7 +878,9 @@ export component ContextMenu inherits Rectangle {
                             }
                         }
                         clicked => {
-                            root.chosen(entry.id);
+                            if (entry.enabled) {
+                                root.chosen(entry.id);
+                            }
                         }
                     }
                 }

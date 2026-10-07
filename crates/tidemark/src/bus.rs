@@ -24,6 +24,8 @@ const RETRY: Duration = Duration::from_secs(5);
 pub enum Update {
     Connected {
         proxy: DaemonProxy<'static>,
+        /// The daemon's own version, for the About dialog's troubleshooting page.
+        version: Option<String>,
         available: String,
         preferences: Preferences,
         definitions: Vec<ProviderDefinition>,
@@ -574,6 +576,7 @@ async fn load(proxy: &DaemonProxy<'static>, on: &impl Fn(Update)) {
     let definitions = proxy.list_providers().await;
     let statuses = proxy.get_status().await;
     let available = proxy.get_update().await.unwrap_or_default();
+    let version = proxy.version().await.ok();
     let preferences = proxy.get_preferences().await.unwrap_or_else(|error| {
         tracing::info!(%error, "the daemon did not answer GetPreferences; using defaults");
         Preferences::default()
@@ -590,6 +593,7 @@ async fn load(proxy: &DaemonProxy<'static>, on: &impl Fn(Update)) {
     match (definitions, statuses) {
         (Ok(definitions), Ok(statuses)) => on(Update::Connected {
             proxy: proxy.clone(),
+            version,
             available,
             preferences,
             definitions,

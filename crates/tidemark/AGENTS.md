@@ -12,6 +12,8 @@ Slint presentation and desktop lifecycle, an IPC client of `tidemarkd`. Markup i
 | Daemon protocol and reconnect | `src/bus.rs` | Generated `DaemonProxy`, `Update`, name watching, Windows p2p |
 | Provider management | `src/provider_settings/` | Dialog controller, list, detail, browser auth, pure model |
 | Alerts | `src/alert.rs`, `ui/alert.slint` | Questions awaited as futures |
+| Preferences | `src/preferences.rs`, `ui/preferences.slint` | Daemon-owned values, optimistic rows, proxy form |
+| About | `src/about.rs`, `ui/about.slint` | Links and the troubleshooting page |
 | Card content | `src/view.rs`, `ui/card.slint` | Pure status-to-card decisions; markup only draws |
 | Grid, drag and window | `ui/app.slint` | Slot geometry, drag, settle, header bar |
 | Widgets and palette | `ui/adw.slint`, `ui/theme.slint` | libadwaita metrics and colours |

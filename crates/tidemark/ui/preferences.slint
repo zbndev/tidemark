@@ -1,0 +1,515 @@
+// The Preferences dialog: General, Network and Data, as AdwPreferencesDialog lays them out.
+// The daemon owns every value; `preferences.rs` decides what is shown and sends what a
+// row asks for. A switch, a choice or a mode moves at once and is put back if refused.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Alert } from "alert.slint";
+import { ActionRow, BoxedList, Button, ComboRow, EntryRow, GroupHeading, SpinRow, Switch, Toast, ViewSwitcher } from "adw.slint";
+
+export global Prefs {
+    in-out property <bool> open;
+    in-out property <int> page;
+
+    in-out property <bool> minimize-on-close;
+    // A choice is its index, -1 for a value this build does not know; the matching
+    // `-unknown` string is then what the row says instead.
+    in-out property <int> startup;
+    in property <string> startup-unknown;
+    in-out property <int> theme;
+    in property <string> theme-unknown;
+    in-out property <bool> refresh-auto;
+    in property <int> refresh-minutes;
+    in-out property <bool> columns-auto;
+    in property <int> max-columns;
+
+    in-out property <int> proxy-mode;
+    in property <string> proxy-mode-unknown;
+    in-out property <string> proxy-host;
+    in-out property <string> proxy-port;
+    // What the daemon holds, so the apply button shows only for an edit.
+    in property <string> stored-host;
+    in property <string> stored-port;
+    in property <bool> host-error;
+    in property <bool> port-error;
+    in-out property <bool> release-check;
+    in property <bool> release-available;
+
+    in-out property <int> retention;
+    in property <string> retention-unknown;
+    in property <string> config-path;
+    in property <string> history-path;
+    in property <string> history-size;
+    in property <string> key-schema;
+    in property <string> token-schema;
+
+    // A row waiting for the daemon's answer, which is what bounds how fast it can send.
+    in property <bool> busy-minimize;
+    in property <bool> busy-startup;
+    in property <bool> busy-theme;
+    in property <bool> busy-refresh-auto;
+    in property <bool> busy-minutes;
+    in property <bool> busy-columns-auto;
+    in property <bool> busy-columns;
+    in property <bool> busy-proxy;
+    in property <bool> busy-release;
+    in property <bool> busy-retention;
+    in property <bool> busy-clear;
+
+    // Moves the keyboard to the proxy row still to be filled in: 0 the host, 1 the port.
+    in property <int> focus-target;
+    in property <int> focus-serial;
+
+    in-out property <string> toast;
+    in-out property <int> toast-serial;
+
+    callback close();
+    // "minimize", "release", "refresh-auto" or "columns-auto".
+    callback set-switch(string, bool);
+    callback set-minutes(int);
+    callback set-columns(int);
+    callback choose-startup(int);
+    callback choose-theme(int);
+    callback choose-retention(int);
+    callback choose-proxy-mode(int);
+    callback apply-proxy();
+    callback clear-history();
+
+    public function show-toast(message: string) {
+        self.toast = message;
+        self.toast-serial += 1;
+    }
+}
+
+component SwitchRow inherits ActionRow {
+    in property <bool> checked;
+    in property <bool> busy;
+    callback toggled(bool);
+    activatable: true;
+    enabled: !root.busy;
+    activated => {
+        root.toggled(!root.checked);
+    }
+    Switch {
+        checked: root.checked;
+        enabled: !root.busy;
+        toggled(on) => {
+            root.toggled(on);
+        }
+    }
+}
+
+component Page inherits ScrollView {
+    VerticalLayout {
+        alignment: start;
+        padding: 24px;
+        padding-top: 12px;
+        spacing: 24px;
+        @children
+    }
+}
+
+component GeneralPage inherits Page {
+    VerticalLayout {
+        GroupHeading {
+            title: "Behavior";
+        }
+        BoxedList {
+            SwitchRow {
+                title: "Minimize to tray on close";
+                subtitle: "Keep Tidemark running when a tray icon can bring the window back.";
+                first: true;
+                last: true;
+                checked: Prefs.minimize-on-close;
+                busy: Prefs.busy-minimize;
+                toggled(on) => {
+                    Prefs.minimize-on-close = on;
+                    Prefs.set-switch("minimize", on);
+                }
+            }
+        }
+    }
+    VerticalLayout {
+        GroupHeading {
+            title: "Startup";
+        }
+        BoxedList {
+            ComboRow {
+                title: "Start at login";
+                subtitle: Prefs.startup-unknown;
+                value-as-subtitle: true;
+                choices: ["App and tray", "Daemon only", "Off"];
+                selected: Prefs.startup;
+                enabled: Prefs.startup >= 0 && !Prefs.busy-startup;
+                last: true;
+                chosen(index) => {
+                    Prefs.startup = index;
+                    Prefs.choose-startup(index);
+                }
+            }
+        }
+    }
+    VerticalLayout {
+        GroupHeading {
+            title: "Theme";
+        }
+        BoxedList {
+            ComboRow {
+                title: "Theme";
+                subtitle: Prefs.theme-unknown;
+                value-as-subtitle: true;
+                choices: ["System", "Light", "Dark"];
+                selected: Prefs.theme;
+                enabled: Prefs.theme >= 0 && !Prefs.busy-theme;
+                last: true;
+                chosen(index) => {
+                    Prefs.theme = index;
+                    Prefs.choose-theme(index);
+                }
+            }
+        }
+    }
+    VerticalLayout {
+        GroupHeading {
+            title: "Providers refresh";
+        }
+        BoxedList {
+            // Vague on purpose: which zone buys which pace is the daemon's business, and a
+            // number here would be a second truth to keep in step with CONTEXT.md.
+            SwitchRow {
+                title: "Auto";
+                subtitle: "Refresh frequency adapts to how much quota is left.";
+                checked: Prefs.refresh-auto;
+                busy: Prefs.busy-refresh-auto;
+                toggled(on) => {
+                    Prefs.refresh-auto = on;
+                    Prefs.set-switch("refresh-auto", on);
+                }
+            }
+            // Follows the switch rather than the store: it flips before the daemon answers.
+            SpinRow {
+                title: "Manual refresh frequency";
+                subtitle: "Minutes between polls when Auto is off.";
+                first: false;
+                last: true;
+                value: Prefs.refresh-minutes;
+                minimum: 1;
+                maximum: 120;
+                enabled: !Prefs.refresh-auto && !Prefs.busy-minutes;
+                changed(minutes) => {
+                    Prefs.set-minutes(minutes);
+                }
+            }
+        }
+    }
+    VerticalLayout {
+        GroupHeading {
+            title: "Card columns";
+        }
+        BoxedList {
+            SwitchRow {
+                title: "Auto";
+                subtitle: "Column count follows the window width.";
+                checked: Prefs.columns-auto;
+                busy: Prefs.busy-columns-auto;
+                toggled(on) => {
+                    Prefs.columns-auto = on;
+                    Prefs.set-switch("columns-auto", on);
+                }
+            }
+            SpinRow {
+                title: "Maximum columns";
+                subtitle: "Most columns when Auto is off.";
+                first: false;
+                last: true;
+                value: Prefs.max-columns;
+                minimum: 1;
+                maximum: 999;
+                enabled: !Prefs.columns-auto && !Prefs.busy-columns;
+                changed(columns) => {
+                    Prefs.set-columns(columns);
+                }
+            }
+        }
+    }
+}
+
+component NetworkPage inherits Page {
+    // The host and the port belong to the mode the row shows, not the one stored:
+    // choosing SOCKS5 before typing where it is, is how this group gets filled in.
+    property <bool> describes-proxy: Prefs.proxy-mode > 0 && !Prefs.busy-proxy;
+    property <int> focus-serial: Prefs.focus-serial;
+    // A tick later: a choice in the mode's menu asks for this while the menu is still
+    // closing, and the menu hands focus back to where it was when it goes.
+    property <bool> focus-pending;
+    changed focus-serial => {
+        self.focus-pending = true;
+    }
+    Timer {
+        interval: 1ms;
+        running: root.focus-pending;
+        triggered => {
+            root.focus-pending = false;
+            if (Prefs.focus-target == 0) {
+                host.focus-input();
+            } else {
+                port.focus-input();
+            }
+        }
+    }
+
+    VerticalLayout {
+        GroupHeading {
+            title: "Proxy";
+            description: "Applies immediately, without restarting the background service. Requests to this machine never go through it.";
+        }
+        BoxedList {
+            ComboRow {
+                title: "Proxy";
+                subtitle: Prefs.proxy-mode-unknown;
+                value-as-subtitle: true;
+                choices: ["Off", "HTTP", "HTTPS", "SOCKS5"];
+                selected: Prefs.proxy-mode;
+                enabled: Prefs.proxy-mode >= 0 && !Prefs.busy-proxy;
+                chosen(index) => {
+                    Prefs.proxy-mode = index;
+                    Prefs.choose-proxy-mode(index);
+                }
+            }
+            // An apply button rather than a request per keystroke: `example.com` on the way
+            // to `proxy.example.com` is eleven proxies nobody asked for.
+            host := EntryRow {
+                title: "Host";
+                first: false;
+                text <=> Prefs.proxy-host;
+                enabled: root.describes-proxy;
+                error: Prefs.host-error;
+                accepted => {
+                    Prefs.apply-proxy();
+                }
+                if root.describes-proxy && Prefs.proxy-host != Prefs.stored-host: Button {
+                    kind: 1;
+                    circular: true;
+                    has-icon: true;
+                    icon: @image-url("icons/object-select-symbolic.svg");
+                    clicked => {
+                        Prefs.apply-proxy();
+                    }
+                }
+            }
+            port := EntryRow {
+                title: "Port";
+                first: false;
+                number: true;
+                text <=> Prefs.proxy-port;
+                enabled: root.describes-proxy;
+                error: Prefs.port-error;
+                accepted => {
+                    Prefs.apply-proxy();
+                }
+                if root.describes-proxy && Prefs.proxy-port != Prefs.stored-port: Button {
+                    kind: 1;
+                    circular: true;
+                    has-icon: true;
+                    icon: @image-url("icons/object-select-symbolic.svg");
+                    clicked => {
+                        Prefs.apply-proxy();
+                    }
+                }
+            }
+        }
+    }
+    // One switch, and what it switches is whether this program reaches the network on its
+    // own behalf: it lives beside the proxy rather than on a page of its own.
+    VerticalLayout {
+        GroupHeading {
+            title: "Release Updates";
+        }
+        BoxedList {
+            SwitchRow {
+                title: "Check for updates";
+                subtitle: Prefs.release-available ? "Ask GitHub for the latest Tidemark release once an hour." : "Release checks are disabled in this build.";
+                first: true;
+                last: true;
+                checked: Prefs.release-check;
+                busy: Prefs.busy-release || !Prefs.release-available;
+                toggled(on) => {
+                    Prefs.release-check = on;
+                    Prefs.set-switch("release", on);
+                }
+            }
+        }
+    }
+}
+
+component DataPage inherits Page {
+    VerticalLayout {
+        GroupHeading {
+            title: "History";
+        }
+        BoxedList {
+            ComboRow {
+                title: "Keep history";
+                subtitle: Prefs.retention-unknown;
+                value-as-subtitle: true;
+                choices: ["Forever", "6 months", "1 year"];
+                selected: Prefs.retention;
+                enabled: Prefs.retention >= 0 && !Prefs.busy-retention;
+                chosen(index) => {
+                    Prefs.retention = index;
+                    Prefs.choose-retention(index);
+                }
+            }
+            ActionRow {
+                title: "Recorded quota history";
+                subtitle: "Delete readings and notification records. Accounts and credentials stay.";
+                first: false;
+                last: true;
+                Button {
+                    text: "Clear History";
+                    kind: 2;
+                    enabled: !Prefs.busy-clear;
+                    clicked => {
+                        Prefs.clear-history();
+                    }
+                }
+            }
+        }
+    }
+    VerticalLayout {
+        GroupHeading {
+            title: "Files";
+        }
+        BoxedList {
+            ActionRow {
+                title: "Configuration file";
+                subtitle: Prefs.config-path;
+                wrap-anywhere: true;
+            }
+            ActionRow {
+                title: "History database";
+                subtitle: Prefs.history-path;
+                wrap-anywhere: true;
+                first: false;
+            }
+            ActionRow {
+                title: "Database size";
+                subtitle: Prefs.history-size;
+                first: false;
+                last: true;
+            }
+        }
+    }
+    VerticalLayout {
+        GroupHeading {
+            title: "System Keyring";
+            description: "Secrets stay in the desktop Secret Service, not in config.toml.";
+        }
+        BoxedList {
+            ActionRow {
+                title: "API keys";
+                subtitle: Prefs.key-schema;
+                wrap-anywhere: true;
+            }
+            ActionRow {
+                title: "OAuth sessions";
+                subtitle: Prefs.token-schema;
+                wrap-anywhere: true;
+                first: false;
+                last: true;
+            }
+        }
+    }
+}
+
+export component PreferencesDialog inherits Rectangle {
+    background: Theme.dark ? #00000080 : #00000040;
+
+    // Swallows presses meant for the window underneath.
+    TouchArea { }
+
+    property <bool> asking: Alert.open;
+    changed asking => {
+        if (!self.asking) {
+            scope.focus();
+        }
+    }
+
+    scope := FocusScope {
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                Prefs.close();
+                return accept;
+            }
+            reject
+        }
+
+        sheet := Rectangle {
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            width: min(620px, root.width - 24px);
+            height: min(680px, root.height - 24px);
+            background: Theme.window-bg;
+            border-radius: 14px;
+            drop-shadow-blur: 24px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: #00000050;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 47px;
+                    HorizontalLayout {
+                        alignment: center;
+                        padding-top: 6px;
+                        padding-bottom: 7px;
+                        ViewSwitcher {
+                            labels: ["General", "Network", "Data"];
+                            icons: [
+                                @image-url("icons/preferences-system-symbolic.svg"),
+                                @image-url("icons/network-workgroup-symbolic.svg"),
+                                @image-url("icons/folder-documents-symbolic.svg"),
+                            ];
+                            active: Prefs.page;
+                            chosen(index) => {
+                                Prefs.page = index;
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-right: 6px;
+                        alignment: end;
+                        VerticalLayout {
+                            alignment: center;
+                            Button {
+                                kind: 3;
+                                has-icon: true;
+                                icon: @image-url("icons/window-close-symbolic.svg");
+                                clicked => {
+                                    Prefs.close();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if Prefs.page == 0: GeneralPage {
+                    vertical-stretch: 1;
+                }
+                if Prefs.page == 1: NetworkPage {
+                    vertical-stretch: 1;
+                }
+                if Prefs.page == 2: DataPage {
+                    vertical-stretch: 1;
+                }
+            }
+
+            Toast {
+                text: Prefs.toast;
+                serial: Prefs.toast-serial;
+            }
+        }
+    }
+}

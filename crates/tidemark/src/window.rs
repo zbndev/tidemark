@@ -12,11 +12,12 @@ use std::rc::{Rc, Weak};
 
 use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use tidemark_types::{Preferences, ProviderDefinition, ProviderStatus, Timestamp};
+use tidemark_types::{DataInfo, Preferences, ProviderDefinition, ProviderStatus, Timestamp, ids};
 
 use crate::alert::Alerts;
 use crate::bus::{self, DaemonProxy, Update};
 use crate::marks::Marks;
+use crate::preferences::PreferencesDialog;
 use crate::provider_settings::{self, CardAction, ProviderDialog};
 use crate::view::{self, Body, Gauge, Tone};
 use crate::{AppWindow, CardData, GaugeData, MenuEntry, RowData, Theme, format, model, update};
@@ -142,6 +143,15 @@ pub struct MainWindow {
     providers: RefCell<Option<Rc<ProviderDialog>>>,
     /// The account whose card menu is open.
     menu_target: RefCell<Option<(String, String)>>,
+    /// What the daemon last said, for the Preferences dialog to open on.
+    preferences: RefCell<Preferences>,
+    data: RefCell<DataInfo>,
+    preferences_dialog: RefCell<Option<Rc<PreferencesDialog>>>,
+    /// What the daemon last said its version was, for the About dialog's troubleshooting
+    /// page. `None` while nothing is answering on the bus.
+    daemon_version: RefCell<Option<String>>,
+    /// The renderer the window is drawn with, for the same page.
+    renderer: String,
     clock: slint::Timer,
 }
 
@@ -157,7 +167,7 @@ impl std::fmt::Debug for MainWindow {
 }
 
 impl MainWindow {
-    pub fn start(ui: &AppWindow) -> Rc<Self> {
+    pub fn start(ui: &AppWindow, renderer: String) -> Rc<Self> {
         let cards = Rc::new(VecModel::default());
         ui.set_cards(ModelRc::from(Rc::clone(&cards)));
         let main = Rc::new(Self {
@@ -176,6 +186,19 @@ impl MainWindow {
             alerts: Alerts::install(ui),
             providers: RefCell::default(),
             menu_target: RefCell::default(),
+            preferences: RefCell::default(),
+            data: RefCell::new(DataInfo {
+                config_path: String::new(),
+                history_path: String::new(),
+                history_bytes: 0,
+                key_schema: ids::SECRET_SCHEMA.into(),
+                token_schema: ids::TOKEN_SCHEMA.into(),
+                release_check_available: false,
+                plugin_icons_path: String::new(),
+            }),
+            preferences_dialog: RefCell::default(),
+            daemon_version: RefCell::default(),
+            renderer,
             clock: slint::Timer::default(),
         });
         ui.set_message("Connecting…".into());
@@ -183,6 +206,15 @@ impl MainWindow {
         let weak = Rc::downgrade(&main);
         ui.on_refresh(Self::callback(&weak, |main| main.refresh_now()));
         ui.on_open_release(Self::callback(&weak, |main| main.open_release()));
+        ui.on_open_preferences({
+            let weak = weak.clone();
+            move || {
+                if let Some(main) = weak.upgrade() {
+                    main.open_preferences();
+                }
+            }
+        });
+        ui.on_open_about(Self::callback(&weak, |main| main.open_about()));
         ui.on_open_providers({
             let weak = weak.clone();
             move || {
@@ -278,6 +310,7 @@ impl MainWindow {
         match update {
             Update::Connected {
                 proxy,
+                version,
                 available,
                 preferences,
                 definitions,
@@ -286,8 +319,10 @@ impl MainWindow {
             } => {
                 tracing::info!(accounts = statuses.len(), "connected to the daemon");
                 self.daemon.replace(Some(proxy));
+                self.daemon_version.replace(version);
                 self.definitions.replace(definitions);
                 self.marks.set_plugin_root(&data.plugin_icons_path);
+                self.data.replace(data);
                 ui.set_connected(true);
                 self.apply_preferences(&preferences);
                 self.show_update(&available);
@@ -300,6 +335,8 @@ impl MainWindow {
             Update::Preferences(preferences) => self.apply_preferences(&preferences),
             Update::Data(data) => {
                 self.marks.set_plugin_root(&data.plugin_icons_path);
+                self.data.replace(data);
+                self.update_preferences();
                 self.redraw();
             }
             Update::Catalog(definitions) => {
@@ -310,6 +347,7 @@ impl MainWindow {
             Update::Activate => present(&ui),
             Update::Waiting(reason) => {
                 self.daemon.replace(None);
+                self.daemon_version.replace(None);
                 ui.set_connected(false);
                 self.show_update("");
                 ui.set_message(reason.into());
@@ -317,6 +355,48 @@ impl MainWindow {
             }
         }
         self.update_providers();
+    }
+
+    /// Opens the one Preferences dialog on what the daemon last said. Like the provider
+    /// dialog it asks for the daemon each time it writes.
+    fn open_preferences(self: &Rc<Self>) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        if self.preferences_dialog.borrow().is_some() || self.daemon.borrow().is_none() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let daemon = Rc::new({
+            let weak = weak.clone();
+            move || weak.upgrade().and_then(|main| main.daemon.borrow().clone())
+        });
+        let dialog = PreferencesDialog::open(
+            &ui,
+            daemon,
+            Rc::clone(&self.alerts),
+            &self.preferences.borrow(),
+            &self.data.borrow(),
+            move || {
+                if let Some(main) = weak.upgrade() {
+                    main.preferences_dialog.replace(None);
+                }
+            },
+        );
+        self.preferences_dialog.replace(Some(dialog));
+    }
+
+    fn update_preferences(&self) {
+        let dialog = self.preferences_dialog.borrow().clone();
+        if let Some(dialog) = dialog {
+            dialog.apply(&self.preferences.borrow(), &self.data.borrow());
+        }
+    }
+
+    fn open_about(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            crate::about::present(&ui, self.daemon_version.borrow().as_deref(), &self.renderer);
+        }
     }
 
     /// Opens the one provider dialog. It asks for the daemon each time it writes, so a
@@ -367,6 +447,7 @@ impl MainWindow {
                 id: action.id().into(),
                 label: action.label().into(),
                 section: action.starts_section(),
+                enabled: true,
             })
             .collect()
     }
@@ -753,6 +834,8 @@ impl MainWindow {
         } else {
             preferences.max_columns.unwrap_or(3) as i32
         });
+        self.preferences.replace(preferences.clone());
+        self.update_preferences();
     }
 
     fn appearance(&self, appearance: Appearance) {
