@@ -32,9 +32,13 @@ On Windows, build `tidemark-slint` and `tidemarkd` together: the client looks fo
 - Refresh, update button (opens the release page), theme preference, and the desktop's
   dark style and accent from the XDG settings portal, or the registry on Windows.
 - Bundled Rubik and embedded symbolic icons, so nothing depends on a system theme.
+- Provider settings, drawn inside the window: configured and installable providers, account
+  add/rename/remove, keys, OAuth sign-in, local sources and browser sessions, options and
+  notifications, plugin import (file chooser through `rfd`, the XDG portal on Linux) and
+  removal; alerts awaited as futures.
 
 ## Not yet
 
-Provider settings, preferences, about and detail dialogs; card context menu; release
+Preferences, about and detail dialogs; card context menu; release
 notes preview and the restart prompt; tray; close-to-tray; `--background` start;
 packaging.

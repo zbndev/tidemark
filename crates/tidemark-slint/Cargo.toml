@@ -16,6 +16,7 @@ workspace = true
 # scripts/check-layering.sh enforces this.
 [dependencies]
 async-io = "2.6.0"
+rfd = "0.17.2"
 semver = "1.0.28"
 # `~`: the winit accessor behind `unstable-winit-030` may change in any minor release.
 slint = { version = "~1.18.1", features = ["renderer-femtovg-wgpu", "unstable-winit-030"] }
@@ -23,6 +24,7 @@ tidemark-ipc = { path = "../tidemark-ipc" }
 tidemark-types = { path = "../tidemark-types" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+webbrowser = "1.2.4"
 zbus = { version = "5.13.2", features = ["p2p"] }
 
 [target.'cfg(windows)'.dependencies]

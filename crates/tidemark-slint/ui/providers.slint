@@ -1,0 +1,736 @@
+// The provider settings dialog: the configured list on two tabs, the catalog picker, and
+// one account's page. Everything drawn here was decided in `provider_settings/`; the
+// markup only says what a click asked for.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Alert } from "alert.slint";
+import { ActionRow, BoxedList, Button, Caption, ComboRow, Entry, EntryRow, GroupHeading, Spinner, Switch, Toast, ToggleGroup } from "adw.slint";
+
+// 0 a provider and its first account, 1 a further account under it, 2 an installed plugin
+// nobody has configured.
+export struct ProviderRowData {
+    kind: int,
+    provider: string,
+    account: string,
+    title: string,
+    subtitle: string,
+    has-mark: bool,
+    mark: image,
+    can-add: bool,
+    can-edit: bool,
+    // A provider row with further accounts, and whether they are showing.
+    nested: bool,
+    expanded: bool,
+}
+
+export struct PickerRowData {
+    provider: string,
+    title: string,
+    has-mark: bool,
+    mark: image,
+}
+
+export struct OptionData {
+    name: string,
+    title: string,
+    description: string,
+    choices: [string],
+    selected: int,
+}
+
+export struct SwitchData {
+    key: string,
+    title: string,
+    enabled: bool,
+}
+
+// One line of a local-source half: a source, or a note standing in for the sources.
+// Tone: 0 plain, 1 working, 2 broken.
+export struct CandidateData {
+    id: string,
+    title: string,
+    subtitle: string,
+    word: string,
+    tone: int,
+    selectable: bool,
+    in-use: bool,
+    indent: bool,
+    note: bool,
+}
+
+export struct DetailData {
+    provider: string,
+    account: string,
+    title: string,
+    // The account's name, on any account but the provider's default.
+    subtitle: string,
+    has-mark: bool,
+    mark: image,
+    can-rename: bool,
+    auth-shown: bool,
+    description: string,
+    // 0 an API key, 1 a login (with or without a local alternative), 2 a credential this
+    // client only describes, 3 a chosen local source.
+    auth: int,
+    stored: bool,
+    // The credential pill; empty for a provider with one credential.
+    choices: [string],
+    choice: int,
+    tidemark-half: bool,
+    sign-in-subtitle: string,
+    signed-in: bool,
+    waiting: bool,
+    login-url: string,
+    local-label: string,
+    local-location: string,
+    // 0 unknown, 1 found, 2 not found.
+    presence: int,
+    presence-text: string,
+    command: string,
+    note: string,
+    connection: string,
+    modes: [string],
+    mode: int,
+    paste: bool,
+    candidates: [CandidateData],
+    options: [OptionData],
+    notifications: [SwitchData],
+}
+
+export global ProviderSettings {
+    in property <bool> open;
+    // 0 the configured list, 1 the catalog picker, 2 an account's page.
+    in property <int> page;
+    in property <int> tab;
+    in property <[ProviderRowData]> rows;
+    in property <string> empty-title;
+    in property <string> empty-description;
+    in property <[PickerRowData]> picker;
+    in property <DetailData> detail;
+    in-out property <string> toast;
+    in-out property <int> toast-serial;
+
+    callback close();
+    callback back();
+    callback choose-tab(int);
+    // The tab's own "+": the catalog on the built-in tab, a file on the custom one.
+    callback add();
+    callback search(string);
+    callback pick(string);
+    callback edit(string, string);
+    callback remove(string, string);
+    callback add-account(string);
+    callback add-first(string);
+    callback remove-plugin(string);
+    callback toggle-expanded(string);
+
+    callback rename();
+    callback save-key(string);
+    callback remove-key();
+    callback sign-in();
+    callback sign-out();
+    callback cancel-login();
+    callback choose-source(int);
+    callback recheck();
+    callback choose-mode(int);
+    callback choose-candidate(string);
+    callback paste-session(string);
+    callback inspect();
+    callback choose-option(string, int);
+    callback toggle-notify(string, bool);
+
+    // Whether an entry holds anything but whitespace. Rust trims what it is sent.
+    pure callback filled(string) -> bool;
+
+    public function show-toast(text: string) {
+        self.toast = text;
+        self.toast-serial += 1;
+    }
+}
+
+component HeaderIcon inherits Button {
+    kind: 3;
+    has-icon: true;
+}
+
+component Pill inherits Rectangle {
+    in property <[string]> labels;
+    in property <int> active;
+    in property <bool> enabled: true;
+    callback chosen(int);
+    VerticalLayout {
+        padding: 8px;
+        ToggleGroup {
+            labels: root.labels;
+            active: root.active;
+            enabled: root.enabled;
+            chosen(index) => {
+                root.chosen(index);
+            }
+        }
+    }
+}
+
+component ListPage inherits ScrollView {
+    VerticalLayout {
+        alignment: start;
+        padding: 24px;
+        padding-top: 12px;
+        spacing: 18px;
+
+        BoxedList {
+            Pill {
+                labels: ["Built-in", "Custom"];
+                active: ProviderSettings.tab;
+                chosen(index) => {
+                    ProviderSettings.choose-tab(index);
+                }
+            }
+        }
+
+        VerticalLayout {
+            spacing: 6px;
+            HorizontalLayout {
+                alignment: end;
+                Button {
+                    has-icon: true;
+                    icon: @image-url("icons/list-add-symbolic.svg");
+                    clicked => {
+                        ProviderSettings.add();
+                    }
+                }
+            }
+
+            if ProviderSettings.rows.length == 0: VerticalLayout {
+                padding: 36px;
+                spacing: 12px;
+                Text {
+                    text: ProviderSettings.empty-title;
+                    color: Theme.fg;
+                    font-size: Theme.title-1;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: ProviderSettings.empty-description;
+                    color: Theme.fg;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+
+            if ProviderSettings.rows.length > 0: BoxedList {
+                for row[index] in ProviderSettings.rows: ActionRow {
+                    first: index == 0;
+                    title: row.title;
+                    subtitle: row.subtitle;
+                    has-mark: row.has-mark;
+                    mark: row.mark;
+                    elbow: row.kind == 1;
+                    indent: row.kind == 1 ? 12px : 0px;
+
+                    if row.kind != 1 && row.can-add: Button {
+                        has-icon: true;
+                        icon: @image-url("icons/list-add-symbolic.svg");
+                        clicked => {
+                            if (row.kind == 2) {
+                                ProviderSettings.add-first(row.provider);
+                            } else {
+                                ProviderSettings.add-account(row.provider);
+                            }
+                        }
+                    }
+                    if row.kind != 2 && row.can-edit: Button {
+                        has-icon: true;
+                        icon: @image-url("icons/document-edit-symbolic.svg");
+                        clicked => {
+                            ProviderSettings.edit(row.provider, row.account);
+                        }
+                    }
+                    Button {
+                        has-icon: true;
+                        kind: 2;
+                        icon: @image-url("icons/user-trash-symbolic.svg");
+                        clicked => {
+                            if (row.kind == 2) {
+                                ProviderSettings.remove-plugin(row.provider);
+                            } else {
+                                ProviderSettings.remove(row.provider, row.account);
+                            }
+                        }
+                    }
+                    if row.nested: Button {
+                        kind: 3;
+                        has-icon: true;
+                        icon: row.expanded ? @image-url("icons/pan-down-symbolic.svg") : @image-url("icons/pan-end-symbolic.svg");
+                        clicked => {
+                            ProviderSettings.toggle-expanded(row.provider);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component PickerPage inherits VerticalLayout {
+    padding-top: 6px;
+
+    HorizontalLayout {
+        padding-left: 24px;
+        padding-right: 24px;
+        padding-bottom: 6px;
+        search := Entry {
+            placeholder: "Search providers";
+            has-icon: true;
+            icon: @image-url("icons/edit-find-symbolic.svg");
+            init => {
+                self.focus-input();
+            }
+            edited(text) => {
+                ProviderSettings.search(text);
+            }
+        }
+    }
+
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            alignment: start;
+            padding: 24px;
+            padding-top: 12px;
+            if ProviderSettings.picker.length == 0: Caption {
+                text: "No providers to add.";
+                horizontal-alignment: center;
+            }
+            if ProviderSettings.picker.length > 0: BoxedList {
+                for row[index] in ProviderSettings.picker: ActionRow {
+                    first: index == 0;
+                    last: index == ProviderSettings.picker.length - 1;
+                    title: row.title;
+                    subtitle: row.provider;
+                    has-mark: row.has-mark;
+                    mark: row.mark;
+                    activatable: true;
+                    activated => {
+                        ProviderSettings.pick(row.provider);
+                    }
+                    Image {
+                        source: @image-url("icons/go-next-symbolic.svg");
+                        colorize: Theme.fg;
+                        width: 16px;
+                        height: 16px;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component DetailPage inherits ScrollView {
+    in property <DetailData> data: ProviderSettings.detail;
+    callback copy(string, string);
+
+    VerticalLayout {
+        alignment: start;
+        padding: 24px;
+        padding-top: 12px;
+        spacing: 24px;
+
+        if root.data.auth-shown: VerticalLayout {
+            GroupHeading {
+                title: "Authentication";
+                description: root.data.description;
+            }
+
+            if root.data.auth == 0: BoxedList {
+                key := EntryRow {
+                    title: root.data.stored ? "Replace the stored key" : "API key";
+                    password: true;
+                    accepted => {
+                        if (ProviderSettings.filled(self.text)) {
+                            ProviderSettings.save-key(self.text);
+                            self.text = "";
+                        }
+                    }
+                    Button {
+                        text: root.data.stored ? "Replace" : "Save";
+                        kind: 1;
+                        enabled: ProviderSettings.filled(key.text);
+                        clicked => {
+                            ProviderSettings.save-key(key.text);
+                            key.text = "";
+                        }
+                    }
+                }
+                if root.data.stored: ActionRow {
+                    first: false;
+                    title: "Stored key";
+                    subtitle: "Removing it leaves the account with no credential.";
+                    Button {
+                        text: "Remove";
+                        kind: 2;
+                        clicked => {
+                            ProviderSettings.remove-key();
+                        }
+                    }
+                }
+            }
+
+            if root.data.auth == 1: VerticalLayout {
+                spacing: 6px;
+                BoxedList {
+                    if root.data.choices.length > 0: Pill {
+                        labels: root.data.choices;
+                        active: root.data.choice;
+                        // A login in progress holds a loopback port; the pill stays put
+                        // until it finishes, so its Cancel stays on screen.
+                        enabled: !root.data.waiting;
+                        chosen(index) => {
+                            ProviderSettings.choose-source(index);
+                        }
+                    }
+                    if root.data.tidemark-half: ActionRow {
+                        first: root.data.choices.length == 0;
+                        title: "OAuth login";
+                        subtitle: root.data.sign-in-subtitle;
+                        if root.data.waiting: Spinner { }
+                        if root.data.waiting: Button {
+                            text: "Copy link";
+                            clicked => {
+                                root.copy(root.data.login-url, "Login address copied. Open it in a browser.");
+                            }
+                        }
+                        if root.data.waiting: Button {
+                            text: "Cancel";
+                            clicked => {
+                                ProviderSettings.cancel-login();
+                            }
+                        }
+                        if !root.data.waiting: Button {
+                            text: root.data.signed-in ? "Sign out" : "Sign in…";
+                            clicked => {
+                                if (root.data.signed-in) {
+                                    ProviderSettings.sign-out();
+                                } else {
+                                    ProviderSettings.sign-in();
+                                }
+                            }
+                        }
+                    }
+                    if !root.data.tidemark-half: ActionRow {
+                        first: false;
+                        title: root.data.local-label;
+                        subtitle: root.data.local-location;
+                        if root.data.presence != 0: Text {
+                            text: root.data.presence-text;
+                            color: root.data.presence == 1 ? Theme.success : Theme.warning;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: "Check again";
+                            clicked => {
+                                ProviderSettings.recheck();
+                            }
+                        }
+                    }
+                    if !root.data.tidemark-half && root.data.command != "": ActionRow {
+                        first: false;
+                        title: "Sign in with the CLI";
+                        subtitle: root.data.command;
+                        Button {
+                            text: "Copy";
+                            clicked => {
+                                root.copy(root.data.command, "Command copied. Run it in a terminal.");
+                            }
+                        }
+                    }
+                }
+                if !root.data.tidemark-half && root.data.note != "": Caption {
+                    text: root.data.note;
+                }
+            }
+
+            if root.data.auth == 2: BoxedList {
+                ActionRow {
+                    title: root.data.connection;
+                }
+            }
+
+            if root.data.auth == 3: VerticalLayout {
+                spacing: 12px;
+                BoxedList {
+                    Pill {
+                        labels: root.data.modes;
+                        active: root.data.mode;
+                        chosen(index) => {
+                            ProviderSettings.choose-mode(index);
+                        }
+                    }
+                }
+                BoxedList {
+                    if root.data.paste: cookie := EntryRow {
+                        title: "Cookie header";
+                        password: true;
+                        accepted => {
+                            if (ProviderSettings.filled(self.text)) {
+                                ProviderSettings.paste-session(self.text);
+                                self.text = "";
+                            }
+                        }
+                        Button {
+                            text: "Save";
+                            kind: 1;
+                            enabled: ProviderSettings.filled(cookie.text);
+                            clicked => {
+                                ProviderSettings.paste-session(cookie.text);
+                                cookie.text = "";
+                            }
+                        }
+                    }
+                    for candidate[index] in root.data.candidates: ActionRow {
+                        first: index == 0 && !root.data.paste;
+                        last: index == root.data.candidates.length - 1;
+                        title: candidate.title;
+                        subtitle: candidate.subtitle;
+                        indent: candidate.indent ? 18px : 0px;
+                        enabled: candidate.selectable || candidate.note;
+                        activatable: candidate.selectable;
+                        activated => {
+                            ProviderSettings.choose-candidate(candidate.id);
+                        }
+                        if !candidate.note: Text {
+                            text: candidate.word;
+                            color: candidate.tone == 1 ? Theme.success : candidate.tone == 2 ? Theme.error : Theme.ink(Theme.dim);
+                            vertical-alignment: center;
+                        }
+                        if candidate.in-use: Image {
+                            source: @image-url("icons/object-select-symbolic.svg");
+                            colorize: Theme.fg;
+                            width: 16px;
+                            height: 16px;
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.data.options.length > 0: VerticalLayout {
+            spacing: 6px;
+            GroupHeading {
+                title: "Settings";
+            }
+            BoxedList {
+                for option[index] in root.data.options: ComboRow {
+                    first: index == 0;
+                    last: index == root.data.options.length - 1;
+                    title: option.title;
+                    choices: option.choices;
+                    selected: option.selected;
+                    chosen(choice) => {
+                        ProviderSettings.choose-option(option.name, choice);
+                    }
+                }
+            }
+            for option in root.data.options: Caption {
+                visible: option.description != "";
+                height: option.description != "" ? self.preferred-height : 0px;
+                text: option.description;
+            }
+        }
+
+        if root.data.notifications.length > 0: VerticalLayout {
+            GroupHeading {
+                title: "Notifications";
+                description: "Warn at 70% and 90%, and say when a window resets.";
+            }
+            BoxedList {
+                for switch[index] in root.data.notifications: ActionRow {
+                    first: index == 0;
+                    title: switch.title;
+                    Switch {
+                        checked: switch.enabled;
+                        toggled(on) => {
+                            ProviderSettings.toggle-notify(switch.key, on);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// AdwPreferencesDialog: a floating sheet over the dimmed window, with its own header bar
+// and a back button on every page but the list.
+export component ProviderDialog inherits Rectangle {
+    background: Theme.dark ? #00000080 : #00000040;
+
+    // Swallows presses meant for the window underneath.
+    TouchArea { }
+
+    // Slint has no clipboard API of its own: a hidden text input copies what it holds.
+    clipboard := TextInput {
+        visible: false;
+        read-only: true;
+    }
+    // Escape is the dialog's again once a question asked over it is answered.
+    property <bool> asking: Alert.open;
+    changed asking => {
+        if (!self.asking) {
+            scope.focus();
+        }
+    }
+
+    function copy(text: string, message: string) {
+        clipboard.text = text;
+        clipboard.select-all();
+        clipboard.copy();
+        ProviderSettings.show-toast(message);
+    }
+
+    scope := FocusScope {
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                if (ProviderSettings.page == 0) {
+                    ProviderSettings.close();
+                } else {
+                    ProviderSettings.back();
+                }
+                return accept;
+            }
+            reject
+        }
+
+        sheet := Rectangle {
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            width: min(560px, root.width - 24px);
+            height: min(680px, root.height - 24px);
+            background: Theme.window-bg;
+            border-radius: 14px;
+            drop-shadow-blur: 24px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: #00000050;
+
+            VerticalLayout {
+                Rectangle {
+                    height: ProviderSettings.page == 2 ? 150px : 47px;
+
+                    HorizontalLayout {
+                        y: 0;
+                        height: 47px;
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        alignment: space-between;
+                        HorizontalLayout {
+                            VerticalLayout {
+                                alignment: center;
+                                if ProviderSettings.page != 0: HeaderIcon {
+                                    icon: @image-url("icons/go-previous-symbolic.svg");
+                                    clicked => {
+                                        ProviderSettings.back();
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            if ProviderSettings.page == 2 && ProviderSettings.detail.auth == 3: VerticalLayout {
+                                alignment: center;
+                                HeaderIcon {
+                                    icon: @image-url("icons/view-refresh-symbolic.svg");
+                                    clicked => {
+                                        ProviderSettings.inspect();
+                                    }
+                                }
+                            }
+                            if ProviderSettings.page == 2 && ProviderSettings.detail.can-rename: VerticalLayout {
+                                alignment: center;
+                                HeaderIcon {
+                                    icon: @image-url("icons/document-edit-symbolic.svg");
+                                    clicked => {
+                                        ProviderSettings.rename();
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                HeaderIcon {
+                                    icon: @image-url("icons/window-close-symbolic.svg");
+                                    clicked => {
+                                        ProviderSettings.close();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if ProviderSettings.page != 2: Text {
+                        y: 0;
+                        height: 47px;
+                        text: ProviderSettings.page == 1 ? "Add provider" : "Providers";
+                        vertical-alignment: center;
+                        color: Theme.fg;
+                        font-weight: 700;
+                    }
+
+                    if ProviderSettings.page == 2: VerticalLayout {
+                        y: 10px;
+                        height: parent.height - 16px;
+                        width: parent.width - 120px;
+                        x: 60px;
+                        spacing: 6px;
+                        alignment: center;
+                        HorizontalLayout {
+                            alignment: center;
+                            Image {
+                                source: ProviderSettings.detail.mark;
+                                colorize: Theme.fg;
+                                opacity: ProviderSettings.detail.has-mark ? 1 : 0;
+                                width: 72px;
+                                height: 72px;
+                            }
+                        }
+                        Text {
+                            text: ProviderSettings.detail.title;
+                            color: Theme.fg;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            overflow: elide;
+                        }
+                        if ProviderSettings.detail.subtitle != "": Text {
+                            text: ProviderSettings.detail.subtitle;
+                            color: Theme.ink(Theme.dim);
+                            font-size: Theme.footer;
+                            horizontal-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                if ProviderSettings.page == 0: ListPage {
+                    vertical-stretch: 1;
+                }
+                if ProviderSettings.page == 1: PickerPage {
+                    vertical-stretch: 1;
+                }
+                if ProviderSettings.page == 2: DetailPage {
+                    vertical-stretch: 1;
+                    copy(text, message) => {
+                        root.copy(text, message);
+                    }
+                }
+            }
+
+            Toast {
+                text: ProviderSettings.toast;
+                serial: ProviderSettings.toast-serial;
+            }
+        }
+    }
+}

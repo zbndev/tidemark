@@ -13,8 +13,10 @@ use std::rc::{Rc, Weak};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use tidemark_types::{Preferences, ProviderDefinition, ProviderStatus, Timestamp};
 
+use crate::alert::Alerts;
 use crate::bus::{self, DaemonProxy, Update};
 use crate::marks::Marks;
+use crate::provider_settings::ProviderDialog;
 use crate::view::{self, Body, Gauge, Tone};
 use crate::{AppWindow, CardData, GaugeData, RowData, Theme, format, model, update};
 
@@ -133,7 +135,10 @@ pub struct MainWindow {
     available: RefCell<String>,
     theme: RefCell<String>,
     system_dark: Cell<bool>,
-    marks: Marks,
+    marks: Rc<Marks>,
+    alerts: Rc<Alerts>,
+    /// The open provider dialog, fed everything the daemon says while it is open.
+    providers: RefCell<Option<Rc<ProviderDialog>>>,
     clock: slint::Timer,
 }
 
@@ -164,7 +169,9 @@ impl MainWindow {
             available: RefCell::default(),
             theme: RefCell::new(Preferences::THEME_SYSTEM.to_owned()),
             system_dark: Cell::new(false),
-            marks: Marks::default(),
+            marks: Rc::default(),
+            alerts: Alerts::install(ui),
+            providers: RefCell::default(),
             clock: slint::Timer::default(),
         });
         ui.set_message("Connecting…".into());
@@ -172,6 +179,14 @@ impl MainWindow {
         let weak = Rc::downgrade(&main);
         ui.on_refresh(Self::callback(&weak, |main| main.refresh_now()));
         ui.on_open_release(Self::callback(&weak, |main| main.open_release()));
+        ui.on_open_providers({
+            let weak = weak.clone();
+            move || {
+                if let Some(main) = weak.upgrade() {
+                    main.open_providers();
+                }
+            }
+        });
         ui.on_toggle_group({
             let weak = weak.clone();
             move |index| {
@@ -284,6 +299,44 @@ impl MainWindow {
                 ui.set_message(reason.into());
                 ui.set_page(PAGE_WAITING);
             }
+        }
+        self.update_providers();
+    }
+
+    /// Opens the one provider dialog. It asks for the daemon each time it writes, so a
+    /// reconnect underneath it is a new connection rather than a dead one.
+    fn open_providers(self: &Rc<Self>) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        if self.providers.borrow().is_some() || self.daemon.borrow().is_none() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let daemon = Rc::new({
+            let weak = weak.clone();
+            move || weak.upgrade().and_then(|main| main.daemon.borrow().clone())
+        });
+        let dialog = ProviderDialog::open(
+            &ui,
+            daemon,
+            Rc::clone(&self.alerts),
+            Rc::clone(&self.marks),
+            &self.definitions.borrow(),
+            &self.statuses.borrow(),
+            move || {
+                if let Some(main) = weak.upgrade() {
+                    main.providers.replace(None);
+                }
+            },
+        );
+        self.providers.replace(Some(dialog));
+    }
+
+    fn update_providers(&self) {
+        let dialog = self.providers.borrow().clone();
+        if let Some(dialog) = dialog {
+            dialog.apply(&self.definitions.borrow(), &self.statuses.borrow());
         }
     }
 
@@ -694,11 +747,7 @@ impl MainWindow {
     /// release page, which is what that dialog's own button does.
     fn open_release(&self) {
         let url = update::release_url(&self.available.borrow());
-        #[cfg(windows)]
-        let opened = std::process::Command::new("explorer").arg(&url).spawn();
-        #[cfg(not(windows))]
-        let opened = std::process::Command::new("xdg-open").arg(&url).spawn();
-        if let Err(error) = opened {
+        if let Err(error) = webbrowser::open(&url) {
             tracing::warn!(%error, "could not open the Tidemark release page");
         }
     }
@@ -715,7 +764,7 @@ impl MainWindow {
     }
 }
 
-fn spawn(future: impl std::future::Future<Output = ()> + 'static) {
+pub fn spawn(future: impl std::future::Future<Output = ()> + 'static) {
     if let Err(error) = slint::spawn_local(future) {
         tracing::error!(%error, "the event loop refused a task");
     }

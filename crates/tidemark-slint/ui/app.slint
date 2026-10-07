@@ -3,9 +3,11 @@
 import { ScrollView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Card, CardData, GaugeData, RowData } from "card.slint";
+import { ProviderDialog, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData } from "providers.slint";
+import { Alert, AlertDialog, AlertForm, AlertResponse, PreviewRow } from "alert.slint";
 import "../../../data/fonts/rubik/Rubik%5Bwght%5D.ttf";
 
-export { Theme, CardData, GaugeData, RowData }
+export { Theme, CardData, GaugeData, RowData, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData, Alert, AlertForm, AlertResponse, PreviewRow }
 
 component HeaderButton inherits Rectangle {
     in property <image> icon;
@@ -15,11 +17,12 @@ component HeaderButton inherits Rectangle {
     height: 34px;
     border-radius: 6px;
     background: !enabled ? transparent : touch.pressed ? Theme.ink(0.16) : touch.has-hover ? Theme.ink(0.07) : transparent;
-    opacity: enabled ? 1 : 0.5;
 
+    // Faded through the colour: `opacity` on an item with children is drawn through an
+    // off-grid texture, which blurs.
     Image {
         source: root.icon;
-        colorize: Theme.fg;
+        colorize: Theme.fg.transparentize(root.enabled ? 0 : 0.5);
         width: 16px;
         height: 16px;
     }
@@ -121,6 +124,7 @@ export component AppWindow inherits Window {
     resize-border-width: custom-frame && !self.maximized ? 6px : 0px;
 
     callback refresh();
+    callback open-providers();
     callback move-window();
     callback close-window();
     callback open-release();
@@ -284,7 +288,10 @@ export component AppWindow inherits Window {
                     alignment: center;
                     HeaderButton {
                         icon: @image-url("icons/dialog-password-symbolic.svg");
-                        enabled: false;
+                        enabled: root.connected;
+                        clicked => {
+                            root.open-providers();
+                        }
                     }
                 }
                 HorizontalLayout {
@@ -492,5 +499,15 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    if ProviderSettings.open: ProviderDialog {
+        width: root.width;
+        height: root.height;
+    }
+
+    if Alert.open: AlertDialog {
+        width: root.width;
+        height: root.height;
     }
 }

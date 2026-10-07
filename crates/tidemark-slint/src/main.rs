@@ -8,6 +8,7 @@
 // it at link time. Gated off tests so failures still print.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+mod alert;
 mod bus;
 #[cfg(windows)]
 mod daemon_job;
@@ -22,6 +23,7 @@ mod marks;
 mod model;
 #[cfg(unix)]
 mod portal;
+mod provider_settings;
 #[cfg(windows)]
 mod registry;
 #[cfg(windows)]
@@ -36,7 +38,11 @@ mod window;
 mod ui {
     slint::include_modules!();
 }
-use ui::{AppWindow, CardData, GaugeData, RowData, Theme};
+use ui::{
+    Alert, AlertForm, AlertResponse, AppWindow, CandidateData, CardData, DetailData, GaugeData,
+    OptionData, PickerRowData, PreviewRow, ProviderRowData, ProviderSettings, RowData, SwitchData,
+    Theme,
+};
 
 fn main() -> Result<(), slint::PlatformError> {
     #[cfg(windows)]
