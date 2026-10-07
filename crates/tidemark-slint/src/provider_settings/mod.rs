@@ -823,6 +823,24 @@ impl ProviderDialog {
         }
     }
 
+    /// A quota card's context menu, taken into this dialog: the row's own control, reached
+    /// with the row's identity instead of its button, so there is one implementation of
+    /// adding, editing and removing an account. The tab is settled first, so going back
+    /// from the account's page lands on the tab its provider is on.
+    pub fn shortcut(self: &Rc<Self>, action: CardAction, provider: &str, account: &str) {
+        let custom = self
+            .definition(provider)
+            .is_some_and(|definition| definition.plugin.is_some());
+        self.tab
+            .set(if custom { Tab::Custom } else { Tab::BuiltIn });
+        self.show(Page::List);
+        match action {
+            CardAction::AddAccount => self.add_account(provider.to_owned()),
+            CardAction::Modify => self.open_detail(provider.to_owned(), account.to_owned()),
+            CardAction::Remove => self.confirm_removal(provider.to_owned(), account.to_owned()),
+        }
+    }
+
     fn confirm_removal(self: &Rc<Self>, provider: String, account: String) {
         let Some(definition) = self.definition(&provider) else {
             return;
@@ -1472,6 +1490,61 @@ pub(crate) fn opens_detail_after_add(definition: &ProviderDefinition) -> bool {
         || !definition.options.is_empty()
 }
 
+/// One entry of a quota card's secondary-click menu. Each is a shortcut to the control the
+/// configured row draws for the same account — never a second implementation of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardAction {
+    AddAccount,
+    Modify,
+    Remove,
+}
+
+impl CardAction {
+    const ALL: [Self; 3] = [Self::AddAccount, Self::Modify, Self::Remove];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::AddAccount => "add-account",
+            Self::Modify => "modify",
+            Self::Remove => "remove",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|action| action.id() == id)
+    }
+
+    /// What the menu item says, in the words the settings row's tooltip uses.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AddAccount => "Add new account",
+            Self::Modify => "Modify",
+            Self::Remove => "Remove",
+        }
+    }
+
+    /// Removal is the one entry that undoes rather than configures, so the menu draws a
+    /// separator above it.
+    pub const fn starts_section(self) -> bool {
+        matches!(self, Self::Remove)
+    }
+}
+
+/// The entries a quota card's context menu offers for one provider. The same three rules
+/// the configured row's buttons follow: a second account where the credential can hold
+/// one, a pen where there is something to configure, and removal always.
+pub fn card_actions(definition: Option<&ProviderDefinition>) -> Vec<CardAction> {
+    let mut actions = Vec::new();
+    if definition.is_some_and(multi_account_capable) {
+        actions.push(CardAction::AddAccount);
+    }
+    if definition.is_some_and(opens_detail_after_add) {
+        actions.push(CardAction::Modify);
+    }
+    actions.push(CardAction::Remove);
+    actions
+}
+
 /// Whether a user can give this provider another account: a key or a browser login is
 /// something a second account can hold its own copy of, while an external or
 /// credential-free provider reads whatever one thing this machine already has.
@@ -1550,6 +1623,33 @@ mod tests {
     fn a_keyless_provider_without_sources_or_options_returns_to_the_list_after_adding() {
         assert!(!opens_detail_after_add(&definition(CredentialKind::None)));
         assert!(opens_detail_after_add(&definition(CredentialKind::Key)));
+    }
+
+    #[test]
+    fn a_card_menu_offers_what_the_configured_row_does() {
+        use CardAction::{AddAccount, Modify, Remove};
+        assert_eq!(
+            card_actions(Some(&definition(CredentialKind::Key))),
+            [AddAccount, Modify, Remove]
+        );
+        assert_eq!(
+            card_actions(Some(&definition(CredentialKind::External))),
+            [Modify, Remove]
+        );
+        assert_eq!(
+            card_actions(Some(&definition(CredentialKind::None))),
+            [Remove]
+        );
+        // A provider the catalog does not know yet can still be removed.
+        assert_eq!(card_actions(None), [Remove]);
+    }
+
+    #[test]
+    fn card_actions_round_trip_through_their_ids() {
+        for action in CardAction::ALL {
+            assert_eq!(CardAction::from_id(action.id()), Some(action));
+        }
+        assert_eq!(CardAction::from_id("rename"), None);
     }
 
     #[test]

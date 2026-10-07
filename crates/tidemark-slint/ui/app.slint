@@ -5,9 +5,10 @@ import { Theme } from "theme.slint";
 import { Card, CardData, GaugeData, RowData } from "card.slint";
 import { ProviderDialog, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData } from "providers.slint";
 import { Alert, AlertDialog, AlertForm, AlertResponse, PreviewRow } from "alert.slint";
+import { ContextMenu, MenuEntry } from "adw.slint";
 import "../../../data/fonts/rubik/Rubik%5Bwght%5D.ttf";
 
-export { Theme, CardData, GaugeData, RowData, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData, Alert, AlertForm, AlertResponse, PreviewRow }
+export { Theme, CardData, GaugeData, RowData, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData, Alert, AlertForm, AlertResponse, PreviewRow, MenuEntry }
 
 component HeaderButton inherits Rectangle {
     in property <image> icon;
@@ -132,6 +133,15 @@ export component AppWindow inherits Window {
     callback card-height(int, length);
     // A completed drag, in visible positions. The window decides what it means.
     callback reorder(int, int);
+    // A card's secondary-click menu: which entries it offers is asked as it opens, and
+    // what a chosen one does belongs to the window.
+    callback card-menu(int) -> [MenuEntry];
+    callback card-action(string);
+
+    property <[MenuEntry]> menu-entries;
+    property <bool> menu-open: false;
+    property <length> menu-x;
+    property <length> menu-y;
 
     property <bool> dark: Theme.dark;
     changed dark => {
@@ -428,6 +438,16 @@ export component AppWindow inherits Window {
                             if (event.button == PointerEventButton.left && (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel)) {
                                 root.release();
                             }
+                            // On press, not release: that is when every other menu on the
+                            // desktop appears.
+                            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.drag-index < 0) {
+                                root.menu-entries = root.card-menu(index);
+                                if (root.menu-entries.length > 0) {
+                                    root.menu-x = self.absolute-position.x + self.mouse-x;
+                                    root.menu-y = self.absolute-position.y + self.mouse-y;
+                                    root.menu-open = true;
+                                }
+                            }
                         }
 
                         moved => {
@@ -498,6 +518,21 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    if root.menu-open: ContextMenu {
+        width: root.width;
+        height: root.height;
+        entries: root.menu-entries;
+        anchor-x: root.menu-x;
+        anchor-y: root.menu-y;
+        chosen(id) => {
+            root.menu-open = false;
+            root.card-action(id);
+        }
+        dismissed => {
+            root.menu-open = false;
         }
     }
 

@@ -40,8 +40,8 @@ mod ui {
 }
 use ui::{
     Alert, AlertForm, AlertResponse, AppWindow, CandidateData, CardData, DetailData, GaugeData,
-    OptionData, PickerRowData, PreviewRow, ProviderRowData, ProviderSettings, RowData, SwitchData,
-    Theme,
+    MenuEntry, OptionData, PickerRowData, PreviewRow, ProviderRowData, ProviderSettings, RowData,
+    SwitchData, Theme,
 };
 
 fn main() -> Result<(), slint::PlatformError> {

@@ -1,5 +1,6 @@
 // The libadwaita widgets the dialogs are built from, drawn to its metrics: buttons, boxed
-// lists and their rows, entries, switches, the toggle pill, the spinner and the toast.
+// lists and their rows, entries, switches, the toggle pill, the spinner, the toast and the
+// context menu.
 
 import { Theme } from "theme.slint";
 
@@ -580,6 +581,116 @@ export component Toast inherits Rectangle {
             color: #ffffff;
             wrap: word-wrap;
             horizontal-alignment: center;
+        }
+    }
+}
+
+export struct MenuEntry {
+    id: string,
+    label: string,
+    // A separator above it: the start of a new section.
+    section: bool,
+}
+
+// A GtkPopoverMenu opened at a point: drawn over the whole window, so a press anywhere
+// outside it dismisses it and goes no further, as a popover's grab does. Arrow keys move
+// the highlight, Return chooses and Escape dismisses.
+export component ContextMenu inherits Rectangle {
+    in property <[MenuEntry]> entries;
+    // Where it was asked for, in window coordinates.
+    in property <length> anchor-x;
+    in property <length> anchor-y;
+    callback chosen(string);
+    callback dismissed();
+    property <int> highlighted: -1;
+
+    init => {
+        keys.focus();
+    }
+
+    TouchArea {
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.dismissed();
+            }
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.dismissed();
+            } else if (event.text == Key.DownArrow) {
+                root.highlighted = mod(root.highlighted + 1, root.entries.length);
+            } else if (event.text == Key.UpArrow) {
+                root.highlighted = root.highlighted <= 0 ? root.entries.length - 1 : root.highlighted - 1;
+            } else if (event.text == Key.Return || event.text == " ") {
+                if (root.highlighted >= 0) {
+                    root.chosen(root.entries[root.highlighted].id);
+                }
+            } else {
+                return reject;
+            }
+            accept
+        }
+    }
+
+    // Opens down and to the right of the point, and flips where the window has no room.
+    popover := Rectangle {
+        x: root.anchor-x + self.width > root.width - 6px ? max(6px, root.anchor-x - self.width) : root.anchor-x;
+        y: root.anchor-y + self.height > root.height - 6px ? max(6px, root.anchor-y - self.height) : root.anchor-y;
+        width: max(160px, column.preferred-width);
+        height: column.preferred-height;
+        background: Theme.popover-bg;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.card-outline;
+        drop-shadow-blur: 12px;
+        drop-shadow-offset-y: 2px;
+        drop-shadow-color: #00000040;
+
+        // Swallows presses on its own padding, which would otherwise dismiss it.
+        TouchArea { }
+
+        column := VerticalLayout {
+            padding: 6px;
+            for entry[index] in root.entries: VerticalLayout {
+                if entry.section && index > 0: Rectangle {
+                    height: 13px;
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.ink(0.1);
+                    }
+                }
+                Rectangle {
+                    height: 32px;
+                    border-radius: 6px;
+                    background: index == root.highlighted ? (item.pressed ? Theme.ink(0.16) : Theme.ink(0.07)) : transparent;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        Text {
+                            text: entry.label;
+                            color: Theme.fg;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    item := TouchArea {
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.highlighted = index;
+                            } else if (root.highlighted == index) {
+                                root.highlighted = -1;
+                            }
+                        }
+                        clicked => {
+                            root.chosen(entry.id);
+                        }
+                    }
+                }
+            }
         }
     }
 }

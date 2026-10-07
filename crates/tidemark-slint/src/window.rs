@@ -16,9 +16,9 @@ use tidemark_types::{Preferences, ProviderDefinition, ProviderStatus, Timestamp}
 use crate::alert::Alerts;
 use crate::bus::{self, DaemonProxy, Update};
 use crate::marks::Marks;
-use crate::provider_settings::ProviderDialog;
+use crate::provider_settings::{self, CardAction, ProviderDialog};
 use crate::view::{self, Body, Gauge, Tone};
-use crate::{AppWindow, CardData, GaugeData, RowData, Theme, format, model, update};
+use crate::{AppWindow, CardData, GaugeData, MenuEntry, RowData, Theme, format, model, update};
 
 /// How often the clock-dependent parts of every card are redrawn.
 const TICK: std::time::Duration = std::time::Duration::from_secs(30);
@@ -139,6 +139,8 @@ pub struct MainWindow {
     alerts: Rc<Alerts>,
     /// The open provider dialog, fed everything the daemon says while it is open.
     providers: RefCell<Option<Rc<ProviderDialog>>>,
+    /// The account whose card menu is open.
+    menu_target: RefCell<Option<(String, String)>>,
     clock: slint::Timer,
 }
 
@@ -172,6 +174,7 @@ impl MainWindow {
             marks: Rc::default(),
             alerts: Alerts::install(ui),
             providers: RefCell::default(),
+            menu_target: RefCell::default(),
             clock: slint::Timer::default(),
         });
         ui.set_message("Connecting…".into());
@@ -184,6 +187,24 @@ impl MainWindow {
             move || {
                 if let Some(main) = weak.upgrade() {
                     main.open_providers();
+                }
+            }
+        });
+        ui.on_card_menu({
+            let weak = weak.clone();
+            move |index| {
+                let entries = weak
+                    .upgrade()
+                    .map(|main| main.card_menu(index as usize))
+                    .unwrap_or_default();
+                ModelRc::new(VecModel::from(entries))
+            }
+        });
+        ui.on_card_action({
+            let weak = weak.clone();
+            move |id| {
+                if let Some(main) = weak.upgrade() {
+                    main.card_action(&id);
                 }
             }
         });
@@ -305,12 +326,10 @@ impl MainWindow {
 
     /// Opens the one provider dialog. It asks for the daemon each time it writes, so a
     /// reconnect underneath it is a new connection rather than a dead one.
-    fn open_providers(self: &Rc<Self>) {
-        let Some(ui) = self.ui.upgrade() else {
-            return;
-        };
+    fn open_providers(self: &Rc<Self>) -> Option<Rc<ProviderDialog>> {
+        let ui = self.ui.upgrade()?;
         if self.providers.borrow().is_some() || self.daemon.borrow().is_none() {
-            return;
+            return None;
         }
         let weak = Rc::downgrade(self);
         let daemon = Rc::new({
@@ -330,7 +349,45 @@ impl MainWindow {
                 }
             },
         );
-        self.providers.replace(Some(dialog));
+        self.providers.replace(Some(Rc::clone(&dialog)));
+        Some(dialog)
+    }
+
+    /// Which entries a card's menu offers, asked as it opens so a catalog that arrived
+    /// since the card was drawn is already answered for.
+    fn card_menu(&self, row: usize) -> Vec<MenuEntry> {
+        let Some((provider, account)) = self.rows.borrow().get(row).cloned() else {
+            return Vec::new();
+        };
+        let actions = provider_settings::card_actions(
+            self.definitions
+                .borrow()
+                .iter()
+                .find(|definition| definition.provider == provider),
+        );
+        self.menu_target.replace(Some((provider, account)));
+        actions
+            .into_iter()
+            .map(|action| MenuEntry {
+                id: action.id().into(),
+                label: action.label().into(),
+                section: action.starts_section(),
+            })
+            .collect()
+    }
+
+    /// A card's context menu is a shortcut into the provider dialog, never a second way of
+    /// doing what it does: the dialog is opened and asked to take the row's own action.
+    fn card_action(self: &Rc<Self>, id: &str) {
+        let Some((provider, account)) = self.menu_target.take() else {
+            return;
+        };
+        let Some(action) = CardAction::from_id(id) else {
+            return;
+        };
+        if let Some(dialog) = self.open_providers() {
+            dialog.shortcut(action, &provider, &account);
+        }
     }
 
     fn update_providers(&self) {
