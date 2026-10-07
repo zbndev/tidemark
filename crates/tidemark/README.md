@@ -22,6 +22,9 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
   and serves `org.freedesktop.Application`, so a second launch raises the first; on
   Windows a session mutex, with activation forwarded through the daemon. `--background`
   (the session autostart) keeps the window hidden, and exits when no panel takes the icon.
+  Linux launch tokens reach the first window so the desktop can finish startup
+  notification. They are captured before thread setup, cleared from the environment,
+  and retained for forwarding when another client already owns the application ID.
 - Tray: ksni on Linux, tray-icon on Windows. Accounts with their shortest window's
   percentage in card order, Open, Refresh, Quit; attention at 90%. Closing the window
   hides it while the icon is up and the preference asks for it, and ends the program

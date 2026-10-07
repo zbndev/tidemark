@@ -51,6 +51,11 @@ use ui::{
 };
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Startup metadata must be captured/cleared while the process is still single
+    // threaded. It is forwarded to the existing client or used by the first window.
+    #[cfg(unix)]
+    let launch = application::Launch::from_env_at_startup();
+
     #[cfg(windows)]
     let sink = file_log::init()
         .map(file_log::Sink::File)
@@ -81,7 +86,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     #[cfg(unix)]
-    let instance = match async_io::block_on(application::claim(!background)) {
+    let instance = match async_io::block_on(application::claim(!background, &launch)) {
         Ok(application::Claim::First(connection)) => Some(connection),
         Ok(application::Claim::Running) => return Ok(()),
         Err(error) => {
@@ -114,8 +119,15 @@ fn main() -> Result<(), slint::PlatformError> {
     // window, only destroy it, and NVIDIA's Vulkan driver crashes creating the swapchain
     // for the window brought back from the tray. SLINT_BACKEND still overrides this for
     // comparisons; the platform is selected either way so the app ID below can be set.
+    #[cfg(target_os = "linux")]
+    let launch = std::cell::RefCell::new(launch);
     let selector =
-        slint::BackendSelector::new().with_winit_window_attributes_hook(window_attributes);
+        slint::BackendSelector::new().with_winit_window_attributes_hook(move |attributes| {
+            let attributes = window_attributes(attributes);
+            #[cfg(target_os = "linux")]
+            let attributes = launch.borrow_mut().window_attributes(attributes);
+            attributes
+        });
     let renderer = match std::env::var("SLINT_BACKEND") {
         Ok(backend) => match selector.select() {
             Ok(()) => format!("SLINT_BACKEND={backend}"),
