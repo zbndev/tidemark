@@ -26,6 +26,8 @@ pub enum Appearance {
 #[derive(Debug)]
 pub enum Content {
     None,
+    /// A diagnostic that may be longer than the window; selectable and scrollable.
+    Details,
     /// An account name, previewed as the id it suggests.
     Name {
         prefill: String,
@@ -220,6 +222,7 @@ impl Alerts {
         alert.set_has_mark(false);
         match question.content {
             Content::None => alert.set_content(0),
+            Content::Details => alert.set_content(4),
             Content::Name { prefill, current } => {
                 alert.set_content(1);
                 alert.set_prefill(prefill.into());

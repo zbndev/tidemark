@@ -259,6 +259,18 @@ impl MainWindow {
                 }
             }
         });
+        ui.on_card_check_error({
+            let alerts = Rc::clone(&main.alerts);
+            move |detail| {
+                let answer = alerts.ask(Question {
+                    content: crate::alert::Content::Details,
+                    ..Question::notice("Check failed", detail.into())
+                });
+                spawn(async move {
+                    answer.await;
+                });
+            }
+        });
         ui.on_toggle_group({
             let weak = weak.clone();
             move |index| {
@@ -777,6 +789,14 @@ impl MainWindow {
             chip: chip.into(),
             chip_tone,
             footer: card.footer.unwrap_or_default().into(),
+            checking: card.checking,
+            check_failed: card.check_failed,
+            error: status
+                .message
+                .clone()
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or_else(|| status.state.clone())
+                .into(),
             slot: placement.slot as i32,
             shown: placement.shown,
             main: placement.main,

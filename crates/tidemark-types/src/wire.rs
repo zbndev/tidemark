@@ -673,6 +673,9 @@ pub struct ProviderStatus {
     /// Human-readable detail for a state that is not `ok`. Absent when there is nothing
     /// to add beyond the state itself.
     pub message: Option<String>,
+    /// Whether a metrics check is currently running, independently of the last result.
+    /// Absent from older daemons. The last good reading and its state survive a check.
+    pub checking: Option<bool>,
     /// When the reading below was taken. Absent while the account has never been polled
     /// successfully — a status can carry a state and no reading at all.
     pub captured_at: Option<i64>,
@@ -741,6 +744,7 @@ impl ProviderStatus {
             account_label: None,
             state: ProviderState::Pending.as_wire().to_owned(),
             message: None,
+            checking: None,
             captured_at: None,
             next_poll_at: None,
             windows: Vec::new(),
@@ -986,6 +990,32 @@ mod tests {
         let decoded: HashMap<String, OwnedValue> =
             encode(&pending).deserialize().expect("decodes").0;
         assert!(!decoded.contains_key("presentation"), "absent means absent");
+    }
+
+    #[test]
+    fn check_progress_is_optional_and_round_trips_without_changing_the_reading() {
+        #[derive(Debug, DeserializeDict, Type)]
+        #[zvariant(signature = "a{sv}")]
+        struct OlderClientStatus {
+            state: String,
+            windows: Vec<WindowStatus>,
+        }
+        let mut original = status();
+        let absent: HashMap<String, OwnedValue> = encode(&original).deserialize().expect("map").0;
+        assert!(!absent.contains_key("checking"));
+        let older: ProviderStatus = encode(&original).deserialize().expect("older payload").0;
+        assert_eq!(older.checking, None);
+        for checking in [true, false] {
+            original.checking = Some(checking);
+            let decoded: ProviderStatus = encode(&original).deserialize().expect("status").0;
+            assert_eq!(decoded, original);
+            assert_eq!(decoded.state(), Some(ProviderState::Ok));
+            assert_eq!(decoded.windows.len(), 2);
+            let old_client: OlderClientStatus =
+                encode(&original).deserialize().expect("old client").0;
+            assert_eq!(old_client.state, "ok");
+            assert_eq!(old_client.windows, original.windows);
+        }
     }
 
     #[test]

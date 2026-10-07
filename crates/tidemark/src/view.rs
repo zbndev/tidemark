@@ -81,9 +81,17 @@ pub struct CardView {
     pub chip: Option<format::Chip>,
     pub body: Body,
     pub footer: Option<String>,
+    pub checking: bool,
+    pub check_failed: bool,
 }
 
 pub fn card(status: &ProviderStatus, now: Timestamp) -> CardView {
+    let checking = status.checking == Some(true);
+    let check_failed = !checking
+        && !matches!(
+            status.state(),
+            Some(ProviderState::Ok | ProviderState::Pending | ProviderState::WaitingForKeyring)
+        );
     let rows = card_rows(status);
     let body = match (rows.split_first(), balance_for(status)) {
         (Some((dominant, rest)), balance) => {
@@ -102,7 +110,15 @@ pub fn card(status: &ProviderStatus, now: Timestamp) -> CardView {
         plan: status.plan().map(str::to_owned),
         chip: format::chip(status),
         body,
-        footer: format::footer(status, now),
+        footer: if checking {
+            None
+        } else if check_failed {
+            Some("check failed".into())
+        } else {
+            format::footer(status, now)
+        },
+        checking,
+        check_failed,
     }
 }
 
@@ -473,5 +489,52 @@ mod tests {
         let view = card(&status, now());
         assert_eq!(view.body, Body::Blank("No key is stored for zai.".into()));
         assert_eq!(view.chip.expect("a problem has a chip").text, "no key");
+    }
+
+    #[test]
+    fn a_failed_check_replaces_the_footer_and_keeps_the_last_reading() {
+        let mut status = status(vec![window("w18000", 18_000, 42.0)]);
+        status.set_state(ProviderState::Unreachable, Some("request timed out".into()));
+        let view = card(&status, now());
+        assert_eq!(view.footer.as_deref(), Some("check failed"));
+        assert!(matches!(view.body, Body::Reading(_)));
+        assert!(view.check_failed);
+
+        status.checking = Some(true);
+        let checking = card(&status, now());
+        assert!(checking.checking);
+        assert!(!checking.check_failed, "a retry hides the previous failure");
+        assert_eq!(checking.footer, None, "the spinner replaces the footer");
+
+        status.checking = Some(false);
+        status.set_state(ProviderState::Ok, None);
+        let success = card(&status, now());
+        assert!(!success.checking);
+        assert!(!success.check_failed);
+        assert_eq!(success.footer.as_deref(), Some("checked just now"));
+    }
+
+    #[test]
+    fn first_check_failures_have_a_footer_but_pending_and_locked_keyrings_do_not() {
+        let mut status = ProviderStatus::pending(&ProviderId::new("zai"), &AccountId::default());
+        for state in [ProviderState::Pending, ProviderState::WaitingForKeyring] {
+            status.set_state(state, None);
+            let view = card(&status, now());
+            assert_eq!(view.footer, None);
+            assert!(!view.check_failed);
+        }
+        for state in [
+            ProviderState::Malformed,
+            ProviderState::RateLimited,
+            ProviderState::CredentialRejected,
+            ProviderState::NoCredential,
+            ProviderState::KeyringUnavailable,
+            ProviderState::Unreachable,
+        ] {
+            status.set_state(state, Some("failure detail".into()));
+            let view = card(&status, now());
+            assert_eq!(view.footer.as_deref(), Some("check failed"));
+            assert!(view.check_failed);
+        }
     }
 }

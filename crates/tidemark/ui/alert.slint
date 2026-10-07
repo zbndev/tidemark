@@ -2,6 +2,7 @@
 // dimmed window. Rust asks a question through the `Alert` global and awaits the answer.
 
 import { Theme } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
 import { Button, Caption, Entry } from "adw.slint";
 
 // 0 plain, 1 suggested, 2 destructive.
@@ -35,7 +36,7 @@ export global Alert {
     in property <string> default-response;
     // Whether the default is the suggested response, which the form has to allow first.
     in property <bool> default-suggested;
-    // 0 nothing, 1 an account name, 2 a plugin account, 3 a plugin file's declarations.
+    // 0 nothing, 1 an account name, 2 a plugin account, 3 a plugin file, 4 a diagnostic.
     in property <int> content;
     in property <string> prefill;
     // A rename: the id the account already has, which the name may not suggest again.
@@ -124,7 +125,7 @@ export component AlertDialog inherits Rectangle {
         Rectangle {
             x: (root.width - self.width) / 2;
             y: (root.height - self.height) / 2;
-            width: min(372px, root.width - 24px);
+            width: min(Alert.content == 4 ? 600px : 372px, root.width - 24px);
             height: layout.preferred-height;
             background: Theme.popover-bg;
             border-radius: 14px;
@@ -145,11 +146,28 @@ export component AlertDialog inherits Rectangle {
                     horizontal-alignment: center;
                     wrap: word-wrap;
                 }
-                if Alert.body != "": Text {
+                if Alert.body != "" && Alert.content != 4: Text {
                     text: Alert.body;
                     color: Theme.fg;
                     horizontal-alignment: center;
                     wrap: word-wrap;
+                }
+
+                if Alert.content == 4: ScrollView {
+                    height: min(320px, max(48px, root.height - 180px));
+                    content-width: self.visible-width;
+                    content-height: max(self.visible-height, diagnostic.preferred-height);
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    mouse-drag-pan-enabled: false;
+                    diagnostic := TextInput {
+                        text: Alert.body;
+                        read-only: true;
+                        single-line: false;
+                        wrap: char-wrap;
+                        color: Theme.fg;
+                        selection-background-color: Theme.accent.with-alpha(0.3);
+                        selection-foreground-color: Theme.fg;
+                    }
                 }
 
                 if Alert.content == 1: VerticalLayout {

@@ -3,6 +3,7 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { Spinner } from "adw.slint";
 
 export struct GaugeData {
     percent: float,
@@ -47,6 +48,9 @@ export struct CardData {
     balance-fraction: string,
     blank: string,
     footer: string,
+    checking: bool,
+    check-failed: bool,
+    error: string,
     // Where the grid puts it: the visible position, whether it is shown at all (an account
     // of a collapsed group rests under its provider's card), and the group badge.
     slot: int,
@@ -131,6 +135,9 @@ export component Card inherits Rectangle {
     // Raised under the pointer, and further while carried.
     in property <bool> lifted;
     in property <bool> carried;
+    // Modal overlays own input and keyboard navigation while open.
+    in property <bool> interactive: true;
+    callback check-error();
 
     // The mark, the name and the plan share one baseline. Each text box ends at its
     // font's descent, the pill adds its padding, the mark adds nothing: the line sits as
@@ -178,13 +185,13 @@ export component Card inherits Rectangle {
     }
 
     // The inset keeps the rectangular viewport and its scrollbar inside the rounded
-    // surface. Padding below preserves the original 16px / 10px content margins.
+    // surface. The check indicator stays pinned outside the scrolling content.
     // Mouse dragging still belongs to the grid; overflow scrolls with the wheel/bar.
     content := ScrollView {
         x: 4px;
         y: 4px;
         width: root.width - 8px;
-        height: root.height - 8px;
+        height: footer.y - self.y;
         content-width: self.visible-width;
         content-height: max(self.visible-height, body.preferred-height);
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -194,7 +201,7 @@ export component Card inherits Rectangle {
             padding-left: 12px;
             padding-right: 12px;
             padding-top: 12px;
-            padding-bottom: 6px;
+            padding-bottom: 0px;
             spacing: 12px;
 
             HorizontalLayout {
@@ -380,16 +387,48 @@ export component Card inherits Rectangle {
                 max-height: Theme.body * 1.25 * 3;
             }
 
-            // Pinned to the bottom, so cards sharing a row line their footers up.
-            VerticalLayout {
-                vertical-stretch: root.data.body == 1 ? 0 : 1;
-                alignment: end;
-                if root.data.footer != "": Text {
-                    text: root.data.footer;
-                    color: Theme.ink(0.45);
-                    font-size: Theme.footer;
-                    overflow: elide;
+            // The last layout gap separates content from the pinned footer.
+            Rectangle { vertical-stretch: root.data.body == 1 ? 0 : 1; }
+        }
+    }
+
+    footer := Rectangle {
+        x: 16px;
+        y: root.height - self.height - 10px;
+        width: root.width - 32px;
+        height: 16px;
+
+        if root.data.checking: Spinner { }
+        if !root.data.checking && !root.data.check-failed: Text {
+            text: root.data.footer;
+            color: Theme.ink(0.45);
+            font-size: Theme.footer;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        if root.data.check-failed: failure := FocusScope {
+            enabled: root.interactive;
+            width: min(parent.width, label.preferred-width);
+            accessible-role: button;
+            accessible-label: root.data.footer;
+            key-pressed(event) => {
+                if (event.text == Key.Return || event.text == " ") {
+                    root.check-error();
+                    return accept;
                 }
+                reject
+            }
+            label := Text {
+                text: root.data.footer;
+                color: Theme.error;
+                font-size: Theme.footer;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            TouchArea {
+                enabled: root.interactive;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { failure.focus(); root.check-error(); }
             }
         }
     }

@@ -42,6 +42,10 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
 - Cards: mark, name, account caption, plan pill, state chip, headline and bar with pace
   mark, blocked windows with a padlock, reset line, absolutes, secondary rows, wallet
   balance, balance-only and blank cards, footer; redrawn every 30 s.
+- Checks: animated spinner in each card's fixed footer during manual and scheduled
+  checks; a failed check shows red `check failed`, opening the daemon's diagnostic on
+  click. Last good metrics stay visible. Progress needs a daemon with the `checking`
+  status field; older daemons still provide failure details and the last check time.
 - Grid: fixed 300 × 220 px cells, Auto or capped columns from preferences, centred.
   Status changes and account expansion keep the same geometry; overflowing card content
   scrolls inside its card.
