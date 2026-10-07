@@ -59,6 +59,17 @@ uds_windows = "1.2.1"
 # zbus 5 and async-io backend this crate already talks to the daemon over.
 ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# A click-through Wayland subsurface for the custom frame's shadow. Bind the
+# existing Winit display through libwayland, still loaded at runtime with dlopen.
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+wayland-client = { version = "0.31.15", features = ["system", "dlopen"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Protocol tests use a socket pair; no display server or GUI is launched.
+wayland-server = "0.31.14"
+
 [build-dependencies]
 slint-build = "1.18.1"
 

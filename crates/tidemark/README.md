@@ -26,8 +26,16 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
   percentage in card order, Open, Refresh, Quit; attention at 90%. Closing the window
   hides it while the icon is up and the preference asks for it, and ends the program
   otherwise.
-- Windows: the p2p endpoint, spawning the daemon into a kill-on-close job, the window's own
-  frame, file log, no console window.
+- The window's own header and controls on Linux and Windows, with native dragging and
+  resizing and no additional system title bar. Floating windows have transparent rounded
+  corners; maximized and full-screen windows have square corners. `WindowMoveArea`
+  hands dragging to the system without retaining Slint's pointer grab. Windows uses
+  its native shadow; on Wayland a synchronized, click-through subsurface paints the
+  shadow below the content, outside Winit's window geometry. It is removed when
+  maximized or full-screen and destroyed before hiding in the tray. X11 shadows
+  follow the compositor's policy.
+- Windows: the p2p endpoint, spawning the daemon into a kill-on-close job, file log,
+  no console window.
 - Cards: mark, name, account caption, plan pill, state chip, headline and bar with pace
   mark, blocked windows with a padlock, reset line, absolutes, secondary rows, wallet
   balance, balance-only and blank cards, footer; redrawn every 30 s.

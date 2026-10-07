@@ -18,9 +18,9 @@ repository = "https://github.com/zbndev/tidemark"
 authors = ["zbndev"]
 
 [workspace.lints.rust]
-# Unsafe stays denied workspace-wide. Win32 FFI needs locally-audited `unsafe`, confined
-# to `cfg(windows)` modules (Linux builds contain none) — `forbid` cannot be locally
-# overridden, hence `deny`.
+# Unsafe stays denied workspace-wide. Native Win32 calls and the borrowed Wayland
+# display bridge need locally audited exceptions in their platform modules;
+# `forbid` cannot be locally overridden, hence `deny`.
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
 

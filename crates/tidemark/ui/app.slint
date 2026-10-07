@@ -105,7 +105,9 @@ export component AppWindow inherits Window {
     preferred-height: 640px;
     min-width: 360px;
     min-height: 240px;
-    background: Theme.window-bg;
+    // The compositor can only show the desktop through the rounded corners when the
+    // window itself clears to transparent. The two backgrounds below paint its surface.
+    background: transparent;
     default-font-family: "Rubik";
     default-font-size: Theme.body;
 
@@ -119,17 +121,16 @@ export component AppWindow inherits Window {
     in property <int> max-columns: 0;
     in property <int> shown-count: 0;
     in property <length> cell-height: 200px;
-    // The window draws its own title bar and frame (Windows): the header moves the window
+    // The window draws its own title bar and frame: the header moves the window
     // and carries its controls, and Slint hands presses near the edges to the system's
     // resize. `maximized` and `minimized` are the window's own, kept in step with the
     // system, so a snap or a keyboard shortcut shows on the maximize button too.
-    in property <bool> custom-frame: false;
-    no-frame: custom-frame;
-    resize-border-width: custom-frame && !self.maximized ? 6px : 0px;
+    no-frame: true;
+    resize-border-width: !self.maximized ? 6px : 0px;
+    property <length> frame-radius: self.maximized || self.full-screen ? 0px : 12px;
 
     callback refresh();
     callback open-providers();
-    callback move-window();
     callback close-window();
     callback open-release();
     callback toggle-group(int);
@@ -275,25 +276,18 @@ export component AppWindow inherits Window {
         Rectangle {
             height: 47px;
             background: Theme.header-bg;
+            border-top-left-radius: root.frame-radius;
+            border-top-right-radius: root.frame-radius;
+            // Paint the rounded background without clipping its children: a rounded
+            // clip would put all the header text into FemtoVG's off-grid texture.
 
-            // Under everything else in the header, so its buttons keep their presses. A
-            // move starts once the pointer has travelled, so a double click can still
-            // maximize.
-            if root.custom-frame: TouchArea {
-                property <bool> moving;
-                pointer-event(event) => {
-                    if (event.kind == PointerEventKind.down) {
-                        self.moving = false;
+            // The built-in move area cancels Slint's pointer grab before handing a
+            // drag to the compositor, which may consume the matching release.
+            WindowMoveArea {
+                TouchArea {
+                    double-clicked => {
+                        root.maximized = !root.maximized;
                     }
-                }
-                moved => {
-                    if (self.pressed && !self.moving && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px)) {
-                        self.moving = true;
-                        root.move-window();
-                    }
-                }
-                double-clicked => {
-                    root.maximized = !root.maximized;
                 }
             }
 
@@ -350,7 +344,7 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    if root.custom-frame: HorizontalLayout {
+                    HorizontalLayout {
                         padding-left: 6px;
                         padding-right: 4px;
                         spacing: 12px;
@@ -401,6 +395,9 @@ export component AppWindow inherits Window {
 
         Rectangle {
             vertical-stretch: 1;
+            background: Theme.window-bg;
+            border-bottom-left-radius: root.frame-radius;
+            border-bottom-right-radius: root.frame-radius;
 
             if root.page == 0: StatusPage {
                 icon: @image-url("icons/network-offline-symbolic.svg");
@@ -416,6 +413,8 @@ export component AppWindow inherits Window {
 
             scroller := ScrollView {
                 visible: root.page == 2;
+                // Keep the scrollbars and dragged cards above the transparent corners.
+                height: parent.height - root.frame-radius;
                 content-width: self.visible-width;
                 content-height: root.content-height;
 
@@ -564,25 +563,30 @@ export component AppWindow inherits Window {
     if Prefs.open: PreferencesDialog {
         width: root.width;
         height: root.height;
+        border-radius: root.frame-radius;
     }
 
     if About.open: AboutDialog {
         width: root.width;
         height: root.height;
+        border-radius: root.frame-radius;
     }
 
     if ReleaseNotes.open: ReleaseNotesDialog {
         width: root.width;
         height: root.height;
+        border-radius: root.frame-radius;
     }
 
     if ProviderSettings.open: ProviderDialog {
         width: root.width;
         height: root.height;
+        border-radius: root.frame-radius;
     }
 
     if Alert.open: AlertDialog {
         width: root.width;
         height: root.height;
+        border-radius: root.frame-radius;
     }
 }

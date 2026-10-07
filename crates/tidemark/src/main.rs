@@ -167,7 +167,7 @@ fn window_attributes(
     #[cfg(windows)]
     let attributes = {
         use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
-        attributes.with_undecorated_shadow(frame::CUSTOM)
+        attributes.with_undecorated_shadow(true)
     };
     attributes
 }
