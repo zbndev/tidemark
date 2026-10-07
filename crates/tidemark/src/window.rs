@@ -19,6 +19,7 @@ use crate::bus::{self, DaemonProxy, Update};
 use crate::marks::Marks;
 use crate::preferences::PreferencesDialog;
 use crate::provider_settings::{self, CardAction, ProviderDialog};
+use crate::tray::{self, Tray};
 use crate::view::{self, Body, Gauge, Tone};
 use crate::{AppWindow, CardData, GaugeData, MenuEntry, RowData, Theme, format, model, update};
 
@@ -38,6 +39,12 @@ pub enum Appearance {
 const PAGE_WAITING: i32 = 0;
 const PAGE_WELCOME: i32 = 1;
 const PAGE_GRID: i32 = 2;
+
+/// Whether the close button hides the window rather than ending the program: only with an
+/// icon in the panel to bring it back, and only while the preference asks for it.
+fn should_minimize_on_close(tray_available: bool, preference: bool) -> bool {
+    tray_available && preference
+}
 
 /// Where one account's card goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +159,11 @@ pub struct MainWindow {
     daemon_version: RefCell<Option<String>>,
     /// The renderer the window is drawn with, for the same page.
     renderer: String,
+    /// The panel icon, once a status-notifier host has accepted it. `None` in a session
+    /// that has none, which is also what leaves the close button closing the program.
+    tray: RefCell<Option<Tray>>,
+    /// Read at close time, so changing the preference needs no reconnect.
+    minimize_on_close: Cell<bool>,
     clock: slint::Timer,
 }
 
@@ -167,7 +179,10 @@ impl std::fmt::Debug for MainWindow {
 }
 
 impl MainWindow {
-    pub fn start(ui: &AppWindow, renderer: String) -> Rc<Self> {
+    /// Builds the window's state and connects it to the daemon. A `background` start is the
+    /// session's autostart: the window stays hidden, and the process stays only if a panel
+    /// accepts the tray icon, rather than leaving something invisible behind.
+    pub fn start(ui: &AppWindow, renderer: String, background: bool) -> Rc<Self> {
         let cards = Rc::new(VecModel::default());
         ui.set_cards(ModelRc::from(Rc::clone(&cards)));
         let main = Rc::new(Self {
@@ -199,6 +214,8 @@ impl MainWindow {
             preferences_dialog: RefCell::default(),
             daemon_version: RefCell::default(),
             renderer,
+            tray: RefCell::default(),
+            minimize_on_close: Cell::new(true),
             clock: slint::Timer::default(),
         });
         ui.set_message("Connecting…".into());
@@ -288,10 +305,92 @@ impl MainWindow {
             }
         });
 
+        ui.window().on_close_requested({
+            let weak = weak.clone();
+            move || {
+                let hide = weak.upgrade().is_some_and(|main| {
+                    should_minimize_on_close(
+                        main.tray.borrow().is_some(),
+                        main.minimize_on_close.get(),
+                    )
+                });
+                if !hide {
+                    quit();
+                }
+                slint::CloseRequestResponse::HideWindow
+            }
+        });
+        main.start_tray(background);
+
         // The watcher's closure owns the only strong reference, for the life of the process.
         let held = Rc::clone(&main);
         bus::watch(move |update| held.handle(update));
         main
+    }
+
+    /// Puts the icon on the panel. Until that has worked the close button ends the
+    /// program: hiding a window with nothing left to bring it back is worse than ignoring
+    /// the preference.
+    fn start_tray(self: &Rc<Self>, background: bool) {
+        let weak = Rc::downgrade(self);
+        spawn(async move {
+            let (commands, inbox) = async_channel::unbounded::<tray::Command>();
+            let tray = match Tray::spawn(commands).await {
+                Ok(tray) => tray,
+                Err(error) => {
+                    tracing::info!(
+                        %error,
+                        "no status-notifier host took the icon; the close button still closes"
+                    );
+                    if background {
+                        quit();
+                    }
+                    return;
+                }
+            };
+            let Some(main) = weak.upgrade() else {
+                return;
+            };
+            main.tray.replace(Some(tray));
+            main.update_tray();
+            drop(main);
+
+            while let Ok(command) = inbox.recv().await {
+                let Some(main) = weak.upgrade() else {
+                    return;
+                };
+                main.obey(command);
+            }
+        });
+    }
+
+    /// Does what the panel asked for. The tray's own thread only put it on a channel.
+    fn obey(&self, command: tray::Command) {
+        match command {
+            tray::Command::Present => {
+                if let Some(ui) = self.ui.upgrade() {
+                    present(&ui);
+                }
+            }
+            tray::Command::Refresh => self.refresh_now(),
+            tray::Command::Quit => {
+                // Taken down here rather than left to the process exit, which on Windows
+                // leaves the icon in the notification area until the pointer passes over it.
+                self.tray.take();
+                quit();
+            }
+        }
+    }
+
+    /// Tells the panel what the window now knows.
+    fn update_tray(&self) {
+        if let Some(tray) = self.tray.borrow().as_ref() {
+            tray.show(
+                &self.statuses.borrow(),
+                &model::titles(&self.definitions.borrow()),
+                self.daemon.borrow().is_some(),
+            );
+        }
     }
 
     fn callback(weak: &Weak<Self>, action: impl Fn(&Self) + 'static) -> impl Fn() + 'static {
@@ -355,6 +454,7 @@ impl MainWindow {
             }
         }
         self.update_providers();
+        self.update_tray();
     }
 
     /// Opens the one Preferences dialog on what the daemon last said. Like the provider
@@ -395,7 +495,12 @@ impl MainWindow {
 
     fn open_about(&self) {
         if let Some(ui) = self.ui.upgrade() {
-            crate::about::present(&ui, self.daemon_version.borrow().as_deref(), &self.renderer);
+            crate::about::present(
+                &ui,
+                self.daemon_version.borrow().as_deref(),
+                &self.renderer,
+                self.tray.borrow().is_some(),
+            );
         }
     }
 
@@ -647,6 +752,7 @@ impl MainWindow {
                 .count() as i32,
         );
         self.update_cell_height();
+        self.update_tray();
     }
 
     fn card_data(
@@ -821,6 +927,7 @@ impl MainWindow {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
+        self.minimize_on_close.set(preferences.minimize_on_close);
         self.theme.replace(
             preferences
                 .theme
@@ -910,6 +1017,14 @@ pub fn present(ui: &AppWindow) {
     window.with_winit_window(|window| window.focus_window());
 }
 
+/// Ends the event loop, which `main` runs until told to so that a hidden window does not end
+/// the program.
+pub fn quit() {
+    if let Err(error) = slint::quit_event_loop() {
+        tracing::error!(%error, "the event loop would not stop");
+    }
+}
+
 pub fn spawn(future: impl std::future::Future<Output = ()> + 'static) {
     if let Err(error) = slint::spawn_local(future) {
         tracing::error!(%error, "the event loop refused a task");
@@ -947,6 +1062,14 @@ mod tests {
             }])),
             ..CardData::default()
         }
+    }
+
+    #[test]
+    fn close_hides_only_when_both_the_tray_and_preference_allow_it() {
+        assert!(should_minimize_on_close(true, true));
+        assert!(!should_minimize_on_close(true, false));
+        assert!(!should_minimize_on_close(false, true));
+        assert!(!should_minimize_on_close(false, false));
     }
 
     #[test]

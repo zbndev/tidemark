@@ -36,9 +36,13 @@ pub fn install(ui: &AppWindow) {
     });
 
     let weak = ui.as_weak();
+    // As the system's own close button would, so the window decides once whether a close
+    // hides it in the tray or ends the program.
     ui.on_close_window(move || {
         if let Some(ui) = weak.upgrade()
-            && let Err(error) = ui.window().hide()
+            && let Err(error) = ui
+                .window()
+                .dispatch_event_with_result(slint::platform::WindowEvent::CloseRequested)
         {
             tracing::warn!(%error, "could not close the window");
         }

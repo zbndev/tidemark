@@ -310,13 +310,15 @@ provider slugs are — not renamable once shipped.
 
 ### API floor
 
-Slint **1.18**, drawn with FemtoVG on wgpu — Vulkan on Linux, Direct3D 12 on Windows — and
+Slint **1.18**, drawn with FemtoVG — on OpenGL on Linux, on wgpu (Direct3D 12) on Windows — and
 pinned with `~` because the winit accessor the window frame uses is an unstable feature
 that may change in any minor release. Not Skia: its renderer hints each glyph while the
-text layout places glyphs at unhinted advances, so small text crowds and drifts.
+text layout places glyphs at unhinted advances, so small text crowds and drifts. Not
+Vulkan on Linux: Wayland cannot hide a window, only destroy it, so a window brought back
+from the tray is a new surface, and NVIDIA's driver crashes creating its swapchain.
 
-The client links fontconfig and nothing else of the desktop's; winit and wgpu open the
-Wayland, X11, xkbcommon and Vulkan libraries with `dlopen`, so packaging names them by hand.
+The client links fontconfig and nothing else of the desktop's; winit and the renderer open
+the Wayland, X11, xkbcommon and EGL libraries with `dlopen`, so packaging names them by hand.
 
 The floor is *the newest we can test against*, not the oldest distribution we could
 theoretically reach. If a toolkit release would make the interface better, we take it, and
@@ -670,7 +672,7 @@ they record bind the Slint client all the same; it draws them in `crates/tidemar
   marked wrong.
 - **The one page that is ours is Troubleshooting**, and it is there so those questions are
   answered before they are asked: the client's version, the version the daemon on the other
-  end reported, the GTK and libadwaita the process actually loaded, the desktop and session
+  end reported, the toolkit version and renderer actually drawing, the desktop and session
   type, and whether a status-notifier host took the icon — which is the difference between
   a close button that hides the window and one that ends the program. Runtime values, not
   the compiled floor: the floor is what we built against and no evidence at all about the

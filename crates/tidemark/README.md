@@ -1,6 +1,6 @@
 # tidemark — the desktop client
 
-The desktop client, drawn with Slint (FemtoVG on wgpu: Vulkan on Linux, Direct3D 12 on
+The desktop client, drawn with Slint (FemtoVG: OpenGL on Linux, wgpu on Direct3D 12 on
 Windows). It speaks to `tidemarkd` over D-Bus and nothing else. It replaced the GTK and
 libadwaita client, whose look it keeps: `ui/theme.slint` and `ui/adw.slint` spell out
 libadwaita's palette and widgets.
@@ -21,7 +21,11 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
 - One client per session: on Linux it owns `io.github.zbndev.Tidemark` on the session bus
   and serves `org.freedesktop.Application`, so a second launch raises the first; on
   Windows a session mutex, with activation forwarded through the daemon. `--background`
-  (the session autostart) exits until there is a tray to keep the client in.
+  (the session autostart) keeps the window hidden, and exits when no panel takes the icon.
+- Tray: ksni on Linux, tray-icon on Windows. Accounts with their shortest window's
+  percentage in card order, Open, Refresh, Quit; attention at 90%. Closing the window
+  hides it while the icon is up and the preference asks for it, and ends the program
+  otherwise.
 - Windows: the p2p endpoint, spawning the daemon into a kill-on-close job, the window's own
   frame, file log, no console window.
 - Cards: mark, name, account caption, plan pill, state chip, headline and bar with pace
@@ -43,10 +47,10 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
 - Primary menu with Preferences (General, Network and Data pages, every value the
   daemon's, a refused change put back) and About (details, issue link, legal, and a
   troubleshooting page with the daemon's version, the renderer, the desktop and session,
-  copied or saved through the file chooser).
+  whether the tray was accepted, copied or saved through the file chooser).
 
 ## Not yet
 
 The GTK client had these; they are still to be drawn here: the detail (history chart)
-dialog; release notes preview and the restart prompt; tray and close-to-tray; keyboard
+dialog; release notes preview and the restart prompt; keyboard
 focus on cards, and F10 for the primary menu.

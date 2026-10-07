@@ -104,7 +104,6 @@
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
               pkgs.libxkbcommon
               pkgs.wayland
-              pkgs.vulkan-loader
               pkgs.libGL
               pkgs.xorg.libX11
               pkgs.xorg.libXcursor

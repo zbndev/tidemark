@@ -10,7 +10,6 @@
   fontconfig,
   libxkbcommon,
   wayland,
-  vulkan-loader,
   libGL,
   xorg,
   sqlite,
@@ -20,11 +19,10 @@
 let
   manifest = builtins.fromTOML (builtins.readFile ../Cargo.toml);
   # Loaded with dlopen by the client, so no linker sees them: winit's Wayland, X11 and
-  # keyboard libraries, and the Vulkan and GL loaders wgpu chooses between.
+  # keyboard libraries, and the GL loader Slint's OpenGL renderer draws through.
   runtimeLibraries = [
     libxkbcommon
     wayland
-    vulkan-loader
     libGL
     xorg.libX11
     xorg.libXcursor

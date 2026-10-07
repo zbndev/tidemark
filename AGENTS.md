@@ -5,7 +5,7 @@
 **Branch:** main
 
 ## OVERVIEW
-Tidemark tracks AI-provider quota windows and pace. Six Rust crates separate daemon state, provider I/O, shared vocabulary, the generated D-Bus proxy, Slint presentation, and `tidemarkctl`; Rust edition 2024, MSRV 1.92, Slint 1.18 (FemtoVG on wgpu).
+Tidemark tracks AI-provider quota windows and pace. Six Rust crates separate daemon state, provider I/O, shared vocabulary, the generated D-Bus proxy, Slint presentation, and `tidemarkctl`; Rust edition 2024, MSRV 1.92, Slint 1.18 (FemtoVG: OpenGL on Linux, wgpu on Windows).
 
 ## STRUCTURE
 ```text
@@ -86,7 +86,7 @@ On the GUI side, `bus::watch` drives `DaemonProxy` on Slint's event loop; signal
 ## UNIQUE STYLES
 - Outbound application identity is `Tidemark/<version>`, not browser/executable impersonation; T3 Chat separately uses a browser-emulating transport stack.
 - Linux uses session D-Bus and systemd user services; Windows uses per-user zbus p2p AF_UNIX, Task Scheduler/HKCU Run, jobs and native tray/toasts.
-- Linux tray integration (still to be ported to the Slint client) uses ksni, not libayatana-appindicator-glib. Rubik and the UI icons are compiled into the client; provider marks are runtime assets.
+- The Linux tray uses ksni, not libayatana-appindicator-glib; Windows uses tray-icon on its own thread. Rubik and the UI icons are compiled into the client; provider marks are runtime assets.
 - Provider SVG marks use filled outlines rather than strokes; desktop integration checks enforce this.
 - UI is `.slint` markup under `crates/tidemark/ui/` drawn to libadwaita's palette and metrics (`theme.slint`, `adw.slint`); decisions are pure Rust, state uses `Rc<RefCell<_>>`/`Cell`/`Weak`. FemtoVG blurs text under rounded clips and `opacity` layers, so neither is used. Card and notification thresholds share 70% / 90%.
 - Simple API-key providers register alphabetically in `keyed::CATALOG`; unusual auth/multi-request clients use `HandSpec` and daemon `HAND_WRITTEN`, not forced `Keyed` implementations. Provider additions also update README and `docs/TRADEMARKS.md`.
@@ -115,7 +115,7 @@ busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark i
 ## NOTES
 - Commands above are documented entry points, not a claim they passed during knowledge-base generation.
 - Secret Service tests skip without a session bus; use plain `cargo test --workspace` for the local gate. Linux validation does not cover Windows-only branches; T3 Chat is Unix-only and Windows Antigravity local agy remains gated.
-- Build prerequisites (Debian/Ubuntu): `libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev`; Fedora: `fontconfig-devel sqlite-devel pkgconf-pkg-config cmake gcc-c++ clang-devel`. At run time the client opens xkbcommon, the Wayland client (or X11) and the Vulkan loader with dlopen.
+- Build prerequisites (Debian/Ubuntu): `libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev`; Fedora: `fontconfig-devel sqlite-devel pkgconf-pkg-config cmake gcc-c++ clang-devel`. At run time the client opens xkbcommon, the Wayland client (or X11) and libEGL with dlopen.
 - T3 Chat's BoringSSL client needs CMake, a C++ compiler, and libclang; `bindgen` generates its bindings at build time. The repository has no `build.rs`, no Blueprint, and no gresource files to precompile.
 - Release only with `scripts/release.sh X.X.X` from clean, up-to-date `main`. It bumps workspace/dependency versions, lockfile, AppStream release entry, and PKGBUILD; commits, tags, and pushes without running tests. AppStream release prose is human work; tag push starts release CI.
 - SQLite is system-linked; TLS uses rustls. Arch packaging disables makepkg LTO for aws-lc-sys.

@@ -24,9 +24,9 @@ license=('MIT')
 # library rather than a vendored copy, on purpose (CONTEXT.md § API floor).
 #
 # The client links fontconfig and nothing else of the desktop's: winit loads xkbcommon and
-# the Wayland client with dlopen, and wgpu the Vulkan loader, so namcap and ldd cannot see
-# them and they are named here. A Vulkan driver is the user's choice of `vulkan-driver`.
-depends=('sqlite' 'dbus' 'fontconfig' 'libxkbcommon' 'wayland' 'vulkan-icd-loader')
+# the Wayland client with dlopen, and Slint's OpenGL renderer libEGL, so namcap and ldd
+# cannot see them and they are named here.
+depends=('sqlite' 'dbus' 'fontconfig' 'libxkbcommon' 'wayland' 'libglvnd')
 optdepends=(
     'libx11: an X11 session'
     'libxcursor: an X11 session'

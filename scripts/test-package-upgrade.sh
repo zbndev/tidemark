@@ -190,7 +190,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         systemd systemd-sysv dbus-user-session dbus-daemon \
         libfontconfig1 libsqlite3-0 hicolor-icon-theme \
-        libxkbcommon0 libwayland-client0 libvulkan1 \
+        libxkbcommon0 libwayland-client0 libegl1 \
     && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 
@@ -206,7 +206,7 @@ DOCKERFILE
 docker build --network host -q -t tidemark-test-fedora - >/dev/null <<'DOCKERFILE'
 FROM fedora:44
 RUN dnf install -y systemd dbus-daemon fontconfig sqlite-libs hicolor-icon-theme \
-        libxkbcommon libwayland-client vulkan-loader util-linux \
+        libxkbcommon libwayland-client libglvnd-egl util-linux \
     && dnf clean all
 DOCKERFILE
 

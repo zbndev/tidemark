@@ -14,6 +14,7 @@ Slint presentation and desktop lifecycle, an IPC client of `tidemarkd`. Markup i
 | Alerts | `src/alert.rs`, `ui/alert.slint` | Questions awaited as futures |
 | Preferences | `src/preferences.rs`, `ui/preferences.slint` | Daemon-owned values, optimistic rows, proxy form |
 | About | `src/about.rs`, `ui/about.slint` | Links and the troubleshooting page |
+| Tray and close-to-tray | `src/tray.rs`, `window.rs` (`start_tray`, `on_close_requested`) | Menu model is pure; backends on their own threads send `Command`s |
 | Card content | `src/view.rs`, `ui/card.slint` | Pure status-to-card decisions; markup only draws |
 | Grid, drag and window | `ui/app.slint` | Slot geometry, drag, settle, header bar |
 | Widgets and palette | `ui/adw.slint`, `ui/theme.slint` | libadwaita metrics and colours |

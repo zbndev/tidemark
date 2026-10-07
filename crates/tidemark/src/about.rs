@@ -84,9 +84,9 @@ async fn choose_destination() -> Option<PathBuf> {
 }
 
 /// Opens the dialog on its summary, with the troubleshooting page filled in as of now.
-pub fn present(ui: &AppWindow, daemon: Option<&str>, renderer: &str) {
+pub fn present(ui: &AppWindow, daemon: Option<&str>, renderer: &str, tray: bool) {
     let about = ui.global::<About>();
-    about.set_debug_info(debug_info(daemon, renderer).into());
+    about.set_debug_info(debug_info(daemon, renderer, tray).into());
     about.set_page(0);
     about.set_open(true);
 }
@@ -94,22 +94,36 @@ pub fn present(ui: &AppWindow, daemon: Option<&str>, renderer: &str) {
 /// What the troubleshooting page shows, and what its copy button puts on the clipboard.
 ///
 /// `daemon` is the version `tidemarkd` reported, absent when nothing answered on the bus;
-/// `renderer` is the one the window is actually drawn with, which falls back when wgpu
-/// finds no adapter.
-fn debug_info(daemon: Option<&str>, renderer: &str) -> String {
+/// `renderer` is the one the window is actually drawn with, which falls back when the
+/// preferred one cannot start; `tray` is whether a status-notifier host accepted the icon,
+/// which is the difference between a close button that hides the window and one that ends
+/// the program.
+fn debug_info(daemon: Option<&str>, renderer: &str, tray: bool) -> String {
     compose(
         daemon,
         renderer,
+        tray,
         &environment("XDG_CURRENT_DESKTOP"),
         &environment("XDG_SESSION_TYPE"),
     )
 }
 
-fn compose(daemon: Option<&str>, renderer: &str, desktop: &str, session: &str) -> String {
+fn compose(
+    daemon: Option<&str>,
+    renderer: &str,
+    tray: bool,
+    desktop: &str,
+    session: &str,
+) -> String {
     let client = env!("CARGO_PKG_VERSION");
     let slint = env!("TIDEMARK_SLINT_VERSION");
     let daemon = daemon.unwrap_or("not running");
     let os = std::env::consts::OS;
+    let tray = if tray {
+        "accepted"
+    } else {
+        "no status-notifier host"
+    };
     format!(
         "Tidemark: {client}\n\
          tidemarkd: {daemon}\n\
@@ -118,7 +132,7 @@ fn compose(daemon: Option<&str>, renderer: &str, desktop: &str, session: &str) -
          OS: {os}\n\
          Desktop: {desktop}\n\
          Session: {session}\n\
-         Tray: none\n"
+         Tray: {tray}\n"
     )
 }
 
@@ -134,15 +148,17 @@ mod tests {
 
     #[test]
     fn a_missing_daemon_is_stated_rather_than_left_blank() {
-        let info = compose(None, "femtovg-wgpu", "Hyprland", "wayland");
+        let info = compose(None, "femtovg-wgpu", false, "Hyprland", "wayland");
         assert!(info.contains("tidemarkd: not running"), "{info}");
+        assert!(info.contains("Tray: no status-notifier host"), "{info}");
         assert!(info.contains("Renderer: femtovg-wgpu"), "{info}");
     }
 
     #[test]
     fn a_connected_daemon_reports_its_own_version() {
-        let info = compose(Some("0.2.0"), "femtovg-wgpu", "GNOME", "x11");
+        let info = compose(Some("0.2.0"), "femtovg-wgpu", true, "GNOME", "x11");
         assert!(info.contains("tidemarkd: 0.2.0"), "{info}");
+        assert!(info.contains("Tray: accepted"), "{info}");
         assert!(info.contains("Desktop: GNOME"), "{info}");
         assert!(info.contains("Session: x11"), "{info}");
     }

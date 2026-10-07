@@ -21,11 +21,14 @@ const INTERFACE: &str = "org.freedesktop.Application";
 pub enum Claim {
     /// The first client: the connection holds the name for as long as it lives.
     First(zbus::Connection),
-    /// Another client holds it and has been asked to come forward.
+    /// Another client holds it, and has been asked to come forward unless this is a
+    /// background start.
     Running,
 }
 
-pub async fn claim() -> zbus::Result<Claim> {
+/// `activate` is false for the session's autostart, which finding a client already running
+/// leaves alone rather than raising its window at login.
+pub async fn claim(activate: bool) -> zbus::Result<Claim> {
     let connection = zbus::Connection::session().await?;
     match connection
         .request_name_with_flags(ids::APP_ID, RequestNameFlags::DoNotQueue.into())
@@ -35,7 +38,9 @@ pub async fn claim() -> zbus::Result<Claim> {
             Ok(Claim::First(connection))
         }
         Ok(RequestNameReply::Exists | RequestNameReply::InQueue) | Err(zbus::Error::NameTaken) => {
-            activate_running(&connection).await?;
+            if activate {
+                activate_running(&connection).await?;
+            }
             Ok(Claim::Running)
         }
         Err(error) => Err(error),

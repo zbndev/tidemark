@@ -230,7 +230,7 @@ format, the sandbox and a worked example.
 
 ## Requirements
 
-A Wayland or X11 desktop and a Vulkan driver. The packages are built for **Fedora 44+** and
+A Wayland or X11 desktop with OpenGL. The packages are built for **Fedora 44+** and
 **Ubuntu 26.04 LTS+** and their derivatives; Arch and other rolling releases are fine.
 
 ## Building from source

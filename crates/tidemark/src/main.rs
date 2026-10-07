@@ -30,6 +30,9 @@ mod provider_settings;
 mod registry;
 #[cfg(windows)]
 mod single_instance;
+mod tray;
+#[cfg(windows)]
+mod tray_icon_rgba;
 #[allow(dead_code)]
 mod update;
 mod view;
@@ -66,16 +69,12 @@ fn main() -> Result<(), slint::PlatformError> {
         println!("tidemark {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    // The session's autostart. A hidden client stays only while a tray icon can bring it
-    // back (CONTEXT.md § Interface), and this one has no tray yet: leaving an invisible
-    // process behind is worse than not starting.
-    if args.iter().any(|argument| argument == "--background") {
-        tracing::info!("started in the background with no tray to keep; exiting");
-        return Ok(());
-    }
+    // The session's autostart: the window stays hidden, and the process stays only once a
+    // tray icon can bring it back (CONTEXT.md § Interface).
+    let background = args.iter().any(|argument| argument == "--background");
 
     #[cfg(unix)]
-    let instance = match async_io::block_on(application::claim()) {
+    let instance = match async_io::block_on(application::claim(!background)) {
         Ok(application::Claim::First(connection)) => Some(connection),
         Ok(application::Claim::Running) => return Ok(()),
         Err(error) => {
@@ -102,21 +101,24 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     };
 
-    // FemtoVG on wgpu: Direct3D 12 on Windows, Vulkan on Linux. Not Skia — Slint's Skia
-    // renderer hints each glyph's outline while parley places it at unhinted advances, so
-    // small text comes out with letters crowding or drifting apart. SLINT_BACKEND still
-    // overrides this for comparisons.
+    // FemtoVG: Slint's Skia renderer hints each glyph's outline while parley places it at
+    // unhinted advances, so small text comes out with letters crowding or drifting apart.
+    // On Windows it runs on wgpu (Direct3D 12). On Linux on OpenGL: Wayland cannot hide a
+    // window, only destroy it, and NVIDIA's Vulkan driver crashes creating the swapchain
+    // for the window brought back from the tray. SLINT_BACKEND still overrides this for
+    // comparisons; the platform is selected either way so the app ID below can be set.
+    let selector =
+        slint::BackendSelector::new().with_winit_window_attributes_hook(window_attributes);
     let renderer = match std::env::var("SLINT_BACKEND") {
-        Ok(backend) => format!("SLINT_BACKEND={backend}"),
-        Err(_) => match slint::BackendSelector::new()
-            .renderer_name("femtovg-wgpu".into())
-            .with_winit_window_attributes_hook(window_attributes)
-            .select()
-        {
-            Ok(()) => "femtovg-wgpu".to_owned(),
+        Ok(backend) => match selector.select() {
+            Ok(()) => format!("SLINT_BACKEND={backend}"),
+            Err(error) => format!("Slint's default (SLINT_BACKEND={backend} failed: {error})"),
+        },
+        Err(_) => match selector.renderer_name(RENDERER.into()).select() {
+            Ok(()) => RENDERER.to_owned(),
             Err(error) => {
-                tracing::warn!(%error, "wgpu is unavailable; using Slint's default renderer");
-                format!("Slint's default (femtovg-wgpu failed: {error})")
+                tracing::warn!(%error, renderer = RENDERER, "using Slint's default renderer");
+                format!("Slint's default ({RENDERER} failed: {error})")
             }
         },
     };
@@ -129,16 +131,26 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     frame::install(&ui);
     about::install(&ui);
-    let _main = window::MainWindow::start(&ui, renderer);
+    let _main = window::MainWindow::start(&ui, renderer, background);
     #[cfg(unix)]
     if let Some(connection) = &instance
         && let Err(error) = async_io::block_on(application::serve(connection, &ui))
     {
         tracing::warn!(%error, "a second launch will not be able to raise this window");
     }
-    tracing::info!("starting desktop client");
-    slint::ComponentHandle::run(&ui)
+    tracing::info!(background, "starting desktop client");
+    if !background {
+        slint::ComponentHandle::show(&ui)?;
+    }
+    // Until told to quit, not until the last window is hidden: a window closed to the tray
+    // is hidden, and the program is still running.
+    slint::run_event_loop_until_quit()
 }
+
+#[cfg(windows)]
+const RENDERER: &str = "femtovg-wgpu";
+#[cfg(not(windows))]
+const RENDERER: &str = "femtovg";
 
 /// A window that draws its own frame still wants the system's shadow around it.
 fn window_attributes(
