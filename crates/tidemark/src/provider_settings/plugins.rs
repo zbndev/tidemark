@@ -10,19 +10,15 @@
 //! is shown and keep the confirm button off an input that has no chance. A second opinion
 //! living in the client is a second opinion that goes stale.
 
-use adw::prelude::*;
-use gtk::gio;
-use tidemark_types::{PluginInfo, account_id_suggestion};
+use std::path::PathBuf;
 
-use super::{name_suggests_usable, reason};
-use crate::bus::DaemonProxy;
-use crate::mark;
+use tidemark_types::PluginInfo;
 
 /// The label/value rows the import dialog shows, in the order they are read.
 ///
 /// The header and the prefix are the point of the whole dialog: together they say exactly
 /// where this stranger's file will put the key that is about to be handed to it.
-pub(super) fn preview(info: &PluginInfo) -> Vec<(String, String)> {
+pub fn preview(info: &PluginInfo) -> Vec<(String, String)> {
     vec![
         ("Provider id".to_owned(), info.id.clone()),
         ("Name".to_owned(), info.name.clone()),
@@ -45,9 +41,25 @@ fn prefix(prefix: &str) -> String {
     }
 }
 
+/// The one sentence that says where the key is about to be sent, in the shape the request
+/// will actually take. It is the whole reason the endpoint and the key are asked for on
+/// the same screen.
+pub fn request_line(info: &PluginInfo) -> String {
+    format!(
+        "{} request, key sent in {}{}",
+        info.method,
+        info.api_key_header,
+        if info.api_key_prefix.is_empty() {
+            String::new()
+        } else {
+            format!(" after {:?}", info.api_key_prefix)
+        }
+    )
+}
+
 /// What to say before a plain-http endpoint is accepted, or nothing when there is nothing
 /// to warn about.
-pub(super) fn endpoint_warning(url: &str) -> Option<String> {
+pub fn endpoint_warning(url: &str) -> Option<String> {
     url.trim().starts_with("http://").then(|| {
         "This endpoint is plain http. The API key will cross the network in clear, where \
          anything between this machine and the endpoint can read it."
@@ -62,7 +74,7 @@ pub(super) fn endpoint_warning(url: &str) -> Option<String> {
 /// chance — a bare host, a path with no origin, a scheme that is not http, credentials in
 /// the URL, a fragment — so that the obvious mistakes are caught while typing rather than
 /// as an error toast after a round trip.
-pub(super) fn valid_endpoint(url: &str) -> bool {
+pub fn valid_endpoint(url: &str) -> bool {
     let url = url.trim();
     let Some(rest) = url
         .strip_prefix("https://")
@@ -80,291 +92,20 @@ pub(super) fn valid_endpoint(url: &str) -> bool {
     !authority.is_empty() && !authority.contains('@')
 }
 
-/// What the account form was filled in with, in the order the daemon is told it.
-#[derive(Debug)]
-pub(super) struct AccountForm {
-    /// The account id, already suggested from the typed name. `None` when the caller
-    /// already knows which account this is for.
-    pub(super) slug: Option<String>,
-    pub(super) endpoint: String,
-    pub(super) allow_insecure_http: bool,
-    pub(super) key: String,
-}
-
-/// Asks for everything one plugin account needs, in one form.
-///
-/// Together rather than in three dialogs because they are one decision: the endpoint says
-/// where the key goes, and agreeing to the second without seeing the first is the mistake
-/// this whole flow exists to prevent. Returns `None` when the dialog was dismissed.
-///
-/// A second account of an already-configured plugin inherits its sibling's endpoint, so
-/// the URL is asked for only when there is nothing to inherit — the first account, or an
-/// older daemon that does not publish endpoints.
-pub(super) async fn account_dialog(
-    parent: &impl IsA<gtk::Widget>,
-    info: &PluginInfo,
-    heading: &str,
-    ask_for_name: bool,
-    ask_for_endpoint: bool,
-) -> Option<AccountForm> {
-    let dialog = adw::AlertDialog::builder().heading(heading).build();
-    dialog.add_responses(&[("cancel", "Cancel"), ("accept", "Add")]);
-    dialog.set_default_response(Some("accept"));
-    dialog.set_close_response("cancel");
-    dialog.set_response_appearance("accept", adw::ResponseAppearance::Suggested);
-
-    let content = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(12)
-        .build();
-
-    let name = gtk::Entry::builder()
-        .placeholder_text("Account name")
-        .activates_default(true)
-        .build();
-    let name_preview = gtk::Label::builder()
-        .xalign(0.0)
-        .css_classes(["caption", "dim-label"])
-        .build();
-    if ask_for_name {
-        content.append(&name);
-        content.append(&name_preview);
-    }
-
-    let endpoint = gtk::Entry::builder()
-        .placeholder_text("https://example.com/v1/usage")
-        .activates_default(true)
-        .build();
-    if ask_for_endpoint {
-        content.append(&label("Metrics URL"));
-        content.append(&endpoint);
-    }
-
-    // The one sentence that says where the key is about to be sent, in the shape the
-    // request will actually take. It is the whole reason the endpoint and the key are
-    // asked for on the same screen.
-    content.append(&caption(&format!(
-        "{} request, key sent in {}{}",
-        info.method,
-        info.api_key_header,
-        if info.api_key_prefix.is_empty() {
-            String::new()
-        } else {
-            format!(" after {:?}", info.api_key_prefix)
-        }
-    )));
-
-    let warning = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .visible(false)
-        .css_classes(["caption", "warning"])
-        .build();
-    let insecure = gtk::CheckButton::builder()
-        .label("Send the key over plain http")
-        .visible(false)
-        .build();
-    content.append(&warning);
-    content.append(&insecure);
-
-    let key = gtk::PasswordEntry::builder()
-        .show_peek_icon(true)
-        .activates_default(true)
-        .build();
-    content.append(&label("API key"));
-    content.append(&key);
-    dialog.set_extra_child(Some(&content));
-
-    let refresh = {
-        let dialog = dialog.clone();
-        let name = name.clone();
-        let name_preview = name_preview.clone();
-        let endpoint = endpoint.clone();
-        let warning = warning.clone();
-        let insecure = insecure.clone();
-        let key = key.clone();
-        move || {
-            let typed = endpoint.text().to_string();
-            let named = if ask_for_name {
-                let text = name.text().to_string();
-                name_preview.set_text(&format!("Account id: {}", account_id_suggestion(&text)));
-                name_suggests_usable(&text, None)
-            } else {
-                true
-            };
-            match endpoint_warning(&typed) {
-                Some(sentence) => {
-                    warning.set_text(&sentence);
-                    warning.set_visible(true);
-                    insecure.set_visible(true);
-                }
-                None => {
-                    warning.set_visible(false);
-                    insecure.set_visible(false);
-                    // Cleared rather than left set: an acknowledgement given for a plain
-                    // http URL must not survive the URL being changed to https and back.
-                    insecure.set_active(false);
-                }
-            }
-            let acknowledged = endpoint_warning(&typed).is_none() || insecure.is_active();
-            // An inherited endpoint was already validated by the sibling that carries it;
-            // there is nothing typed here to re-validate.
-            let endpoint_ok = !ask_for_endpoint || valid_endpoint(&typed);
-            dialog.set_response_enabled(
-                "accept",
-                named && endpoint_ok && acknowledged && !key.text().trim().is_empty(),
-            );
-        }
-    };
-    name.connect_changed({
-        let refresh = refresh.clone();
-        move |_| refresh()
-    });
-    endpoint.connect_changed({
-        let refresh = refresh.clone();
-        move |_| refresh()
-    });
-    key.connect_changed({
-        let refresh = refresh.clone();
-        move |_| refresh()
-    });
-    insecure.connect_toggled({
-        let refresh = refresh.clone();
-        move |_| refresh()
-    });
-    refresh();
-
-    (dialog.choose_future(Some(parent)).await == "accept").then(|| AccountForm {
-        slug: ask_for_name.then(|| account_id_suggestion(&name.text())),
-        endpoint: endpoint.text().trim().to_owned(),
-        allow_insecure_http: insecure.is_active(),
-        key: key.text().trim().to_owned(),
-    })
-}
-
-/// Shows what a file declares and offers to install it, or reports why it was refused.
-///
-/// Two steps on purpose: inspecting writes nothing, so a file somebody sent can be read
-/// here and then closed. Returns the installed definition's metadata, or `None` when
-/// nothing was installed.
-pub(super) async fn import_dialog(
-    parent: &impl IsA<gtk::Widget>,
-    proxy: &DaemonProxy<'static>,
-    bytes: Vec<u8>,
-) -> Option<PluginInfo> {
-    let info = match proxy.inspect_plugin(bytes.clone()).await {
-        Ok(info) => info,
-        Err(error) => {
-            let refusal = adw::AlertDialog::builder()
-                .heading("This file was refused")
-                .body(reason(&error))
-                .build();
-            refusal.add_response("close", "Close");
-            refusal.set_close_response("close");
-            refusal.choose_future(Some(parent)).await;
-            return None;
-        }
-    };
-
-    let dialog = adw::AlertDialog::builder()
-        .heading(format!("Install {}?", info.name))
-        .body(
-            "This provider is not part of Tidemark. It runs a parser the file's author wrote, and it will be sent the API key you give it.",
-        )
-        .build();
-    dialog.add_responses(&[("cancel", "Cancel"), ("install", "Install")]);
-    dialog.set_default_response(Some("cancel"));
-    dialog.set_close_response("cancel");
-    dialog.set_response_appearance("install", adw::ResponseAppearance::Suggested);
-
-    let content = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(6)
-        .build();
-    if info.has_mark {
-        let image = mark::image();
-        if let Some(svg) = info.mark_svg.as_deref() {
-            mark::set_preview(&image, svg);
-        } else {
-            // Compatibility with an older daemon: installed plugins only named their
-            // materialized mark, which still works when the icon is already on disk.
-            mark::set(&image, &info.id);
-        }
-        image.set_halign(gtk::Align::Center);
-        content.append(&image);
-    }
-    let rows = gtk::Grid::builder()
-        .column_spacing(12)
-        .row_spacing(4)
-        .build();
-    for (index, (title, value)) in preview(&info).into_iter().enumerate() {
-        let row = i32::try_from(index).unwrap_or(i32::MAX);
-        rows.attach(&caption(&title), 0, row, 1, 1);
-        let value = gtk::Label::builder()
-            .label(&value)
-            .xalign(0.0)
-            .selectable(true)
-            .wrap(true)
-            .build();
-        rows.attach(&value, 1, row, 1, 1);
-    }
-    content.append(&rows);
-    dialog.set_extra_child(Some(&content));
-
-    if dialog.choose_future(Some(parent)).await != "install" {
-        return None;
-    }
-    match proxy.install_plugin(bytes).await {
-        Ok(installed) => Some(installed),
-        Err(error) => {
-            let refusal = adw::AlertDialog::builder()
-                .heading("This file was refused")
-                .body(reason(&error))
-                .build();
-            refusal.add_response("close", "Close");
-            refusal.set_close_response("close");
-            refusal.choose_future(Some(parent)).await;
-            None
-        }
-    }
-}
-
-/// The file chooser, filtered to the one extension a definition has.
-pub(super) fn file_dialog() -> gtk::FileDialog {
-    let filter = gtk::FileFilter::new();
-    filter.set_name(Some("Tidemark provider"));
-    filter.add_pattern("*.tidemark-provider");
-    let filters = gio::ListStore::new::<gtk::FileFilter>();
-    filters.append(&filter);
-    gtk::FileDialog::builder()
-        .title("Import a provider")
-        .filters(&filters)
-        .default_filter(&filter)
-        .modal(true)
-        .build()
-}
-
-fn label(text: &str) -> gtk::Label {
-    gtk::Label::builder()
-        .label(text)
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .build()
-}
-
-fn caption(text: &str) -> gtk::Label {
-    gtk::Label::builder()
-        .label(text)
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["caption", "dim-label"])
-        .build()
+/// The system's file chooser, filtered to the one extension a definition has: the XDG
+/// portal on Linux, the common dialog on Windows. `None` when it was dismissed.
+pub async fn choose_file() -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Import a provider")
+        .add_filter("Tidemark provider", &["tidemark-provider"])
+        .pick_file()
+        .await
+        .map(|file| file.path().to_path_buf())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_warning, preview, valid_endpoint};
-    use tidemark_types::PluginInfo;
+    use super::*;
 
     fn info(header: &str, prefix: &str, method: &str) -> PluginInfo {
         PluginInfo {
@@ -398,9 +139,18 @@ mod tests {
             .iter()
             .find(|(label, _)| label == "Key prefix")
             .expect("shown");
+        assert_eq!(prefix.1, "none");
+    }
+
+    #[test]
+    fn the_request_line_names_the_header_and_any_prefix() {
         assert_eq!(
-            prefix.1, "none",
-            "a missing prefix is a fact about the request, not a blank"
+            request_line(&info("Authorization", "Bearer ", "POST")),
+            "POST request, key sent in Authorization after \"Bearer \""
+        );
+        assert_eq!(
+            request_line(&info("X-Acme-Key", "", "GET")),
+            "GET request, key sent in X-Acme-Key"
         );
     }
 

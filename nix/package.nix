@@ -6,16 +6,31 @@
   git,
   clang,
   llvmPackages,
-  wrapGAppsHook4,
-  makeWrapper,
-  gtk4,
-  libadwaita,
+  patchelf,
+  fontconfig,
+  libxkbcommon,
+  wayland,
+  vulkan-loader,
+  libGL,
+  xorg,
   sqlite,
   dbus,
   hicolor-icon-theme,
 }:
 let
   manifest = builtins.fromTOML (builtins.readFile ../Cargo.toml);
+  # Loaded with dlopen by the client, so no linker sees them: winit's Wayland, X11 and
+  # keyboard libraries, and the Vulkan and GL loaders wgpu chooses between.
+  runtimeLibraries = [
+    libxkbcommon
+    wayland
+    vulkan-loader
+    libGL
+    xorg.libX11
+    xorg.libXcursor
+    xorg.libXi
+    xorg.libXrandr
+  ];
 in
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "tidemark";
@@ -40,12 +55,10 @@ rustPlatform.buildRustPackage (finalAttrs: {
     git
     clang
     llvmPackages.libclang
-    wrapGAppsHook4
-    makeWrapper
+    patchelf
   ];
   buildInputs = [
-    gtk4
-    libadwaita
+    fontconfig
     sqlite
     dbus
     hicolor-icon-theme
@@ -66,6 +79,10 @@ rustPlatform.buildRustPackage (finalAttrs: {
       --replace-fail /usr/bin/tidemarkd "$out/bin/tidemarkd"
     substituteInPlace "$out/lib/systemd/user/tidemarkd.service" \
       --replace-fail /usr/bin/tidemarkd "$out/bin/tidemarkd"
+  '';
+
+  postFixup = ''
+    patchelf --add-rpath "${lib.makeLibraryPath runtimeLibraries}" "$out/bin/tidemark"
   '';
 
   meta = {

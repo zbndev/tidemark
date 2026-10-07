@@ -118,7 +118,8 @@ Daemon plus client, split over D-Bus.
 - **CLI** — `tidemarkctl`. The third client, and the one the interface was shaped for:
   one round trip draws a window, a Waybar module, or a line of output.
 
-Language is Rust; GUI is GTK4 + libadwaita. Rust was chosen for packaging above all —
+Language is Rust; GUI is Slint, drawn to libadwaita's look. It replaced a GTK4 +
+libadwaita client, which stays the reference for how the interface looks and behaves. Rust was chosen for packaging above all —
 `deb`/`rpm`/`PKGBUILD` from a single binary is the cheap path — and for `serde`, which
 turns "the provider silently changed their undocumented JSON" from a blank screen into a
 named field in an error.
@@ -132,10 +133,10 @@ GUI never performs network I/O, and there is exactly one definition of the D-Bus
 |---|---|---|
 | `tidemark-types` | vocabulary, identity constants, D-Bus wire shapes | anything with I/O |
 | `tidemark-ipc` | the generated D-Bus proxy | providers, storage, the display |
-| `tidemark-core` | provider clients, history, secrets | GTK, GDK, libadwaita |
+| `tidemark-core` | provider clients, history, secrets | Slint, winit, wgpu |
 | `tidemarkd` | scheduler, D-Bus service, notifications | — |
 | `tidemark` | the interface | `tidemark-core`, HTTP, SQLite |
-| `tidemark-cli` | `tidemarkctl` | `tidemark-core`, GTK, a runtime |
+| `tidemark-cli` | `tidemarkctl` | `tidemark-core`, Slint, a runtime |
 
 The GUI depends on `tidemark-types` and D-Bus only. Folding the vocabulary into
 `tidemark-core` and feature-gating the network out of it does not work: Cargo unifies
@@ -296,7 +297,7 @@ states over D-Bus, never cookie values, tokens, or database paths.
 Three boundaries make this acceptable where blanket cookie-scraping would not be:
 
 - **The daemon owns all of it.** Browser storage is touched by tidemarkd alone;
-  the GTK process renders published states and never learns how a credential is
+  the GUI process renders published states and never learns how a credential is
   stored.
 - **Snapshot reads.** A browser's cookie database is read through an owner-only
   temporary copy; no browser directory is opened in place or written to.
@@ -309,17 +310,17 @@ provider slugs are — not renamable once shipped.
 
 ### API floor
 
-GTK **4.22** and libadwaita **1.9**, set as the `v4_22` and `v1_9` binding features.
+Slint **1.18**, drawn with FemtoVG on wgpu — Vulkan on Linux, Direct3D 12 on Windows — and
+pinned with `~` because the winit accessor the window frame uses is an unstable feature
+that may change in any minor release. Not Skia: its renderer hints each glyph while the
+text layout places glyphs at unhinted advances, so small text crowds and drifts.
+
+The client links fontconfig and nothing else of the desktop's; winit and wgpu open the
+Wayland, X11, xkbcommon and Vulkan libraries with `dlopen`, so packaging names them by hand.
 
 The floor is *the newest we can test against*, not the oldest distribution we could
-theoretically reach. Long-term-support distributions are not a design constraint here: if
-a widget or an API would make the interface better, we use it, and the packaging targets
-follow the code rather than the other way round. Raise this line whenever the toolkit
-gains something worth having — it is a floor, not a budget.
-
-The consequence is deliberate and accepted: distributions shipping older GTK do not get a
-native package. If reach ever matters more than it does now, that is a Flatpak, not a
-rewrite of the interface against an older API.
+theoretically reach. If a toolkit release would make the interface better, we take it, and
+the packaging targets follow the code rather than the other way round.
 
 SQLite is the system library rather than a vendored copy, so the `deb` and `rpm` do not
 carry a bundled copy of a library the distribution already ships — `ldd` on the daemon
@@ -531,6 +532,9 @@ history that does not exist yet.
 
 ## Interface
 
+Several items below were written for the GTK client and name its widgets. The decisions
+they record bind the Slint client all the same; it draws them in `crates/tidemark/ui/`.
+
 - **Grid of provider cards**, columns by width, **in the order the user put them in**.
   How many columns the width turns into is a preference: Auto (the default) fits as many
   columns as the window holds, and Manual caps the count at a chosen ceiling. Nothing else
@@ -709,15 +713,13 @@ so a build with no provider marks stays a supported configuration: a card withou
 state the interface already has.
 
 The repository-local flake exports the Nix package and `nixosModules.default`. Enabling the
-module registers only the D-Bus-activated user daemon; it does not autostart the GTK client.
+module registers only the D-Bus-activated user daemon; it does not autostart the desktop client.
 The scheduled workflow proposes `flake.lock` updates through a reviewed pull request. DEB,
 RPM, and the local `PKGBUILD` retain their distinct installation and upgrade behavior.
 
-The GTK 4.22 / libadwaita 1.9 floor above is GNOME 50, which became the default in exactly
-two places: **Fedora 44** and **Ubuntu 26.04 LTS**. So the `rpm` targets Fedora 44+ and the
-`deb` targets Ubuntu 26.04+. Nothing older qualifies — Debian's trixie is at GTK 4.18 — and
-the `ubuntu-26.04` runner reports 4.22.4 and 1.9.1, which is where that is checked rather
-than assumed.
+The `rpm` targets Fedora 44+ and the `deb` Ubuntu 26.04+. That floor was set by the GTK
+4.22 / libadwaita 1.9 the former client needed, which only those two shipped; the Slint
+client no longer needs it, and lowering it is a packaging decision rather than a code one.
 
 glibc is forward- but not backward-compatible, so a build host must be no newer than the
 oldest target. That is settled by construction rather than by choosing a host: each format
@@ -731,8 +733,8 @@ rather than reading `DT_NEEDED`, so an `rpm` built on Arch asked for `libgstream
 `libcups`, `libkrb5` and `libxml2.so.16` — none of which either binary links, and some of
 which Fedora numbers differently. And neither packaging tool treats a missing dependency
 helper as an error: without `dpkg-shlibdeps`, `depends = "$auto"` resolves to *nothing* and
-`cargo-deb` emits a warning a log scrolls past, yielding a package that installs with no
-GTK present and then fails to start. `scripts/check-package-deps.sh` turns that warning
+`cargo-deb` emits a warning a log scrolls past, yielding a package that installs without the
+libraries it links and then fails to start. `scripts/check-package-deps.sh` turns that warning
 into a failed build, and both package jobs run it.
 
 An upgrade restarts the user's daemon: both formats' maintainer scripts call

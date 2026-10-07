@@ -36,25 +36,22 @@ forbid() {
 # tidemark-types and need its derives. zbus is, and stays — encoding a message is the
 # contract, opening a connection is an implementation.
 forbid tidemark-types 'it is the contract, not an implementation' \
-    reqwest hyper rusqlite libsqlite3-sys tokio gtk4 gtk4-sys libadwaita zbus
+    reqwest hyper rusqlite libsqlite3-sys tokio slint zbus
 
 # The contract's client half: it may open a connection, and nothing else. tokio is on the
 # list because zbus can be built on either reactor, and a CLI whose value is starting fast
 # must not acquire a second runtime by accident.
 forbid tidemark-ipc 'the contract carries no implementation' \
-    tidemark-core reqwest hyper rusqlite libsqlite3-sys gtk4 gtk4-sys libadwaita tokio
+    tidemark-core reqwest hyper rusqlite libsqlite3-sys slint tokio
 
 forbid tidemark-cli 'the CLI prints what the daemon publishes and nothing else' \
-    tidemark-core reqwest hyper rusqlite libsqlite3-sys gtk4 gtk4-sys libadwaita tokio
+    tidemark-core reqwest hyper rusqlite libsqlite3-sys slint tokio
 
 forbid tidemark-core 'core must build on a machine with no display stack' \
-    gtk4 gtk4-sys gdk4-sys libadwaita libadwaita-sys
+    slint i-slint-core winit wgpu
 
 forbid tidemark 'the client talks to tidemarkd over D-Bus, not to providers' \
     tidemark-core reqwest hyper rusqlite libsqlite3-sys
-
-forbid tidemark-slint 'the prototype client talks to tidemarkd over D-Bus, like the GTK one' \
-    tidemark-core reqwest hyper rusqlite libsqlite3-sys gtk4 libadwaita
 
 if [ "$status" -eq 0 ]; then
     echo 'layering ok'

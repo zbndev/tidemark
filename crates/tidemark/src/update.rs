@@ -72,8 +72,8 @@ where
     Some(command)
 }
 
-/// Replaces this process with the same command, avoiding a race with GTK's single
-/// instance. Returns only when the restart did not happen; the caller turns the error
+/// Replaces this process with the same command, avoiding a race with the session's
+/// single instance. Returns only when the restart did not happen; the caller turns the error
 /// into the "could not restart" dialog.
 pub fn restart() -> io::Error {
     let Some(command) = restart_command(std::env::args_os()) else {
@@ -82,8 +82,8 @@ pub fn restart() -> io::Error {
     restart_process(command)
 }
 
-/// Unix can swap the program in place: the exec keeps the process identity, so GTK's
-/// single-instance lock never sees two holders, and argv[0] is resolved exactly as it
+/// Unix can swap the program in place: the exec keeps the process identity, so the
+/// application name on the session bus never has two holders, and argv[0] is resolved exactly as it
 /// was for this invocation.
 #[cfg(unix)]
 fn restart_process(mut command: Command) -> io::Error {

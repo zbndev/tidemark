@@ -1,7 +1,7 @@
 # IPC CONTRACT KNOWLEDGE BASE
 
 ## OVERVIEW
-The generated D-Bus proxy for `io.github.zbndev.Tidemark.Daemon1`, shared by every client: the GTK window and `tidemarkctl` build their proxy from the same trait, so a method that changed shape breaks the build instead of a user's machine.
+The generated D-Bus proxy for `io.github.zbndev.Tidemark.Daemon1`, shared by every client: the desktop client and `tidemarkctl` build their proxy from the same trait, so a method that changed shape breaks the build instead of a user's machine.
 
 ## WHERE TO LOOK
 | Task | Location | Notes |
@@ -17,7 +17,7 @@ The generated D-Bus proxy for `io.github.zbndev.Tidemark.Daemon1`, shared by eve
 - Nothing here opens a connection, retries, or names a transport — reconnection is `tidemark/src/bus.rs`, and the CLI's single connection is `tidemark-cli/src/connect.rs`.
 
 ## ANTI-PATTERNS
-- Do not add provider I/O, storage, a display dependency, or a second async runtime; `scripts/check-layering.sh` forbids `tidemark-core`, `reqwest`, `hyper`, `rusqlite`, `libsqlite3-sys`, `gtk4`, `gtk4-sys`, `libadwaita` and `tokio`.
+- Do not add provider I/O, storage, a display dependency, or a second async runtime; `scripts/check-layering.sh` forbids `tidemark-core`, `reqwest`, `hyper`, `rusqlite`, `libsqlite3-sys`, `slint` and `tokio`.
 - Do not define wire structures here; they belong to `tidemark-types` so the daemon and clients decode one vocabulary.
 - Never let a second `#[zbus::proxy]` definition exist anywhere in the workspace: every
   client generates from `src/lib.rs`, so interface drift is a compile failure.

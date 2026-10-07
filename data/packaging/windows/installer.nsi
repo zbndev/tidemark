@@ -8,9 +8,9 @@
 ; (TidemarkDaemon), the HKCU Run value (Tidemark), the AUMID registry key,
 ; the shortcut and every installed file.
 ;
-; Build (from data/packaging/windows/, after stage-gtk-runtime.sh and a
+; Build (from data/packaging/windows/, after stage-runtime.sh and a
 ; `cargo build --release -p tidemark -p tidemarkd`):
-;   makensis /DSRC_DIR=..\..\target\release /DGTK_DIR=nsis-staging\gtk installer.nsi
+;   makensis /DSRC_DIR=..\..\target\release /DRUNTIME_DIR=nsis-staging\runtime installer.nsi
 
 Unicode true
 ManifestDPIAware true
@@ -28,8 +28,8 @@ ManifestDPIAware true
 !ifndef SRC_DIR
   !define SRC_DIR "..\..\target\release"
 !endif
-!ifndef GTK_DIR
-  !define GTK_DIR "nsis-staging\gtk"
+!ifndef RUNTIME_DIR
+  !define RUNTIME_DIR "nsis-staging\runtime"
 !endif
 !ifndef OUT_FILE
   !define OUT_FILE "tidemark-installer.exe"
@@ -70,7 +70,14 @@ Section "Install"
 
   File "${SRC_DIR}\tidemark.exe"
   File "${SRC_DIR}\tidemarkd.exe"
-  File /r "${GTK_DIR}\*.*"
+  ; An upgrade from the GTK client leaves its runtime behind otherwise: DLLs, schemas,
+  ; icon themes and fontconfig nothing loads any more.
+  RMDir /r "$INSTDIR\lib"
+  RMDir /r "$INSTDIR\etc"
+  RMDir /r "$INSTDIR\share"
+  Delete "$INSTDIR\*.dll"
+
+  File /r "${RUNTIME_DIR}\*.*"
 
   ; Start-menu shortcut with the toast-identity property. The property is
   ; REQUIRED (todo 16); if the helper cannot set it, the install is aborted

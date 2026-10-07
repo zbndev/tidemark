@@ -1,10 +1,7 @@
 //! What one card says, decided without a toolkit.
 //!
-//! The GTK client makes these decisions inside `card.rs`, next to the widgets. Here they are
-//! a pure function from a [`ProviderStatus`] and the current instant to a [`CardView`], and
-//! the `.slint` markup only draws what this returns. The resolution helpers are the GTK
-//! card's own, unchanged; a shared crate both clients import is the step after the
-//! prototype.
+//! A pure function from a [`ProviderStatus`] and the current instant to a [`CardView`]; the
+//! `.slint` markup only draws what this returns.
 
 use std::borrow::Cow;
 

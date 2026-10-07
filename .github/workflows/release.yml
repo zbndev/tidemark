@@ -17,21 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install the toolkit and the shell-check tools
+      - name: Install the libraries and the shell-check tools
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake \
+            libfontconfig-dev libsqlite3-dev pkg-config cmake \
             dbus-daemon desktop-file-utils appstream shellcheck
 
       - name: The tag must agree with Cargo.toml
         run: scripts/check-tag-version.sh "${GITHUB_REF_NAME}"
-
-      - name: Confirm the toolkit meets the floor
-        run: |
-          pkg-config --atleast-version=4.22 gtk4
-          pkg-config --atleast-version=1.9 libadwaita-1
-          pkg-config --modversion gtk4 libadwaita-1
 
       - uses: Swatinem/rust-cache@v2
 
@@ -47,8 +41,8 @@ jobs:
 
   deb:
     needs: checks
-    # Ubuntu 26.04 is the oldest release meeting the GTK 4.22 floor, so building on it
-    # makes it the oldest supported target. glibc is forward- but not backward-compatible,
+    # Building on Ubuntu 26.04 makes it the oldest supported target. glibc is forward- but
+    # not backward-compatible,
     # which is the whole reason each format is built on its own target rather than on one
     # shared build host.
     runs-on: ubuntu-26.04
@@ -56,11 +50,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v5
-      - name: Install the toolkit
+      - name: Install the libraries
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake dpkg-dev
+            libfontconfig-dev libsqlite3-dev pkg-config cmake dpkg-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-deb --locked
       - run: cargo build --release --locked --workspace
@@ -92,8 +86,8 @@ jobs:
     steps:
       - name: Bootstrap the container
         run: |
-          dnf install -y git gcc gcc-c++ cmake clang-devel gtk4-devel \
-            libadwaita-devel sqlite-devel pkgconf-pkg-config rpm-build
+          dnf install -y git gcc gcc-c++ cmake clang-devel fontconfig-devel \
+            sqlite-devel pkgconf-pkg-config rpm-build
       - uses: actions/checkout@v5
       - name: Install rustup
         run: |
@@ -182,11 +176,10 @@ jobs:
         run: cargo build --release --locked -p tidemark -p tidemarkd
 
       # The DLL set is not hand-written: the script walks the PE import closure of both
-      # executables and of every gdk-pixbuf loader, and refuses a package whose installed
-      # version is not the pinned one.
+      # executables, and refuses a package whose installed version is not the pinned one.
       - name: Stage the resolved MSYS2 UCRT64 runtime
         shell: msys2 {0}
-        run: bash data/packaging/windows/stage-gtk-runtime.sh build target/release
+        run: bash data/packaging/windows/stage-runtime.sh build target/release
 
       # choco's nsis package is NSIS 3.x with MUI2, the System plugin and lzma — the
       # whole surface installer.nsi uses.
@@ -209,7 +202,7 @@ jobs:
           & "C:\Program Files (x86)\NSIS\makensis.exe" `
             "/DVERSION=$version" `
             "/DSRC_DIR=${env:GITHUB_WORKSPACE}\target\release" `
-            "/DGTK_DIR=${env:GITHUB_WORKSPACE}\build\nsis-staging\gtk" `
+            "/DRUNTIME_DIR=${env:GITHUB_WORKSPACE}\build\nsis-staging\runtime" `
             "/DOUT_FILE=Tidemark-${env:TAG}-setup.exe" `
             installer.nsi
 

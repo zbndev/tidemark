@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-# Refuses a package whose dependency list does not name the toolkit.
+# Refuses a package whose dependency list does not name the libraries the binaries link.
 #
 #   scripts/check-package-deps.sh target/debian/tidemark_0.1.0-1_amd64.deb
 #   scripts/check-package-deps.sh target/generate-rpm/tidemark-0.1.0-1.x86_64.rpm
@@ -10,7 +10,7 @@ set -eu
 # dpkg-shlibdeps, cargo-generate-rpm through rpm's find-requires. Neither treats a missing
 # helper as an error: on a machine without dpkg-dev, `depends = "$auto"` resolves to
 # *nothing* and cargo-deb emits a warning that a CI log scrolls straight past. The result
-# is a package that installs on a system with no GTK at all and then fails to start.
+# is a package that installs on a system without them and then fails to start.
 #
 # Measured on 2026-08-22: built on Arch, where dpkg-shlibdeps does not exist, the .deb came
 # out with `Depends: dbus-user-session, hicolor-icon-theme` — only the two entries written
@@ -43,10 +43,10 @@ esac
 # entries that matter rather than printing the lot into a CI log.
 printf '%s entries\n' "$(printf '%s' "$dependencies" | tr ' ,' '\n' | grep -c .)"
 
-# The interface links GTK and libadwaita; a list naming neither was not derived from the
-# binary, whatever else it contains.
+# The interface links fontconfig and the daemon SQLite; a list naming neither was not
+# derived from the binaries, whatever else it contains.
 status=0
-for library in gtk adwaita; do
+for library in fontconfig sqlite; do
     case "$dependencies" in
         *"$library"*)
             printf '  %s: %s\n' "$library" \
@@ -67,4 +67,4 @@ if [ "$status" -ne 0 ]; then
     exit 1
 fi
 
-printf 'the dependency list names the toolkit\n'
+printf 'the dependency list names the linked libraries\n'

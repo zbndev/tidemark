@@ -1,4 +1,4 @@
-//! Provider logos. The GTK client asks the icon theme; Slint has none, so this looks in the
+//! Provider logos. Slint has no icon theme to ask, so this looks in the
 //! same places the theme would — the plugin marks the daemon materializes, the installed
 //! hicolor theme (on Windows, `share\icons` beside the executable), and the source tree in
 //! a development build — and colours the symbolic SVG itself in the markup.
@@ -51,14 +51,20 @@ impl Marks {
         if let Some(home) = std::env::var_os("HOME") {
             roots.push(Path::new(&home).join(".local/share/icons"));
         }
-        if let Some(installed) = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join("share").join("icons")))
-        {
-            roots.push(installed);
+        // Beside the executable on Windows; the prefix it is installed under elsewhere,
+        // which is the only place a Nix store path keeps them.
+        if let Ok(exe) = std::env::current_exe() {
+            roots.extend(
+                exe.ancestors()
+                    .skip(1)
+                    .take(2)
+                    .map(|dir| dir.join("share").join("icons")),
+            );
         }
-        roots.push(PathBuf::from("/usr/share/icons"));
-        roots.push(PathBuf::from("/usr/local/share/icons"));
+        let data_dirs = std::env::var_os("XDG_DATA_DIRS")
+            .filter(|dirs| !dirs.is_empty())
+            .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+        roots.extend(std::env::split_paths(&data_dirs).map(|dir| dir.join("icons")));
         roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/icons"));
 
         roots.iter().find_map(|root| {

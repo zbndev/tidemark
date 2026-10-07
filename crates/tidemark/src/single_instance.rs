@@ -24,7 +24,7 @@ const CLIENT_MUTEX: &str = r"Local\io.github.zbndev.Tidemark.Client";
 
 /// Holds the client singleton mutex for as long as the process runs.
 ///
-/// Acquire it before GTK initialises: a second instance must be gone before it can open
+/// Acquire it before the window exists: a second instance must be gone before it can open
 /// a window. Dropping the guard releases (and closes) the handle; if the process dies
 /// without dropping it, the kernel closes the handle anyway.
 pub struct Guard {

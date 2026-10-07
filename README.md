@@ -23,7 +23,7 @@ when it resets, and whether your current pace gets you there. One card per accou
 side, so you can tell at a glance which provider to start a long run on.
 
 A background service keeps polling while the window is closed, so the tray icon and the
-notifications stay current. Native GTK4 + libadwaita — no Electron, no embedded browser.
+notifications stay current. Native Rust and Slint — no Electron, no embedded browser.
 
 - **Every window.** Five-hour, weekly, monthly — whatever the provider
   exposes, each with its own reset time.
@@ -94,7 +94,7 @@ For NixOS, add Tidemark as a flake input, import its module, and enable the serv
 ```
 
 The module installs Tidemark and registers its D-Bus-activated user daemon. It does not
-start the GTK window at login. `nix run github:zbndev/tidemark#tidemarkd` is available for
+start the window at login. `nix run github:zbndev/tidemark#tidemarkd` is available for
 diagnostics, but normal use should let D-Bus activate the daemon when the window or another
 client asks for it.
 
@@ -230,12 +230,13 @@ format, the sandbox and a worked example.
 
 ## Requirements
 
-GTK 4.22 and libadwaita 1.9, which means **Fedora 44+** or **Ubuntu 26.04 LTS+** and their
-derivatives. Older distributions cannot run it. Arch and other rolling releases are fine.
+A Wayland or X11 desktop and a Vulkan driver. The packages are built for **Fedora 44+** and
+**Ubuntu 26.04 LTS+** and their derivatives; Arch and other rolling releases are fine.
 
 ## Building from source
 
-Needs Rust 1.92 or newer and the development packages for GTK4, libadwaita and SQLite:
+Needs Rust 1.92 or newer, CMake, Clang, and the development packages for fontconfig and
+SQLite:
 
 ```bash
 git clone https://github.com/zbndev/tidemark.git

@@ -9,5 +9,5 @@ host on 2026-09-05.
 - License: SIL Open Font License 1.1, reproduced in `OFL.txt`
 - Upstream: <https://github.com/googlefonts/rubik>
 
-The Windows package keeps the font next to its GTK runtime and registers it
-with Pango at startup. It never installs a font into Windows for the user.
+The client compiles it in (`crates/tidemark/ui/app.slint` imports it) on every
+platform. No package installs it as a system font.

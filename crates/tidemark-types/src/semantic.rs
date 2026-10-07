@@ -2,7 +2,7 @@
 //!
 //! Presentation, and semantic on purpose: a producer names *what a number means* — a gauge
 //! of a percentage, a value, an `X of Y` — and never a pixel, a colour or a font. That is
-//! what lets one GTK renderer serve both a built-in adapter and an untrusted plugin, and
+//! what lets one renderer serve both a built-in adapter and an untrusted plugin, and
 //! what lets a future Waybar module render the same reading without importing either.
 
 use zvariant::{DeserializeDict, SerializeDict, Type};

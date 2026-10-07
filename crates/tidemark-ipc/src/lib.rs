@@ -1,6 +1,6 @@
 //! The D-Bus contract between `tidemarkd` and everything that reads it.
 //!
-//! One definition, shared: the GTK window and `tidemarkctl` generate their proxy from this
+//! One definition, shared: the desktop client and `tidemarkctl` generate their proxy from this
 //! trait, so a method that changed shape is a compile error here rather than a runtime
 //! error on somebody's machine. That is the same argument that keeps the wire vocabulary in
 //! `tidemark-types` — a rule the build enforces beats a rule a hurry can skip.

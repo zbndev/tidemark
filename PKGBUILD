@@ -22,7 +22,19 @@ url='https://github.com/zbndev/tidemark'
 license=('MIT')
 # rustls and oo7's native crypto keep OpenSSL and libsecret out; SQLite is the system
 # library rather than a vendored copy, on purpose (CONTEXT.md § API floor).
-depends=('gtk4' 'libadwaita' 'sqlite' 'dbus')
+#
+# The client links fontconfig and nothing else of the desktop's: winit loads xkbcommon and
+# the Wayland client with dlopen, and wgpu the Vulkan loader, so namcap and ldd cannot see
+# them and they are named here. A Vulkan driver is the user's choice of `vulkan-driver`.
+depends=('sqlite' 'dbus' 'fontconfig' 'libxkbcommon' 'wayland' 'vulkan-icd-loader')
+optdepends=(
+    'libx11: an X11 session'
+    'libxcursor: an X11 session'
+    'libxi: an X11 session'
+    'libxrandr: an X11 session'
+    'libxkbcommon-x11: an X11 session'
+    'xdg-desktop-portal: the plugin file chooser, and the desktop dark style and accent'
+)
 makedepends=('cargo' 'cmake' 'clang')
 install=tidemark.install
 source=()
@@ -79,9 +91,8 @@ package() {
     install -Dm755 data/restart-user-daemon \
         "$pkgdir/usr/lib/tidemark/restart-user-daemon"
 
-    # The provider marks. They are recoloured by the theme only because GTK finds them
-    # through the icon theme as symbolic icons, which is what putting them in hicolor buys;
-    # loaded any other way they would keep the colours in the file.
+    # The provider marks. The client looks for them where the icon theme keeps symbolic
+    # icons and colours them itself, as the theme would.
     #
     # These five files are their owners' trademarks and are *not* under this package's
     # licence, so TRADEMARKS.md is installed next to LICENSE where a reader checking what

@@ -357,12 +357,10 @@ fn statuses() -> Vec<ProviderStatus> {
     vec![claude, codex, kimi, antigravity, zai]
 }
 
-fn main() -> gtk::glib::ExitCode {
-    // glib's main loop rather than a runtime of its own: this crate has no async runtime
-    // and does not want one, and zbus is happy to be driven by whatever is running.
-    let looper = gtk::glib::MainLoop::new(None, false);
-
-    gtk::glib::spawn_future_local(async move {
+fn main() {
+    // async-io's executor, the one the client drives zbus with: one future, run to the end
+    // of the process.
+    async_io::block_on(async {
         let statuses = statuses();
         println!(
             "serving {} accounts on {}",
@@ -389,9 +387,6 @@ fn main() -> gtk::glib::ExitCode {
             }
         }
     });
-
-    looper.run();
-    gtk::glib::ExitCode::SUCCESS
 }
 
 #[cfg(test)]

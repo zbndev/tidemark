@@ -12,8 +12,6 @@
 use tidemark_types::present::{duration, plural};
 use tidemark_types::{ProviderState, ProviderStatus, Remedy, Timestamp};
 
-pub use tidemark_types::present::percent;
-
 /// How much emphasis a chip gets. Maps to the libadwaita style classes, which is why there
 /// are three of them rather than one per [`ProviderState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -539,7 +539,7 @@ pub(crate) fn account_with_source(
 /// The local browser-auth capability one hand-written provider declares.
 ///
 /// This is daemon metadata rather than a GUI branch: a later browser-cookie provider adds
-/// its selector here and gets the same wire contract, engine lifecycle and GTK rendering.
+/// its selector here and gets the same wire contract, engine lifecycle and rendering.
 fn browser_auth(provider: &str) -> Option<AuthSelector> {
     match provider {
         cursor::PROVIDER_ID => Some(AuthSelector {

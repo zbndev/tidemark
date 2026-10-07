@@ -500,9 +500,9 @@ pub struct DataInfo {
     pub release_check_available: bool,
     /// Where installed plugin marks are materialized, as an XDG icon-theme root.
     ///
-    /// A path the client *adds to its icon search path*, never one it opens files from
-    /// itself: a symbolic SVG only takes the theme's colour when GTK loads it through the
-    /// icon theme. Empty from a daemon that has no plugin directory, which a client must
+    /// A path the client *adds to its icon search path*: an icon-theme root, laid out as
+    /// `hicolor/symbolic/apps`, which the client searches the way it searches the installed
+    /// theme. Empty from a daemon that has no plugin directory, which a client must
     /// read as "add nothing" rather than as a root at the filesystem's top.
     pub plugin_icons_path: String,
 }
@@ -1015,7 +1015,7 @@ mod tests {
 
     #[test]
     fn a_browser_auth_definition_and_nested_candidate_survive_the_bus() {
-        // Removing the selector or flattening a browser's two profiles would leave the GTK
+        // Removing the selector or flattening a browser's two profiles would leave the
         // client unable to offer the explicit source the daemon validated.
         let selector = AuthSelector {
             option: "auth-source".into(),

@@ -2,10 +2,11 @@
 # Stage the MSYS2 UCRT64 runtime that the locked Windows GNU build links against.
 #
 # The DLL set is not hand-maintained: this script walks the PE import closure of
-# tidemark.exe, tidemarkd.exe and every staged gdk-pixbuf loader. Package
+# tidemark.exe and tidemarkd.exe. The client draws with Slint and imports system DLLs
+# only; what is staged is the daemon's system SQLite and whatever that pulls in. Package
 # versions and package archive hashes are locked in msys2-runtime-packages.txt.
 #
-# Usage: data/packaging/windows/stage-gtk-runtime.sh [workdir] [release-dir]
+# Usage: data/packaging/windows/stage-runtime.sh [workdir] [release-dir]
 # Requires an MSYS2 UCRT64 environment with objdump, pacman and the packages in
 # msys2-runtime-packages.txt installed at exactly the recorded versions.
 set -euo pipefail
@@ -14,8 +15,7 @@ WORK="${1:-build}"
 RELEASE_DIR="${2:-target/release}"
 PREFIX="${MINGW_PREFIX:-/ucrt64}"
 SRC_BIN="$PREFIX/bin"
-SRC_LOADERS="$PREFIX/lib/gdk-pixbuf-2.0/2.10.0/loaders"
-DST="$WORK/nsis-staging/gtk"
+DST="$WORK/nsis-staging/runtime"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_LOCK="$SCRIPT_DIR/msys2-runtime-packages.txt"
 IMPORT_LOG="$WORK/nsis-runtime-imports.txt"
@@ -44,9 +44,7 @@ while read -r package version sha256; do
 done < "$PACKAGE_LOCK"
 
 rm -rf "$DST"
-mkdir -p "$DST" "$DST/lib/gdk-pixbuf-2.0/2.10.0/loaders"
-mkdir -p "$DST/share/glib-2.0/schemas" "$DST/share/icons"
-cp "$SRC_LOADERS"/*.dll "$DST/lib/gdk-pixbuf-2.0/2.10.0/loaders/"
+mkdir -p "$DST/share/icons"
 
 # Index UCRT64 DLLs case-insensitively, as the Windows loader does.
 declare -A available seen staged
@@ -55,8 +53,6 @@ while IFS= read -r -d '' dll; do
   available["$(basename "${dll,,}")"]="$dll"
 done < <(find "$SRC_BIN" -maxdepth 1 -type f -iname '*.dll' -print0)
 queue=("$RELEASE_DIR/tidemark.exe" "$RELEASE_DIR/tidemarkd.exe")
-while IFS= read -r -d '' loader; do queue+=("$loader"); done \
-  < <(find "$SRC_LOADERS" -maxdepth 1 -type f -iname '*.dll' -print0)
 
 system32="$(cygpath "${SYSTEMROOT:-C:\\Windows}")/System32"
 : > "$IMPORT_LOG"
@@ -97,59 +93,12 @@ done
 for lower in "${!staged[@]}"; do cp "${staged[$lower]}" "$DST/"; done
 printf '%s\n' "${!staged[@]}" | LC_ALL=C sort > "$DLL_LOG"
 
-# Keep the data layout used by GTK's prefix-relative lookup. Compile schemas in
-# staging, and regenerate the pixbuf cache with paths relative to the install
-# root so no CI or developer path leaks into the installer.
-cp "$PREFIX/share/glib-2.0/schemas"/*.xml "$DST/share/glib-2.0/schemas/"
-cp "$PREFIX/share/glib-2.0/schemas/gschema.dtd" "$DST/share/glib-2.0/schemas/"
-"$SRC_BIN/glib-compile-schemas.exe" "$DST/share/glib-2.0/schemas"
-cp -r "$PREFIX/share/icons/Adwaita" "$DST/share/icons/"
-cp -r "$PREFIX/share/icons/hicolor" "$DST/share/icons/"
-cp -r "$PREFIX/share/fontconfig" "$DST/share/"
-
-# fontconfig's configuration, which the client now depends on rather than merely
-# links: it selects Pango's FreeType back end at startup (crates/tidemark/src/font.rs),
-# and that back end asks fontconfig for every substitution. On Windows fontconfig reads
-# its configuration from etc/fonts beside the directory its own DLL sits in, and expands
-# WINDOWSFONTDIR there to the system font directory.
-#
-# Without this the program still runs — fontconfig's built-in Windows fallback finds the
-# installed families anyway — but conf.d is what chooses among them: measured on a cold
-# cache, the glyphs Rubik lacks came from Verdana and Arial with the configuration staged
-# and from MingLiU-ExtB without it, and the hinting and antialias defaults live in the
-# same directory.
-mkdir -p "$DST/etc"
-cp -r "$PREFIX/etc/fonts" "$DST/etc/"
-test -f "$DST/etc/fonts/fonts.conf" || { echo "fontconfig configuration not staged" >&2; exit 1; }
-
-# Tidemark's own artwork rides the prefix-relative lookup GTK already uses for the
-# staged sets above: the provider marks merge into hicolor (see
-# crates/tidemark/src/mark.rs — the theme lookup is what recolours them), and the
-# Start/taskbar icon lands beside share/ as tidemark.ico. The MSYS2 hicolor ships a
-# stale icon-theme.cache that would hide the merged marks, so it is dropped and GTK
-# falls back to a directory scan.
+# Tidemark's own artwork: the provider marks go to share/icons/hicolor, where the client
+# looks beside its executable (crates/tidemark/src/marks.rs), and the Start/taskbar icon
+# lands beside share/ as tidemark.ico. Rubik is compiled into the client.
 APP_ICONS="$SCRIPT_DIR/../../../data/icons"
-APP_FONTS="$SCRIPT_DIR/../../../data/fonts/rubik"
-for file in "$APP_FONTS/Rubik%5Bwght%5D.ttf"; do
-  test -f "$file" || { echo "required application font input not found: $file" >&2; exit 1; }
-done
-cp -r "$APP_ICONS/hicolor/." "$DST/share/icons/hicolor/"
-rm -f "$DST/share/icons/hicolor/icon-theme.cache"
+cp -r "$APP_ICONS/hicolor" "$DST/share/icons/"
 cp "$APP_ICONS/tidemark.ico" "$DST/share/tidemark.ico"
-mkdir -p "$DST/share/fonts"
-cp "$APP_FONTS/Rubik%5Bwght%5D.ttf" "$DST/share/fonts/"
-
-DST_WIN="$(cygpath -m "$(cd "$DST" && pwd)")"
-CACHE="$DST/lib/gdk-pixbuf-2.0/2.10.0/loaders/loaders.cache"
-loader_args=()
-while IFS= read -r -d '' loader; do loader_args+=("$(cygpath -m "$loader")"); done \
-  < <(find "$DST/lib/gdk-pixbuf-2.0/2.10.0/loaders" -maxdepth 1 -type f -iname '*.dll' -print0)
-"$SRC_BIN/gdk-pixbuf-query-loaders.exe" "${loader_args[@]}" > "$CACHE"
-sed -i "s|\"$DST_WIN/|\"|g" "$CACHE"
-if grep -Fq "$DST_WIN" "$CACHE" || ! grep -q '^"lib/' "$CACHE"; then
-  echo "loaders.cache is not install-root relative" >&2
-  exit 1
-fi
 
 echo "staged ${#staged[@]} transitive runtime DLLs from $PREFIX"
 echo "runtime package lock: $PACKAGE_LOG"

@@ -12,19 +12,12 @@ shortcut, and every installed file. Nothing machine-wide, no elevation.
 ## Files
 
 - `installer.nsi` — the NSIS 3 script (per-user, `RequestExecutionLevel user`).
-- `stage-gtk-runtime.sh` — walks the full PE import closure of both release
-  executables and all MSYS2 gdk-pixbuf loaders, then assembles
-  `build/nsis-staging/gtk/` with those UCRT64 DLLs, a relative-path
-  `loaders.cache`, compiled GLib schemas, fontconfig data and configuration,
-  and icon themes. It also places the pinned Rubik font beside the runtime.
-  Tidemark registers it privately at launch, never as a Windows system font,
-  and draws through Pango's FreeType back end rather than the GDI one — which
-  is why `etc/fonts` is staged and not only `share/fontconfig`. The staged
-  gtk4 also carries MSYS2's `001-fix-font-rendering.patch`, which defaults
-  `gtk-font-rendering` to `manual`; the client asks for `automatic` back at
-  startup, because the hinted metrics that patch turns on are written for the
-  GDI back end and crowd small text on the FreeType one. See
-  `crates/tidemark/src/font.rs` for both.
+- `stage-runtime.sh` — walks the full PE import closure of both release
+  executables and assembles `build/nsis-staging/runtime/` with the UCRT64 DLLs
+  found there, the provider marks under `share/icons/hicolor` and
+  `share/tidemark.ico`. The client draws with Slint and imports only system
+  DLLs, with Rubik compiled in; what is staged is the daemon's SQLite and its
+  closure. An upgrade from the GTK client removes the GTK runtime it left.
 - `msys2-runtime-packages.txt` — exact package versions and package-archive
   SHA-256 hashes for every staged DLL/data owner. The release workflow
   downloads and verifies these archives before it builds, so linked and
@@ -36,9 +29,9 @@ shortcut, and every installed file. Nothing machine-wide, no elevation.
 
 ```sh
 cargo build --release -p tidemark -p tidemarkd
-data/packaging/windows/stage-gtk-runtime.sh build
+data/packaging/windows/stage-runtime.sh build
 cd data/packaging/windows
-makensis /DSRC_DIR=<abs path>/target/release /DGTK_DIR=<abs path>/build/nsis-staging/gtk \
+makensis /DSRC_DIR=<abs path>/target/release /DRUNTIME_DIR=<abs path>/build/nsis-staging/runtime \
          /DOUT_FILE=tidemark-installer.exe installer.nsi
 ```
 
