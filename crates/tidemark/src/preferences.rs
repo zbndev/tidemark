@@ -1,13 +1,21 @@
 //! Application preferences: behavior, startup, network, and local data.
+//!
+//! The daemon owns every value. A row the user moves shows its new state at once and
+//! waits, disabled, for the answer; a refusal redraws everything from what the daemon last
+//! said and says why.
 
 use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use std::future::Future;
+use std::rc::Rc;
 
-use adw::prelude::*;
-use gtk::glib;
+use slint::{ComponentHandle, SharedString};
 use tidemark_types::{DataInfo, Preferences};
 
+use crate::alert::{Alerts, Question};
 use crate::bus::DaemonProxy;
+use crate::provider_settings::reason;
+use crate::window::spawn;
+use crate::{AppWindow, Prefs};
 
 const RETENTION_VALUES: [&str; 3] = [
     Preferences::RETENTION_FOREVER,
@@ -15,26 +23,17 @@ const RETENTION_VALUES: [&str; 3] = [
     Preferences::RETENTION_ONE_YEAR,
 ];
 
-/// What the retention values above are called on screen, in the same order.
-const RETENTION_LABELS: [&str; 3] = ["Forever", "6 months", "1 year"];
-
 const STARTUP_VALUES: [&str; 3] = [
     Preferences::STARTUP_APP,
     Preferences::STARTUP_DAEMON,
     Preferences::STARTUP_OFF,
 ];
 
-/// What the startup values above are called on screen, in the same order.
-const STARTUP_LABELS: [&str; 3] = ["App and tray", "Daemon only", "Off"];
-
 const THEME_VALUES: [&str; 3] = [
     Preferences::THEME_SYSTEM,
     Preferences::THEME_LIGHT,
     Preferences::THEME_DARK,
 ];
-
-/// What the appearance choices above are called on screen, in the same order.
-const THEME_LABELS: [&str; 3] = ["System", "Light", "Dark"];
 
 const PROXY_VALUES: [&str; 4] = [
     Preferences::PROXY_OFF,
@@ -43,15 +42,49 @@ const PROXY_VALUES: [&str; 4] = [
     Preferences::PROXY_SOCKS5,
 ];
 
-/// What the proxy modes above are called on screen, in the same order.
-const PROXY_LABELS: [&str; 4] = ["Off", "HTTP", "HTTPS", "SOCKS5"];
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SwitchKind {
     ReleaseCheck,
     MinimizeOnClose,
     RefreshAuto,
     ColumnsAuto,
+}
+
+impl SwitchKind {
+    fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "release" => Some(Self::ReleaseCheck),
+            "minimize" => Some(Self::MinimizeOnClose),
+            "refresh-auto" => Some(Self::RefreshAuto),
+            "columns-auto" => Some(Self::ColumnsAuto),
+            _ => None,
+        }
+    }
+
+    fn busy(self) -> Busy {
+        match self {
+            Self::ReleaseCheck => Busy::Release,
+            Self::MinimizeOnClose => Busy::Minimize,
+            Self::RefreshAuto => Busy::RefreshAuto,
+            Self::ColumnsAuto => Busy::ColumnsAuto,
+        }
+    }
+}
+
+/// A row waiting for the daemon.
+#[derive(Debug, Clone, Copy)]
+enum Busy {
+    Minimize,
+    Startup,
+    Theme,
+    RefreshAuto,
+    Minutes,
+    ColumnsAuto,
+    Columns,
+    Proxy,
+    Release,
+    Retention,
+    Clear,
 }
 
 /// Whether an incomplete proxy is the user's mistake or just the middle of typing one in.
@@ -63,663 +96,315 @@ enum Complaint {
     Silent,
 }
 
-/// The standard libadwaita Preferences dialog and its authoritative daemon-backed state.
-#[derive(Debug)]
-pub struct PreferencesDialog {
-    dialog: adw::PreferencesDialog,
-    proxy: DaemonProxy<'static>,
-    release_check: adw::SwitchRow,
-    minimize_on_close: adw::SwitchRow,
-    refresh_auto: adw::SwitchRow,
-    refresh_minutes: adw::SpinRow,
-    columns_auto: adw::SwitchRow,
-    max_columns: adw::SpinRow,
+#[derive(Debug, Clone, Copy)]
+enum ProxyField {
+    Host,
+    Port,
+}
 
-    theme: adw::ComboRow,
-    startup: adw::ComboRow,
-    retention: adw::ComboRow,
-    proxy_mode: adw::ComboRow,
-    proxy_host: adw::EntryRow,
-    proxy_port: adw::EntryRow,
-    config_path: adw::ActionRow,
-    history_path: adw::ActionRow,
-    history_size: adw::ActionRow,
-    key_schema: adw::ActionRow,
-    token_schema: adw::ActionRow,
+type Daemon = Rc<dyn Fn() -> Option<DaemonProxy<'static>>>;
+
+pub struct PreferencesDialog {
+    ui: slint::Weak<AppWindow>,
+    daemon: Daemon,
+    alerts: Rc<Alerts>,
     preferences: RefCell<Preferences>,
     data: RefCell<DataInfo>,
-    suppress: Cell<bool>,
+    on_closed: Box<dyn Fn()>,
+    closed: Cell<bool>,
+}
+
+impl std::fmt::Debug for PreferencesDialog {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreferencesDialog")
+            .field("preferences", &self.preferences)
+            .field("closed", &self.closed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PreferencesDialog {
-    pub fn present(
-        parent: &impl IsA<gtk::Widget>,
-        proxy: DaemonProxy<'static>,
-        preferences: Preferences,
-        data: DataInfo,
+    pub fn open(
+        ui: &AppWindow,
+        daemon: Daemon,
+        alerts: Rc<Alerts>,
+        preferences: &Preferences,
+        data: &DataInfo,
         on_closed: impl Fn() + 'static,
     ) -> Rc<Self> {
-        let dialog = adw::PreferencesDialog::builder()
-            .title("Preferences")
-            .content_width(620)
-            .content_height(680)
-            .build();
-
-        let minimize_on_close = adw::SwitchRow::builder()
-            .title("Minimize to tray on close")
-            .subtitle("Keep Tidemark running when a tray icon can bring the window back.")
-            .build();
-        let startup_mode = adw::ComboRow::builder()
-            .title("Start at login")
-            .subtitle("Choose what starts with your graphical session.")
-            .model(&gtk::StringList::new(&STARTUP_LABELS))
-            .expression(gtk::PropertyExpression::new(
-                gtk::StringObject::static_type(),
-                None::<gtk::Expression>,
-                "string",
-            ))
-            .use_subtitle(true)
-            .build();
-
-        let theme = adw::ComboRow::builder()
-            .title("Theme")
-            .subtitle("Choose whether Tidemark follows your system appearance.")
-            .model(&gtk::StringList::new(&THEME_LABELS))
-            .expression(gtk::PropertyExpression::new(
-                gtk::StringObject::static_type(),
-                None::<gtk::Expression>,
-                "string",
-            ))
-            .use_subtitle(true)
-            .build();
-
-        let behavior = adw::PreferencesGroup::builder().title("Behavior").build();
-        behavior.add(&minimize_on_close);
-        let startup = adw::PreferencesGroup::builder().title("Startup").build();
-        startup.add(&startup_mode);
-        let theme_group = adw::PreferencesGroup::builder().title("Theme").build();
-        theme_group.add(&theme);
-        // The subtitle stays vague on purpose: which zone buys which pace is the daemon's
-        // business, and a number here would be a second truth to keep in step with
-        // `CONTEXT.md`.
-        let refresh_auto = adw::SwitchRow::builder()
-            .title("Auto")
-            .subtitle("Refresh frequency adapts to how much quota is left.")
-            .build();
-        let refresh_minutes = adw::SpinRow::new(
-            Some(&gtk::Adjustment::new(5.0, 1.0, 120.0, 1.0, 10.0, 0.0)),
-            1.0,
-            0,
-        );
-        refresh_minutes.set_title("Manual refresh frequency");
-        refresh_minutes.set_subtitle("Minutes between polls when Auto is off.");
-        let refresh_group = adw::PreferencesGroup::builder()
-            .title("Providers refresh")
-            .build();
-        refresh_group.add(&refresh_auto);
-        refresh_group.add(&refresh_minutes);
-        let columns_auto = adw::SwitchRow::builder()
-            .title("Auto")
-            .subtitle("Column count follows the window width.")
-            .build();
-        let max_columns = adw::SpinRow::new(
-            Some(&gtk::Adjustment::new(3.0, 1.0, 999.0, 1.0, 10.0, 0.0)),
-            1.0,
-            0,
-        );
-        max_columns.set_title("Maximum columns");
-        max_columns.set_subtitle("Most columns when Auto is off.");
-        let columns_group = adw::PreferencesGroup::builder()
-            .title("Card columns")
-            .build();
-        columns_group.add(&columns_auto);
-        columns_group.add(&max_columns);
-
-        let general = adw::PreferencesPage::builder()
-            .title("General")
-            .icon_name("preferences-system-symbolic")
-            .build();
-        general.add(&behavior);
-        general.add(&startup);
-        general.add(&theme_group);
-        general.add(&refresh_group);
-        general.add(&columns_group);
-        dialog.add(&general);
-
-        let proxy_mode = adw::ComboRow::builder()
-            .title("Proxy")
-            .subtitle("Route every request and every helper process through a proxy.")
-            .model(&gtk::StringList::new(&PROXY_LABELS))
-            .expression(gtk::PropertyExpression::new(
-                gtk::StringObject::static_type(),
-                None::<gtk::Expression>,
-                "string",
-            ))
-            .use_subtitle(true)
-            .build();
-        // An apply button rather than a request per keystroke: `example.com` on the way to
-        // `proxy.example.com` is eleven proxies nobody asked for, and each one would drop
-        // every client the daemon holds.
-        let proxy_host = adw::EntryRow::builder()
-            .title("Host")
-            .show_apply_button(true)
-            .input_purpose(gtk::InputPurpose::Url)
-            .build();
-        let proxy_port = adw::EntryRow::builder()
-            .title("Port")
-            .show_apply_button(true)
-            .input_purpose(gtk::InputPurpose::Digits)
-            .build();
-        let proxy_group = adw::PreferencesGroup::builder()
-            .title("Proxy")
-            .description(
-                "Applies immediately, without restarting the background service. \
-                 Requests to this machine never go through it.",
-            )
-            .build();
-        proxy_group.add(&proxy_mode);
-        proxy_group.add(&proxy_host);
-        proxy_group.add(&proxy_port);
-
-        let release_check = adw::SwitchRow::builder()
-            .title("Check for updates")
-            .subtitle("Ask GitHub for the latest Tidemark release once an hour.")
-            .build();
-        let release_group = adw::PreferencesGroup::builder()
-            .title("Release Updates")
-            .build();
-        release_group.add(&release_check);
-
-        // The release check lives here rather than on a page of its own: it is one switch,
-        // and what it is a switch over is the network.
-        let network = adw::PreferencesPage::builder()
-            .title("Network")
-            .icon_name("network-workgroup-symbolic")
-            .build();
-        network.add(&proxy_group);
-        network.add(&release_group);
-        dialog.add(&network);
-
-        let retention = adw::ComboRow::builder()
-            .title("Keep history")
-            .subtitle("Older readings are deleted after this period.")
-            .model(&gtk::StringList::new(&RETENTION_LABELS))
-            .expression(gtk::PropertyExpression::new(
-                gtk::StringObject::static_type(),
-                None::<gtk::Expression>,
-                "string",
-            ))
-            .use_subtitle(true)
-            .build();
-        let clear = gtk::Button::builder()
-            .label("Clear History")
-            .valign(gtk::Align::Center)
-            .css_classes(["destructive-action"])
-            .build();
-        let clear_row = adw::ActionRow::builder()
-            .title("Recorded quota history")
-            .subtitle("Delete readings and notification records. Accounts and credentials stay.")
-            .build();
-        clear_row.add_suffix(&clear);
-
-        let history_group = adw::PreferencesGroup::builder().title("History").build();
-        history_group.add(&retention);
-        history_group.add(&clear_row);
-
-        let config_path = path_row("Configuration file");
-        let history_path = path_row("History database");
-        let history_size = adw::ActionRow::builder().title("Database size").build();
-        let files = adw::PreferencesGroup::builder().title("Files").build();
-        files.add(&config_path);
-        files.add(&history_path);
-        files.add(&history_size);
-
-        let key_schema = path_row("API keys");
-        let token_schema = path_row("OAuth sessions");
-        let keyring = adw::PreferencesGroup::builder()
-            .title("System Keyring")
-            .description("Secrets stay in the desktop Secret Service, not in config.toml.")
-            .build();
-        keyring.add(&key_schema);
-        keyring.add(&token_schema);
-
-        let data_page = adw::PreferencesPage::builder()
-            .title("Data")
-            .icon_name("folder-documents-symbolic")
-            .build();
-        data_page.add(&history_group);
-        data_page.add(&files);
-        data_page.add(&keyring);
-        dialog.add(&data_page);
-
-        let settings = Rc::new(Self {
-            dialog: dialog.clone(),
-            proxy,
-            release_check,
-            minimize_on_close,
-            refresh_auto,
-            refresh_minutes,
-            columns_auto,
-            max_columns,
-
-            theme,
-            startup: startup_mode,
-            retention,
-            proxy_mode,
-            proxy_host,
-            proxy_port,
-            config_path,
-            history_path,
-            history_size,
-            key_schema,
-            token_schema,
+        let dialog = Rc::new(Self {
+            ui: ui.as_weak(),
+            daemon,
+            alerts,
             preferences: RefCell::new(preferences.clone()),
             data: RefCell::new(data.clone()),
-            suppress: Cell::new(false),
+            on_closed: Box::new(on_closed),
+            closed: Cell::new(false),
         });
+        dialog.wire(ui);
+        let prefs = ui.global::<Prefs>();
+        prefs.set_page(0);
+        dialog.render();
+        prefs.set_open(true);
+        dialog
+    }
 
-        settings.connect_switch(&settings.release_check, SwitchKind::ReleaseCheck);
-        settings.connect_switch(&settings.minimize_on_close, SwitchKind::MinimizeOnClose);
-        settings.connect_switch(&settings.refresh_auto, SwitchKind::RefreshAuto);
-        settings.connect_switch(&settings.columns_auto, SwitchKind::ColumnsAuto);
+    fn wire(self: &Rc<Self>, ui: &AppWindow) {
+        let prefs = ui.global::<Prefs>();
+        let weak = Rc::downgrade(self);
+        let with = |action: fn(&Rc<Self>)| {
+            let weak = weak.clone();
+            move || {
+                if let Some(dialog) = weak.upgrade() {
+                    action(&dialog);
+                }
+            }
+        };
+        let indexed = |action: fn(&Rc<Self>, usize)| {
+            let weak = weak.clone();
+            move |index: i32| {
+                if let (Some(dialog), Ok(index)) = (weak.upgrade(), usize::try_from(index)) {
+                    action(&dialog, index);
+                }
+            }
+        };
+        let counted = |action: fn(&Rc<Self>, u32)| {
+            let weak = weak.clone();
+            move |count: i32| {
+                if let (Some(dialog), Ok(count)) = (weak.upgrade(), u32::try_from(count)) {
+                    action(&dialog, count);
+                }
+            }
+        };
 
-        settings.connect_theme();
-        settings.connect_startup();
-        settings.connect_retention();
-        settings.connect_proxy();
-        settings.connect_refresh_minutes();
-        settings.connect_max_columns();
-
-        settings.connect_clear(&clear);
-        settings.apply(&preferences, &data);
-
-        dialog.connect_closed({
-            let weak = Rc::downgrade(&settings);
-            move |_| {
-                if weak.upgrade().is_some() {
-                    on_closed();
+        prefs.on_close(with(Self::close));
+        prefs.on_set_switch({
+            let weak = weak.clone();
+            move |id: SharedString, enabled| {
+                if let (Some(dialog), Some(kind)) = (weak.upgrade(), SwitchKind::from_id(&id)) {
+                    dialog.change_switch(kind, enabled);
                 }
             }
         });
-        dialog.present(Some(parent));
-        settings
+        prefs.on_set_minutes(counted(Self::set_minutes));
+        prefs.on_set_columns(counted(Self::set_columns));
+        prefs.on_choose_startup(indexed(Self::choose_startup));
+        prefs.on_choose_theme(indexed(Self::choose_theme));
+        prefs.on_choose_retention(indexed(Self::choose_retention));
+        prefs.on_choose_proxy_mode(indexed(|dialog, _| {
+            dialog.submit_proxy(Complaint::Silent);
+        }));
+        prefs.on_apply_proxy(with(|dialog| dialog.submit_proxy(Complaint::Loud)));
+        prefs.on_clear_history(with(Self::clear_history));
     }
 
+    /// Takes what the daemon now says, and redraws every row from it.
     pub fn apply(&self, preferences: &Preferences, data: &DataInfo) {
-        *self.preferences.borrow_mut() = preferences.clone();
-        *self.data.borrow_mut() = data.clone();
-        self.suppress.set(true);
-        self.release_check
-            .set_active(preferences.release_check && data.release_check_available);
-        self.minimize_on_close
-            .set_active(preferences.minimize_on_close);
-        self.refresh_auto
-            .set_active(preferences.refresh_mode == Preferences::REFRESH_AUTO);
-        self.refresh_minutes
-            .set_value(f64::from(preferences.refresh_minutes));
-        self.columns_auto
-            .set_active(preferences.columns_auto.unwrap_or(true));
-        self.max_columns
-            .set_value(f64::from(preferences.max_columns.unwrap_or(3)));
-
-        apply_named_choice(
-            &self.theme,
-            &THEME_LABELS,
-            theme_index(
-                preferences
-                    .theme
-                    .as_deref()
-                    .unwrap_or(Preferences::THEME_SYSTEM),
-            ),
-            preferences
-                .theme
-                .as_deref()
-                .unwrap_or(Preferences::THEME_SYSTEM),
-        );
-        apply_named_choice(
-            &self.startup,
-            &STARTUP_LABELS,
-            startup_index(&preferences.startup_mode),
-            &preferences.startup_mode,
-        );
-        apply_named_choice(
-            &self.retention,
-            &RETENTION_LABELS,
-            retention_index(&preferences.history_retention),
-            &preferences.history_retention,
-        );
-        apply_named_choice(
-            &self.proxy_mode,
-            &PROXY_LABELS,
-            proxy_index(&preferences.proxy_mode),
-            &preferences.proxy_mode,
-        );
-        self.proxy_host.set_text(&preferences.proxy_host);
-        // Zero is "unset" on the wire and has to read as empty here: a port row showing
-        // `0` invites the user to leave it, and `0` is not a port.
-        self.proxy_port.set_text(&match preferences.proxy_port {
-            0 => String::new(),
-            port => port.to_string(),
-        });
-        self.suppress.set(false);
-
-        self.release_check
-            .set_sensitive(data.release_check_available);
-        self.release_check
-            .set_subtitle(if data.release_check_available {
-                "Ask GitHub for the latest Tidemark release once an hour."
-            } else {
-                "Release checks are disabled in this build."
-            });
-        self.config_path
-            .set_subtitle(&display_path(&data.config_path));
-        self.history_path
-            .set_subtitle(&display_path(&data.history_path));
-        self.history_size
-            .set_subtitle(&format_bytes(data.history_bytes));
-        self.key_schema.set_subtitle(&data.key_schema);
-        self.token_schema.set_subtitle(&data.token_schema);
-        for row in [&self.proxy_host, &self.proxy_port] {
-            row.remove_css_class("error");
+        if self.closed.get() {
+            return;
         }
-        self.sync_proxy_editable();
-        self.sync_refresh_editable();
-        self.sync_columns_editable();
+        self.preferences.replace(preferences.clone());
+        self.data.replace(data.clone());
+        self.render();
     }
 
-    /// Whether the manual interval row can be typed into, from what the Auto switch
-    /// shows — the row's own state, not the stored preference, for the reason the proxy
-    /// rows read theirs: the switch flips before the daemon answers.
-    fn sync_refresh_editable(&self) {
-        self.refresh_minutes
-            .set_sensitive(manual_refresh_editable(self.refresh_auto.is_active()));
+    fn render(&self) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let prefs = ui.global::<Prefs>();
+        let preferences = self.preferences.borrow();
+        let data = self.data.borrow();
+
+        prefs.set_minimize_on_close(preferences.minimize_on_close);
+        let (index, unknown) = choice(&STARTUP_VALUES, &preferences.startup_mode);
+        prefs.set_startup(index);
+        prefs.set_startup_unknown(unknown.into());
+        let theme = preferences
+            .theme
+            .as_deref()
+            .unwrap_or(Preferences::THEME_SYSTEM);
+        let (index, unknown) = choice(&THEME_VALUES, theme);
+        prefs.set_theme(index);
+        prefs.set_theme_unknown(unknown.into());
+        prefs.set_refresh_auto(preferences.refresh_mode == Preferences::REFRESH_AUTO);
+        prefs.set_refresh_minutes(clamp_to_i32(preferences.refresh_minutes));
+        prefs.set_columns_auto(preferences.columns_auto.unwrap_or(true));
+        prefs.set_max_columns(clamp_to_i32(preferences.max_columns.unwrap_or(3)));
+
+        let (index, unknown) = choice(&PROXY_VALUES, &preferences.proxy_mode);
+        prefs.set_proxy_mode(index);
+        prefs.set_proxy_mode_unknown(unknown.into());
+        let port = port_text(preferences.proxy_port);
+        prefs.set_proxy_host(preferences.proxy_host.as_str().into());
+        prefs.set_stored_host(preferences.proxy_host.as_str().into());
+        prefs.set_proxy_port(port.as_str().into());
+        prefs.set_stored_port(port.into());
+        prefs.set_host_error(false);
+        prefs.set_port_error(false);
+        prefs.set_release_check(preferences.release_check && data.release_check_available);
+        prefs.set_release_available(data.release_check_available);
+
+        let (index, unknown) = choice(&RETENTION_VALUES, &preferences.history_retention);
+        prefs.set_retention(index);
+        prefs.set_retention_unknown(unknown.into());
+        prefs.set_config_path(display_path(&data.config_path).into());
+        prefs.set_history_path(display_path(&data.history_path).into());
+        prefs.set_history_size(format_bytes(data.history_bytes).into());
+        prefs.set_key_schema(data.key_schema.as_str().into());
+        prefs.set_token_schema(data.token_schema.as_str().into());
     }
 
-    /// Whether the ceiling row can be typed into — the same contract the manual interval
-    /// row follows, read from the switch and not the store.
-    fn sync_columns_editable(&self) {
-        self.max_columns
-            .set_sensitive(manual_columns_editable(self.columns_auto.is_active()));
+    fn close(self: &Rc<Self>) {
+        if self.closed.replace(true) {
+            return;
+        }
+        if let Some(ui) = self.ui.upgrade() {
+            ui.global::<Prefs>().set_open(false);
+        }
+        (self.on_closed)();
     }
 
-    fn connect_switch(self: &Rc<Self>, row: &adw::SwitchRow, kind: SwitchKind) {
-        row.connect_active_notify({
-            let weak = Rc::downgrade(self);
-            move |row| {
-                let Some(settings) = weak.upgrade() else {
-                    return;
-                };
-                if settings.suppress.get() {
-                    return;
-                }
-                if matches!(kind, SwitchKind::RefreshAuto) {
-                    // Before the round trip, so the row the mode just made irrelevant
-                    // locks the moment the switch flips and not a reply later.
-                    settings.sync_refresh_editable();
-                }
-                if matches!(kind, SwitchKind::ColumnsAuto) {
-                    settings.sync_columns_editable();
-                }
+    fn toast(&self, message: &str) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.global::<Prefs>().invoke_show_toast(message.into());
+        }
+    }
 
-                settings.change_switch(kind, row.is_active());
+    fn set_busy(&self, busy: Busy, on: bool) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let prefs = ui.global::<Prefs>();
+        match busy {
+            Busy::Minimize => prefs.set_busy_minimize(on),
+            Busy::Startup => prefs.set_busy_startup(on),
+            Busy::Theme => prefs.set_busy_theme(on),
+            Busy::RefreshAuto => prefs.set_busy_refresh_auto(on),
+            Busy::Minutes => prefs.set_busy_minutes(on),
+            Busy::ColumnsAuto => prefs.set_busy_columns_auto(on),
+            Busy::Columns => prefs.set_busy_columns(on),
+            Busy::Proxy => prefs.set_busy_proxy(on),
+            Busy::Release => prefs.set_busy_release(on),
+            Busy::Retention => prefs.set_busy_retention(on),
+            Busy::Clear => prefs.set_busy_clear(on),
+        }
+    }
+
+    /// Sends one change with its row disabled, which is what bounds how fast a held
+    /// stepper or a restless switch can send. A refusal redraws from the daemon's state.
+    fn send<F, Fut>(
+        self: &Rc<Self>,
+        busy: Busy,
+        request: F,
+        accepted: impl FnOnce(&mut Preferences) + 'static,
+    ) where
+        F: FnOnce(DaemonProxy<'static>) -> Fut + 'static,
+        Fut: Future<Output = zbus::Result<()>> + 'static,
+    {
+        let Some(proxy) = (self.daemon)() else {
+            self.toast("Tidemark is not running.");
+            self.render();
+            return;
+        };
+        self.set_busy(busy, true);
+        let dialog = Rc::clone(self);
+        spawn(async move {
+            match request(proxy).await {
+                Ok(()) => accepted(&mut dialog.preferences.borrow_mut()),
+                Err(error) => {
+                    dialog.render();
+                    dialog.toast(&reason(&error));
+                }
             }
+            dialog.set_busy(busy, false);
         });
     }
 
-    fn change_switch(self: Rc<Self>, kind: SwitchKind, enabled: bool) {
-        let row = self.switch_row(kind).clone();
-        row.set_sensitive(false);
-        glib::spawn_future_local(async move {
-            let result = match kind {
-                SwitchKind::ReleaseCheck => self.proxy.set_release_check(enabled).await,
-                SwitchKind::MinimizeOnClose => self.proxy.set_minimize_on_close(enabled).await,
-                SwitchKind::RefreshAuto => {
-                    let mode = refresh_mode_for(enabled);
-                    self.proxy.set_refresh_mode(mode).await
-                }
-                SwitchKind::ColumnsAuto => self.proxy.set_columns_auto(enabled).await,
-            };
-            if let Err(error) = result {
-                let preferences = self.preferences.borrow().clone();
-                let data = self.data.borrow().clone();
-                self.apply(&preferences, &data);
-                self.toast(&error.to_string());
-            } else {
-                let mut preferences = self.preferences.borrow_mut();
+    fn change_switch(self: &Rc<Self>, kind: SwitchKind, enabled: bool) {
+        self.send(
+            kind.busy(),
+            move |proxy| async move {
                 match kind {
-                    SwitchKind::ReleaseCheck => preferences.release_check = enabled,
-                    SwitchKind::MinimizeOnClose => preferences.minimize_on_close = enabled,
+                    SwitchKind::ReleaseCheck => proxy.set_release_check(enabled).await,
+                    SwitchKind::MinimizeOnClose => proxy.set_minimize_on_close(enabled).await,
                     SwitchKind::RefreshAuto => {
-                        preferences.refresh_mode = refresh_mode_for(enabled).to_owned();
+                        proxy.set_refresh_mode(refresh_mode_for(enabled)).await
                     }
-                    SwitchKind::ColumnsAuto => preferences.columns_auto = Some(enabled),
+                    SwitchKind::ColumnsAuto => proxy.set_columns_auto(enabled).await,
                 }
-            }
-            if !matches!(kind, SwitchKind::ReleaseCheck)
-                || self.data.borrow().release_check_available
-            {
-                row.set_sensitive(true);
-            }
-        });
+            },
+            move |preferences| match kind {
+                SwitchKind::ReleaseCheck => preferences.release_check = enabled,
+                SwitchKind::MinimizeOnClose => preferences.minimize_on_close = enabled,
+                SwitchKind::RefreshAuto => {
+                    preferences.refresh_mode = refresh_mode_for(enabled).to_owned();
+                }
+                SwitchKind::ColumnsAuto => preferences.columns_auto = Some(enabled),
+            },
+        );
     }
 
-    fn switch_row(&self, kind: SwitchKind) -> &adw::SwitchRow {
-        match kind {
-            SwitchKind::ReleaseCheck => &self.release_check,
-            SwitchKind::MinimizeOnClose => &self.minimize_on_close,
-            SwitchKind::RefreshAuto => &self.refresh_auto,
-            SwitchKind::ColumnsAuto => &self.columns_auto,
+    fn set_minutes(self: &Rc<Self>, minutes: u32) {
+        self.send(
+            Busy::Minutes,
+            move |proxy| async move { proxy.set_refresh_minutes(minutes).await },
+            move |preferences| preferences.refresh_minutes = minutes,
+        );
+        // The stepper shows the new value while it waits.
+        if let Some(ui) = self.ui.upgrade() {
+            ui.global::<Prefs>()
+                .set_refresh_minutes(clamp_to_i32(minutes));
         }
     }
 
-    /// Commits the manual interval each time the stepper settles on a value.
-    ///
-    /// The row is made insensitive for the round trip, which is what bounds the commit
-    /// rate: a held stepper button cannot queue a poll per click.
-    fn connect_refresh_minutes(self: &Rc<Self>) {
-        self.refresh_minutes.connect_value_notify({
-            let weak = Rc::downgrade(self);
-            move |row| {
-                let Some(settings) = weak.upgrade() else {
-                    return;
-                };
-                if settings.suppress.get() {
-                    return;
-                }
-                let minutes = row.value() as u32;
-                row.set_sensitive(false);
-                glib::spawn_future_local(async move {
-                    if let Err(error) = settings.proxy.set_refresh_minutes(minutes).await {
-                        let preferences = settings.preferences.borrow().clone();
-                        let data = settings.data.borrow().clone();
-                        settings.apply(&preferences, &data);
-                        settings.toast(&error.to_string());
-                    } else {
-                        settings.preferences.borrow_mut().refresh_minutes = minutes;
-                    }
-                    // Either way the row is redrawn from the switch, which is what
-                    // restores its sensitivity under the mode that allows typing.
-                    settings.sync_refresh_editable();
-                });
-            }
-        });
-    }
-
-    /// Commits the column ceiling each time the stepper settles on a value, under the same
-    /// round-trip insensitivity that bounds the commit rate of the interval row.
-    fn connect_max_columns(self: &Rc<Self>) {
-        self.max_columns.connect_value_notify({
-            let weak = Rc::downgrade(self);
-            move |row| {
-                let Some(settings) = weak.upgrade() else {
-                    return;
-                };
-                if settings.suppress.get() {
-                    return;
-                }
-                let columns = row.value() as u32;
-                row.set_sensitive(false);
-                glib::spawn_future_local(async move {
-                    if let Err(error) = settings.proxy.set_max_columns(columns).await {
-                        let preferences = settings.preferences.borrow().clone();
-                        let data = settings.data.borrow().clone();
-                        settings.apply(&preferences, &data);
-                        settings.toast(&error.to_string());
-                    } else {
-                        settings.preferences.borrow_mut().max_columns = Some(columns);
-                    }
-                    // Either way the row is redrawn from the switch, which is what
-                    // restores its sensitivity under the mode that allows typing.
-                    settings.sync_columns_editable();
-                });
-            }
-        });
-    }
-
-    fn connect_startup(self: &Rc<Self>) {
-        self.startup.connect_selected_notify({
-            let weak = Rc::downgrade(self);
-            move |row| {
-                let Some(settings) = weak.upgrade() else {
-                    return;
-                };
-                if settings.suppress.get() {
-                    return;
-                }
-                let Some(mode) = STARTUP_VALUES.get(row.selected() as usize) else {
-                    return;
-                };
-                let mode = (*mode).to_owned();
-                row.set_sensitive(false);
-                let row = row.clone();
-                glib::spawn_future_local(async move {
-                    if let Err(error) = settings.proxy.set_startup_mode(&mode).await {
-                        let preferences = settings.preferences.borrow().clone();
-                        let data = settings.data.borrow().clone();
-                        settings.apply(&preferences, &data);
-                        settings.toast(&error.to_string());
-                    } else {
-                        settings.preferences.borrow_mut().startup_mode = mode;
-                    }
-                    row.set_sensitive(true);
-                });
-            }
-        });
-    }
-
-    fn connect_theme(self: &Rc<Self>) {
-        self.theme.connect_selected_notify({
-            let weak = Rc::downgrade(self);
-            move |row| {
-                let Some(settings) = weak.upgrade() else {
-                    return;
-                };
-                if settings.suppress.get() {
-                    return;
-                }
-                let Some(theme) = THEME_VALUES.get(row.selected() as usize) else {
-                    return;
-                };
-                let theme = (*theme).to_owned();
-                row.set_sensitive(false);
-                let row = row.clone();
-                glib::spawn_future_local(async move {
-                    if let Err(error) = settings.proxy.set_theme(&theme).await {
-                        let preferences = settings.preferences.borrow().clone();
-                        let data = settings.data.borrow().clone();
-                        settings.apply(&preferences, &data);
-                        settings.toast(&error.to_string());
-                    } else {
-                        settings.preferences.borrow_mut().theme = Some(theme);
-                    }
-                    row.set_sensitive(true);
-                });
-            }
-        });
-    }
-
-    fn connect_retention(self: &Rc<Self>) {
-        self.retention.connect_selected_notify({
-            let weak = Rc::downgrade(self);
-            move |row| {
-                let Some(settings) = weak.upgrade() else {
-                    return;
-                };
-                if settings.suppress.get() {
-                    return;
-                }
-                let Some(retention) = RETENTION_VALUES.get(row.selected() as usize) else {
-                    return;
-                };
-                let retention = (*retention).to_owned();
-                row.set_sensitive(false);
-                let row = row.clone();
-                glib::spawn_future_local(async move {
-                    if let Err(error) = settings.proxy.set_history_retention(&retention).await {
-                        let preferences = settings.preferences.borrow().clone();
-                        let data = settings.data.borrow().clone();
-                        settings.apply(&preferences, &data);
-                        settings.toast(&error.to_string());
-                    } else {
-                        settings.preferences.borrow_mut().history_retention = retention;
-                    }
-                    row.set_sensitive(true);
-                });
-            }
-        });
-    }
-
-    /// All three proxy rows commit the same way, because they are one setting.
-    ///
-    /// The mode opens the two rows it needs and then tries; the host and the port commit
-    /// when their apply button is pressed or Enter ends the edit. Whichever of them the
-    /// user touched, the daemon is sent the whole triple.
-    fn connect_proxy(self: &Rc<Self>) {
-        self.proxy_mode.connect_selected_notify({
-            let weak = Rc::downgrade(self);
-            move |_| {
-                if let Some(settings) = weak.upgrade()
-                    && !settings.suppress.get()
-                {
-                    // Before the attempt, because choosing `SOCKS5` is what makes the host
-                    // typeable and the attempt below is what needs it typed.
-                    settings.sync_proxy_editable();
-                    settings.submit_proxy(Complaint::Silent);
-                }
-            }
-        });
-        for row in [&self.proxy_host, &self.proxy_port] {
-            row.connect_apply({
-                let weak = Rc::downgrade(self);
-                move |_| {
-                    if let Some(settings) = weak.upgrade()
-                        && !settings.suppress.get()
-                    {
-                        settings.submit_proxy(Complaint::Loud);
-                    }
-                }
-            });
+    fn set_columns(self: &Rc<Self>, columns: u32) {
+        self.send(
+            Busy::Columns,
+            move |proxy| async move { proxy.set_max_columns(columns).await },
+            move |preferences| preferences.max_columns = Some(columns),
+        );
+        if let Some(ui) = self.ui.upgrade() {
+            ui.global::<Prefs>().set_max_columns(clamp_to_i32(columns));
         }
     }
 
-    /// Whether the host and the port can be typed into.
-    ///
-    /// The rule reads the **row** and not the stored preference, which is the whole point
-    /// of it: choosing `SOCKS5` before typing where the proxy is, is how this group gets
-    /// filled in, and that choice is deliberately not sent - so the stored mode is still
-    /// `off` at the moment the two rows it needs have to become editable. Deriving this
-    /// from storage locks them shut and leaves the setting unreachable.
-    ///
-    /// A mode this build cannot show empties its own row, and `selected` is then out of
-    /// range: nothing to describe, nothing to type.
-    fn sync_proxy_editable(&self) {
-        let editable = proxy_rows_editable(self.proxy_mode.selected());
-        for row in [&self.proxy_host, &self.proxy_port] {
-            row.set_sensitive(editable);
-        }
+    fn choose_startup(self: &Rc<Self>, index: usize) {
+        let Some(mode) = STARTUP_VALUES.get(index) else {
+            return;
+        };
+        self.send(
+            Busy::Startup,
+            move |proxy| async move { proxy.set_startup_mode(mode).await },
+            move |preferences| preferences.startup_mode = (*mode).to_owned(),
+        );
     }
 
-    /// Sends the proxy the three rows currently describe.
+    fn choose_theme(self: &Rc<Self>, index: usize) {
+        let Some(theme) = THEME_VALUES.get(index) else {
+            return;
+        };
+        self.send(
+            Busy::Theme,
+            move |proxy| async move { proxy.set_theme(theme).await },
+            move |preferences| preferences.theme = Some((*theme).to_owned()),
+        );
+    }
+
+    fn choose_retention(self: &Rc<Self>, index: usize) {
+        let Some(retention) = RETENTION_VALUES.get(index) else {
+            return;
+        };
+        self.send(
+            Busy::Retention,
+            move |proxy| async move { proxy.set_history_retention(retention).await },
+            move |preferences| preferences.history_retention = (*retention).to_owned(),
+        );
+    }
+
+    /// Sends the proxy the three rows currently describe, read from the rows rather than
+    /// from what is stored.
     ///
     /// A mode with no host or no port yet is **not** sent. The daemon would refuse it and
     /// be right to, but choosing `SOCKS5` before typing where it is, is the normal way to
@@ -727,205 +412,149 @@ impl PreferencesDialog {
     /// the wrong thing: the row that still needs typing is focused, and only a deliberate
     /// submit of an incomplete one is marked as wrong.
     fn submit_proxy(self: &Rc<Self>, complaint: Complaint) {
-        let Some(mode) = PROXY_VALUES.get(self.proxy_mode.selected() as usize) else {
+        let Some(ui) = self.ui.upgrade() else {
             return;
         };
-        let mode = (*mode).to_owned();
-        let host = self.proxy_host.text().trim().to_owned();
-        let typed = self.proxy_port.text();
-        let typed = typed.trim();
-        for row in [&self.proxy_host, &self.proxy_port] {
-            row.remove_css_class("error");
-        }
-        let port = if typed.is_empty() {
-            Some(0)
-        } else {
-            typed.parse::<u16>().ok().filter(|port| *port != 0)
+        let prefs = ui.global::<Prefs>();
+        let Some(mode) = usize::try_from(prefs.get_proxy_mode())
+            .ok()
+            .and_then(|index| PROXY_VALUES.get(index))
+        else {
+            return;
         };
-        let Some(port) = port else {
-            self.proxy_port.add_css_class("error");
-            self.proxy_port.grab_focus();
+        let host = prefs.get_proxy_host().trim().to_owned();
+        prefs.set_host_error(false);
+        prefs.set_port_error(false);
+        let Some(port) = parse_port(&prefs.get_proxy_port()) else {
+            prefs.set_port_error(true);
+            self.focus(ProxyField::Port);
             if matches!(complaint, Complaint::Loud) {
                 self.toast("A proxy port is a number from 1 to 65535");
             }
             return;
         };
-        if mode != Preferences::PROXY_OFF {
+        if *mode != Preferences::PROXY_OFF {
             let incomplete = if host.is_empty() {
-                Some(&self.proxy_host)
+                Some(ProxyField::Host)
             } else if port == 0 {
-                Some(&self.proxy_port)
+                Some(ProxyField::Port)
             } else {
                 None
             };
-            if let Some(row) = incomplete {
+            if let Some(field) = incomplete {
                 if matches!(complaint, Complaint::Loud) {
-                    row.add_css_class("error");
+                    match field {
+                        ProxyField::Host => prefs.set_host_error(true),
+                        ProxyField::Port => prefs.set_port_error(true),
+                    }
                 }
-                row.grab_focus();
+                self.focus(field);
                 return;
             }
         }
 
-        let settings = Rc::clone(self);
-        let rows = [
-            self.proxy_host.clone().upcast::<gtk::Widget>(),
-            self.proxy_port.clone().upcast(),
-            self.proxy_mode.clone().upcast(),
-        ];
-        for row in &rows {
-            row.set_sensitive(false);
-        }
-        glib::spawn_future_local(async move {
-            let result = settings.proxy.set_proxy(&mode, &host, port).await;
-            match result {
+        let Some(proxy) = (self.daemon)() else {
+            self.toast("Tidemark is not running.");
+            self.render();
+            return;
+        };
+        self.set_busy(Busy::Proxy, true);
+        let dialog = Rc::clone(self);
+        spawn(async move {
+            match proxy.set_proxy(mode, &host, port).await {
                 Ok(()) => {
                     {
-                        let mut preferences = settings.preferences.borrow_mut();
-                        preferences.proxy_mode = mode;
+                        let mut preferences = dialog.preferences.borrow_mut();
+                        preferences.proxy_mode = (*mode).to_owned();
                         preferences.proxy_host = host;
                         preferences.proxy_port = port;
                     }
-                    settings.toast("Proxy updated");
+                    dialog.toast("Proxy updated");
                 }
-                Err(error) => settings.toast(&error.to_string()),
+                Err(error) => dialog.toast(&reason(&error)),
             }
-            // Either way the rows are redrawn from the state that is now authoritative,
-            // which is also what restores their sensitivity for the new mode.
-            let preferences = settings.preferences.borrow().clone();
-            let data = settings.data.borrow().clone();
-            settings.apply(&preferences, &data);
+            // Either way the rows are redrawn from the state that is now authoritative.
+            dialog.set_busy(Busy::Proxy, false);
+            dialog.render();
         });
     }
 
-    fn connect_clear(self: &Rc<Self>, button: &gtk::Button) {
-        button.connect_clicked({
-            let weak: Weak<Self> = Rc::downgrade(self);
-            move |button| {
-                let Some(settings) = weak.upgrade() else {
-                    return;
-                };
-                button.set_sensitive(false);
-                let button = button.clone();
-                glib::spawn_future_local(async move {
-                    let confirmation = adw::AlertDialog::builder()
-                        .heading("Clear history?")
-                        .body("This permanently deletes recorded quota history and notification records. Provider accounts and credentials are not affected.")
-                        .build();
-                    confirmation.add_responses(&[("cancel", "Cancel"), ("clear", "Clear History")]);
-                    confirmation.set_default_response(Some("cancel"));
-                    confirmation.set_close_response("cancel");
-                    confirmation.set_response_appearance(
-                        "clear",
-                        adw::ResponseAppearance::Destructive,
-                    );
-                    if confirmation.choose_future(Some(&settings.dialog)).await == "clear" {
-                        match settings.proxy.clear_history().await {
-                            Ok(()) => {
-                                settings.toast("History cleared");
-                                if let Ok(data) = settings.proxy.get_data_info().await {
-                                    let preferences = settings.preferences.borrow().clone();
-                                    settings.apply(&preferences, &data);
-                                }
+    fn focus(&self, field: ProxyField) {
+        if let Some(ui) = self.ui.upgrade() {
+            let prefs = ui.global::<Prefs>();
+            prefs.set_focus_target(match field {
+                ProxyField::Host => 0,
+                ProxyField::Port => 1,
+            });
+            prefs.set_focus_serial(prefs.get_focus_serial() + 1);
+        }
+    }
+
+    fn clear_history(self: &Rc<Self>) {
+        self.set_busy(Busy::Clear, true);
+        let dialog = Rc::clone(self);
+        spawn(async move {
+            let answer = dialog
+                .alerts
+                .ask(Question::destructive(
+                    "Clear history?".to_owned(),
+                    "This permanently deletes recorded quota history and notification records. \
+                     Provider accounts and credentials are not affected.",
+                    "Clear History",
+                ))
+                .await;
+            if answer.confirmed() {
+                match (dialog.daemon)() {
+                    None => dialog.toast("Tidemark is not running."),
+                    Some(proxy) => match proxy.clear_history().await {
+                        Ok(()) => {
+                            dialog.toast("History cleared");
+                            if let Ok(data) = proxy.get_data_info().await {
+                                let preferences = dialog.preferences.borrow().clone();
+                                dialog.apply(&preferences, &data);
                             }
-                            Err(error) => settings.toast(&error.to_string()),
                         }
-                    }
-                    button.set_sensitive(true);
-                });
+                        Err(error) => dialog.toast(&reason(&error)),
+                    },
+                }
             }
+            dialog.set_busy(Busy::Clear, false);
         });
     }
-
-    fn toast(&self, message: &str) {
-        self.dialog.add_toast(adw::Toast::new(message));
-    }
 }
 
-fn path_row(title: &str) -> adw::ActionRow {
-    adw::ActionRow::builder().title(title).build()
-}
-
-fn display_path(path: &str) -> String {
-    if path.is_empty() {
-        "Unavailable until the daemon is restarted".into()
-    } else {
-        path.into()
-    }
-}
-
-/// Shows a named daemon choice on a combo row.
+/// A named daemon value as a row's index, or -1 and what to say instead.
 ///
 /// A value this build does not know is kept visible and untouchable rather than guessed:
-/// the row is emptied of choices so it cannot show or select a different one, disabled so
-/// it cannot be changed by accident, and says what the daemon actually reported. A known
-/// value puts the choices back, selects its own, and leaves the row editable.
-///
-/// Emptying the row is what it takes: `AdwComboRow` holds a model with a valid selection
-/// in it, and setting the position to [`gtk::INVALID_LIST_POSITION`] with the labels still
-/// there leaves the first one selected — the very guess this avoids.
-fn apply_named_choice(row: &adw::ComboRow, labels: &[&str], known: Option<u32>, raw: &str) {
-    match known {
-        Some(index) => {
-            if row.model().is_none() {
-                row.set_model(Some(&gtk::StringList::new(labels)));
-            }
-            row.set_use_subtitle(true);
-            row.set_selected(index);
-            row.set_sensitive(true);
-        }
-        None => {
-            row.set_model(None::<&gtk::StringList>);
-            row.set_use_subtitle(false);
-            row.set_subtitle(&format!(
-                "Unsupported value {raw:?} reported by the daemon."
-            ));
-            row.set_sensitive(false);
-        }
+/// the row shows no choice, is disabled so it cannot be changed by accident, and says what
+/// the daemon actually reported.
+fn choice(values: &[&str], raw: &str) -> (i32, String) {
+    match values.iter().position(|value| *value == raw) {
+        Some(index) => (i32::try_from(index).unwrap_or(-1), String::new()),
+        None => (
+            -1,
+            format!("Unsupported value {raw:?} reported by the daemon."),
+        ),
     }
 }
 
-fn retention_index(value: &str) -> Option<u32> {
-    RETENTION_VALUES
-        .iter()
-        .position(|candidate| *candidate == value)
-        .map(|index| index as u32)
+/// Zero is "unset" on the wire and has to read as empty: a port row showing `0` invites
+/// the user to leave it, and `0` is not a port.
+fn port_text(port: u16) -> String {
+    match port {
+        0 => String::new(),
+        port => port.to_string(),
+    }
 }
 
-fn startup_index(value: &str) -> Option<u32> {
-    STARTUP_VALUES
-        .iter()
-        .position(|candidate| *candidate == value)
-        .map(|index| index as u32)
-}
-
-fn theme_index(value: &str) -> Option<u32> {
-    THEME_VALUES
-        .iter()
-        .position(|candidate| *candidate == value)
-        .map(|index| index as u32)
-}
-
-fn proxy_index(value: &str) -> Option<u32> {
-    PROXY_VALUES
-        .iter()
-        .position(|candidate| *candidate == value)
-        .map(|index| index as u32)
-}
-
-/// Whether the host and port rows belong to a proxy at all, for what the mode row has
-/// selected right now - including [`gtk::INVALID_LIST_POSITION`], which is what an unknown
-/// daemon value leaves behind.
-fn proxy_rows_editable(selected: u32) -> bool {
-    PROXY_VALUES
-        .get(selected as usize)
-        .is_some_and(|mode| *mode != Preferences::PROXY_OFF)
-}
-
-/// Whether the manual interval row belongs to the mode the Auto switch shows right now —
-/// including the moment between a toggle and the daemon's answer.
-fn manual_refresh_editable(auto_active: bool) -> bool {
-    !auto_active
+/// An empty row is "no port yet"; anything else must be a real one.
+fn parse_port(typed: &str) -> Option<u16> {
+    let typed = typed.trim();
+    if typed.is_empty() {
+        Some(0)
+    } else {
+        typed.parse::<u16>().ok().filter(|port| *port != 0)
+    }
 }
 
 /// The named mode a switch state commits.
@@ -937,21 +566,31 @@ fn refresh_mode_for(auto_active: bool) -> &'static str {
     }
 }
 
-/// Whether the ceiling row belongs to the mode the Auto switch shows right now — the same
-/// moment-between-a-toggle-and-the-answer the manual interval row handles.
-fn manual_columns_editable(auto_active: bool) -> bool {
-    !auto_active
+fn clamp_to_i32(value: u32) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
+fn display_path(path: &str) -> String {
+    if path.is_empty() {
+        "Unavailable until the daemon is restarted".into()
+    } else {
+        path.into()
+    }
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a size shown to one decimal place"
+)]
 fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
     const GIB: u64 = 1024 * MIB;
     match bytes {
-        0..=1023 => format!("{bytes} bytes"),
-        MIB..=u64::MAX if bytes < GIB => format!("{:.1} MiB", bytes as f64 / MIB as f64),
-        GIB..=u64::MAX => format!("{:.1} GiB", bytes as f64 / GIB as f64),
-        _ => format!("{:.1} KiB", bytes as f64 / KIB as f64),
+        0..KIB => format!("{bytes} bytes"),
+        KIB..MIB => format!("{:.1} KiB", bytes as f64 / KIB as f64),
+        MIB..GIB => format!("{:.1} MiB", bytes as f64 / MIB as f64),
+        _ => format!("{:.1} GiB", bytes as f64 / GIB as f64),
     }
 }
 
@@ -960,61 +599,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_retention_policy_selects_its_named_row() {
-        assert_eq!(retention_index(Preferences::RETENTION_FOREVER), Some(0));
-        assert_eq!(retention_index(Preferences::RETENTION_SIX_MONTHS), Some(1));
-        assert_eq!(retention_index(Preferences::RETENTION_ONE_YEAR), Some(2));
-        assert_eq!(retention_index("eventually"), None);
-    }
-
-    #[test]
-    fn every_startup_mode_selects_its_named_row() {
-        assert_eq!(startup_index(Preferences::STARTUP_APP), Some(0));
-        assert_eq!(startup_index(Preferences::STARTUP_DAEMON), Some(1));
-        assert_eq!(startup_index(Preferences::STARTUP_OFF), Some(2));
-        assert_eq!(startup_index("everything"), None);
-    }
-
-    #[test]
-    fn every_theme_selects_its_named_row() {
-        assert_eq!(theme_index(Preferences::THEME_SYSTEM), Some(0));
-        assert_eq!(theme_index(Preferences::THEME_LIGHT), Some(1));
-        assert_eq!(theme_index(Preferences::THEME_DARK), Some(2));
-        assert_eq!(theme_index("night"), None);
-    }
-
-    #[test]
-    fn every_proxy_mode_selects_its_named_row() {
-        assert_eq!(proxy_index(Preferences::PROXY_OFF), Some(0));
-        assert_eq!(proxy_index(Preferences::PROXY_HTTP), Some(1));
-        assert_eq!(proxy_index(Preferences::PROXY_HTTPS), Some(2));
-        assert_eq!(proxy_index(Preferences::PROXY_SOCKS5), Some(3));
-        assert_eq!(proxy_index("socks4"), None);
-        assert_eq!(PROXY_VALUES.len(), PROXY_LABELS.len());
-    }
-
-    #[test]
-    fn the_manual_interval_row_follows_the_auto_switch() {
-        // Reads the row and not the stored preference, for the same reason the proxy
-        // rows do: the switch flips before the daemon has answered, and locking the
-        // row against the stored value would leave the setting unreachable mid-change.
-        assert!(!manual_refresh_editable(true), "auto decides the pace");
-        assert!(
-            manual_refresh_editable(false),
-            "manual needs a pace to read"
+    fn every_named_value_selects_its_row() {
+        assert_eq!(
+            choice(&RETENTION_VALUES, Preferences::RETENTION_FOREVER).0,
+            0
         );
+        assert_eq!(
+            choice(&RETENTION_VALUES, Preferences::RETENTION_ONE_YEAR).0,
+            2
+        );
+        assert_eq!(choice(&STARTUP_VALUES, Preferences::STARTUP_DAEMON).0, 1);
+        assert_eq!(choice(&THEME_VALUES, Preferences::THEME_DARK).0, 2);
+        assert_eq!(choice(&PROXY_VALUES, Preferences::PROXY_SOCKS5).0, 3);
     }
 
     #[test]
-    fn the_maximum_columns_row_follows_the_auto_switch() {
-        // The same contract as the manual interval row: the switch flips before the
-        // daemon answers, so the ceiling row must lock against what the switch says and
-        // not what the store still holds.
-        assert!(!manual_columns_editable(true), "auto decides the count");
-        assert!(
-            manual_columns_editable(false),
-            "manual needs a ceiling to read"
+    fn an_unknown_value_is_shown_rather_than_guessed() {
+        let (index, said) = choice(&PROXY_VALUES, "socks4");
+        assert_eq!(index, -1);
+        assert!(said.contains("\"socks4\""), "{said}");
+        assert!(choice(&THEME_VALUES, "light").1.is_empty());
+    }
+
+    #[test]
+    fn switch_ids_name_the_four_switches() {
+        assert_eq!(
+            SwitchKind::from_id("release"),
+            Some(SwitchKind::ReleaseCheck)
         );
+        assert_eq!(
+            SwitchKind::from_id("minimize"),
+            Some(SwitchKind::MinimizeOnClose)
+        );
+        assert_eq!(
+            SwitchKind::from_id("refresh-auto"),
+            Some(SwitchKind::RefreshAuto)
+        );
+        assert_eq!(
+            SwitchKind::from_id("columns-auto"),
+            Some(SwitchKind::ColumnsAuto)
+        );
+        assert_eq!(SwitchKind::from_id("theme"), None);
     }
 
     #[test]
@@ -1023,20 +648,15 @@ mod tests {
         assert_eq!(refresh_mode_for(false), Preferences::REFRESH_MANUAL);
     }
 
-    /// The regression this exists for: the host and the port were derived from the
-    /// *stored* mode, which is still `off` while a just-chosen `SOCKS5` is waiting for the
-    /// host that would let it be stored. The two rows the user has to type into were the
-    /// two rows that stayed locked, and the setting could not be reached at all.
     #[test]
-    fn choosing_a_proxy_opens_the_rows_it_needs_before_anything_is_stored() {
-        assert!(!proxy_rows_editable(0), "off has nothing to describe");
-        assert!(proxy_rows_editable(1), "http needs a host and a port");
-        assert!(proxy_rows_editable(2));
-        assert!(proxy_rows_editable(3), "socks5 needs a host and a port");
-        assert!(
-            !proxy_rows_editable(gtk::INVALID_LIST_POSITION),
-            "an unknown daemon mode empties its row and describes nothing"
-        );
+    fn an_unset_port_reads_as_empty_and_empty_reads_as_unset() {
+        assert_eq!(port_text(0), "");
+        assert_eq!(port_text(1080), "1080");
+        assert_eq!(parse_port(" "), Some(0));
+        assert_eq!(parse_port("1080"), Some(1080));
+        assert_eq!(parse_port("0"), None);
+        assert_eq!(parse_port("70000"), None);
+        assert_eq!(parse_port("proxy"), None);
     }
 
     #[test]
@@ -1045,72 +665,15 @@ mod tests {
         assert_eq!(format_bytes(512), "512 bytes");
         assert_eq!(format_bytes(1536), "1.5 KiB");
         assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB");
-    }
-    /// Whether a display is available for building widgets; the row state below can only
-    /// be observed on real ones. Every widget assertion lives in a single test because
-    /// GTK belongs to the thread that initialized it and the harness gives each test its
-    /// own thread.
-    fn widgets() -> bool {
-        static READY: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| adw::init().is_ok());
-        *READY
-    }
-
-    fn choice_row(labels: &[&str]) -> adw::ComboRow {
-        adw::ComboRow::builder()
-            .model(&gtk::StringList::new(labels))
-            .expression(gtk::PropertyExpression::new(
-                gtk::StringObject::static_type(),
-                None::<gtk::Expression>,
-                "string",
-            ))
-            .use_subtitle(true)
-            .build()
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
     }
 
     #[test]
-    fn unknown_named_choices_are_kept_visible_and_untouchable() {
-        if !widgets() {
-            eprintln!("skipped: no display is available");
-            return;
-        }
-
-        for (labels, known, raw) in [
-            (
-                &STARTUP_LABELS[..],
-                startup_index(Preferences::STARTUP_DAEMON),
-                "launcher",
-            ),
-            (
-                &RETENTION_LABELS[..],
-                retention_index(Preferences::RETENTION_ONE_YEAR),
-                "decade",
-            ),
-            (
-                &PROXY_LABELS[..],
-                proxy_index(Preferences::PROXY_SOCKS5),
-                "socks4",
-            ),
-        ] {
-            let row = choice_row(labels);
-
-            apply_named_choice(&row, labels, None, raw);
-
-            assert_eq!(row.selected(), gtk::INVALID_LIST_POSITION);
-            assert!(row.model().is_none());
-            assert!(!row.is_sensitive());
-            assert!(
-                row.subtitle()
-                    .is_some_and(|subtitle| subtitle.contains(&format!("{raw:?}"))),
-                "the raw value should stay visible, got: {:?}",
-                row.subtitle()
-            );
-
-            // A known value reported later selects its row and can be changed again.
-            apply_named_choice(&row, labels, known, "ignored");
-            assert_eq!(row.selected(), known.unwrap());
-            assert!(row.model().is_some());
-            assert!(row.is_sensitive());
-            assert!(row.uses_subtitle());
-        }
+    fn a_path_the_daemon_could_not_name_says_so() {
+        assert_eq!(
+            display_path(""),
+            "Unavailable until the daemon is restarted"
+        );
+        assert_eq!(display_path("/x/config.toml"), "/x/config.toml");
     }
 }

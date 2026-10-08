@@ -38,7 +38,7 @@
 - Do not invent a value the daemon did not send: no `null`, no zero, no "0%" placeholder where a provider withheld a reading. An absent key stays absent.
 - Do not rename or remove a key in `json`/`waybar` or renumber an exit code — add keys instead. A panel widget parses these.
 - Do not let `guard` judge a non-`ok` account's last-good reading: exit `69`, never a "safe" answer about quota nobody can spend.
-- Do not add provider I/O, storage, a display dependency, or `tokio`; `scripts/check-layering.sh` forbids `tidemark-core`, `reqwest`, `hyper`, `rusqlite`, `libsqlite3-sys`, `gtk4`, `gtk4-sys`, `libadwaita` and `tokio`.
+- Do not add provider I/O, storage, a display dependency, or `tokio`; `scripts/check-layering.sh` forbids `tidemark-core`, `reqwest`, `hyper`, `rusqlite`, `libsqlite3-sys`, `slint` and `tokio`.
 - Do not re-derive which window matters: `format::dominant` calls `Snapshot::dominant_window`, the same rule the card and the tray use.
 
 ## CHECKS

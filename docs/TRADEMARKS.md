@@ -95,9 +95,8 @@ single-colour path set and stripped of the fills, gradients, masks and filters t
 originals carry — a symbolic icon is recoloured by the theme and cannot keep
 them; the ai&, ClawRouter, Fireworks, LiteLLM, OpenRouter, Sakana, Synthetic and Wayfinder marks were first
 drawn as strokes, a stroke being as single-colour as a fill, and their strokes have since
-been outlined into the filled paths that ship — GTK's symbolic renderer paints `fill` and
-does not draw a `stroke` at all, so the stroked files rendered as blank or half-blank
-cards. The outlining is a change of representation, not of shape. Each was then
+been outlined into the filled paths that ship, so symbolic recolouring uses the same
+filled-outline representation for every mark. The outlining is a change of representation, not of shape. Each was then
 re-framed: its own bounding box measured, its longest side scaled to the
 same fraction of a square grid so that the set reads at one optical size, and the box shifted
 so the mark stands on the grid's floor rather than floating in its middle — which is

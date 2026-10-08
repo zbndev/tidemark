@@ -3,7 +3,7 @@
 //! The daemon's catalog spells each name — "DeepSeek", "OpenRouter", "ClinePass" — and
 //! `tidemark_types::provider_label` only capitalises a slug, so a client that printed the
 //! label alone would say "Deepseek" where the card, the tray menu and the notification all
-//! say "DeepSeek". The GTK window resolves this the same way in
+//! say "DeepSeek". The desktop client resolves this the same way in
 //! `crates/tidemark/src/model.rs`, and the daemon does it again in `notify.rs`: catalog
 //! first, label as the fallback for a provider newer than this build.
 

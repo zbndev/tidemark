@@ -1,88 +1,122 @@
 //! The About dialog: who wrote this, which version is running, and where to report it.
 //!
-//! `AdwAboutDialog` is the whole of it. Every part of the standard layout — the icon over
-//! the name, the version pill, Details, Report an Issue, Legal — is a property rather than
-//! a widget we place, so the dialog looks like every other GNOME application's and follows
-//! the platform when libadwaita changes its mind about the arrangement.
-//!
-//! The licence text is not written out here either. `gtk::License::MitX11` is what makes
-//! the Legal page say the application comes with absolutely no warranty and link the MIT
-//! licence; spelling that sentence ourselves would be a second copy of a legal notice to
-//! keep in agreement with the one GTK already translates.
+//! The icon over the name, the version pill, Details, Report an Issue and Legal.
 //!
 //! The one thing that is ours is the troubleshooting page. It answers the questions every
-//! bug report about this program starts with — which daemon is on the other end, whether
-//! the panel took the icon, which toolkit is actually loaded — and it answers them from the
-//! running process rather than from what the reporter remembers installing.
+//! bug report about this program starts with — which daemon is on the other end, which
+//! renderer is drawing, which desktop and session — and it answers them from the running
+//! process rather than from what the reporter remembers installing.
 
-use adw::prelude::*;
-use tidemark_types::ids;
+use std::path::PathBuf;
 
-/// Where **Details** goes.
+use slint::ComponentHandle;
+
+use crate::window::spawn;
+use crate::{About, AppWindow};
+
+/// Where **Website** goes.
 const WEBSITE_URL: &str = "https://github.com/zbndev/tidemark";
 /// Where **Report an Issue** goes. `/new/choose` rather than the issue list, because the
 /// repository has templates and a report that skips them is a report that has to be asked
 /// for the version, the desktop and the provider all over again.
 const ISSUES_URL: &str = "https://github.com/zbndev/tidemark/issues/new/choose";
+/// The MIT licence text linked from Legal.
+const LICENSE_URL: &str = "https://opensource.org/licenses/mit";
 /// The file the troubleshooting page's save button offers.
 const DEBUG_INFO_FILENAME: &str = "tidemark-debug-info.txt";
 
-/// Shows the About dialog over `parent`.
-///
-/// `AdwDialog` is modal within the window, so there is no second one to guard against: the
-/// menu button that activates this is behind it while it is up.
-pub fn present(parent: &impl IsA<gtk::Widget>, debug_info: &str) {
-    let dialog = adw::AboutDialog::builder()
-        .application_icon(ids::APP_ID)
-        .application_name("Tidemark")
-        .developer_name("zbndev")
-        .version(env!("CARGO_PKG_VERSION"))
-        // The summary the desktop file and the metainfo already use. It is what turns the
-        // website link into a **Details** page rather than a bare row.
-        .comments("Track AI provider quota limits.")
-        .website(WEBSITE_URL)
-        .issue_url(ISSUES_URL)
-        .copyright("© 2026 zbndev")
-        .license_type(gtk::License::MitX11)
-        .debug_info(debug_info)
-        .debug_info_filename(DEBUG_INFO_FILENAME)
-        .build();
-    dialog.present(Some(parent));
+/// Wires the dialog's links and its save button, once, for the life of the window.
+pub fn install(ui: &AppWindow) {
+    let about = ui.global::<About>();
+    about.set_version(env!("CARGO_PKG_VERSION").into());
+    // The summary the desktop file and the metainfo already use.
+    about.set_comments("Track AI provider quota limits.".into());
+    about.set_developer("zbndev".into());
+    about.set_copyright("© 2026 zbndev".into());
+
+    let weak = ui.as_weak();
+    about.on_close(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<About>().set_open(false);
+        }
+    });
+    about.on_open_link(|link| {
+        let url = match link.as_str() {
+            "website" => WEBSITE_URL,
+            "issues" => ISSUES_URL,
+            _ => LICENSE_URL,
+        };
+        if let Err(error) = webbrowser::open(url) {
+            tracing::warn!(%error, url, "could not open a link from the About dialog");
+        }
+    });
+    let weak = ui.as_weak();
+    about.on_save_debug_info(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let text = ui.global::<About>().get_debug_info().to_string();
+        let weak = weak.clone();
+        spawn(async move {
+            let Some(path) = choose_destination().await else {
+                return;
+            };
+            let message = match std::fs::write(&path, text) {
+                Ok(()) => "Debugging information saved".to_owned(),
+                Err(error) => format!("Could not save: {error}"),
+            };
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<About>().invoke_show_toast(message.into());
+            }
+        });
+    });
+}
+
+async fn choose_destination() -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Save Debugging Information")
+        .set_file_name(DEBUG_INFO_FILENAME)
+        .save_file()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
+/// Opens the dialog on its summary, with the troubleshooting page filled in as of now.
+pub fn present(ui: &AppWindow, daemon: Option<&str>, renderer: &str, tray: bool) {
+    let about = ui.global::<About>();
+    about.set_debug_info(debug_info(daemon, renderer, tray).into());
+    about.set_page(0);
+    about.set_open(true);
 }
 
 /// What the troubleshooting page shows, and what its copy button puts on the clipboard.
 ///
 /// `daemon` is the version `tidemarkd` reported, absent when nothing answered on the bus;
-/// `tray` is whether a status-notifier host accepted the icon, which is the difference
-/// between a close button that hides the window and one that ends the program.
-///
-/// The toolkit versions are the ones the process loaded, not the ones it was built
-/// against. Those are the same number often enough that stating the compiled floor would
-/// look like an answer while being no evidence at all about the machine the bug is on.
-pub fn debug_info(daemon: Option<&str>, tray: bool) -> String {
+/// `renderer` is the one the window is actually drawn with, which falls back when the
+/// preferred one cannot start; `tray` is whether a status-notifier host accepted the icon,
+/// which is the difference between a close button that hides the window and one that ends
+/// the program.
+fn debug_info(daemon: Option<&str>, renderer: &str, tray: bool) -> String {
     compose(
         daemon,
+        renderer,
         tray,
-        &format!(
-            "{}.{}.{}",
-            gtk::major_version(),
-            gtk::minor_version(),
-            gtk::micro_version()
-        ),
-        &format!(
-            "{}.{}.{}",
-            adw::major_version(),
-            adw::minor_version(),
-            adw::micro_version()
-        ),
+        &environment("XDG_CURRENT_DESKTOP"),
+        &environment("XDG_SESSION_TYPE"),
     )
 }
 
-/// The page, given the facts. Separate from the two calls above because those assert that
-/// GTK has been initialised, which a unit test has no way to arrange and no need to.
-fn compose(daemon: Option<&str>, tray: bool, gtk_version: &str, adw_version: &str) -> String {
+fn compose(
+    daemon: Option<&str>,
+    renderer: &str,
+    tray: bool,
+    desktop: &str,
+    session: &str,
+) -> String {
     let client = env!("CARGO_PKG_VERSION");
+    let slint = env!("TIDEMARK_SLINT_VERSION");
     let daemon = daemon.unwrap_or("not running");
+    let os = std::env::consts::OS;
     let tray = if tray {
         "accepted"
     } else {
@@ -91,13 +125,12 @@ fn compose(daemon: Option<&str>, tray: bool, gtk_version: &str, adw_version: &st
     format!(
         "Tidemark: {client}\n\
          tidemarkd: {daemon}\n\
-         GTK: {gtk_version}\n\
-         libadwaita: {adw_version}\n\
-         Desktop: {}\n\
-         Session: {}\n\
-         Tray: {tray}\n",
-        environment("XDG_CURRENT_DESKTOP"),
-        environment("XDG_SESSION_TYPE"),
+         Slint: {slint}\n\
+         Renderer: {renderer}\n\
+         OS: {os}\n\
+         Desktop: {desktop}\n\
+         Session: {session}\n\
+         Tray: {tray}\n"
     )
 }
 
@@ -113,16 +146,18 @@ mod tests {
 
     #[test]
     fn a_missing_daemon_is_stated_rather_than_left_blank() {
-        let info = compose(None, false, "4.22.4", "1.9.3");
+        let info = compose(None, "femtovg-wgpu", false, "Hyprland", "wayland");
         assert!(info.contains("tidemarkd: not running"), "{info}");
         assert!(info.contains("Tray: no status-notifier host"), "{info}");
+        assert!(info.contains("Renderer: femtovg-wgpu"), "{info}");
     }
 
     #[test]
     fn a_connected_daemon_reports_its_own_version() {
-        let info = compose(Some("0.2.0"), true, "4.22.4", "1.9.3");
+        let info = compose(Some("0.2.0"), "femtovg-wgpu", true, "GNOME", "x11");
         assert!(info.contains("tidemarkd: 0.2.0"), "{info}");
         assert!(info.contains("Tray: accepted"), "{info}");
-        assert!(info.contains("GTK: 4.22.4"), "{info}");
+        assert!(info.contains("Desktop: GNOME"), "{info}");
+        assert!(info.contains("Session: x11"), "{info}");
     }
 }

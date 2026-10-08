@@ -9,6 +9,6 @@ Moniker: tidemark
 Tags:
   - monitoring
   - tray
-  - gtk
+  - slint
 ManifestType: defaultLocale
 ManifestVersion: 1.9.0

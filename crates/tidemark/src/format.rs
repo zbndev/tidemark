@@ -12,10 +12,7 @@
 use tidemark_types::present::{duration, plural};
 use tidemark_types::{ProviderState, ProviderStatus, Remedy, Timestamp};
 
-pub use tidemark_types::present::percent;
-
-/// How much emphasis a chip gets. Maps to the libadwaita style classes, which is why there
-/// are three of them rather than one per [`ProviderState`].
+/// How much emphasis a chip gets: three tones rather than one per [`ProviderState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     /// Nothing is wrong; the chip is only saying what is happening.
@@ -24,20 +21,6 @@ pub enum Tone {
     Attention,
     /// Needs the user, or a new release.
     Danger,
-}
-
-impl Tone {
-    /// The libadwaita style class that colours a label this way.
-    pub fn css_class(self) -> &'static str {
-        match self {
-            Self::Neutral => "dim-label",
-            Self::Attention => "warning",
-            Self::Danger => "error",
-        }
-    }
-
-    /// Every class this enum can apply, so a widget can drop the previous one.
-    pub const ALL_CLASSES: [&'static str; 3] = ["dim-label", "warning", "error"];
 }
 
 /// The short label shown next to the provider's name when something is going on.

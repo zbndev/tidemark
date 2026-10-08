@@ -6,9 +6,10 @@ use semver::{Error, Version};
 
 pub(crate) const RELEASES_URL: &str = "https://github.com/zbndev/tidemark/releases";
 
-pub(crate) fn update_tooltip(version: &str) -> Option<String> {
-    (!version.is_empty()).then(|| format!("Tidemark {version} is available"))
-}
+/// Private launch handoff; overwritten on every restart, so an inherited predecessor
+/// never makes a later restart wait for the wrong client.
+#[cfg(any(windows, test))]
+pub(crate) const RESTART_PARENT: &str = "TIDEMARK_RESTART_PARENT_PID";
 
 /// Where the release notes dialog's download button goes.
 ///
@@ -72,8 +73,8 @@ where
     Some(command)
 }
 
-/// Replaces this process with the same command, avoiding a race with GTK's single
-/// instance. Returns only when the restart did not happen; the caller turns the error
+/// Replaces this process with the same command, avoiding a race with the session's
+/// single instance. Returns only when the restart did not happen; the caller turns the error
 /// into the "could not restart" dialog.
 pub fn restart() -> io::Error {
     let Some(command) = restart_command(std::env::args_os()) else {
@@ -82,8 +83,8 @@ pub fn restart() -> io::Error {
     restart_process(command)
 }
 
-/// Unix can swap the program in place: the exec keeps the process identity, so GTK's
-/// single-instance lock never sees two holders, and argv[0] is resolved exactly as it
+/// Unix can swap the program in place: the exec keeps the process identity, so the
+/// application name on the session bus never has two holders, and argv[0] is resolved exactly as it
 /// was for this invocation.
 #[cfg(unix)]
 fn restart_process(mut command: Command) -> io::Error {
@@ -92,11 +93,10 @@ fn restart_process(mut command: Command) -> io::Error {
     command.exec()
 }
 
-/// Windows has no exec, so the successor is spawned first and this process exits only
-/// once it exists: there is never a moment without a process, the brief overlap of the
-/// two instances is what the platform offers instead. The successor's executable is
-/// [`restart_sibling`]'s resolution of the original program argument — never a PATH
-/// search.
+/// Windows has no exec. Spawn the successor with this client's PID, then exit; it waits
+/// for this process before claiming the singleton or connecting to the daemon. Keeping
+/// the guard until exit also leaves this client intact if spawning fails. The successor
+/// is resolved by [`restart_sibling`] — never a PATH search.
 #[cfg(windows)]
 fn restart_process(command: Command) -> io::Error {
     match restart_sibling(&command) {
@@ -116,7 +116,7 @@ fn restart_process(command: Command) -> io::Error {
 /// rather than where the updater just wrote, so the successor is this process's own
 /// file instead. (When no program argument exists at all, [`restart`] has already
 /// answered with the same NotFound error on every platform.)
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn restart_sibling(command: &Command) -> io::Result<Command> {
     let exe = std::env::current_exe()?;
     let original = std::path::Path::new(command.get_program());
@@ -126,6 +126,7 @@ fn restart_sibling(command: &Command) -> io::Result<Command> {
     };
     let mut sibling = Command::new(program);
     sibling.args(command.get_args());
+    sibling.env(RESTART_PARENT, std::process::id().to_string());
     Ok(sibling)
 }
 
@@ -133,20 +134,7 @@ fn restart_sibling(command: &Command) -> io::Result<Command> {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{UpdateNotice, release_url, restart_command, update_tooltip};
-
-    #[test]
-    fn an_empty_update_has_no_button_copy() {
-        assert_eq!(update_tooltip(""), None);
-    }
-
-    #[test]
-    fn an_available_update_names_the_daemon_selected_version() {
-        assert_eq!(
-            update_tooltip("0.12.3").as_deref(),
-            Some("Tidemark 0.12.3 is available")
-        );
-    }
+    use super::{UpdateNotice, release_url, restart_command};
 
     #[test]
     fn the_download_button_goes_to_the_release_being_previewed() {
@@ -202,6 +190,42 @@ mod tests {
             command.get_args().collect::<Vec<_>>(),
             vec![OsStr::new("--background")]
         );
+    }
+
+    /// The successor must know which process still holds the singleton. Re-execute
+    /// only the recorder test, so this also checks what actually reaches the child.
+    #[test]
+    fn the_successor_receives_the_restarting_clients_pid() {
+        let record = std::env::temp_dir().join(format!(
+            "tidemark-restart-parent-{}.txt",
+            std::process::id()
+        ));
+        let original = restart_command([
+            std::env::current_exe().unwrap().as_os_str(),
+            OsStr::new("--exact"),
+            OsStr::new("update::tests::record_restart_parent"),
+            OsStr::new("--ignored"),
+        ])
+        .unwrap();
+        let status = super::restart_sibling(&original)
+            .unwrap()
+            .env("TIDEMARK_TEST_RESTART_RECORD", &record)
+            .status()
+            .expect("the recorder starts");
+        assert!(status.success(), "the recorder must finish successfully");
+        let parent = std::fs::read_to_string(&record).expect("the child's restart parent");
+        std::fs::remove_file(record).unwrap();
+        assert_eq!(parent, std::process::id().to_string());
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for the_successor_receives_the_restarting_clients_pid"]
+    fn record_restart_parent() {
+        let Some(record) = std::env::var_os("TIDEMARK_TEST_RESTART_RECORD") else {
+            return;
+        };
+        let parent = std::env::var("TIDEMARK_RESTART_PARENT_PID").unwrap_or_default();
+        std::fs::write(record, parent).unwrap();
     }
 }
 

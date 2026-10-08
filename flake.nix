@@ -92,8 +92,7 @@
               pkgs.cmake
               pkgs.clang
               pkgs.llvmPackages.libclang
-              pkgs.gtk4
-              pkgs.libadwaita
+              pkgs.fontconfig
               pkgs.sqlite
               pkgs.dbus
               pkgs.desktop-file-utils
@@ -101,6 +100,16 @@
               pkgs.shellcheck
             ];
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+            # What the client opens with dlopen at startup; see nix/package.nix.
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.libxkbcommon
+              pkgs.wayland
+              pkgs.libGL
+              pkgs.xorg.libX11
+              pkgs.xorg.libXcursor
+              pkgs.xorg.libXi
+              pkgs.xorg.libXrandr
+            ];
           };
         }
       );

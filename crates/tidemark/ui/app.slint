@@ -1,0 +1,610 @@
+// The window: a header bar over either the card grid or a message page.
+
+import { ScrollView, Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Card, CardData, GaugeData, RowData } from "card.slint";
+import { ProviderDialog, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData } from "providers.slint";
+import { Alert, AlertDialog, AlertForm, AlertResponse, PreviewRow } from "alert.slint";
+import { ContextMenu, MenuEntry } from "widgets.slint";
+import { Prefs, PreferencesDialog } from "preferences.slint";
+import { About, AboutDialog } from "about.slint";
+import { NoteBlock, ReleaseNotes, ReleaseNotesDialog } from "release_notes.slint";
+import { QuotaDetails, QuotaDetailsDialog, QuotaWindowData, QuotaDetailRow, QuotaSectionData } from "detail.slint";
+import "../../../data/fonts/rubik/Rubik%5Bwght%5D.ttf";
+
+export { Theme, CardData, GaugeData, RowData, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData, Alert, AlertForm, AlertResponse, PreviewRow, MenuEntry, Prefs, About, NoteBlock, ReleaseNotes, QuotaDetails, QuotaWindowData, QuotaDetailRow, QuotaSectionData }
+
+component HeaderButton inherits Rectangle {
+    in property <image> icon;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 34px;
+    height: 34px;
+    border-radius: 6px;
+    background: !enabled ? transparent : touch.pressed ? Theme.ink(0.16) : touch.has-hover ? Theme.ink(0.07) : transparent;
+
+    // Faded through the colour: `opacity` on an item with children is drawn through an
+    // off-grid texture, which blurs.
+    Image {
+        source: root.icon;
+        colorize: Theme.fg.transparentize(root.enabled ? 0 : 0.5);
+        width: 16px;
+        height: 16px;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Window controls: a small round button with a faint fill, for windows that
+// draw their own title bar.
+component WindowButton inherits Rectangle {
+    in property <image> icon;
+    callback clicked();
+    width: 24px;
+    height: 24px;
+    border-radius: self.height / 2;
+    background: touch.pressed ? Theme.ink(0.3) : touch.has-hover ? Theme.ink(0.15) : Theme.ink(0.1);
+
+    Image {
+        source: root.icon;
+        colorize: Theme.fg;
+        width: 16px;
+        height: 16px;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A status page: a large dim icon, a title, and what to do about it.
+component StatusPage inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> description;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 12px;
+        padding: 24px;
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: root.icon;
+                colorize: Theme.ink(0.5);
+                width: 128px;
+                height: 128px;
+            }
+        }
+        Text {
+            text: root.title;
+            color: Theme.fg;
+            font-size: Theme.title-1;
+            font-weight: 800;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.description;
+            color: Theme.fg;
+            font-size: Theme.body;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Tidemark";
+    preferred-width: 1000px;
+    preferred-height: 640px;
+    min-width: 360px;
+    min-height: 240px;
+    // The compositor can only show the desktop through the rounded corners when the
+    // window itself clears to transparent. The two backgrounds below paint its surface.
+    background: transparent;
+    default-font-family: "Rubik";
+    default-font-size: Theme.body;
+
+    // 0 waiting for the daemon, 1 connected with nothing to show, 2 the grid.
+    in property <int> page: 0;
+    in property <string> message: "";
+    in property <bool> connected: false;
+    in property <string> available: "";
+    in property <[CardData]> cards;
+    // Zero means Auto: as many columns as fit.
+    in property <int> max-columns: 0;
+    in property <int> shown-count: 0;
+    // The window draws its own title bar and frame: the header moves the window
+    // and carries its controls, and Slint hands presses near the edges to the system's
+    // resize. `maximized` and `minimized` are the window's own, kept in step with the
+    // system, so a snap or a keyboard shortcut shows on the maximize button too.
+    no-frame: true;
+    resize-border-width: !self.maximized ? 6px : 0px;
+    property <length> frame-radius: self.maximized || self.full-screen ? 0px : 12px;
+
+    callback refresh();
+    callback open-providers();
+    callback close-window();
+    callback open-release();
+    callback toggle-group(int);
+    // A completed drag, in visible positions. The window decides what it means.
+    callback reorder(int, int);
+    // A card's secondary-click menu: which entries it offers is asked as it opens, and
+    // what a chosen one does belongs to the window.
+    callback card-menu(int) -> [MenuEntry];
+    callback card-action(string);
+    callback card-check-error(string);
+    callback open-detail(int);
+    callback open-preferences();
+    callback open-about();
+
+    property <[MenuEntry]> menu-entries;
+    property <bool> menu-open: false;
+    // Which menu is open: a card's, or the header's primary menu.
+    property <bool> menu-primary: false;
+    property <length> menu-x;
+    property <length> menu-y;
+
+    property <bool> dark: Theme.dark;
+    changed dark => {
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    init => {
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    // Fixed card geometry, independent of provider state and content.
+    property <length> cell-width: 300px;
+    // Statuses, errors and account expansion never change the grid's geometry.
+    property <length> cell-height: 234px;
+    property <length> spacing: 12px;
+    property <length> margin: 12px;
+    property <length> available-width: scroller.visible-width - 2 * margin;
+    property <int> fitting: max(1, floor((available-width + spacing) / (cell-width + spacing)));
+    property <int> columns: max-columns > 0 ? min(fitting, max-columns) : fitting;
+    property <int> rows: ceil(shown-count / columns);
+    property <length> content-left: margin + max(0px, available-width - (columns * cell-width + (columns - 1) * spacing)) / 2;
+    property <length> content-height: 2 * margin + rows * cell-height + max(0, rows - 1) * spacing;
+
+    // The drag: which card (model index), from which slot, how far it has travelled, and
+    // the slot its centre is over. Offsets are in content coordinates.
+    property <int> drag-index: -1;
+    property <int> drag-slot: -1;
+    property <bool> carrying: false;
+    property <length> drag-dx;
+    property <length> drag-dy;
+    property <int> drag-target: -1;
+    // Where the pointer is inside the visible part of the scroller, for autoscroll.
+    property <length> pointer-y;
+    // The card settling into its slot after a release, and where it was let go.
+    property <int> settle-index: -1;
+    property <length> settle-x;
+    property <length> settle-y;
+    property <duration> settle-start;
+
+    pure function whole-x(index: int) -> length {
+        return content-left + mod(index, columns) * (cell-width + spacing);
+    }
+    pure function whole-y(index: int) -> length {
+        return margin + floor(index / columns) * (cell-height + spacing);
+    }
+    // A fractional slot interpolates between the whole slots either side of it, including
+    // the step from the end of one row to the start of the next.
+    pure function slot-x(position: float) -> length {
+        return whole-x(floor(position)) + (position - floor(position)) * (whole-x(floor(position) + 1) - whole-x(floor(position)));
+    }
+    pure function slot-y(position: float) -> length {
+        return whole-y(floor(position)) + (position - floor(position)) * (whole-y(floor(position) + 1) - whole-y(floor(position)));
+    }
+    // Where the other cards go while one is carried from `drag-slot` to `drag-target`.
+    pure function shifted(slot: int) -> int {
+        if (!carrying || slot == drag-slot) {
+            return slot;
+        }
+        if (drag-slot < drag-target && slot > drag-slot && slot <= drag-target) {
+            return slot - 1;
+        }
+        if (drag-slot > drag-target && slot >= drag-target && slot < drag-slot) {
+            return slot + 1;
+        }
+        return slot;
+    }
+    // The slot under the carried card's centre, measured against the resting slots so it
+    // cannot flicker while the pointer holds still.
+    pure function drop-target() -> int {
+        if (shown-count == 0) {
+            return 0;
+        }
+        return min(shown-count - 1, clamp(floor((whole-y(drag-slot) + drag-dy + cell-height / 2 - margin) / (cell-height + spacing)), 0, rows - 1) * columns + clamp(floor((whole-x(drag-slot) + drag-dx + cell-width / 2 - content-left) / (cell-width + spacing)), 0, columns - 1));
+    }
+    pure function settle-progress() -> float {
+        return 1 - pow(1 - clamp((animation-tick() - settle-start) / 200ms, 0, 1), 3);
+    }
+    // Pixels per second: nothing until the pointer is within 48px of an edge.
+    pure function autoscroll-rate() -> float {
+        if (scroller.visible-height <= 96px) {
+            return 0;
+        }
+        if (pointer-y < 48px) {
+            return -900 * (1 - max(0, pointer-y / 48px));
+        }
+        if (scroller.visible-height - pointer-y < 48px) {
+            return 900 * (1 - max(0, (scroller.visible-height - pointer-y) / 48px));
+        }
+        return 0;
+    }
+
+    function release() {
+        if (carrying) {
+            settle-x = whole-x(drag-slot) + drag-dx;
+            settle-y = whole-y(drag-slot) + drag-dy;
+            settle-start = animation-tick();
+            settle-index = drag-index;
+            carrying = false;
+            drag-index = -1;
+            root.reorder(drag-slot, drag-target);
+        } else {
+            drag-index = -1;
+        }
+    }
+
+    Timer {
+        interval: 200ms;
+        running: root.settle-index >= 0;
+        triggered => {
+            root.settle-index = -1;
+        }
+    }
+
+    Timer {
+        interval: 16ms;
+        running: root.carrying && root.autoscroll-rate() != 0;
+        triggered => {
+            let before = scroller.content-y;
+            scroller.content-y = clamp(scroller.content-y - root.autoscroll-rate() * 16px / 1000, min(0px, scroller.visible-height - scroller.content-height), 0px);
+            root.drag-dy += before - scroller.content-y;
+            root.drag-target = root.drop-target();
+        }
+    }
+
+    VerticalLayout {
+        // A header bar drawn by the window itself.
+        Rectangle {
+            height: 47px;
+            background: Theme.header-bg;
+            border-top-left-radius: root.frame-radius;
+            border-top-right-radius: root.frame-radius;
+            // Paint the rounded background without clipping its children: a rounded
+            // clip would put all the header text into FemtoVG's off-grid texture.
+
+            // The built-in move area cancels Slint's pointer grab before handing a
+            // drag to the compositor, which may consume the matching release.
+            WindowMoveArea {
+                TouchArea {
+                    double-clicked => {
+                        root.maximized = !root.maximized;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                alignment: space-between;
+                VerticalLayout {
+                    alignment: center;
+                    HeaderButton {
+                        icon: @image-url("icons/dialog-password-symbolic.svg");
+                        enabled: root.connected;
+                        clicked => {
+                            root.open-providers();
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    if root.available != "": VerticalLayout {
+                        alignment: center;
+                        HeaderButton {
+                            icon: @image-url("icons/software-update-available-symbolic.svg");
+                            clicked => {
+                                root.open-release();
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        HeaderButton {
+                            icon: @image-url("icons/view-refresh-symbolic.svg");
+                            enabled: root.connected;
+                            clicked => {
+                                root.refresh();
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        // The platform's primary menu: rightmost, where a GNOME user looks for
+                        // About without being told where it is.
+                        primary := HeaderButton {
+                            icon: @image-url("icons/open-menu-symbolic.svg");
+                            clicked => {
+                                root.menu-entries = [
+                                    { id: "preferences", label: "Preferences", enabled: root.connected },
+                                    { id: "about", label: "About Tidemark", section: true, enabled: true },
+                                ];
+                                root.menu-primary = true;
+                                root.menu-x = self.absolute-position.x + self.width;
+                                root.menu-y = self.absolute-position.y + self.height + 4px;
+                                root.menu-open = true;
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 4px;
+                        spacing: 12px;
+                        VerticalLayout {
+                            alignment: center;
+                            WindowButton {
+                                icon: @image-url("icons/window-minimize-symbolic.svg");
+                                clicked => {
+                                    root.minimized = true;
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            WindowButton {
+                                icon: root.maximized ? @image-url("icons/window-restore-symbolic.svg") : @image-url("icons/window-maximize-symbolic.svg");
+                                clicked => {
+                                    root.maximized = !root.maximized;
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            WindowButton {
+                                icon: @image-url("icons/window-close-symbolic.svg");
+                                clicked => {
+                                    root.close-window();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: "Tidemark";
+                color: Theme.fg;
+                font-size: Theme.body;
+                font-weight: 700;
+            }
+
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.header-shade;
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.window-bg;
+            border-bottom-left-radius: root.frame-radius;
+            border-bottom-right-radius: root.frame-radius;
+
+            if root.page == 0: StatusPage {
+                icon: @image-url("icons/network-offline-symbolic.svg");
+                title: "Waiting for Tidemark";
+                description: root.message;
+            }
+
+            if root.page == 1: StatusPage {
+                icon: @image-url("icons/view-grid-symbolic.svg");
+                title: "Welcome to Tidemark";
+                description: "Add a provider to start tracking your quota.";
+            }
+
+            scroller := ScrollView {
+                visible: root.page == 2;
+                // Keep the scrollbars and dragged cards above the transparent corners.
+                height: parent.height - root.frame-radius;
+                content-width: self.visible-width;
+                content-height: root.content-height;
+
+                for card[index] in root.cards: slot := Rectangle {
+                    property <bool> carried: root.carrying && root.drag-index == index;
+                    // Pressed with a drag possible: raised at once, before the pointer has
+                    // travelled far enough to start carrying it.
+                    property <bool> grabbed: root.drag-index == index;
+                    property <bool> settling: root.settle-index == index;
+                    // Retained through release(): clearing the global drag must not turn
+                    // its final pointer release into a card click.
+                    property <bool> was-dragged: false;
+                    // The slot in index units, so a window resize repositions instantly
+                    // while a reorder animates.
+                    property <float> position: root.shifted(card.slot);
+                    animate position {
+                        duration: slot.settling ? 0ms : 250ms;
+                        easing: cubic-bezier(0.33, 1, 0.68, 1);
+                    }
+
+                    x: carried ? root.whole-x(root.drag-slot) + root.drag-dx : settling ? root.settle-x + root.settle-progress() * (root.whole-x(card.slot) - root.settle-x) : root.slot-x(position);
+                    y: carried ? root.whole-y(root.drag-slot) + root.drag-dy : settling ? root.settle-y + root.settle-progress() * (root.whole-y(card.slot) - root.settle-y) : root.slot-y(position);
+                    width: root.cell-width;
+                    height: root.cell-height;
+                    z: grabbed || settling ? 10 : card.main ? 1 : 0;
+                    opacity: card.shown ? 1 : 0;
+                    animate opacity { duration: 180ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
+
+                    touch := TouchArea {
+                        enabled: card.shown;
+                        mouse-cursor: slot.grabbed ? MouseCursor.grabbing : MouseCursor.default;
+
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                slot.was-dragged = false;
+                            }
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down && root.shown-count > 1) {
+                                root.drag-index = index;
+                                root.drag-slot = card.slot;
+                                root.drag-target = card.slot;
+                                root.drag-dx = 0;
+                                root.drag-dy = 0;
+                            }
+                            if (event.button == PointerEventButton.left && (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel)) {
+                                root.release();
+                            }
+                            // On press, not release: that is when every other menu on the
+                            // desktop appears.
+                            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.drag-index < 0) {
+                                root.menu-entries = root.card-menu(index);
+                                root.menu-primary = false;
+                                if (root.menu-entries.length > 0) {
+                                    root.menu-x = self.absolute-position.x + self.mouse-x;
+                                    root.menu-y = self.absolute-position.y + self.mouse-y;
+                                    root.menu-open = true;
+                                }
+                            }
+                        }
+
+                        clicked => {
+                            if (!slot.was-dragged) {
+                                root.open-detail(index);
+                            }
+                        }
+
+                        moved => {
+                            if (root.drag-index != index) {
+                                return;
+                            }
+                            if (!root.carrying) {
+                                // A click that wobbles within the drag threshold is still a click.
+                                if (abs(self.mouse-x - self.pressed-x) < 8px && abs(self.mouse-y - self.pressed-y) < 8px) {
+                                    return;
+                                }
+                                root.carrying = true;
+                                slot.was-dragged = true;
+                            }
+                            // The slot moves with the pointer, so what the pointer has moved
+                            // since the last event is its distance from the grip point.
+                            root.drag-dx += self.mouse-x - self.pressed-x;
+                            root.drag-dy += self.mouse-y - self.pressed-y;
+                            root.pointer-y = slot.y + self.mouse-y + scroller.content-y;
+                            root.drag-target = root.drop-target();
+                        }
+                    }
+
+                    body := Card {
+                        y: touch.has-hover && !root.carrying && root.settle-index < 0 ? -2px : 0px;
+                        animate y { duration: 150ms; easing: ease-out; }
+                        width: parent.width;
+                        height: parent.height;
+                        data: card;
+                        lifted: touch.has-hover && !root.carrying;
+                        carried: slot.grabbed;
+                        interactive: card.shown && !root.menu-open && !Alert.open && !Prefs.open && !About.open
+                            && !ReleaseNotes.open && !ProviderSettings.open && !QuotaDetails.open;
+                        check-error => { root.card-check-error(card.error); }
+                    }
+
+                    // A notification-style counter on the provider's card, outside the title
+                    // row so that nothing in the row can push it around.
+                    if card.badge != "": Rectangle {
+                        x: parent.width - 18px;
+                        y: body.y - 10px;
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: Theme.accent;
+                        border-width: card.expanded ? 2px : 0px;
+                        border-color: Theme.accent-fg.with-alpha(0.45);
+                        drop-shadow-blur: 3px;
+                        drop-shadow-offset-y: 1px;
+                        drop-shadow-color: #0000004d;
+
+                        Text {
+                            text: card.badge;
+                            color: Theme.accent-fg;
+                            font-size: Theme.body * 0.75;
+                            font-weight: 700;
+                        }
+
+                        TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.toggle-group(index);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.menu-open: ContextMenu {
+        width: root.width;
+        height: root.height;
+        entries: root.menu-entries;
+        anchor-x: root.menu-x;
+        anchor-y: root.menu-y;
+        chosen(id) => {
+            root.menu-open = false;
+            if (!root.menu-primary) {
+                root.card-action(id);
+            } else if (id == "preferences") {
+                root.open-preferences();
+            } else {
+                root.open-about();
+            }
+        }
+        dismissed => {
+            root.menu-open = false;
+        }
+    }
+
+    if QuotaDetails.open: QuotaDetailsDialog {
+        width: root.width;
+        height: root.height;
+        border-radius: root.frame-radius;
+    }
+
+    if Prefs.open: PreferencesDialog {
+        width: root.width;
+        height: root.height;
+        border-radius: root.frame-radius;
+    }
+
+    if About.open: AboutDialog {
+        width: root.width;
+        height: root.height;
+        border-radius: root.frame-radius;
+    }
+
+    if ReleaseNotes.open: ReleaseNotesDialog {
+        width: root.width;
+        height: root.height;
+        border-radius: root.frame-radius;
+    }
+
+    if ProviderSettings.open: ProviderDialog {
+        width: root.width;
+        height: root.height;
+        border-radius: root.frame-radius;
+    }
+
+    if Alert.open: AlertDialog {
+        width: root.width;
+        height: root.height;
+        border-radius: root.frame-radius;
+    }
+}

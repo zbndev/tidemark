@@ -8,7 +8,7 @@ set -eu
 #
 # Run by hand. This has no GitHub Actions trigger on purpose: it needs systemd as PID 1 in
 # a privileged container, and the thing it guards changes about once a release. See
-# docs/superpowers/specs/2026-08-22-ci-release-packaging-design.md.
+# CONTEXT.md, Packaging.
 #
 # # Why the packages are built inside the target containers
 #
@@ -178,7 +178,7 @@ FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive PATH=/root/.cargo/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake libclang-dev curl ca-certificates pkg-config dpkg-dev \
-        libgtk-4-dev libadwaita-1-dev libsqlite3-dev \
+        libfontconfig-dev libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 RUN cargo install cargo-deb --locked
@@ -189,7 +189,8 @@ FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         systemd systemd-sysv dbus-user-session dbus-daemon \
-        libgtk-4-1 libadwaita-1-0 libsqlite3-0 hicolor-icon-theme \
+        libfontconfig1 libsqlite3-0 hicolor-icon-theme \
+        libxkbcommon0 libwayland-client0 libegl1 \
     && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 
@@ -197,15 +198,15 @@ docker build --network host -q -t tidemark-build-fedora - >/dev/null <<'DOCKERFI
 FROM fedora:44
 ENV PATH=/root/.cargo/bin:$PATH
 RUN dnf install -y git gcc gcc-c++ cmake clang-devel curl pkgconf-pkg-config rpm-build \
-        gtk4-devel libadwaita-devel sqlite-devel && dnf clean all
+        fontconfig-devel sqlite-devel && dnf clean all
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 RUN cargo install cargo-generate-rpm --locked
 DOCKERFILE
 
 docker build --network host -q -t tidemark-test-fedora - >/dev/null <<'DOCKERFILE'
 FROM fedora:44
-RUN dnf install -y systemd dbus-daemon gtk4 libadwaita sqlite-libs hicolor-icon-theme \
-        util-linux \
+RUN dnf install -y systemd dbus-daemon fontconfig sqlite-libs hicolor-icon-theme \
+        libxkbcommon libwayland-client libglvnd-egl util-linux \
     && dnf clean all
 DOCKERFILE
 

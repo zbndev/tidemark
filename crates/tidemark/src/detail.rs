@@ -1,15 +1,16 @@
-//! State and presentation for one provider's quota detail dialog.
+//! One account's quota history and published details.
 
 use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
-use adw::prelude::*;
-use tidemark_types::{DetailRow, DetailSection, ProviderStatus, Timestamp, WindowStatus};
+use slint::{ComponentHandle, ModelRc, VecModel};
+use tidemark_types::{DetailSection, HistoryPoint, ProviderStatus, Timestamp, WindowStatus};
 
 use crate::bus::DaemonProxy;
-use crate::chart::Chart;
-use crate::format;
-use crate::mark;
+use crate::window::spawn;
+use crate::{
+    AppWindow, QuotaDetailRow, QuotaDetails, QuotaSectionData, QuotaWindowData, chart, format,
+};
 
 /// The window whose current segment the chart is displaying.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -53,6 +54,10 @@ struct Request {
 struct RequestGeneration(u64);
 
 impl RequestGeneration {
+    fn invalidate(&mut self) {
+        self.0 = self.0.wrapping_add(1);
+    }
+
     fn begin(&mut self, key: &str) -> Request {
         self.0 = self.0.wrapping_add(1);
         Request {
@@ -66,290 +71,282 @@ impl RequestGeneration {
     }
 }
 
-/// The one detail dialog the main window may have open.
-#[derive(Debug)]
+type Daemon = Rc<dyn Fn() -> Option<DaemonProxy<'static>>>;
+
+/// The one account dialog retained by the main window. Every load asks for the current
+/// daemon, so reconnecting does not leave a dead proxy behind in an open dialog.
 pub struct DetailDialog {
-    dialog: adw::Dialog,
-    proxy: DaemonProxy<'static>,
+    ui: slint::Weak<AppWindow>,
+    daemon: Daemon,
     status: RefCell<ProviderStatus>,
     selection: RefCell<Selection>,
     requests: RefCell<RequestGeneration>,
-    rebuilding_windows: Cell<bool>,
-    window_keys: RefCell<Vec<String>>,
-    windows: gtk::ListBox,
-    details: gtk::Box,
-    state: gtk::Label,
-    schedule: gtk::Label,
-    chart: Chart,
-    self_weak: RefCell<Weak<Self>>,
+    closed: Cell<bool>,
+    on_closed: Box<dyn Fn()>,
 }
 
 impl DetailDialog {
-    /// Builds, presents, and retains one account's detail dialog.
-    pub fn present(
-        parent: &impl IsA<gtk::Widget>,
-        proxy: DaemonProxy<'static>,
-        status: ProviderStatus,
-        provider_name: String,
+    pub fn open(
+        ui: &AppWindow,
+        daemon: Daemon,
+        status: &ProviderStatus,
+        name: &str,
+        mark: Option<slint::Image>,
         on_closed: impl Fn() + 'static,
     ) -> Rc<Self> {
-        let mark = mark::image();
-        mark.set_pixel_size(32);
-        mark::set(&mark, &status.provider);
-        let name = gtk::Label::builder()
-            .label(provider_name.clone())
-            .css_classes(["title-2"])
-            .halign(gtk::Align::Start)
-            .build();
-        let state = gtk::Label::builder()
-            .halign(gtk::Align::Start)
-            .css_classes(["dim-label"])
-            .build();
-        let identity = gtk::Box::builder().spacing(12).build();
-        let identity_text = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(2)
-            .valign(gtk::Align::Center)
-            .build();
-        identity_text.append(&name);
-        identity_text.append(&state);
-        identity.append(&mark);
-        identity.append(&identity_text);
-
-        let windows = gtk::ListBox::builder()
-            .selection_mode(gtk::SelectionMode::Single)
-            .css_classes(["boxed-list"])
-            .build();
-        let windows_group = adw::PreferencesGroup::builder()
-            .title("Quota windows")
-            .build();
-        windows_group.add(&windows);
-
-        let chart = Chart::new();
-        let schedule = gtk::Label::builder()
-            .halign(gtk::Align::Start)
-            .css_classes(["dim-label", "caption"])
-            .build();
-        let legend = gtk::Label::builder()
-            .label("Actual · Even pace")
-            .halign(gtk::Align::Start)
-            .css_classes(["caption"])
-            .build();
-        let chart_group = adw::PreferencesGroup::builder().title("Burn-down").build();
-        chart_group.add(&schedule);
-        chart_group.add(&legend);
-        chart_group.add(chart.widget());
-
-        let details = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(12)
-            .build();
-        let content = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(18)
-            .margin_top(24)
-            .margin_bottom(24)
-            .margin_start(24)
-            .margin_end(24)
-            .build();
-        content.append(&identity);
-        content.append(&windows_group);
-        content.append(&chart_group);
-        content.append(&details);
-        let scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .child(&content)
-            .build();
-        // AdwDialog forces AdwHeaderBar's decoration layout to include a close button;
-        // packing our own would render two of them.
-        let header = adw::HeaderBar::new();
-        let view = adw::ToolbarView::builder().content(&scroller).build();
-        view.add_top_bar(&header);
-        let dialog = adw::Dialog::builder()
-            .title(format!("{provider_name} details"))
-            .content_width(720)
-            .content_height(680)
-            .child(&view)
-            .build();
-
         let detail = Rc::new(Self {
-            dialog: dialog.clone(),
-            proxy,
-            status: RefCell::new(status),
-            selection: RefCell::new(Selection::default()),
-            requests: RefCell::new(RequestGeneration::default()),
-            rebuilding_windows: Cell::new(false),
-            window_keys: RefCell::new(Vec::new()),
-            windows,
-            details,
-            state,
-            schedule,
-            chart,
-            self_weak: RefCell::new(Weak::new()),
+            ui: ui.as_weak(),
+            daemon,
+            status: RefCell::new(status.clone()),
+            selection: RefCell::default(),
+            requests: RefCell::default(),
+            closed: Cell::new(false),
+            on_closed: Box::new(on_closed),
         });
-        *detail.self_weak.borrow_mut() = Rc::downgrade(&detail);
-
-        detail.windows.connect_row_selected({
-            let weak = Rc::downgrade(&detail);
-            move |_, row| {
-                let Some(detail) = weak.upgrade() else {
-                    return;
-                };
-                if detail.rebuilding_windows.get() {
-                    return;
-                }
-                let Some(index) = row.map(gtk::ListBoxRow::index) else {
-                    return;
-                };
-                let Some(key) = detail.window_keys.borrow().get(index as usize).cloned() else {
-                    return;
-                };
-                if detail.selection.borrow().key() != Some(key.as_str()) {
-                    detail.selection.borrow_mut().0 = Some(key);
-                    detail.load_current_segment();
-                }
+        let global = ui.global::<QuotaDetails>();
+        let weak = Rc::downgrade(&detail);
+        global.on_close(move || {
+            if let Some(detail) = weak.upgrade() {
+                detail.close();
             }
         });
-        dialog.connect_closed(move |_| on_closed());
-
-        // Keep the immutable borrow out of `apply`: it replaces the stored status as its
-        // first step, so borrowing and cloning inline would overlap the two RefCell borrows.
-        let initial_status = detail.status.borrow().clone();
-        detail.apply(&initial_status);
-        dialog.present(Some(parent));
+        let weak = Rc::downgrade(&detail);
+        global.on_select(move |index| {
+            if let (Some(detail), Ok(index)) = (weak.upgrade(), usize::try_from(index)) {
+                detail.select(index);
+            }
+        });
+        detail.apply(status, name, mark);
+        global.set_open(true);
         detail
     }
 
-    /// Whether this dialog belongs to this exact account.
     pub fn matches(&self, provider: &str, account: &str) -> bool {
         let status = self.status.borrow();
         status.provider == provider && status.account == account
     }
 
-    /// Refreshes the dialog after the daemon published a new status.
-    pub fn apply(&self, status: &ProviderStatus) {
-        *self.status.borrow_mut() = status.clone();
+    pub fn apply(self: &Rc<Self>, status: &ProviderStatus, name: &str, mark: Option<slint::Image>) {
+        if self.closed.get() {
+            return;
+        }
+        self.status.replace(status.clone());
         self.selection.borrow_mut().apply(status);
-        self.rebuild_windows();
-        self.rebuild_details();
-        self.update_state();
-        self.load_current_segment();
-    }
-
-    /// Closes the standard dialog; its `closed` handler releases main-window ownership.
-    pub fn close(&self) {
-        self.dialog.close();
-    }
-
-    fn rebuild_windows(&self) {
-        while let Some(child) = self.windows.first_child() {
-            self.windows.remove(&child);
+        if let Some(ui) = self.ui.upgrade() {
+            let global = ui.global::<QuotaDetails>();
+            global.set_name(name.into());
+            global.set_account(if status.account == "default" {
+                status.account_label.as_deref().unwrap_or("").into()
+            } else {
+                status
+                    .account_label
+                    .as_deref()
+                    .unwrap_or(&status.account)
+                    .into()
+            });
+            global.set_has_mark(mark.is_some());
+            global.set_mark(mark.unwrap_or_default());
+            global.set_state(
+                format::chip(status)
+                    .map(|chip| chip.text)
+                    .unwrap_or_default()
+                    .into(),
+            );
+            global.set_sections(ModelRc::new(VecModel::from(
+                detail_sections(status)
+                    .into_iter()
+                    .map(|section| QuotaSectionData {
+                        title: section.title.into(),
+                        rows: ModelRc::new(VecModel::from(
+                            section
+                                .rows
+                                .into_iter()
+                                .map(|row| QuotaDetailRow {
+                                    label: row.label.into(),
+                                    value: row.value.into(),
+                                })
+                                .collect::<Vec<_>>(),
+                        )),
+                    })
+                    .collect::<Vec<_>>(),
+            )));
         }
+        self.tick();
+        self.load();
+    }
+
+    /// Clock-dependent summaries change without requesting the same history every tick.
+    pub fn tick(&self) {
+        if self.closed.get() {
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let global = ui.global::<QuotaDetails>();
         let status = self.status.borrow();
-        *self.window_keys.borrow_mut() = status
-            .windows
-            .iter()
-            .map(|window| window.key.clone())
-            .collect();
-        self.rebuilding_windows.set(true);
-        for window in &status.windows {
-            let row = adw::ActionRow::builder()
-                .title(&window.title)
-                .subtitle(window_summary(window, Timestamp::now()))
-                .activatable(true)
-                .build();
-            row.set_cursor_from_name(Some("pointer"));
-            self.windows.append(&row);
-        }
-        let selected = self.selection.borrow().key().map(str::to_owned);
-        if let Some(index) = selected.as_deref().and_then(|key| {
-            self.window_keys
-                .borrow()
+        let now = Timestamp::now();
+        global.set_windows(ModelRc::new(VecModel::from(
+            status
+                .windows
                 .iter()
-                .position(|candidate| candidate == key)
-        }) {
-            self.windows
-                .select_row(self.windows.row_at_index(index as i32).as_ref());
-        }
-        self.rebuilding_windows.set(false);
+                .map(|window| QuotaWindowData {
+                    title: window.title.clone().into(),
+                    summary: window_summary(window, now).into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+        global.set_selected(
+            status
+                .windows
+                .iter()
+                .position(|window| self.selection.borrow().key() == Some(window.key.as_str()))
+                .map_or(-1, |index| index as i32),
+        );
     }
 
-    fn rebuild_details(&self) {
-        while let Some(child) = self.details.first_child() {
-            self.details.remove(&child);
-        }
-        for section in detail_sections(&self.status.borrow()) {
-            let group = adw::PreferencesGroup::builder()
-                .title(&section.title)
-                .build();
-            for row in &section.rows {
-                group.add(
-                    &adw::ActionRow::builder()
-                        .title(&row.label)
-                        .subtitle(&row.value)
-                        .build(),
-                );
-            }
-            self.details.append(&group);
-        }
-    }
-
-    fn update_state(&self) {
-        match format::chip(&self.status.borrow()) {
-            Some(chip) => {
-                self.state.set_label(&chip.text);
-                self.state.set_visible(true);
-            }
-            None => self.state.set_visible(false),
-        }
-    }
-
-    fn load_current_segment(&self) {
-        let status = self.status.borrow().clone();
-        let Some(key) = self.selection.borrow().key().map(str::to_owned) else {
-            self.schedule
-                .set_label("No quota reading is available yet.");
-            self.chart.set_empty("No quota reading is available yet.");
+    fn select(self: &Rc<Self>, index: usize) {
+        if self.closed.get() {
             return;
-        };
-        let Some(window) = status
+        }
+        let key = self
+            .status
+            .borrow()
+            .windows
+            .get(index)
+            .map(|window| window.key.clone());
+        if let Some(key) = key
+            && self.selection.borrow().key() != Some(key.as_str())
+        {
+            self.selection.borrow_mut().0 = Some(key);
+            self.tick();
+            self.load();
+        }
+    }
+
+    pub fn close(&self) {
+        if self.closed.replace(true) {
+            return;
+        }
+        self.requests.borrow_mut().invalidate();
+        if let Some(ui) = self.ui.upgrade() {
+            ui.global::<QuotaDetails>().set_open(false);
+        }
+        (self.on_closed)();
+    }
+
+    pub fn disconnected(&self) {
+        self.requests.borrow_mut().invalidate();
+        self.message(
+            "The daemon is unavailable. History will reload when it reconnects.",
+            false,
+            true,
+        );
+    }
+
+    fn message(&self, message: &str, loading: bool, failed: bool) {
+        if let Some(ui) = self.ui.upgrade() {
+            let global = ui.global::<QuotaDetails>();
+            global.set_actual("".into());
+            global.set_has_marker(false);
+            global.set_message(message.into());
+            global.set_loading(loading);
+            global.set_failed(failed);
+        }
+    }
+
+    fn load(self: &Rc<Self>) {
+        self.requests.borrow_mut().invalidate();
+        let status = self.status.borrow().clone();
+        let selected = self.selection.borrow().key().map(str::to_owned);
+        let window = status
             .windows
             .iter()
-            .find(|window| window.key == key)
-            .cloned()
-        else {
-            self.schedule
-                .set_label("The selected window is no longer reported.");
-            self.chart
-                .set_empty("The selected window is no longer reported.");
+            .find(|window| Some(window.key.as_str()) == selected.as_deref())
+            .cloned();
+        let Some(ui) = self.ui.upgrade() else {
             return;
         };
-        self.schedule.set_label(&schedule_text(&window));
-        self.chart.set_loading();
-        let request = self.requests.borrow_mut().begin(&key);
-        let proxy = self.proxy.clone();
-        let weak = self.self_weak.borrow().clone();
-        gtk::glib::spawn_future_local(async move {
+        let global = ui.global::<QuotaDetails>();
+        global.set_schedule(
+            window
+                .as_ref()
+                .map(schedule_text)
+                .unwrap_or_default()
+                .into(),
+        );
+        global.set_has_schedule(
+            window
+                .as_ref()
+                .is_some_and(|window| window.resets_at.is_some() && window.length_secs.is_some()),
+        );
+        let Some(window) = window else {
+            self.message("No quota reading is available yet.", false, false);
+            return;
+        };
+        let Some(proxy) = (self.daemon)() else {
+            self.disconnected();
+            return;
+        };
+        self.message("Loading current segment…", true, false);
+        let request = self.requests.borrow_mut().begin(&window.key);
+        let weak = Rc::downgrade(self);
+        spawn(async move {
             let result = proxy
                 .current_segment(&status.provider, &status.account, &request.key)
                 .await;
             let Some(detail) = weak.upgrade() else {
                 return;
             };
-            if !detail
-                .requests
-                .borrow()
-                .accepts(&request, detail.selection.borrow().key())
+            if detail.closed.get()
+                || !detail
+                    .requests
+                    .borrow()
+                    .accepts(&request, detail.selection.borrow().key())
             {
                 return;
             }
             match result {
-                Ok(points) => detail.chart.set_data(window, points),
-                Err(error) => detail
-                    .chart
-                    .set_error(&format!("Could not load history: {error}")),
+                Ok(points) => detail.show_chart(&window, &points),
+                Err(error) => {
+                    detail.message(&format!("Could not load history: {error}"), false, true)
+                }
             }
         });
+    }
+
+    fn show_chart(&self, window: &WindowStatus, points: &[HistoryPoint]) {
+        let geometry = chart::geometry(window, points, 1000.0, 1000.0);
+        if geometry.actual.is_empty() {
+            self.message("No stored readings in this segment yet.", false, false);
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let global = ui.global::<QuotaDetails>();
+        let mut path = String::new();
+        use std::fmt::Write;
+        for (index, point) in geometry.actual.iter().enumerate() {
+            write!(
+                &mut path,
+                "{} {} {} ",
+                if index == 0 { 'M' } else { 'L' },
+                point.x,
+                point.y
+            )
+            .expect("writing to a String");
+        }
+        global.set_actual(path.into());
+        global.set_has_marker(geometry.marker.is_some());
+        if let Some(marker) = geometry.marker {
+            global.set_marker_x(marker.x as f32);
+            global.set_marker_y(marker.y as f32);
+        }
+        global.set_has_schedule(geometry.diagonal.is_some());
+        global.set_message("".into());
+        global.set_loading(false);
+        global.set_failed(false);
     }
 }
 
@@ -370,13 +367,7 @@ fn detail_sections(status: &ProviderStatus) -> Vec<DetailSection> {
             let rows = section
                 .items
                 .iter()
-                .filter_map(|widget| {
-                    let row = crate::card::presentation_row(presentation, widget)?;
-                    Some(DetailRow {
-                        label: row.metric.title.clone(),
-                        value: row.text()?,
-                    })
-                })
+                .filter_map(|widget| crate::view::detail_row(presentation, widget))
                 .collect::<Vec<_>>();
             (!rows.is_empty()).then(|| DetailSection {
                 title: section.title.clone(),
@@ -402,7 +393,7 @@ fn detail_rows(status: &ProviderStatus) -> Vec<(String, String)> {
 /// the percentage is omitted when it is absent, so a provider that reports only a
 /// percentage produces the same line it always did.
 fn window_summary(window: &WindowStatus, now: Timestamp) -> String {
-    let mut summary = format::percent(window.used_percent);
+    let mut summary = tidemark_types::present::percent(window.used_percent);
     if let Some(subtitle) = window.subtitle.as_deref() {
         summary.push_str(" · ");
         summary.push_str(subtitle);
@@ -574,6 +565,207 @@ mod tests {
 
         assert!(!requests.accepts(&old, Some("weekly")));
         assert!(requests.accepts(&current, Some("weekly")));
+    }
+
+    #[test]
+    fn reconnects_and_updates_of_the_same_window_invalidate_old_history() {
+        let mut requests = RequestGeneration::default();
+        let old = requests.begin("weekly");
+        requests.invalidate();
+        assert!(!requests.accepts(&old, Some("weekly")));
+        let current = requests.begin("weekly");
+        assert!(!requests.accepts(&old, Some("weekly")));
+        assert!(requests.accepts(&current, Some("weekly")));
+        assert!(!requests.accepts(&current, None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_dialog_loads_the_selected_accounts_history_and_reports_empty_or_failed_replies() {
+        use super::*;
+        use slint::ComponentHandle;
+        use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+        use slint::platform::{EventLoopProxy, Platform, PlatformError, WindowAdapter};
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        type Job = Box<dyn FnOnce() + Send>;
+        #[derive(Clone, Default)]
+        struct Queue(Arc<Mutex<VecDeque<Job>>>);
+        impl Queue {
+            fn until(&self, done: impl Fn() -> bool) {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !done() {
+                    let job = self.0.lock().unwrap().pop_front();
+                    if let Some(job) = job {
+                        job();
+                    } else {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "headless history request timed out"
+                    );
+                }
+            }
+        }
+        impl EventLoopProxy for Queue {
+            fn quit_event_loop(&self) -> Result<(), slint::EventLoopError> {
+                Ok(())
+            }
+            fn invoke_from_event_loop(&self, event: Job) -> Result<(), slint::EventLoopError> {
+                self.0.lock().unwrap().push_back(event);
+                Ok(())
+            }
+        }
+        impl Platform for Queue {
+            fn create_window_adapter(
+                &self,
+            ) -> Result<std::rc::Rc<dyn WindowAdapter>, PlatformError> {
+                Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+            }
+            fn new_event_loop_proxy(&self) -> Option<Box<dyn EventLoopProxy>> {
+                Some(Box::new(self.clone()))
+            }
+        }
+        struct Call {
+            provider: String,
+            account: String,
+            key: String,
+            reply: async_channel::Sender<zbus::fdo::Result<Vec<HistoryPoint>>>,
+        }
+        struct History(async_channel::Sender<Call>);
+        #[zbus::interface(name = "io.github.zbndev.Tidemark.Daemon1")]
+        impl History {
+            async fn current_segment(
+                &self,
+                provider: &str,
+                account: &str,
+                window: &str,
+            ) -> zbus::fdo::Result<Vec<HistoryPoint>> {
+                let (reply, result) = async_channel::bounded(1);
+                self.0
+                    .send(Call {
+                        provider: provider.into(),
+                        account: account.into(),
+                        key: window.into(),
+                        reply,
+                    })
+                    .await
+                    .unwrap();
+                result.recv().await.unwrap()
+            }
+        }
+
+        // A socket pair and a software adapter: no session bus, panel, OS window or GUI.
+        let (server_stream, client_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (calls, received) = async_channel::unbounded();
+        let server = std::thread::spawn(move || {
+            async_io::block_on(async {
+                zbus::connection::Builder::async_io_unix_stream(server_stream)
+                    .server(zbus::Guid::generate())
+                    .unwrap()
+                    .p2p()
+                    .serve_at(tidemark_types::ids::OBJECT_PATH, History(calls))
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap()
+            })
+        });
+        let client = async_io::block_on(
+            zbus::connection::Builder::async_io_unix_stream(client_stream)
+                .p2p()
+                .build(),
+        )
+        .unwrap();
+        let _server = server.join().unwrap();
+        let proxy = async_io::block_on(DaemonProxy::new(&client)).unwrap();
+        let daemon = Rc::new(RefCell::new(Some(proxy)));
+        let queue = Queue::default();
+        slint::platform::set_platform(Box::new(queue.clone())).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let mut reading = status(&[("weekly", Some(604_800)), ("five-hour", Some(18_000))]);
+        reading.account = "second".into();
+        reading.account_label = Some("Work".into());
+        let dialog = DetailDialog::open(
+            &ui,
+            Rc::new({
+                let daemon = daemon.clone();
+                move || daemon.borrow().clone()
+            }),
+            &reading,
+            "Z.ai",
+            None,
+            || {},
+        );
+        let global = ui.global::<QuotaDetails>();
+        assert!(global.get_open());
+        assert_eq!(global.get_account(), "Work");
+        assert_eq!(global.get_selected(), 1);
+        assert!(global.get_loading());
+        queue.until(|| !received.is_empty());
+        let call = received.try_recv().unwrap();
+        assert_eq!(
+            (
+                call.provider.as_str(),
+                call.account.as_str(),
+                call.key.as_str()
+            ),
+            ("zai", "second", "five-hour")
+        );
+        call.reply
+            .try_send(Ok(vec![HistoryPoint {
+                captured_at: 1_785_700_000,
+                used_percent: 25.0,
+            }]))
+            .unwrap();
+        queue.until(|| !global.get_loading());
+        assert!(global.get_message().is_empty());
+        assert!(!global.get_actual().is_empty());
+        assert!(global.get_has_marker());
+        assert_eq!(global.get_marker_y(), 750.0);
+
+        global.invoke_select(0);
+        queue.until(|| !received.is_empty());
+        let call = received.try_recv().unwrap();
+        assert_eq!(call.key, "weekly");
+        call.reply.try_send(Ok(Vec::new())).unwrap();
+        queue.until(|| !global.get_loading());
+        assert!(!global.get_message().is_empty());
+        assert!(!global.get_failed());
+        assert!(global.get_actual().is_empty());
+        assert!(!global.get_has_marker());
+
+        dialog.apply(&reading, "Z.ai", None);
+        assert_eq!(
+            global.get_selected(),
+            0,
+            "a status update preserves selection"
+        );
+        queue.until(|| !received.is_empty());
+        received
+            .try_recv()
+            .unwrap()
+            .reply
+            .try_send(Err(zbus::fdo::Error::Failed("history unavailable".into())))
+            .unwrap();
+        queue.until(|| !global.get_loading());
+        assert!(global.get_failed());
+        assert!(global.get_message().contains("history unavailable"));
+
+        daemon.borrow_mut().take();
+        dialog.disconnected();
+        assert!(global.get_failed());
+        assert!(!global.get_loading());
+        global.invoke_close();
+        assert!(!global.get_open());
+        dialog.apply(&reading, "Z.ai", None);
+        assert!(
+            !global.get_open(),
+            "late updates cannot resurrect a closed dialog"
+        );
     }
 
     #[test]

@@ -26,6 +26,25 @@ pub(super) const API_ENDPOINTS: &[&str] = &[
 /// How many times `loadCodeAssist` is re-asked for a project after onboarding.
 const PROJECT_POLLS: usize = 5;
 
+/// Cloud Code selects Antigravity consumer access from the Hub compatibility token.
+/// Without it, even valid tokens get `UNSUPPORTED_CLIENT` at setup and 429 at quota.
+/// Keep Tidemark as the actual product identity rather than impersonating the Hub.
+pub(super) fn cloud_code_user_agent() -> String {
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let architecture = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    format!(
+        "{} (compatible; antigravity/hub/2.9.1 {platform}/{architecture})",
+        tidemark_types::user_agent()
+    )
+}
+
 /// The registered Google desktop client used by the system-browser login flow.
 pub fn client() -> Client {
     Client {
@@ -229,6 +248,7 @@ async fn post_json(
     let response = client
         .post(url)
         .bearer_auth(access_token)
+        .header(reqwest::header::USER_AGENT, cloud_code_user_agent())
         .json(body)
         .send()
         .await
@@ -374,6 +394,37 @@ mod tests {
         tokio::runtime::Runtime::new()
             .expect("runtime")
             .block_on(future)
+    }
+
+    #[test]
+    fn cloud_code_setup_announces_hub_compatibility_and_tidemark() {
+        let load = r#"{"allowedTiers":[{"id":"free-tier","isDefault":true}]}"#;
+        let done = r#"{"done":true,"response":{"cloudaicompanionProject":"project-1"}}"#;
+        let (base, requests, server) = local_server(vec![(200, load), (200, done)]);
+        let client = crate::providers::http::client().expect("client");
+        let document = block_on(complete_login_at(
+            &client,
+            &[base],
+            &token_response(),
+            1_787_270_400_000,
+            Duration::ZERO,
+        ))
+        .expect("login provisioned");
+        server.join().expect("server stopped");
+        assert_eq!(document["project_id"], "project-1");
+        let requests: Vec<_> = requests.into_iter().collect();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            let agent = request
+                .lines()
+                .find(|line| line.starts_with("user-agent:"))
+                .expect("product identified");
+            assert!(agent.starts_with("user-agent: Tidemark/"), "{agent}");
+            assert!(
+                agent.contains("(compatible; antigravity/hub/2.9.1 "),
+                "Cloud Code otherwise rejects this client: {agent}"
+            );
+        }
     }
 
     #[test]

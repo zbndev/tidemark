@@ -1837,7 +1837,15 @@ impl Engine {
         // Credentials first, and sequentially: each is one local D-Bus round trip, and a
         // provider whose key is missing must reach its state without a network attempt.
         for &index in &due {
+            self.accounts[index].status.checking = Some(true);
+            let _ = self
+                .updates
+                .send(Publication::Changed(self.accounts[index].status.clone()))
+                .await;
             self.ensure_client(index).await;
+            if self.accounts[index].client.is_none() {
+                self.reschedule(index).await;
+            }
         }
 
         let mut fetches = JoinSet::new();
@@ -1854,12 +1862,19 @@ impl Engine {
             }
         }
 
-        // Accounts with no client got their state from `ensure_client` and never reached a
-        // fetch; they still need rescheduling, or they would come due forever.
+        // Anything still checking here lost its fetch task instead of returning a result.
         for &index in &due {
-            if self.accounts[index].client.is_none() {
-                self.reschedule(index).await;
+            if self.accounts[index].status.checking != Some(true) {
+                continue;
             }
+            // A panicked fetch must not leave a permanent spinner in the client.
+            self.apply(
+                index,
+                Err(ProviderError::Local(
+                    "The metrics check did not finish.".into(),
+                )),
+            )
+            .await;
         }
     }
 
@@ -2205,6 +2220,7 @@ impl Engine {
 
         let account = &mut self.accounts[index];
         account.due = Instant::now() + interval;
+        account.status.checking = Some(false);
         account.status.next_poll_at = Some(
             now.saturating_add_seconds(interval.as_secs() as i64)
                 .as_unix(),
@@ -5001,6 +5017,128 @@ svg = '''
     }
 
     #[tokio::test]
+    async fn check_progress_is_published_while_the_fetch_is_still_waiting() {
+        #[derive(Debug, Default)]
+        struct Blocked(tokio::sync::Notify);
+        impl Provider for Blocked {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("fake")
+            }
+            fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+                Box::pin(async {
+                    self.0.notified().await;
+                    Ok(snapshot(42.0, 18_000))
+                })
+            }
+        }
+        let provider = Arc::new(Blocked::default());
+        let Harness {
+            mut engine,
+            mut updates,
+            ..
+        } = with_provider(provider.clone());
+        let polling = tokio::spawn(async move {
+            engine.poll_due(Instant::now()).await;
+        });
+        let started = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+            .await
+            .expect("progress arrives before the provider answers")
+            .expect("publication");
+        assert!(matches!(started, Publication::Changed(status) if status.checking == Some(true)));
+        provider.0.notify_one();
+        polling.await.expect("poll completed");
+        let finished = updates.recv().await.expect("completion publication");
+        assert!(matches!(finished, Publication::Changed(status)
+            if status.checking == Some(false) && status.state() == Some(ProviderState::Ok)));
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_clears_progress_and_preserves_cached_metrics() {
+        let mut harness = with_provider(Fake::new(vec![
+            Ok(snapshot(42.0, 18_000)),
+            Err(ProviderError::Http { status: 502 }),
+        ]));
+        harness.engine.poll_due(Instant::now()).await;
+        harness.published();
+        harness.poll_again().await;
+        let published = harness.published();
+        assert_eq!(published.len(), 2);
+        assert_eq!(published[0].checking, Some(true));
+        assert_eq!(published[0].windows[0].used_percent, 42.0);
+        assert_eq!(published[1].checking, Some(false));
+        assert_eq!(published[1].state(), Some(ProviderState::Unreachable));
+        assert_eq!(published[1].windows, published[0].windows);
+    }
+
+    #[tokio::test]
+    async fn a_panicked_fetch_clears_progress_and_is_rescheduled() {
+        #[derive(Debug)]
+        struct Panics;
+        impl Provider for Panics {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("fake")
+            }
+            fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+                Box::pin(async { panic!("simulated provider panic") })
+            }
+        }
+        let mut harness = with_provider(Arc::new(Panics));
+        harness.engine.poll_due(Instant::now()).await;
+        let finished = harness.published().pop().expect("failed completion");
+        assert_eq!(finished.checking, Some(false));
+        assert_eq!(finished.state(), Some(ProviderState::Unreachable));
+        assert!(finished.message.is_some());
+        assert!(harness.wait_secs() > 0);
+    }
+
+    #[tokio::test]
+    async fn a_local_refusal_stops_checking_without_waiting_for_another_provider() {
+        #[derive(Debug)]
+        struct Blocked;
+        impl Provider for Blocked {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("blocked")
+            }
+            fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+                Box::pin(std::future::pending())
+            }
+        }
+        let Harness {
+            mut engine,
+            mut updates,
+            ..
+        } = Harness::new(
+            vec![
+                Account::new(
+                    ProviderId::new("missing"),
+                    AccountId::default(),
+                    Box::new(|_, _, _| panic!("no client may be built without a key")),
+                ),
+                Account::with_client(Arc::new(Blocked)),
+            ],
+            Arc::new(Keyring(|| Ok(None))),
+        );
+        let polling = tokio::spawn(async move {
+            engine.poll_due(Instant::now()).await;
+        });
+        let completed = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(update) = updates.recv().await {
+                if let Publication::Changed(status) = update
+                    && status.provider == "missing"
+                    && status.checking == Some(false)
+                {
+                    return status;
+                }
+            }
+            panic!("publication channel closed");
+        })
+        .await;
+        polling.abort();
+        let status = completed.expect("the missing-key check completes independently");
+        assert_eq!(status.state(), Some(ProviderState::NoCredential));
+    }
+
+    #[tokio::test]
     async fn current_segment_command_returns_only_the_open_segment() {
         let (updates, _published) = mpsc::channel(8);
         let mut engine = Engine::new(
@@ -5246,6 +5384,11 @@ svg = '''
         let status = harness.published().pop().expect("published");
         assert_eq!(status.state(), Some(ProviderState::WaitingForKeyring));
         assert_eq!(
+            status.checking,
+            Some(false),
+            "local refusals stop the spinner too"
+        );
+        assert_eq!(
             harness.wait_secs(),
             scheduler::KEYRING_RETRY.as_secs(),
             "the daemon keeps asking, because the user is about to log in"
@@ -5271,6 +5414,7 @@ svg = '''
 
         let status = harness.published().pop().expect("published");
         assert_eq!(status.state(), Some(ProviderState::NoCredential));
+        assert_eq!(status.checking, Some(false));
         assert!(status.message.is_none(), "the state says it all");
     }
 
@@ -5461,7 +5605,11 @@ svg = '''
         harness.engine.poll_due(Instant::now()).await;
 
         let published = harness.published();
-        let five_hour = published[0]
+        let completed = published
+            .iter()
+            .find(|status| status.checking == Some(false))
+            .expect("completed check");
+        let five_hour = completed
             .windows
             .iter()
             .find(|window| window.key == "w18000")

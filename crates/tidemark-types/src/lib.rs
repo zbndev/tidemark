@@ -5,8 +5,8 @@
 //! window, segment, snapshot, pace — and the shapes those travel in over D-Bus.
 //!
 //! It deliberately depends on nothing that talks to the network, the disk or the display.
-//! Anything that needs an HTTP client belongs in `tidemark-core`; anything that needs GTK
-//! belongs in `tidemark`. `scripts/check-layering.sh` enforces that.
+//! Anything that needs an HTTP client belongs in `tidemark-core`; anything that needs a
+//! display belongs in `tidemark`. `scripts/check-layering.sh` enforces that.
 
 pub mod present;
 pub mod semantic;

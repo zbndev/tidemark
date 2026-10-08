@@ -17,38 +17,34 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install the toolkit and the shell-check tools
+      - name: Install the libraries and the shell-check tools
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake \
+            libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev \
             dbus-daemon desktop-file-utils appstream shellcheck
 
       - name: The tag must agree with Cargo.toml
         run: scripts/check-tag-version.sh "${GITHUB_REF_NAME}"
 
-      - name: Confirm the toolkit meets the floor
-        run: |
-          pkg-config --atleast-version=4.22 gtk4
-          pkg-config --atleast-version=1.9 libadwaita-1
-          pkg-config --modversion gtk4 libadwaita-1
-
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: dbus-run-session -- cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: dbus-run-session -- cargo test --workspace --locked
       - run: scripts/check-layering.sh
       - run: scripts/check-desktop-integration.sh
       - run: scripts/test-restart-user-daemon.sh
+      - run: scripts/test-package-deps.sh
+      - run: scripts/test-release.sh
       - run: |
-          shellcheck scripts/*.sh data/restart-user-daemon \
+          shellcheck scripts/*.sh data/restart-user-daemon data/packaging/windows/stage-runtime.sh \
             data/packaging/deb/postinst data/packaging/rpm/post-install.sh
 
   deb:
     needs: checks
-    # Ubuntu 26.04 is the oldest release meeting the GTK 4.22 floor, so building on it
-    # makes it the oldest supported target. glibc is forward- but not backward-compatible,
+    # Building on Ubuntu 26.04 makes it the oldest supported target. glibc is forward- but
+    # not backward-compatible,
     # which is the whole reason each format is built on its own target rather than on one
     # shared build host.
     runs-on: ubuntu-26.04
@@ -56,11 +52,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v5
-      - name: Install the toolkit
+      - name: Install the libraries
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake dpkg-dev
+            libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev dpkg-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-deb --locked
       - run: cargo build --release --locked --workspace
@@ -92,8 +88,8 @@ jobs:
     steps:
       - name: Bootstrap the container
         run: |
-          dnf install -y git gcc gcc-c++ cmake clang-devel gtk4-devel \
-            libadwaita-devel sqlite-devel pkgconf-pkg-config rpm-build
+          dnf install -y git gcc gcc-c++ cmake clang-devel fontconfig-devel \
+            sqlite-devel pkgconf-pkg-config rpm-build
       - uses: actions/checkout@v5
       - name: Install rustup
         run: |
@@ -115,8 +111,8 @@ jobs:
   # The Windows setup executable, built against the same pinned MSYS2 UCRT64 runtime the
   # binaries link against: package name, version and archive SHA-256 are all locked in
   # msys2-runtime-packages.txt, so what is linked and what is shipped cannot drift apart.
-  # Nothing is tested here — CI's windows-tests job has already run fmt, clippy and the
-  # whole suite on this target, on the commit the tag points at.
+  # The Windows gate runs on the tag itself and the pinned release runtime before any
+  # installer is staged. Main-branch CI is not evidence that this tag passed Windows tests.
   windows:
     needs: checks
     runs-on: windows-latest
@@ -172,21 +168,28 @@ jobs:
         run: |
           rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
           rustup default stable-x86_64-pc-windows-gnu
+          rustup component add rustfmt clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: ucrt64-release
+
+      - name: Windows release checks
+        shell: msys2 {0}
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
 
       - name: Release binaries
         shell: msys2 {0}
         run: cargo build --release --locked -p tidemark -p tidemarkd
 
       # The DLL set is not hand-written: the script walks the PE import closure of both
-      # executables and of every gdk-pixbuf loader, and refuses a package whose installed
-      # version is not the pinned one.
+      # executables, and refuses a package whose installed version is not the pinned one.
       - name: Stage the resolved MSYS2 UCRT64 runtime
         shell: msys2 {0}
-        run: bash data/packaging/windows/stage-gtk-runtime.sh build target/release
+        run: bash data/packaging/windows/stage-runtime.sh build target/release
 
       # choco's nsis package is NSIS 3.x with MUI2, the System plugin and lzma — the
       # whole surface installer.nsi uses.
@@ -209,7 +212,7 @@ jobs:
           & "C:\Program Files (x86)\NSIS\makensis.exe" `
             "/DVERSION=$version" `
             "/DSRC_DIR=${env:GITHUB_WORKSPACE}\target\release" `
-            "/DGTK_DIR=${env:GITHUB_WORKSPACE}\build\nsis-staging\gtk" `
+            "/DRUNTIME_DIR=${env:GITHUB_WORKSPACE}\build\nsis-staging\runtime" `
             "/DOUT_FILE=Tidemark-${env:TAG}-setup.exe" `
             installer.nsi
 

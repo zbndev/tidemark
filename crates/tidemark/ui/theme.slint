@@ -1,0 +1,43 @@
+// The application palette, shared by all Slint components.
+// Opaque everywhere: the card colour includes its background composite,
+// so cards that overlap during a reorder never show through each other.
+
+export global Theme {
+    in-out property <bool> dark: false;
+    // The desktop's accent, as the XDG portal reports it; blue otherwise.
+    in-out property <color> accent: #3584e4;
+
+    out property <color> window-bg: dark ? #222226 : #fafafb;
+    out property <color> header-bg: dark ? #2e2e32 : #ffffff;
+    out property <color> header-shade: dark ? #0000065c : #0000061f;
+    out property <color> card-bg: dark ? #343437 : #ffffff;
+    out property <color> card-outline: dark ? #00000617 : #00000608;
+    out property <color> card-shadow: dark ? #00000630 : #00000612;
+    out property <color> popover-bg: dark ? #3c3c40 : #ffffff;
+    out property <color> accent-fg: #ffffff;
+    out property <color> warning-bg: dark ? #cd9309 : #e5a50a;
+    out property <color> error-bg: dark ? #c01c28 : #e01b24;
+    out property <color> warning: dark ? #f8e45c : #9c6e03;
+    out property <color> error: dark ? #ff938c : #c30000;
+    out property <color> success: dark ? #78e9ab : #007c3d;
+    // The accent made readable as text, lighter on dark and darker on light.
+    out property <color> link: dark ? accent.mix(#ffffff, 0.65) : accent.mix(#000000, 0.8);
+
+    // The text colour and the emphasis levels for secondary text.
+    property <color> fg-rgb: dark ? #ffffff : #000006;
+    property <float> fg-alpha: dark ? 1.0 : 0.8;
+    out property <color> fg: fg-rgb.with-alpha(fg-alpha);
+    out property <float> dim: 0.55;
+
+    public pure function ink(alpha: float) -> color {
+        return fg-rgb.with-alpha(fg-alpha * alpha);
+    }
+
+    out property <length> body: 11pt;
+    out property <length> caption: body * 0.8;
+    out property <length> footer: body * 0.9;
+    out property <length> title-1: 20pt;
+    // Rubik's descent, as a fraction of its size. Slint lays text out by its box, not its
+    // baseline, so a row that means "one baseline" lifts each box by the descent it lacks.
+    out property <float> descent: 0.25;
+}

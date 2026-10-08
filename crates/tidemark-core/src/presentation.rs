@@ -1,6 +1,6 @@
 //! Every built-in provider's reading, in the semantic presentation the card renders.
 //!
-//! One adapter, in core, so the plugin path and the built-in path reach the GTK card
+//! One adapter, in core, so the plugin path and the built-in path reach the desktop card
 //! through the same shape and there is no second renderer to keep in step. It is a pure
 //! function of a [`Snapshot`]: the windows become gauges in the order the card has always
 //! drawn them, and the detail sections become ordered status text. Nothing is invented —

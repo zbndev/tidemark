@@ -1,6 +1,6 @@
 <!-- The Sakana mark belongs to Sakana AI. Not covered by Tidemark's MIT licence; used
      nominatively to identify the service a card reports on. See docs/TRADEMARKS.md. -->
-<!-- Drawn as filled outlines, not strokes: GTK's symbolic renderer paints fill only. -->
+<!-- Drawn as filled outlines, not strokes: symbolic recolouring uses fill only. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="#000">
   <g transform="translate(-3.9 4) scale(1.078)">
   <path d="M 50,4 C 26.546635,4 7.5,23.046635 7.5,46.5 7.5,69.953365 26.546635,89 50,89 73.453365,89 92.5,69.953365 92.5,46.5 92.5,23.046635 73.453365,4 50,4 Z m 0,8 C 69.146635,12 84.5,27.353365 84.5,46.5 84.5,65.646635 69.146635,81 50,81 30.853365,81 15.5,65.646635 15.5,46.5 15.5,27.353365 30.853365,12 50,12 Z"/>

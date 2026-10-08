@@ -500,9 +500,9 @@ pub struct DataInfo {
     pub release_check_available: bool,
     /// Where installed plugin marks are materialized, as an XDG icon-theme root.
     ///
-    /// A path the client *adds to its icon search path*, never one it opens files from
-    /// itself: a symbolic SVG only takes the theme's colour when GTK loads it through the
-    /// icon theme. Empty from a daemon that has no plugin directory, which a client must
+    /// A path the client *adds to its icon search path*: an icon-theme root, laid out as
+    /// `hicolor/symbolic/apps`, which the client searches the way it searches the installed
+    /// theme. Empty from a daemon that has no plugin directory, which a client must
     /// read as "add nothing" rather than as a root at the filesystem's top.
     pub plugin_icons_path: String,
 }
@@ -673,6 +673,9 @@ pub struct ProviderStatus {
     /// Human-readable detail for a state that is not `ok`. Absent when there is nothing
     /// to add beyond the state itself.
     pub message: Option<String>,
+    /// Whether a metrics check is currently running, independently of the last result.
+    /// Absent from older daemons. The last good reading and its state survive a check.
+    pub checking: Option<bool>,
     /// When the reading below was taken. Absent while the account has never been polled
     /// successfully — a status can carry a state and no reading at all.
     pub captured_at: Option<i64>,
@@ -741,6 +744,7 @@ impl ProviderStatus {
             account_label: None,
             state: ProviderState::Pending.as_wire().to_owned(),
             message: None,
+            checking: None,
             captured_at: None,
             next_poll_at: None,
             windows: Vec::new(),
@@ -989,6 +993,32 @@ mod tests {
     }
 
     #[test]
+    fn check_progress_is_optional_and_round_trips_without_changing_the_reading() {
+        #[derive(Debug, DeserializeDict, Type)]
+        #[zvariant(signature = "a{sv}")]
+        struct OlderClientStatus {
+            state: String,
+            windows: Vec<WindowStatus>,
+        }
+        let mut original = status();
+        let absent: HashMap<String, OwnedValue> = encode(&original).deserialize().expect("map").0;
+        assert!(!absent.contains_key("checking"));
+        let older: ProviderStatus = encode(&original).deserialize().expect("older payload").0;
+        assert_eq!(older.checking, None);
+        for checking in [true, false] {
+            original.checking = Some(checking);
+            let decoded: ProviderStatus = encode(&original).deserialize().expect("status").0;
+            assert_eq!(decoded, original);
+            assert_eq!(decoded.state(), Some(ProviderState::Ok));
+            assert_eq!(decoded.windows.len(), 2);
+            let old_client: OlderClientStatus =
+                encode(&original).deserialize().expect("old client").0;
+            assert_eq!(old_client.state, "ok");
+            assert_eq!(old_client.windows, original.windows);
+        }
+    }
+
+    #[test]
     fn a_provider_definition_survives_the_bus() {
         let original = ProviderDefinition {
             provider: "antigravity".into(),
@@ -1015,7 +1045,7 @@ mod tests {
 
     #[test]
     fn a_browser_auth_definition_and_nested_candidate_survive_the_bus() {
-        // Removing the selector or flattening a browser's two profiles would leave the GTK
+        // Removing the selector or flattening a browser's two profiles would leave the
         // client unable to offer the explicit source the daemon validated.
         let selector = AuthSelector {
             option: "auth-source".into(),

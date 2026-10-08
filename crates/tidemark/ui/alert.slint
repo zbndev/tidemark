@@ -1,0 +1,327 @@
+// An alert dialog: a heading, a sentence, an optional form, and a row of responses, over a
+// dimmed window. Rust asks a question through the `Alert` global and awaits the answer.
+
+import { Theme } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Button, Caption, Entry } from "widgets.slint";
+
+// 0 plain, 1 suggested, 2 destructive.
+export struct AlertResponse {
+    id: string,
+    label: string,
+    kind: int,
+}
+
+export struct PreviewRow {
+    label: string,
+    value: string,
+}
+
+// What the form held when a response was chosen; empty for a plain alert.
+export struct AlertForm {
+    name: string,
+    endpoint: string,
+    insecure: bool,
+    key: string,
+}
+
+export global Alert {
+    in property <bool> open;
+    // A new question, so a form left over from the previous one starts empty.
+    in property <int> serial;
+    in property <string> heading;
+    in property <string> body;
+    in property <[AlertResponse]> responses;
+    in property <string> close-response;
+    in property <string> default-response;
+    // Whether the default is the suggested response, which the form has to allow first.
+    in property <bool> default-suggested;
+    // 0 nothing, 1 an account name, 2 a plugin account, 3 a plugin file, 4 a diagnostic.
+    in property <int> content;
+    in property <string> prefill;
+    // A rename: the id the account already has, which the name may not suggest again.
+    in property <string> current;
+    in property <bool> ask-name;
+    in property <bool> ask-endpoint;
+    in property <string> request;
+    in property <[PreviewRow]> preview;
+    in property <bool> has-mark;
+    in property <image> mark;
+
+    callback respond(string, AlertForm);
+    pure callback filled(string) -> bool;
+    pure callback suggest-id(string) -> string;
+    pure callback name-usable(string, string) -> bool;
+    pure callback endpoint-valid(string) -> bool;
+    pure callback endpoint-warning(string) -> string;
+}
+
+export component AlertDialog inherits Rectangle {
+    background: Theme.dark ? #00000080 : #00000040;
+
+    property <int> serial: Alert.serial;
+    property <string> name-text;
+    property <string> endpoint-text;
+    property <string> key-text;
+    property <bool> insecure;
+    property <string> warning: Alert.content == 2 && Alert.ask-endpoint ? Alert.endpoint-warning(root.endpoint-text) : "";
+    // Whether the suggested response can be taken. The form requires:
+    // a name that suggests a usable id, an endpoint the daemon would not refuse outright,
+    // plain http only once acknowledged, and a key.
+    property <bool> valid: Alert.content == 1 ? Alert.name-usable(root.name-text, Alert.current)
+        : Alert.content == 2 ? ((!Alert.ask-name || Alert.name-usable(root.name-text, ""))
+            && (!Alert.ask-endpoint || Alert.endpoint-valid(root.endpoint-text))
+            && (root.warning == "" || root.insecure)
+            && Alert.filled(root.key-text))
+        : true;
+
+    function reset() {
+        root.name-text = Alert.prefill;
+        root.endpoint-text = "";
+        root.key-text = "";
+        root.insecure = false;
+        scope.focus();
+    }
+    changed serial => {
+        root.reset();
+    }
+    init => {
+        root.reset();
+    }
+
+    function form() -> AlertForm {
+        return {
+            name: root.name-text,
+            endpoint: root.endpoint-text,
+            insecure: root.insecure,
+            key: root.key-text,
+        };
+    }
+    function enabled(response: AlertResponse) -> bool {
+        return response.kind != 1 || root.valid;
+    }
+    function take-default() {
+        if (!Alert.default-suggested || root.valid) {
+            Alert.respond(Alert.default-response, root.form());
+        }
+    }
+
+    // Swallows presses meant for the window underneath.
+    TouchArea { }
+
+    scope := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                Alert.respond(Alert.close-response, root.form());
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.take-default();
+                return accept;
+            }
+            reject
+        }
+
+        Rectangle {
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            width: min(Alert.content == 4 ? 600px : 372px, root.width - 24px);
+            height: layout.preferred-height;
+            background: Theme.popover-bg;
+            border-radius: 14px;
+            drop-shadow-blur: 24px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: #00000050;
+
+            layout := VerticalLayout {
+                padding: 24px;
+                padding-top: 32px;
+                spacing: 12px;
+
+                Text {
+                    text: Alert.heading;
+                    color: Theme.fg;
+                    font-size: Theme.body * 1.36;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                if Alert.body != "" && Alert.content != 4: Text {
+                    text: Alert.body;
+                    color: Theme.fg;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                if Alert.content == 4: ScrollView {
+                    height: min(320px, max(48px, root.height - 180px));
+                    content-width: self.visible-width;
+                    content-height: max(self.visible-height, diagnostic.preferred-height);
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    mouse-drag-pan-enabled: false;
+                    diagnostic := TextInput {
+                        text: Alert.body;
+                        read-only: true;
+                        single-line: false;
+                        wrap: char-wrap;
+                        color: Theme.fg;
+                        selection-background-color: Theme.accent.with-alpha(0.3);
+                        selection-foreground-color: Theme.fg;
+                    }
+                }
+
+                if Alert.content == 1: VerticalLayout {
+                    spacing: 6px;
+                    name := Entry {
+                        text <=> root.name-text;
+                        placeholder: "Account name";
+                        init => {
+                            self.focus-input();
+                        }
+                        accepted => {
+                            root.take-default();
+                        }
+                    }
+                    Caption {
+                        text: "Account id: " + Alert.suggest-id(root.name-text);
+                    }
+                }
+
+                if Alert.content == 2: VerticalLayout {
+                    spacing: 12px;
+                    if Alert.ask-name: VerticalLayout {
+                        spacing: 6px;
+                        Entry {
+                            text <=> root.name-text;
+                            placeholder: "Account name";
+                            init => {
+                                self.focus-input();
+                            }
+                            accepted => {
+                                root.take-default();
+                            }
+                        }
+                        Caption {
+                            text: "Account id: " + Alert.suggest-id(root.name-text);
+                        }
+                    }
+                    if Alert.ask-endpoint: VerticalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Metrics URL";
+                            color: Theme.fg;
+                            font-weight: 700;
+                        }
+                        Entry {
+                            text <=> root.endpoint-text;
+                            placeholder: "https://example.com/v1/usage";
+                            accepted => {
+                                root.take-default();
+                            }
+                        }
+                    }
+                    // Where the key is about to be sent, in the shape the request takes.
+                    Caption {
+                        text: Alert.request;
+                    }
+                    if root.warning != "": VerticalLayout {
+                        spacing: 6px;
+                        Caption {
+                            text: root.warning;
+                            color: Theme.warning;
+                        }
+                        Rectangle {
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    width: 18px;
+                                    height: 18px;
+                                    border-radius: 4px;
+                                    background: root.insecure ? Theme.accent : Theme.ink(0.1);
+                                    border-width: root.insecure ? 0px : 1px;
+                                    border-color: Theme.ink(0.3);
+                                    if root.insecure: Image {
+                                        source: @image-url("icons/object-select-symbolic.svg");
+                                        colorize: Theme.accent-fg;
+                                        width: 14px;
+                                        height: 14px;
+                                    }
+                                }
+                                Text {
+                                    text: "Send the key over plain http";
+                                    color: Theme.fg;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            TouchArea {
+                                clicked => {
+                                    root.insecure = !root.insecure;
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        text: "API key";
+                        color: Theme.fg;
+                        font-weight: 700;
+                    }
+                    Entry {
+                        text <=> root.key-text;
+                        password: true;
+                        init => {
+                            if (!Alert.ask-name) {
+                                self.focus-input();
+                            }
+                        }
+                        accepted => {
+                            root.take-default();
+                        }
+                    }
+                }
+
+                if Alert.content == 3: VerticalLayout {
+                    spacing: 12px;
+                    if Alert.has-mark: HorizontalLayout {
+                        alignment: center;
+                        Image {
+                            source: Alert.mark;
+                            colorize: Theme.fg;
+                            width: 32px;
+                            height: 32px;
+                        }
+                    }
+                    for row in Alert.preview: HorizontalLayout {
+                        spacing: 12px;
+                        Caption {
+                            text: row.label;
+                            width: 96px;
+                        }
+                        Text {
+                            text: row.value;
+                            color: Theme.fg;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-top: 12px;
+                    spacing: 12px;
+                    for response in Alert.responses: Button {
+                        // Equal widths, whatever the labels say.
+                        preferred-width: 0px;
+                        horizontal-stretch: 1;
+                        button-height: 38px;
+                        text: response.label;
+                        kind: response.kind;
+                        enabled: root.enabled(response);
+                        clicked => {
+                            Alert.respond(response.id, root.form());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

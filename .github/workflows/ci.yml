@@ -39,25 +39,20 @@ env:
 
 jobs:
   checks:
-    # The only hosted runner carrying GTK 4.22 / libadwaita 1.9, which is the project's
-    # API floor. ubuntu-latest is still 24.04 and ships GTK 4.18; this code does not
-    # compile against it.
+    # The release builds the .deb on the same image, so the gate sees the libraries the
+    # package is linked against.
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install the toolkit and the shell-check tools
+      # fontconfig is the one desktop library the client links; Slint's windowing and GPU
+      # libraries are loaded at run time and need no headers.
+      - name: Install the libraries and the shell-check tools
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libgtk-4-dev libadwaita-1-dev libsqlite3-dev pkg-config cmake \
+            libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev \
             dbus-daemon desktop-file-utils appstream shellcheck
-
-      - name: Confirm the toolkit meets the floor
-        run: |
-          pkg-config --atleast-version=4.22 gtk4
-          pkg-config --atleast-version=1.9 libadwaita-1
-          pkg-config --modversion gtk4 libadwaita-1
 
       # rust-toolchain.toml pins the channel; rustup reads it on first use.
       - name: Show the toolchain
@@ -69,13 +64,13 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # A session bus, because tidemark-core's Secret Service tests skip themselves
       # without one and tidemarkd opens a session connection. With a bus but no Secret
       # Service the keyring assertions still skip, which is the designed behaviour.
       - name: Tests
-        run: dbus-run-session -- cargo test --workspace
+        run: dbus-run-session -- cargo test --workspace --locked
 
       - name: Layering
         run: scripts/check-layering.sh
@@ -86,16 +81,22 @@ jobs:
       - name: The user-daemon restart helper
         run: scripts/test-restart-user-daemon.sh
 
+      - name: Package dependency checks
+        run: scripts/test-package-deps.sh
+
+      - name: Release helper
+        run: scripts/test-release.sh
+
       - name: Shell
         run: |
-          shellcheck scripts/*.sh data/restart-user-daemon \
+          shellcheck scripts/*.sh data/restart-user-daemon data/packaging/windows/stage-runtime.sh \
             data/packaging/deb/postinst data/packaging/rpm/post-install.sh
 
   # The same gate on Windows: fmt, clippy and the whole suite, on MSYS2 UCRT64. The
   # MSVC target has never linked this dependency set (link.exe 1181) and is not what
   # the project ships, so the GNU toolchain is the one thing this job insists on.
-  # Unix-only tests cfg-gate themselves out at their seams, and the GTK widget tests
-  # skip on a runner with no display, so a red run here is a real regression.
+  # Unix-only tests cfg-gate themselves out at their seams, so a red run here is a real
+  # regression.
   windows-tests:
     runs-on: windows-latest
     timeout-minutes: 60
@@ -105,8 +106,7 @@ jobs:
       # MSVC host); without it the toolchain file would silently flip every
       # cargo invocation back to MSVC.
       RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
-      # gtk-rs MinGW recipe: the UCRT64 pkgconfig trees backing the system
-      # GTK/libadwaita/SQLite that the workspace links.
+      # The UCRT64 pkgconfig trees backing the system SQLite the daemon links.
       PKG_CONFIG_PATH: /ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig
     steps:
       - uses: actions/checkout@v5
@@ -123,21 +123,18 @@ jobs:
           # cmake build BoringSSL behind wreq (bindgen at build time).
           path-type: inherit
           install: >-
-            mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-libadwaita
             mingw-w64-ucrt-x86_64-pkg-config
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-clang
             mingw-w64-ucrt-x86_64-sqlite3
             mingw-w64-ucrt-x86_64-go
 
-      # Before any cargo step: prove the MSYS2 environment resolved. The
-      # gtk4/libadwaita-1/sqlite3 modversions MUST appear in the log (this step
-      # fails if any is missing).
+      # Before any cargo step: prove the MSYS2 environment resolved. The sqlite3
+      # modversion MUST appear in the log (this step fails if it is missing).
       - name: Confirm the MSYS2 environment
         shell: msys2 {0}
         run: |
-          pkg-config --modversion gtk4 libadwaita-1 sqlite3
+          pkg-config --modversion sqlite3
           command -v gcc g++ clang cmake cargo rustup
 
       # A full GNU-host toolchain, not just target std: build scripts and proc
@@ -162,8 +159,8 @@ jobs:
 
       - name: Clippy
         shell: msys2 {0}
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Tests
         shell: msys2 {0}
-        run: cargo test --workspace
+        run: cargo test --workspace --locked

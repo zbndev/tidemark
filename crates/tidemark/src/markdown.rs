@@ -2,38 +2,38 @@
 //!
 //! Release notes are written by whoever published the release and arrive over the bus
 //! verbatim. They are neither trusted markup nor a document worth a full renderer: what
-//! this produces is a flat list of [`Block`]s, each carrying Pango markup for one label.
-//! Parsing is CommonMark by way of `pulldown-cmark`, so emphasis, links and code spans are
-//! decided by a parser rather than by regular expressions that would disagree with GitHub's
-//! own rendering of the same text.
+//! this produces is a flat list of [`Block`]s, one element each. Parsing is CommonMark by
+//! way of `pulldown-cmark`, so emphasis, links and code spans are decided by a parser
+//! rather than by regular expressions that would disagree with GitHub's own rendering.
+//!
+//! Each block's text is Markdown again, but only the inline subset Slint's `StyledText`
+//! draws: emphasis, strong, strikethrough, code spans, links and hard breaks. Slint refuses
+//! the whole string over anything else — a heading, a rule, a stray tag — so the blocks are
+//! split out here, and everything that reaches it is escaped.
 //!
 //! Two deliberate departures from a browser:
 //!
 //! * **Raw HTML is dropped, never shown.** Release bodies carry `<!-- -->` comments and the
-//!   occasional `<details>`; Pango would reject the tags and printing them verbatim is
-//!   noise. Their text content still comes through as text.
+//!   occasional `<details>`; printing them verbatim is noise. Their text content still
+//!   comes through as text.
 //! * **Bare URLs become links.** GitHub's generated notes are mostly bare pull-request
 //!   URLs, which CommonMark leaves as plain text. A preview of those notes where the links
 //!   are dead would send every reader to the browser this dialog exists to postpone.
-//!
-//! Everything that reaches a label is escaped here. A release body containing `<b>` or a
-//! stray `&` is text, and Pango failing to parse a label's markup would drop the label's
-//! contents entirely.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-/// One block of a rendered document: one widget's worth.
+/// One block of a rendered document: one element's worth.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Block {
     /// A heading and its depth, 1 to 6.
-    Heading { level: u8, markup: String },
+    Heading { level: u8, markdown: String },
     /// A run of prose.
-    Paragraph { markup: String },
+    Paragraph { markdown: String },
     /// One list item, with the marker its list gives it and how deeply it is nested.
     Item {
         depth: usize,
         marker: String,
-        markup: String,
+        markdown: String,
     },
     /// A fenced or indented code block, verbatim and unescaped.
     Code { text: String },
@@ -46,12 +46,31 @@ pub(crate) fn blocks(markdown: &str) -> Vec<Block> {
     Render::default().run(markdown)
 }
 
+/// A code block as styled-text Markdown: one code span per line, since `StyledText` has
+/// no code blocks and a span is the only way it sets text in a monospaced face. A blank
+/// line is a no-break space, which keeps its height without drawing an empty span.
+pub(crate) fn code_lines(text: &str) -> String {
+    let mut out = String::new();
+    for (index, line) in text.lines().enumerate() {
+        if index > 0 {
+            out.push_str("\\\n");
+        }
+        if line.trim().is_empty() {
+            out.push('\u{a0}');
+        } else {
+            code_span(line, &mut out);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Default)]
 struct Render {
     blocks: Vec<Block>,
-    /// The inline run being accumulated: Pango markup, already escaped.
-    markup: String,
-    /// Plain text seen since the last markup was written, not yet escaped into `markup`.
+    /// The inline run being accumulated: styled-text Markdown, already escaped. A `\n` in
+    /// it is a hard break, written out as one by [`Render::take`].
+    markdown: String,
+    /// Plain text seen since the last markup was written, not yet escaped into `markdown`.
     ///
     /// A parser splits text at every position emphasis *could* have started, so
     /// `example.com/a_b` arrives in three pieces. Bare URLs are recognised across the whole
@@ -66,14 +85,15 @@ struct Render {
     heading: Option<u8>,
     /// The code block being accumulated, if any.
     code: Option<String>,
-    /// How many links are open, so text inside one is never linkified again.
-    links: usize,
+    /// The destinations of the links still open, innermost last. Text inside one is never
+    /// linkified again.
+    links: Vec<String>,
 }
 
 impl Render {
     fn run(mut self, markdown: &str) -> Vec<Block> {
         // Strikethrough and task lists are GitHub's, are used in release notes, and cost
-        // nothing to accept. Tables are not enabled: a table rendered as one label per row
+        // nothing to accept. Tables are not enabled: a table rendered as one line per row
         // of pipes is no worse than the source, and a dialog is not where a layout engine
         // earns its keep.
         let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
@@ -93,18 +113,16 @@ impl Render {
             },
             Event::Code(code) => {
                 self.flush_text();
-                self.markup.push_str("<tt>");
-                escape(&code, &mut self.markup);
-                self.markup.push_str("</tt>");
+                code_span(&code, &mut self.markdown);
             }
             // A line break inside a paragraph is a space, the way every Markdown renderer
-            // reflows it: the label decides where the line ends, from the width it is given.
+            // reflows it: the text decides where the line ends, from the width it is given.
             // Both go through the text buffer, because a URL ends at whitespace either way.
             Event::SoftBreak => self.pending.push(' '),
             Event::HardBreak => self.pending.push('\n'),
             Event::TaskListMarker(done) => {
                 self.flush_text();
-                self.markup.push_str(if done { "☑ " } else { "☐ " });
+                self.markdown.push_str(if done { "☑ " } else { "☐ " });
             }
             Event::Rule => self.blocks.push(Block::Rule),
             // Raw HTML, footnote references and maths: dropped rather than shown. See the
@@ -117,16 +135,16 @@ impl Render {
         }
     }
 
-    /// Escapes the buffered text into the markup run, linkifying bare URLs outside links.
+    /// Escapes the buffered text into the run, linkifying bare URLs outside links.
     fn flush_text(&mut self) {
         if self.pending.is_empty() {
             return;
         }
         let pending = std::mem::take(&mut self.pending);
-        if self.links > 0 {
-            escape(&pending, &mut self.markup);
+        if !self.links.is_empty() {
+            escape(&pending, &mut self.markdown);
         } else {
-            linkify(&pending, &mut self.markup);
+            linkify(&pending, &mut self.markdown);
         }
     }
 
@@ -136,17 +154,17 @@ impl Render {
         self.flush_text();
         match tag {
             Tag::Heading { level, .. } => {
-                self.markup.clear();
+                self.markdown.clear();
                 self.heading = Some(depth(level));
             }
             // A loose list item's text arrives wrapped in a paragraph. Inside an item that
             // is a continuation line, not a new block.
             Tag::Paragraph if self.in_item() => {
-                if !self.markup.is_empty() {
-                    self.markup.push('\n');
+                if !self.markdown.is_empty() {
+                    self.markdown.push('\n');
                 }
             }
-            Tag::Paragraph => self.markup.clear(),
+            Tag::Paragraph => self.markdown.clear(),
             Tag::List(start) => {
                 // A nested list interrupts its parent item: whatever that item said before
                 // the nesting is its own line, and the parent's own end must not repeat it.
@@ -154,7 +172,7 @@ impl Render {
                 self.lists.push(start);
             }
             Tag::Item => {
-                self.markup.clear();
+                self.markdown.clear();
                 let marker = match self.lists.last_mut() {
                     Some(Some(number)) => {
                         let marker = format!("{number}.");
@@ -166,14 +184,14 @@ impl Render {
                 self.items.push((marker, false));
             }
             Tag::CodeBlock(_) => self.code = Some(String::new()),
-            Tag::Emphasis => self.markup.push_str("<i>"),
-            Tag::Strong => self.markup.push_str("<b>"),
-            Tag::Strikethrough => self.markup.push_str("<s>"),
+            Tag::Emphasis => self.markdown.push('*'),
+            // A heading is set in bold as a whole, and strong inside bold is nothing to
+            // draw — but `****` would be, as literal asterisks.
+            Tag::Strong if self.heading.is_none() => self.markdown.push_str("**"),
+            Tag::Strikethrough => self.markdown.push_str("~~"),
             Tag::Link { dest_url, .. } => {
-                self.links += 1;
-                self.markup.push_str("<a href=\"");
-                escape(&dest_url, &mut self.markup);
-                self.markup.push_str("\">");
+                self.links.push(dest_url.into_string());
+                self.markdown.push('[');
             }
             // An image cannot be fetched by a dialog that does no I/O, so only its
             // alternative text — which arrives as the tag's own contents — is kept.
@@ -188,14 +206,19 @@ impl Render {
         match tag {
             TagEnd::Heading(_) => {
                 if let Some(level) = self.heading.take() {
-                    let markup = self.take();
-                    self.push(Block::Heading { level, markup });
+                    let markdown = self.take();
+                    let markdown = if markdown.is_empty() {
+                        markdown
+                    } else {
+                        format!("**{markdown}**")
+                    };
+                    self.push(Block::Heading { level, markdown });
                 }
             }
             TagEnd::Paragraph if self.in_item() => {}
             TagEnd::Paragraph => {
-                let markup = self.take();
-                self.push(Block::Paragraph { markup });
+                let markdown = self.take();
+                self.push(Block::Paragraph { markdown });
             }
             TagEnd::List(_) => {
                 self.lists.pop();
@@ -211,12 +234,13 @@ impl Render {
                     });
                 }
             }
-            TagEnd::Emphasis => self.markup.push_str("</i>"),
-            TagEnd::Strong => self.markup.push_str("</b>"),
-            TagEnd::Strikethrough => self.markup.push_str("</s>"),
+            TagEnd::Emphasis => self.markdown.push('*'),
+            TagEnd::Strong if self.heading.is_none() => self.markdown.push_str("**"),
+            TagEnd::Strikethrough => self.markdown.push_str("~~"),
             TagEnd::Link => {
-                self.links = self.links.saturating_sub(1);
-                self.markup.push_str("</a>");
+                if let Some(url) = self.links.pop() {
+                    close_link(&url, &mut self.markdown);
+                }
             }
             _ => {}
         }
@@ -232,29 +256,37 @@ impl Render {
         let Some((marker, pushed)) = self.items.last_mut() else {
             return;
         };
-        if *pushed || self.markup.trim().is_empty() {
+        if *pushed || self.markdown.trim().is_empty() {
             return;
         }
         let marker = marker.clone();
         *pushed = true;
-        let markup = self.take();
+        let markdown = self.take();
         self.push(Block::Item {
             depth,
             marker,
-            markup,
+            markdown,
         });
     }
 
+    /// The finished run. Each line is trimmed, since CommonMark would otherwise read four
+    /// leading spaces as code; empty lines go, and the rest are joined by hard breaks.
     fn take(&mut self) -> String {
         self.flush_text();
-        std::mem::take(&mut self.markup).trim().to_owned()
+        let run = std::mem::take(&mut self.markdown);
+        run.split('\n')
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\\\n")
     }
 
     /// Keeps empty blocks out: a stray blank paragraph is vertical space nobody asked for.
     fn push(&mut self, block: Block) {
         let empty = match &block {
-            Block::Heading { markup, .. } | Block::Paragraph { markup } => markup.is_empty(),
-            Block::Item { markup, .. } => markup.is_empty(),
+            Block::Heading { markdown, .. }
+            | Block::Paragraph { markdown }
+            | Block::Item { markdown, .. } => markdown.is_empty(),
             Block::Code { text } => text.is_empty(),
             Block::Rule => false,
         };
@@ -275,21 +307,47 @@ fn depth(level: HeadingLevel) -> u8 {
     }
 }
 
-/// Appends `text` as Pango markup, escaping everything markup would otherwise read.
+/// Appends `text` as Markdown that reads back as exactly this text.
 ///
-/// `"` is escaped too, because the same function writes link destinations into an
-/// attribute, where a quotation mark would end it. An apostrophe is not: attributes here
-/// are double-quoted, and "What's Changed" is a heading, not an entity.
+/// Every ASCII punctuation character is backslash-escaped, which CommonMark allows for all
+/// of them: no `*`, `[`, `<` or leading `#` in a release body can open anything. A `\n` is
+/// passed through as the run's hard-break marker.
 fn escape(text: &str, out: &mut String) {
     for character in text.chars() {
-        match character {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(character),
+        if character.is_ascii_punctuation() {
+            out.push('\\');
         }
+        out.push(character);
     }
+}
+
+/// Appends a code span holding `code` verbatim. The fence is one backtick longer than any
+/// run inside it, and the padding space on either side is the one CommonMark strips.
+fn code_span(code: &str, out: &mut String) {
+    let mut longest = 0;
+    let mut run = 0;
+    for character in code.chars() {
+        run = if character == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat(longest + 1);
+    out.push_str(&fence);
+    out.push(' ');
+    out.push_str(code);
+    out.push(' ');
+    out.push_str(&fence);
+}
+
+/// Closes the link whose text has just been written, pointing it at `url`.
+fn close_link(url: &str, out: &mut String) {
+    out.push_str("](<");
+    for character in url.chars() {
+        if matches!(character, '<' | '>' | '\\') {
+            out.push('\\');
+        }
+        out.push(character);
+    }
+    out.push_str(">)");
 }
 
 /// Appends `text`, turning bare `http(s)` URLs into links.
@@ -298,11 +356,9 @@ fn linkify(text: &str, out: &mut String) {
     while let Some(start) = url_start(rest) {
         escape(&rest[..start], out);
         let (url, tail) = split_url(&rest[start..]);
-        out.push_str("<a href=\"");
+        out.push('[');
         escape(url, out);
-        out.push_str("\">");
-        escape(url, out);
-        out.push_str("</a>");
+        close_link(url, out);
         rest = tail;
     }
     escape(rest, out);
@@ -352,16 +408,22 @@ fn split_url(text: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, blocks};
+    use super::{Block, blocks, code_lines};
 
-    fn markup(block: &Block) -> &str {
+    fn markdown(block: &Block) -> &str {
         match block {
-            Block::Heading { markup, .. }
-            | Block::Paragraph { markup }
-            | Block::Item { markup, .. } => markup,
+            Block::Heading { markdown, .. }
+            | Block::Paragraph { markdown }
+            | Block::Item { markdown, .. } => markdown,
             Block::Code { text } => text,
             Block::Rule => "",
         }
+    }
+
+    /// What Slint makes of it: anything it cannot draw fails the whole string.
+    fn styled(markdown: &str) -> slint::StyledText {
+        slint::StyledText::from_markdown(markdown)
+            .unwrap_or_else(|error| panic!("Slint refused {markdown:?}: {error}"))
     }
 
     #[test]
@@ -377,7 +439,7 @@ mod tests {
             rendered[0],
             Block::Heading {
                 level: 2,
-                markup: "What's Changed".into(),
+                markdown: "**What\\'s Changed**".into(),
             }
         );
         assert_eq!(
@@ -385,33 +447,34 @@ mod tests {
             Block::Item {
                 depth: 0,
                 marker: "•".into(),
-                markup: concat!(
-                    "fix(ui): a fix by @zbndev in ",
-                    "<a href=\"https://github.com/zbndev/tidemark/pull/69\">",
-                    "https://github.com/zbndev/tidemark/pull/69</a>",
+                markdown: concat!(
+                    "fix\\(ui\\)\\: a fix by \\@zbndev in ",
+                    "[https\\:\\/\\/github\\.com\\/zbndev\\/tidemark\\/pull\\/69]",
+                    "(<https://github.com/zbndev/tidemark/pull/69>)",
                 )
                 .into(),
             },
             "a bare pull-request URL is a link, or the whole preview is dead text"
         );
         assert!(
-            markup(&rendered[2]).starts_with("<b>Full Changelog</b>: <a href=\""),
+            markdown(&rendered[2]).starts_with("**Full Changelog**\\: [https"),
             "got {:?}",
             rendered[2]
         );
+        for block in &rendered {
+            styled(markdown(block));
+        }
     }
 
     #[test]
-    fn emphasis_code_and_links_become_pango_markup() {
+    fn emphasis_code_and_links_survive_as_styled_text() {
         let rendered = blocks("*Cards* keep `MIN_WIDTH`, see [the PR](https://example.com/a).");
 
         assert_eq!(
-            markup(&rendered[0]),
-            concat!(
-                "<i>Cards</i> keep <tt>MIN_WIDTH</tt>, see ",
-                "<a href=\"https://example.com/a\">the PR</a>.",
-            )
+            markdown(&rendered[0]),
+            "*Cards* keep ` MIN_WIDTH `\\, see [the PR](<https://example.com/a>)\\."
         );
+        styled(markdown(&rendered[0]));
     }
 
     #[test]
@@ -419,10 +482,24 @@ mod tests {
         let rendered = blocks("Use <b>&amp;</b> in \"quotes\" <!-- and a comment -->\n");
 
         assert_eq!(
-            markup(&rendered[0]),
-            "Use &amp; in &quot;quotes&quot;",
-            "tags and comments go, their text stays, and what reaches Pango is escaped: a \
-             label whose markup does not parse loses all of its contents"
+            markdown(&rendered[0]),
+            "Use \\& in \\\"quotes\\\"",
+            "tags and comments go, their text stays, and nothing in it reaches Slint as \
+             markup: one construct it cannot draw and it refuses the whole block"
+        );
+        styled(markdown(&rendered[0]));
+    }
+
+    #[test]
+    fn text_that_looks_like_markdown_stays_text() {
+        // Escaped, so not a list, a heading, a quote or a tag once it is a block's text.
+        let rendered = blocks("Run \\*all\\* of `a`` b` then <u>x</u> 1\\. done # ok > yes\n");
+        styled(markdown(&rendered[0]));
+        assert!(
+            markdown(&rendered[0]).contains("```` a`` b ````")
+                || markdown(&rendered[0]).contains("``` a`` b ```"),
+            "got {:?}",
+            rendered[0]
         );
     }
 
@@ -443,17 +520,17 @@ mod tests {
                 Block::Item {
                     depth: 0,
                     marker: "1.".into(),
-                    markup: "first".into(),
+                    markdown: "first".into(),
                 },
                 Block::Item {
                     depth: 0,
                     marker: "2.".into(),
-                    markup: "second".into(),
+                    markdown: "second".into(),
                 },
                 Block::Item {
                     depth: 1,
                     marker: "•".into(),
-                    markup: "nested".into(),
+                    markdown: "nested".into(),
                 },
                 Block::Code {
                     text: "cargo test".into(),
@@ -468,19 +545,46 @@ mod tests {
         let rendered = blocks("See https://example.com/a_(b), then https://example.com/c.\n");
 
         assert_eq!(
-            markup(&rendered[0]),
+            markdown(&rendered[0]),
             concat!(
-                "See <a href=\"https://example.com/a_(b)\">https://example.com/a_(b)</a>, ",
-                "then <a href=\"https://example.com/c\">https://example.com/c</a>.",
+                "See [https\\:\\/\\/example\\.com\\/a\\_\\(b\\)](<https://example.com/a_(b)>)\\, ",
+                "then [https\\:\\/\\/example\\.com\\/c](<https://example.com/c>)\\.",
             )
         );
+        styled(markdown(&rendered[0]));
     }
 
     #[test]
     fn a_word_ending_in_a_scheme_is_not_a_link() {
         let rendered = blocks("nothttps://example.com is not a link\n");
 
-        assert_eq!(markup(&rendered[0]), "nothttps://example.com is not a link");
+        assert!(!markdown(&rendered[0]).contains("]("), "{:?}", rendered[0]);
+    }
+
+    #[test]
+    fn hard_breaks_and_loose_items_become_lines_without_a_trailing_break() {
+        let rendered = blocks("one  \ntwo\n\n- item\n\n  more\n");
+
+        assert_eq!(markdown(&rendered[0]), "one\\\ntwo");
+        assert_eq!(markdown(&rendered[1]), "item\\\nmore");
+        styled(markdown(&rendered[0]));
+        styled(markdown(&rendered[1]));
+    }
+
+    #[test]
+    fn a_heading_is_bold_once_however_it_was_written() {
+        let rendered = blocks("### **Full** `log`\n");
+
+        assert_eq!(markdown(&rendered[0]), "**Full ` log `**");
+        styled(markdown(&rendered[0]));
+    }
+
+    #[test]
+    fn a_code_block_is_one_code_span_per_line() {
+        let lines = code_lines("cargo test\n\n  `x`");
+
+        assert_eq!(lines, "` cargo test `\\\n\u{a0}\\\n``   `x` ``");
+        styled(&lines);
     }
 
     #[test]
