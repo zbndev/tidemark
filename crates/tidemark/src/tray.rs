@@ -285,19 +285,86 @@ impl Backend for Model {
 mod backend {
     use super::*;
     use ksni::TrayMethods;
+    use std::future::{Future, poll_fn};
+    use std::pin::pin;
+    use std::task::Poll;
+    use std::time::Duration;
     use tidemark_types::ids;
+    use zbus::export::futures_core::Stream;
 
     /// The icon the panel shows. It deliberately uses the same full-colour icon name as the
     /// application: `data/icons` supplies native small sizes so a panel never has to enlarge a
     /// tiny fallback pixmap, and the `PKGBUILD` installs them all.
     const ICON: &str = ids::APP_ID;
+    const WATCHER: &str = "org.kde.StatusNotifierWatcher";
+    const STARTUP_GRACE: Duration = Duration::from_secs(30);
 
     pub type Error = ksni::Error;
 
     pub struct Handle(ksni::Handle<Model>);
 
     pub async fn spawn(model: Model) -> Result<Handle, Error> {
-        Ok(Handle(model.spawn().await?))
+        spawn_with_timeout(model, STARTUP_GRACE).await
+    }
+
+    async fn spawn_with_timeout(model: Model, timeout: Duration) -> Result<Handle, Error> {
+        let mut registration = pin!(async {
+            let connection = zbus::Connection::session().await.map_err(Error::Dbus)?;
+            let bus = zbus::fdo::DBusProxy::new(&connection)
+                .await
+                .map_err(Error::Dbus)?;
+            // Subscribe before querying so a panel starting between the two cannot be missed.
+            let changes = bus
+                .receive_name_owner_changed_with_args(&[(0, WATCHER)])
+                .await
+                .map_err(Error::Dbus)?;
+            let mut changes = pin!(changes);
+            let mut available = bus
+                .name_has_owner(WATCHER.try_into().expect("constant bus name"))
+                .await
+                .map_err(Error::Watcher)?;
+            if !available {
+                // A direct ksni call could activate an installed watcher; keep that behavior.
+                match bus
+                    .start_service_by_name(WATCHER.try_into().expect("constant bus name"), 0)
+                    .await
+                {
+                    Ok(_) | Err(zbus::fdo::Error::ServiceUnknown(_)) => {}
+                    Err(error) => return Err(Error::Watcher(error)),
+                }
+                tracing::info!("waiting for the session's status-notifier watcher");
+            }
+            while !available {
+                let event = poll_fn(|cx| changes.as_mut().poll_next(cx))
+                    .await
+                    .ok_or_else(|| {
+                        Error::Watcher(zbus::fdo::Error::ServiceUnknown(
+                            "the tray watcher stream closed".into(),
+                        ))
+                    })?;
+                available = event
+                    .args()
+                    .map_err(Error::Dbus)?
+                    .new_owner()
+                    .as_ref()
+                    .is_some();
+            }
+            // The name alone is not acceptance: ksni still performs its normal registration.
+            Ok(Handle(model.spawn().await?))
+        });
+        let mut deadline = pin!(async_io::Timer::after(timeout));
+        poll_fn(|cx| {
+            if let Poll::Ready(result) = registration.as_mut().poll(cx) {
+                return Poll::Ready(result);
+            }
+            if deadline.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Err(Error::Watcher(zbus::fdo::Error::ServiceUnknown(
+                    format!("no ready tray watcher after {timeout:?}"),
+                ))));
+            }
+            Poll::Pending
+        })
+        .await
     }
 
     impl Handle {
@@ -306,6 +373,222 @@ mod backend {
                 .update(|model: &mut Model| model.state = state)
                 .await
                 .is_some()
+        }
+    }
+
+    #[cfg(test)]
+    mod startup_tests {
+        use super::*;
+        use std::future::{Future, poll_fn};
+        use std::pin::pin;
+        use std::task::Poll;
+        use std::time::{Duration, Instant};
+
+        const WATCHER: &str = "org.kde.StatusNotifierWatcher";
+
+        struct Watcher(async_channel::Sender<String>);
+
+        #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
+        impl Watcher {
+            async fn register_status_notifier_item(&self, service: &str) {
+                self.0
+                    .send(service.to_owned())
+                    .await
+                    .expect("registration receiver");
+            }
+
+            #[zbus(property)]
+            fn is_status_notifier_host_registered(&self) -> bool {
+                true
+            }
+        }
+
+        fn model() -> Model {
+            Model {
+                state: State::default(),
+                commands: async_channel::unbounded().0,
+            }
+        }
+
+        #[test]
+        fn startup_waits_for_a_late_panel_and_still_exits_when_none_appears() {
+            // Private bus and subprocess: never register test icons on the user's panel.
+            let output = std::process::Command::new("dbus-run-session")
+                .arg("--")
+                .arg(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "tray::backend::startup_tests::isolated_startup_scenarios",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .output()
+                .expect("isolated D-Bus session");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn startup_preserves_watcher_activation() {
+            let directory = tempfile::tempdir().expect("private service directory");
+            let executable = std::env::current_exe().expect("test executable");
+            let quoted_executable = executable
+                .to_str()
+                .expect("UTF-8 test path")
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            std::fs::write(
+                directory.path().join(format!("{WATCHER}.service")),
+                format!(
+                    "[D-BUS Service]\nName={WATCHER}\nExec=\"{quoted_executable}\" --exact tray::backend::startup_tests::isolated_activated_watcher --ignored --nocapture\n"
+                ),
+            )
+            .expect("activation service");
+            let service_directory = directory
+                .path()
+                .to_str()
+                .expect("UTF-8 service directory")
+                .replace('&', "&amp;")
+                .replace('<', "&lt;");
+            let config = directory.path().join("bus.conf");
+            std::fs::write(
+                &config,
+                format!(
+                    "<busconfig><type>session</type><listen>unix:tmpdir=/tmp</listen><auth>EXTERNAL</auth><servicedir>{service_directory}</servicedir><policy context=\"default\"><allow send_destination=\"*\"/><allow receive_sender=\"*\"/><allow own=\"*\"/></policy></busconfig>"
+                ),
+            )
+            .expect("private bus config");
+            let output = std::process::Command::new("dbus-run-session")
+                .arg("--config-file")
+                .arg(config)
+                .arg("--")
+                .arg(executable)
+                .args([
+                    "--exact",
+                    "tray::backend::startup_tests::isolated_activatable_startup",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .output()
+                .expect("isolated activation session");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "activation helper; run only on the parent's isolated D-Bus"]
+        fn isolated_activated_watcher() {
+            async_io::block_on(async {
+                let (registered, registrations) = async_channel::unbounded();
+                let watcher = zbus::connection::Builder::session()
+                    .expect("activation session")
+                    .serve_at("/StatusNotifierWatcher", Watcher(registered))
+                    .expect("watcher interface")
+                    .name(WATCHER)
+                    .expect("watcher name")
+                    .build()
+                    .await
+                    .expect("activated panel");
+                // Bound the helper's lifetime, including a failed registration, and keep the
+                // host available through ksni's subsequent property query.
+                async_io::Timer::after(Duration::from_secs(3)).await;
+                registrations.try_recv().expect("activated registration");
+                // The parent may have already stopped the private bus.
+                let _ = watcher.close().await;
+            });
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper; run only on the parent's isolated D-Bus"]
+        fn isolated_activatable_startup() {
+            async_io::block_on(async {
+                let tray = spawn_with_timeout(model(), Duration::from_secs(2))
+                    .await
+                    .expect("activate an installed watcher before waiting");
+                tray.0.shutdown().await;
+            });
+        }
+
+        #[test]
+        #[ignore = "subprocess helper; run only on the parent's isolated D-Bus"]
+        fn isolated_startup_scenarios() {
+            async_io::block_on(async {
+                let mut starting = pin!(spawn_with_timeout(model(), Duration::from_secs(2)));
+                let mut panel_delay = pin!(async_io::Timer::after(Duration::from_millis(100)));
+                let premature = poll_fn(|cx| {
+                    if let Poll::Ready(result) = starting.as_mut().poll(cx) {
+                        return Poll::Ready(Some(result));
+                    }
+                    if panel_delay.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(None);
+                    }
+                    Poll::Pending
+                })
+                .await;
+                assert!(
+                    premature.is_none(),
+                    "startup must wait while the panel is still starting"
+                );
+
+                let (registered, registrations) = async_channel::unbounded();
+                let watcher = zbus::connection::Builder::session()
+                    .expect("private session")
+                    .serve_at("/StatusNotifierWatcher", Watcher(registered))
+                    .expect("watcher interface")
+                    .name(WATCHER)
+                    .expect("watcher name")
+                    .build()
+                    .await
+                    .expect("panel started");
+                let tray = starting.await.expect("late panel accepts the tray");
+                assert!(
+                    registrations
+                        .recv()
+                        .await
+                        .expect("registration")
+                        .starts_with("org.kde.StatusNotifierItem-")
+                );
+                tray.0.shutdown().await;
+
+                let tray = spawn_with_timeout(model(), Duration::from_secs(2))
+                    .await
+                    .expect("an already running panel accepts the tray");
+                assert!(
+                    registrations
+                        .recv()
+                        .await
+                        .expect("registration")
+                        .starts_with("org.kde.StatusNotifierItem-")
+                );
+                tray.0.shutdown().await;
+                watcher
+                    .release_name(WATCHER)
+                    .await
+                    .expect("panel releases name");
+                watcher.close().await.expect("panel stopped");
+
+                let before = Instant::now();
+                let result = spawn_with_timeout(model(), Duration::from_millis(100)).await;
+                assert!(matches!(
+                    result,
+                    Err(Error::Watcher(zbus::fdo::Error::ServiceUnknown(_)))
+                ));
+                assert!(
+                    before.elapsed() >= Duration::from_millis(100),
+                    "absence is checked for the whole startup grace period"
+                );
+            });
         }
     }
 

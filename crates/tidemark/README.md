@@ -29,6 +29,11 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
   percentage in card order, Open, Refresh, Quit; attention at 90%. Closing the window
   hides it while the icon is up and the preference asks for it, and ends the program
   otherwise.
+- Linux tray startup waits up to 30 seconds for the panel's StatusNotifierWatcher on
+  D-Bus, so an early session autostart survives the panel starting later. Without a host,
+  background startup still exits and closing a visible window still ends the client.
+  Opening from the tray explicitly requests a frame, so a Wayland window first created
+  hidden is mapped when the user opens it.
 - The window's own header and controls on Linux and Windows, with native dragging and
   resizing and no additional system title bar. Floating windows have transparent rounded
   corners; maximized and full-screen windows have square corners. `WindowMoveArea`

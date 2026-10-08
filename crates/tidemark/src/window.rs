@@ -1065,6 +1065,10 @@ pub fn present(ui: &AppWindow) {
         tracing::warn!(%error, "could not bring the window forward");
         return;
     }
+    // Wayland maps a window on its first frame. During background startup the native
+    // window's initial redraw can arrive while Slint keeps it hidden; show doesn't
+    // generate another redraw, so request that first visible frame explicitly.
+    window.request_redraw();
     window.with_winit_window(|window| window.focus_window());
 }
 
@@ -1098,6 +1102,41 @@ async fn restore(main: Weak<MainWindow>, proxy: DaemonProxy<'static>) {
 mod tests {
     use super::*;
     use tidemark_types::{AccountId, ProviderId};
+
+    #[test]
+    fn opening_a_never_shown_window_requests_its_first_frame() {
+        use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+        use slint::platform::{Platform, PlatformError, WindowAdapter};
+
+        struct HeadlessPlatform(Rc<RefCell<Option<Rc<MinimalSoftwareWindow>>>>);
+
+        impl Platform for HeadlessPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+                let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+                self.0.replace(Some(adapter.clone()));
+                Ok(adapter)
+            }
+        }
+
+        let adapter = Rc::new(RefCell::new(None));
+        slint::platform::set_platform(Box::new(HeadlessPlatform(adapter.clone()))).unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::PhysicalSize::new(1000, 640));
+        let adapter = adapter.borrow().clone().unwrap();
+        // A native window can discard its initial paint while startup keeps it hidden.
+        // Showing it on Wayland doesn't generate another paint event by itself.
+        adapter.draw_if_needed(|_| {});
+        assert!(!ui.window().is_visible());
+
+        present(&ui);
+
+        assert!(ui.window().is_visible());
+        assert!(
+            adapter.draw_if_needed(|_| {}),
+            "opening from the tray must schedule the first visible frame"
+        );
+        ui.hide().unwrap();
+    }
 
     fn status(provider: &str, account: &str) -> ProviderStatus {
         ProviderStatus::pending(&ProviderId::new(provider), &AccountId::new(account))

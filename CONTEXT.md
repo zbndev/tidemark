@@ -691,8 +691,9 @@ they record bind the Slint client all the same; it draws them in `crates/tidemar
   nothing left to bring it back is worse than ignoring a preference.
 - **The `app` startup mode uses that same tray condition.** `tidemark --background` builds
   the window without showing it and stays only after a StatusNotifier host accepts the
-  icon. On a desktop without one it exits cleanly instead of leaving an invisible process
-  behind.
+  icon. On Linux it waits up to 30 seconds for the watcher to appear during session
+  startup, using D-Bus name-owner signals. On a desktop without one it exits cleanly
+  instead of leaving an invisible process behind.
 - **Release checks are optional twice.** `[updates] check = false` stops the hourly GitHub
   request at runtime and clears any published update notice. The daemon's `update-check`
   Cargo feature is enabled by default for upstream builds; a distribution can build with
