@@ -92,16 +92,23 @@ function Installed-Processes {
 }
 function Run-Setup([string] $Version, [bool] $Success = $true, [string[]] $Extra = @(), [string] $ArtifactPath) {
     $path = if ($ArtifactPath) { $ArtifactPath } else { Join-Path $testBuild "Tidemark-v$Version-setup.exe" }
-    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$install`"", "/LOG=`"$testRoot/setup-$Version-$([Guid]::NewGuid().ToString('N')).log`"") + $Extra
+    $log = Join-Path $testRoot "setup-$Version-$([Guid]::NewGuid().ToString('N')).log"
+    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$install`"", "/LOG=`"$log`"") + $Extra
     $process = Start-Process -FilePath $path -ArgumentList $arguments -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit(120000)) { $process.Kill(); throw 'Setup exceeded 120 seconds' }
-    Assert-That (($process.ExitCode -eq 0) -eq $Success) "Setup $Version exit=$($process.ExitCode), expected success=$Success. Logs: $testRoot"
+    if (($process.ExitCode -eq 0) -ne $Success) {
+        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 40 | ForEach-Object { Write-Host "  setup: $_" } }
+        throw "Setup $Version exit=$($process.ExitCode), expected success=$Success. Logs: $testRoot"
+    }
 }
 function Uninstall-Fixture {
     $path = Join-Path $install 'unins000.exe'
     $process = Start-Process -FilePath $path -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$testRoot/uninstall.log`"") -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit(120000)) { $process.Kill(); throw 'Fixture uninstall exceeded 120 seconds' }
     Assert-That ($process.ExitCode -eq 0) "Uninstall failed: $($process.ExitCode)"
+    # The uninstaller relaunches a temporary copy that removes unins000.* only after
+    # this process exits; a reinstall scanning the directory must not race it.
+    Wait-Until { @(Get-ChildItem -LiteralPath $install -Filter 'unins*' -File -ErrorAction SilentlyContinue).Count -eq 0 } 'uninstaller removed its own files'
     Wait-Until { @(Installed-Processes).Count -eq 0 } 'fixture processes exit after uninstall'
     foreach ($name in @($appId, "${appId}_is1")) {
         $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("$uninstallBase\$name")

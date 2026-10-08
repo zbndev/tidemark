@@ -1045,7 +1045,11 @@ mod tests {
             b"original"
         );
         assert!(f.state().join(DIRECTORY_STATE).exists());
+        // A junction is removed as a directory; a unix symlink is removed as a file.
+        #[cfg(windows)]
         fs::remove_dir(link).unwrap();
+        #[cfg(unix)]
+        fs::remove_file(link).unwrap();
         finalize_directory(&f.state()).unwrap();
     }
 
