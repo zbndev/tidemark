@@ -1,0 +1,4 @@
+# Always pass --target x86_64-pc-windows-msvc on Windows. Keeping these flags
+# target-specific leaves host proc macros and build scripts on the dynamic CRT.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

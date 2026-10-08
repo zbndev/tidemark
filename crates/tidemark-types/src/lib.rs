@@ -40,6 +40,13 @@ pub use wire::{
 pub mod ids {
     /// Application ID, and the bus name the GUI owns.
     pub const APP_ID: &str = "io.github.zbndev.Tidemark";
+    /// Session-local installer gate. Its kernel lifetime follows Setup/Uninstall.
+    pub const INSTALLER_MUTEX: &str = r"Local\io.github.zbndev.Tidemark.Maintenance";
+    /// Native maintenance requests, handled before changing installed files.
+    // Stop-event prefixes: append '.<pid>' so maintenance cannot stop another copy.
+    pub const DAEMON_STOP_EVENT: &str = r"Local\io.github.zbndev.Tidemark.StopDaemon";
+    pub const CLIENT_STOP_EVENT: &str = r"Local\io.github.zbndev.Tidemark.StopClient";
+    pub const DAEMON_READY_EVENT: &str = r"Local\io.github.zbndev.Tidemark.ReadyDaemon";
     /// Bus name the daemon owns.
     pub const DAEMON_BUS_NAME: &str = "io.github.zbndev.Tidemark.Daemon";
     /// Object path both processes agree on.

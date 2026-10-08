@@ -9,13 +9,13 @@ PackageVersion: 0.5.2
 Installers:
   - InstallerLocale: en-US
     Architecture: x64
-    InstallerType: nullsoft
+    InstallerType: inno
     InstallerUrl: https://github.com/zbndev/tidemark/releases/download/v0.5.2/Tidemark-v0.5.2-setup.exe
     InstallerSha256: <sha256 of the released setup executable, filled at release time>
     Scope: user
     InstallerSwitches:
-      Silent: /S
-      SilentWithProgress: /S
+      Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+      SilentWithProgress: /SILENT /SUPPRESSMSGBOXES /NORESTART
     UpgradeBehavior: install
 ManifestType: installer
 ManifestVersion: 1.9.0

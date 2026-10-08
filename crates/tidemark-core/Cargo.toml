@@ -34,7 +34,6 @@ sha1 = { version = "0.11.0", default-features = false }
 # `socks`: without it a `socks5://` proxy URL parses and then refuses every connection
 # made through it. `system-proxy`: what "no proxy configured here" falls back to.
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "charset", "http2", "system-proxy", "socks", "json", "gzip", "form", "query"] }
-rusqlite = "0.40.2"
 rustix = { version = "1.1.4", features = ["process", "pty", "rand"] }
 serde = { version = "1.0.229", features = ["derive"] }
 # `float_roundtrip`: the default parser may land 1 ULP off the literal, which would
@@ -53,6 +52,7 @@ tracing = "0.1.44"
 # unconditionally on boring2 (BoringSSL), which does not build on Windows yet —
 # reversible once boring-sys2 builds there.
 [target.'cfg(unix)'.dependencies]
+rusqlite = "0.40.2"
 oo7 = { version = "0.6.0", default-features = false, features = ["native_crypto", "tokio"] }
 # wreq: the browser-emulating HTTP stack T3 Chat's Vercel edge demands — it gates on the
 # client's TLS/HTTP2 fingerprint, and no honest rustls ClientHello passes (see
@@ -64,6 +64,8 @@ wreq = { version = "~0.15.3", default-features = false, features = ["webpki-root
 wreq-util = "~0.1.0"
 
 [target.'cfg(windows)'.dependencies]
+# Bundle SQLite only on Windows; Linux packages continue to link system SQLite.
+rusqlite = { version = "0.40.2", features = ["bundled-windows"] }
 aes-gcm = "0.11.1"
 getrandom = "0.4.3"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Threading"] }

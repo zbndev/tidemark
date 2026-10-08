@@ -20,7 +20,7 @@ mod engine;
 mod file_log;
 mod keyring;
 #[cfg(windows)]
-mod lifecycle;
+use tidemarkd::lifecycle;
 mod notify;
 mod peer;
 mod plugins;
@@ -250,6 +250,18 @@ fn main() -> std::process::ExitCode {
     if std::env::args().any(|a| a == "--version") {
         println!("tidemarkd {}", env!("CARGO_PKG_VERSION"));
         return std::process::ExitCode::SUCCESS;
+    }
+
+    #[cfg(windows)]
+    {
+        match tidemarkd::installer_process::active() {
+            Ok(false) => {}
+            Ok(true) => return std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!(%error, "could not check installation state");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
     }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -487,6 +499,30 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let release_checker: Option<tokio::task::JoinHandle<()>> = None;
 
     let signals = shutdown_signals(commands.clone())?;
+    #[cfg(windows)]
+    let maintenance = {
+        let stop = tidemarkd::installer_process::StopEvent::new(&format!(
+            "{}.{}",
+            ids::DAEMON_STOP_EVENT,
+            std::process::id()
+        ))?;
+        let commands = commands.clone();
+        tokio::spawn(async move {
+            loop {
+                match stop.wait(0) {
+                    Ok(true) => {
+                        let _ = commands.send(Command::Shutdown).await;
+                        break;
+                    }
+                    Ok(false) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                    Err(error) => {
+                        tracing::error!(%error, "installer stop event failed");
+                        break;
+                    }
+                }
+            }
+        })
+    };
 
     // The daemon's own connection carries the notifications on Linux: it is already
     // open, and org.freedesktop.Notifications is on the same bus as everything else here.
@@ -509,6 +545,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // each account has a credential rather than having to wait a poll to find out.
     engine.probe_credentials(None).await;
     engine.announce().await;
+    #[cfg(windows)]
+    let _ready = {
+        // Keep this PID's readiness event alive for the full lifetime of the serving daemon.
+        let ready = tidemarkd::installer_process::StopEvent::new(&format!(
+            "{}.{}",
+            ids::DAEMON_READY_EVENT,
+            std::process::id()
+        ))?;
+        ready.signal()?;
+        ready
+    };
     engine.run(&mut command_queue).await;
 
     // Dropping the engine closes the update channel, which ends the publisher; that
@@ -519,6 +566,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         release_checker.abort();
     }
     signals.abort();
+    #[cfg(windows)]
+    maintenance.abort();
     #[cfg(windows)]
     accept_task.abort();
     Ok(())

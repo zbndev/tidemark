@@ -1,4 +1,14 @@
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=../../data/icons/tidemark.ico");
+        winresource::WindowsResource::new()
+            .set_icon("../../data/icons/tidemark.ico")
+            .set("ProductName", "Tidemark")
+            .set("FileDescription", "Tidemark desktop client")
+            .set("OriginalFilename", "tidemark.exe")
+            .compile()
+            .expect("the Windows icon and version resources compile");
+    }
     let config = slint_build::CompilerConfiguration::new().with_style("fluent".into());
     slint_build::compile_with_config("ui/app.slint", config).expect("the Slint markup compiles");
 

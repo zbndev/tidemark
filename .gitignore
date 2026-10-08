@@ -26,5 +26,5 @@
 .opencode
 .mcp.json
 
-# NSIS staging output, from building the Windows installer in place
+# Windows packaging output, including the pinned Inno compiler and test fixtures
 /build/

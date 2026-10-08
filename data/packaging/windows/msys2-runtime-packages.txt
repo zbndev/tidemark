@@ -1,6 +1,0 @@
-# package version sha256(package archive)
-# Source: https://repo.msys2.org/mingw/ucrt64/
-mingw-w64-ucrt-x86_64-gcc-libs 16.2.0-3 5763fabf86fa13a4449ee765006d3446384ed66af7bf827459710eb777e0b11c
-mingw-w64-ucrt-x86_64-libwinpthread 14.0.0.r353.g6df76fa52-2 ec1a46e63d424a90992a14c0996c0b5bb17370af6044380b590d05f725eeb43f
-mingw-w64-ucrt-x86_64-sqlite3 3.53.4-1 a8f904acb136634b4f708e8a0f9f301f76a3c42eea387a51300af961d0066051
-mingw-w64-ucrt-x86_64-zlib 1.3.2-2 841401182976d2f9e17e5c0ebaac51f2a8014140ea53d67625e91c8fb3c85ea0

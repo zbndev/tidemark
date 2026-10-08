@@ -52,12 +52,13 @@ use windows::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject,
 };
+#[cfg(test)]
+use windows::Win32::System::Registry::RegDeleteTreeW;
+use windows::Win32::System::Registry::RegQueryValueExW;
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW,
 };
-#[cfg(test)]
-use windows::Win32::System::Registry::{RegDeleteTreeW, RegQueryValueExW};
 use windows::Win32::System::Threading::CreateMutexW;
 
 use windows::core::HSTRING;
@@ -94,7 +95,11 @@ impl Singleton {
     /// Takes the per-user singleton mutex. `Ok(None)` means another daemon of this
     /// user already holds it: the caller should exit 0 quietly.
     pub fn acquire() -> Result<Option<Self>, windows::core::Error> {
-        let name = HSTRING::from(SINGLETON_MUTEX);
+        Self::named(SINGLETON_MUTEX)
+    }
+
+    fn named(name: &str) -> Result<Option<Self>, windows::core::Error> {
+        let name = HSTRING::from(name);
         // SAFETY: `name` is a valid nul-terminated HSTRING borrowed for the call; the
         // returned handle is owned by us and closed in `Drop`.
         let handle = unsafe { CreateMutexW(None, false, &name) }?;
@@ -360,6 +365,77 @@ pub fn set_ui_run(enabled: bool) -> Result<(), String> {
     set_run_value_with(HKEY_CURRENT_USER, enabled, &exe)
 }
 
+/// Temporarily suspend an existing, owned task during setup. Its definition and
+/// enabled state are preserved; a task pointing at another installation is a blocker.
+pub fn installed_task_enabled(install: &Path) -> Result<Option<bool>, String> {
+    installed_task(install, None)
+}
+
+pub fn enable_installed_task(install: &Path, enabled: bool) -> Result<(), String> {
+    match installed_task(install, Some(enabled))? {
+        Some(_) => Ok(()),
+        None => {
+            Err("the saved daemon task no longer exists; recovery state has been preserved".into())
+        }
+    }
+}
+
+fn installed_task(install: &Path, enabled: Option<bool>) -> Result<Option<bool>, String> {
+    // SAFETY: initialize this helper thread's COM apartment. All COM values are dropped
+    // in the inner call before balancing initialization with CoUninitialize.
+    unsafe {
+        CoInitializeEx(None, COINIT_MULTITHREADED)
+            .ok()
+            .map_err(|error| error.to_string())?;
+        let result = installed_task_com(install, enabled);
+        CoUninitialize();
+        result
+    }
+}
+
+fn installed_task_com(install: &Path, enabled: Option<bool>) -> Result<Option<bool>, String> {
+    // SAFETY: all interfaces come from live Task Scheduler objects in this apartment.
+    unsafe {
+        let service: ITaskService = CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)
+            .map_err(|error| error.to_string())?;
+        let empty = VARIANT::default();
+        service
+            .Connect(&empty, &empty, &empty, &empty)
+            .map_err(|error| error.to_string())?;
+        let root = service
+            .GetFolder(&BSTR::from("\\"))
+            .map_err(|error| error.to_string())?;
+        let task = match root.GetTask(&BSTR::from(DAEMON_TASK_NAME)) {
+            Ok(task) => task,
+            Err(error) if WIN32_ERROR::from_error(&error) == Some(ERROR_FILE_NOT_FOUND) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(format!("could not inspect the daemon task: {error}")),
+        };
+        let action: IExecAction = task
+            .Definition()
+            .and_then(|definition| definition.Actions())
+            .and_then(|actions| actions.get_Item(1))
+            .and_then(|action| action.cast())
+            .map_err(|error| error.to_string())?;
+        let mut path = BSTR::new();
+        action.Path(&mut path).map_err(|error| error.to_string())?;
+        let expected = install.join("tidemarkd.exe");
+        if !path
+            .to_string()
+            .eq_ignore_ascii_case(&expected.to_string_lossy())
+        {
+            return Err("the daemon task belongs to another installation".into());
+        }
+        let previous = task.Enabled().map_err(|error| error.to_string())?.as_bool();
+        if let Some(enabled) = enabled {
+            task.SetEnabled(if enabled { VARIANT_TRUE } else { VARIANT_FALSE })
+                .map_err(|error| format!("could not suspend/restore the daemon task: {error}"))?;
+        }
+        Ok(Some(previous))
+    }
+}
+
 /// Where the daemon executable lives, for the task's command line.
 fn daemon_exe() -> Result<PathBuf, String> {
     current_exe_sibling("tidemarkd.exe")
@@ -462,6 +538,58 @@ fn delete_run_value(key: HKEY) -> Result<(), String> {
             windows::core::Error::from(result)
         )),
     }
+}
+
+/// Exact prior Run payload, including arguments. Installation never infers a new mode.
+pub fn ui_run_snapshot() -> Result<Option<Vec<u16>>, String> {
+    let key = open_run_key(HKEY_CURRENT_USER)?;
+    let result = (|| {
+        let mut kind = REG_SZ;
+        let mut bytes = vec![0u8; 65536];
+        let mut length = bytes.len() as u32;
+        // SAFETY: live query key and correctly sized writable buffer.
+        let status = unsafe {
+            RegQueryValueExW(
+                key,
+                &HSTRING::from(UI_RUN_VALUE_NAME),
+                None,
+                Some(&mut kind),
+                Some(bytes.as_mut_ptr()),
+                Some(&mut length),
+            )
+        };
+        if status == ERROR_FILE_NOT_FOUND {
+            return Ok(None);
+        }
+        status.ok().map_err(|error| error.to_string())?;
+        if kind != REG_SZ || length < 2 || !length.is_multiple_of(2) {
+            return Err("invalid Tidemark Run registration".into());
+        }
+        let units: Vec<_> = bytes[..length as usize]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|part| u16::from_le_bytes([part[0], part[1]]))
+            .collect();
+        if units.last() != Some(&0) {
+            return Err("unterminated Run registration".into());
+        }
+        Ok(Some(units))
+    })();
+    // SAFETY: no outstanding borrows use this key after its synchronous query.
+    let _ = unsafe { RegCloseKey(key) };
+    result
+}
+
+pub fn restore_ui_run(payload: Option<&[u16]>) -> Result<(), String> {
+    let key = open_run_key(HKEY_CURRENT_USER)?;
+    let result = match payload {
+        Some(payload) => write_run_value(key, payload),
+        None => delete_run_value(key),
+    };
+    // SAFETY: write/delete completed; the key is owned here.
+    let _ = unsafe { RegCloseKey(key) };
+    result
 }
 
 /// Reads back the Run value as a lossy string, for tests and diagnostics.
@@ -663,12 +791,13 @@ mod tests {
 
     #[test]
     fn the_singleton_is_exclusive_within_this_session() {
-        let _first = Singleton::acquire()
+        let name = format!("Local\\Tidemark.SingletonTest.{}", std::process::id());
+        let _first = Singleton::named(&name)
             .expect("the first acquire works")
             .expect("unheld");
 
         assert!(
-            Singleton::acquire()
+            Singleton::named(&name)
                 .expect("the second acquire works")
                 .is_none(),
             "a second acquire while the first guard lives must find the mutex taken"
