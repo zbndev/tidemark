@@ -584,12 +584,13 @@ IPC, dialog lifetimes and pure presentation decisions.
   pointer area while the card moves, so the lift cannot make hover flicker.
 - **A card being carried is opaque.** It takes the popover surface colour and a deeper
   shadow, while its foreground stays unchanged.
-- **Cards are fixed at 300 × 220 logical pixels**, including before the first reading
+- **Cards are fixed at 300 × 234 logical pixels**, including before the first reading
   and while every provider reports an error. Rows share a height and their footers line
   up; the last row stays left aligned within the centred grid. Long card content scrolls
-  inside the card. Labels ellipsize or wrap within the allocation, so neither a URL in
-  an error nor a provider title can change the grid geometry. The full error is available
-  in provider settings and through the failed-check footer.
+  with the mouse wheel; cards never show scrollbars. Labels ellipsize or wrap within the
+  allocation, so neither a URL in an error nor a provider title can change the grid
+  geometry. The full error is available in provider settings and through the failed-check
+  footer.
 - **The footer reports check progress.** A spinner replaces the last-check time while
   the daemon publishes `checking`. A failed check shows red `check failed`; clicking it
   opens an alert with the daemon's diagnostic. The last good metrics remain visible.

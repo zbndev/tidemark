@@ -184,9 +184,9 @@ export component Card inherits Rectangle {
         border-color: Theme.card-outline;
     }
 
-    // The inset keeps the rectangular viewport and its scrollbar inside the rounded
+    // The inset keeps the rectangular viewport inside the rounded
     // surface. The check indicator stays pinned outside the scrolling content.
-    // Mouse dragging still belongs to the grid; overflow scrolls with the wheel/bar.
+    // Mouse dragging still belongs to the grid; overflow scrolls with the wheel.
     content := ScrollView {
         x: 4px;
         y: 4px;
@@ -195,6 +195,7 @@ export component Card inherits Rectangle {
         content-width: self.visible-width;
         content-height: max(self.visible-height, body.preferred-height);
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
         mouse-drag-pan-enabled: false;
 
         body := VerticalLayout {

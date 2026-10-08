@@ -114,9 +114,9 @@ mod tests {
             let groups = groups.clone();
             move |_| groups.set(groups.get() + 1)
         });
-        // The narrow error link is centred in the footer. The scroller's shortened
-        // height leaves 6px above and below it, so the card begins at y65.
-        click(ui.window(), 188.0, 267.0);
+        // The narrow error link is centred in the footer, 18px above the card's bottom.
+        // The card begins at y65 and is 234px high.
+        click(ui.window(), 188.0, 281.0);
         assert_eq!(failures.get(), 1);
         click(ui.window(), 334.0, 69.0);
         assert_eq!(groups.get(), 1);

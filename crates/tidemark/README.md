@@ -54,7 +54,7 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
   burn-down chart with even pace when the schedule is known, and published detail sections.
   Live updates preserve selection; history loads over D-Bus, with loading, empty and error
   states. Late replies cannot replace a newer selection or reopen a closed dialog.
-- Grid: fixed 300 × 220 px cells, Auto or capped columns from preferences, centred.
+- Grid: fixed 300 × 234 px cells, Auto or capped columns from preferences, centred.
   Status changes and account expansion keep the same geometry; overflowing card content
   scrolls inside its card.
 - Hover lift; drag to reorder with displaced cards moving out of the way, settle on
