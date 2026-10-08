@@ -326,9 +326,16 @@ The floor is *the newest we can test against*, not the oldest distribution we co
 theoretically reach. If a toolkit release would make the interface better, we take it, and
 the packaging targets follow the code rather than the other way round.
 
-SQLite is the system library rather than a vendored copy, so the `deb` and `rpm` do not
+On Linux, SQLite is the system library rather than a vendored copy, so the `deb` and `rpm` do not
 carry a bundled copy of a library the distribution already ships — `ldd` on the daemon
 shows `libsqlite3.so.0` from `/usr/lib`.
+
+Windows uses the native MSVC toolchain, bundled SQLite and a static CRT. The per-user
+Inno Setup 7 installer owns program-file transactions and shell integration; the
+daemon helper snapshots them and coordinates PID-specific shutdown/readiness events.
+The daemon flushes before the GUI closes its job. Setup preserves task/Run preferences
+and independent daemon ownership, while config, history and secrets stay outside the
+installer's ownership. Updates are manual. See `data/packaging/windows/README.md`.
 
 TLS is rustls, which keeps OpenSSL out of the link. It does **not** keep C out: rustls's
 default provider is `aws-lc-rs`, and `aws-lc-sys` vendors C and assembly compiled by the

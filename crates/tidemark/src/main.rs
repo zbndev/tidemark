@@ -18,6 +18,8 @@ mod detail;
 mod file_log;
 mod format;
 mod frame;
+#[cfg(windows)]
+mod maintenance;
 mod markdown;
 mod marks;
 mod model;
@@ -77,6 +79,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // The session's autostart: the window stays hidden, and the process stays only once a
     // tray icon can bring it back (CONTEXT.md § Interface).
     let background = args.iter().any(|argument| argument == "--background");
+
+    #[cfg(windows)]
+    if maintenance::active().map_err(|error| slint::PlatformError::from(error.to_string()))? {
+        return Ok(());
+    }
 
     #[cfg(windows)]
     if let Err(error) = single_instance::wait_for_restart() {
@@ -147,6 +154,8 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     let ui = AppWindow::new()?;
+    #[cfg(windows)]
+    maintenance::watch_stop().map_err(|error| slint::PlatformError::from(error.to_string()))?;
     frame::install(&ui);
     about::install(&ui);
     release_notes::install(&ui);
@@ -178,7 +187,15 @@ fn window_attributes(
     #[cfg(windows)]
     let attributes = {
         use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
-        attributes.with_undecorated_shadow(true)
+        let icon = slint::winit_030::winit::window::Icon::from_rgba(
+            tray_icon_rgba::ICON_RGBA.to_vec(),
+            32,
+            32,
+        )
+        .ok();
+        attributes
+            .with_undecorated_shadow(true)
+            .with_window_icon(icon)
     };
     attributes
 }

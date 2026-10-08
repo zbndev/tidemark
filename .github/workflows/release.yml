@@ -38,7 +38,7 @@ jobs:
       - run: scripts/test-package-deps.sh
       - run: scripts/test-release.sh
       - run: |
-          shellcheck scripts/*.sh data/restart-user-daemon data/packaging/windows/stage-runtime.sh \
+          shellcheck scripts/*.sh data/restart-user-daemon \
             data/packaging/deb/postinst data/packaging/rpm/post-install.sh
 
   deb:
@@ -108,120 +108,49 @@ jobs:
           path: target/generate-rpm/*.rpm
           if-no-files-found: error
 
-  # The Windows setup executable, built against the same pinned MSYS2 UCRT64 runtime the
-  # binaries link against: package name, version and archive SHA-256 are all locked in
-  # msys2-runtime-packages.txt, so what is linked and what is shipped cannot drift apart.
-  # The Windows gate runs on the tag itself and the pinned release runtime before any
-  # installer is staged. Main-branch CI is not evidence that this tag passed Windows tests.
+  # Windows tests gate the tag's setup artifact before a draft release is created.
   windows:
     needs: checks
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
       contents: read
-    env:
-      # RUSTUP_TOOLCHAIN outranks both `rustup default` and rust-toolchain.toml (which
-      # pins only channel=stable, i.e. the runner's MSVC host). MSVC has never linked
-      # this dependency set, and is not what the project ships.
-      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
-      PKG_CONFIG_PATH: /ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig
     steps:
       - uses: actions/checkout@v5
-
-      - uses: msys2/setup-msys2@v2.27.0
-        with:
-          msystem: UCRT64
-          update: true
-          # path-type: inherit keeps the runner's ~/.cargo/bin inside the msys2 shell;
-          # /etc/profile still puts /ucrt64/bin first, so pkg-config and gcc keep winning.
-          path-type: inherit
-          # Build tools only. Everything that is linked or shipped comes from the exact
-          # archives installed below, before Cargo can link against anything else.
-          install: >-
-            mingw-w64-ucrt-x86_64-pkg-config
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-clang
-            mingw-w64-ucrt-x86_64-go
-
-      - name: Install the pinned MSYS2 UCRT64 runtime and link stack
-        shell: msys2 {0}
-        run: |
-          set -euo pipefail
-          mkdir -p build/msys2-packages
-          archives=()
-          while read -r package version sha256; do
-            [[ -n "$package" && "${package:0:1}" != '#' ]] || continue
-            # Belt and suspenders next to .gitattributes eol=lf: a CR in the checksum
-            # breaks `sha256sum --check` on a CRLF checkout.
-            sha256=${sha256%$'\r'}
-            archive="build/msys2-packages/${package}-${version}-any.pkg.tar.zst"
-            url="https://repo.msys2.org/mingw/ucrt64/${package}-${version}-any.pkg.tar.zst"
-            curl --fail --location --retry 3 --output "$archive" "$url"
-            printf '%s *%s\n' "$sha256" "$archive" | sha256sum --check --strict
-            curl --fail --location --retry 3 --output "$archive.sig" "$url.sig"
-            archives+=("$archive")
-          done < data/packaging/windows/msys2-runtime-packages.txt
-          pacman --noconfirm -U "${archives[@]}"
-
-      - name: Default a GNU-host Rust toolchain
+      - name: MSVC toolchain
         shell: pwsh
         run: |
-          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-          rustup default stable-x86_64-pc-windows-gnu
-          rustup component add rustfmt clippy
-
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --component rustfmt --component clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ucrt64-release
-
+          key: msvc-static-release
       - name: Windows release checks
-        shell: msys2 {0}
+        shell: pwsh
         run: |
+          . ./scripts/windows-env.ps1
           cargo fmt --all --check
-          cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo test --workspace --locked
-
-      - name: Release binaries
-        shell: msys2 {0}
-        run: cargo build --release --locked -p tidemark -p tidemarkd
-
-      # The DLL set is not hand-written: the script walks the PE import closure of both
-      # executables, and refuses a package whose installed version is not the pinned one.
-      - name: Stage the resolved MSYS2 UCRT64 runtime
-        shell: msys2 {0}
-        run: bash data/packaging/windows/stage-runtime.sh build target/release
-
-      # choco's nsis package is NSIS 3.x with MUI2, the System plugin and lzma — the
-      # whole surface installer.nsi uses.
-      - name: Install NSIS
+          if ($LASTEXITCODE -ne 0) { throw 'Format failed' }
+          cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Clippy failed' }
+          cargo test --workspace --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+          ./data/packaging/windows/test-stage-runtime.ps1
+      - name: Build Inno setup
         shell: pwsh
-        run: choco install nsis -y --no-progress
-
-      # Named for the release here rather than renamed further down: makensis is already
-      # told the version, because it writes it into the per-user uninstall entry, so the
-      # file may as well leave the compiler under the name a person downloads. The tag
-      # comes in through the environment rather than being interpolated into the script,
-      # so a tag name never becomes part of the PowerShell that runs.
-      - name: makensis
-        shell: pwsh
-        working-directory: data/packaging/windows
         env:
           TAG: ${{ github.ref_name }}
+        run: ./scripts/build-windows.ps1 -AppVersion ($env:TAG -replace '^v', '')
+      - name: Isolated installer tests
+        shell: pwsh
         run: |
-          $version = $env:TAG -replace '^v', ''
-          & "C:\Program Files (x86)\NSIS\makensis.exe" `
-            "/DVERSION=$version" `
-            "/DSRC_DIR=${env:GITHUB_WORKSPACE}\target\release" `
-            "/DRUNTIME_DIR=${env:GITHUB_WORKSPACE}\build\nsis-staging\runtime" `
-            "/DOUT_FILE=Tidemark-${env:TAG}-setup.exe" `
-            installer.nsi
-
+          $setup = Get-ChildItem build/windows/installer/Tidemark-v*-setup.exe
+          if (@($setup).Count -ne 1) { throw 'Expected one setup artifact' }
+          ./scripts/test-windows-installer.ps1 -SetupPath $setup.FullName
       - uses: actions/upload-artifact@v4
         with:
           name: windows-setup
-          path: data/packaging/windows/Tidemark-*-setup.exe
+          path: build/windows/installer/Tidemark-v*-setup.exe
           if-no-files-found: error
-
   # Depends on all four, so a failure anywhere means no release object is created at all.
   # A draft, not a publication: a person decides when it goes out.
   release:

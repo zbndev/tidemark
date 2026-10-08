@@ -201,6 +201,11 @@ mod reconnect {
     /// and dies when this process does. See `daemon_job`.
     #[cfg(windows)]
     fn spawn_daemon() {
+        // The installer holds the gate until files and startup registrations are ready.
+        // On an access error keep the daemon stopped rather than racing replacement.
+        if crate::maintenance::active().unwrap_or(true) {
+            return;
+        }
         let spawned = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(|dir| dir.join("tidemarkd.exe")))

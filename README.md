@@ -55,7 +55,10 @@ yay -S tidemark-git
 
 Experimental. Download the setup executable from the
 [latest release](https://github.com/zbndev/tidemark/releases/latest). It installs for the
-current user only and needs no administrator rights. The installer is not code-signed, so
+current user only and needs no administrator rights. The Inno Setup 7 installer handles
+manual upgrades and preserves startup preferences and user data. Native MSVC build and
+recovery instructions are in [Windows packaging](data/packaging/windows/README.md).
+The installer is not code-signed, so
 SmartScreen stops the first run — More info → Run anyway.
 
 ### Nix

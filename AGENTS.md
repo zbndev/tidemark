@@ -79,7 +79,7 @@ On the GUI side, `bus::watch` drives `DaemonProxy` on Slint's event loop; signal
 - Do not create vendor-owned credential files that do not already exist; preserve their ownership boundary.
 - Do not configure cargo-deb system-scope `systemd-units` for the user daemon or restart it from RPM postun. Package greeting failure must not fail installation.
 - Never run `scripts/release.sh` as a validator: it changes versions and performs commit/tag/push. The core live probe reads a real key and calls Z.ai; exclude it from routine validation.
-- Never ship Windows system DLLs; the NSIS installer is per-user and unelevated.
+- Never ship Windows system DLLs; the Inno installer is per-user and unelevated.
 - No embedded webview or JS engine. Never rename shipped provider slugs, fabricate history points, or hide windows.
 - Root `src/` is ignored scratch, not a Cargo target; `pkg/`, `.worktrees/`, `target/`, and `*.pkg.tar.*` are build output, not editable source.
 
@@ -118,8 +118,8 @@ busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark i
 - Build prerequisites (Debian/Ubuntu): `libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev`; Fedora: `fontconfig-devel sqlite-devel pkgconf-pkg-config cmake gcc-c++ clang-devel`. At run time the client opens xkbcommon, the Wayland client (or X11) and libEGL with dlopen.
 - T3 Chat's BoringSSL client needs CMake, a C++ compiler, and libclang; `bindgen` generates its bindings at build time. The GUI `build.rs` compiles `.slint` markup and embeds Rubik and UI icons through `slint-build`.
 - Release only with `scripts/release.sh X.X.X` from clean, up-to-date `main`. It bumps workspace/dependency versions, lockfile, AppStream release entry, and PKGBUILD; commits, tags, and pushes without running tests. AppStream release prose is human work; tag push starts release CI.
-- SQLite is system-linked; TLS uses rustls. Arch packaging disables makepkg LTO for aws-lc-sys.
-- CI uses ubuntu-26.04 and Windows MSYS2 UCRT64 with `stable-x86_64-pc-windows-gnu`, not MSVC. Windows packaging documents pinned SHA-256 archives and PE import-closure staging.
+- SQLite is system-linked on Linux and bundled on Windows; TLS uses rustls. Arch packaging disables makepkg LTO for aws-lc-sys.
+- CI uses ubuntu-26.04 and native Windows MSVC with a static CRT. Windows packaging pins Inno 7.1.0 by SHA-256 and rejects non-system PE imports.
 - Nix exports packages, apps, a NixOS module and a dev shell for x86_64-linux/aarch64-linux.
 - `scripts/test-package-upgrade.sh [workdir]` needs Docker/systemd; `scripts/check-tag-version.sh <tag>` validates release version alignment.
 - More specific AGENTS.md files cover each crate and core's providers, keyed providers, Antigravity, browser and storage domains; keep implementation details there.
@@ -128,14 +128,22 @@ busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark i
 - Never perform manual/UI verification (clicking through the app, screenshots, driving the installed app) — the user does all manual checks. State what to verify by hand and stop.
 
 ## BUILDING & TESTING ON THIS WINDOWS MACHINE (binding recipe)
-The default Rust host toolchain here is MSVC and plain `cargo` in Git Bash FAILS (`link.exe` resolves to GNU coreutils' `link`, build scripts die). The project targets `stable-x86_64-pc-windows-gnu` with MSYS2 UCRT64 (the daemon links its SQLite). Always run builds/tests through MSYS2 bash with the toolchain and paths pinned:
+Use PowerShell and the native Visual Studio x64 environment. Visual Studio/Build Tools
+must have Desktop development with C++ and a Windows SDK. Do not build through Git Bash
+or MSYS2: its coreutils `link.exe` can shadow the MSVC linker.
 
-```bash
-C:/msys64/usr/bin/bash.exe -lc 'set -euo pipefail; \
-  export PATH=/c/Users/zaebo/.cargo/bin:/ucrt64/bin:$PATH; \
-  export RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu; \
-  export PKG_CONFIG_PATH=/ucrt64/lib/pkgconfig:/ucrt64/share/pkgconfig; \
-  cd /c/Users/zaebo/tidemark; \
-  cargo build --release -p tidemark -p tidemarkd'
+```powershell
+. ./scripts/windows-env.ps1
+cargo build --release --locked --target x86_64-pc-windows-msvc -p tidemark -p tidemarkd --bins
+# Or build, validate the payload and compile the pinned Inno setup:
+./scripts/build-windows.ps1
 ```
-(adjust the final cargo command as needed). Without `/ucrt64/bin` on PATH linking fails (`cannot find -lsqlite3`); without `RUSTUP_TOOLCHAIN` it builds MSVC. Replacing installed binaries: installed app lives in `$LOCALAPPDATA/Programs/tidemark`; `taskkill //IM tidemark.exe //IM tidemarkd.exe //F` first, back up, then copy from `target/release`. Known unrelated local test failures: `tidemark-core secrets::windows_store` tests fail while the real app/daemon is running (they touch the real Windows credential store), the `tidemarkd lifecycle::tests::the_singleton_is_exclusive_within_this_session` test fails while the daemon is running (singleton lock held), and `providers::keyed`/`providers::codex`/`oauth` live-transport tests fail behind a system proxy (HTTP 503) — neither is a regression signal; verify a suspicious failure with `git stash` before believing it.
+Always pass the explicit `--target` for builds/checks/tests: `.cargo/config.toml`
+sets a static CRT only for target artifacts, leaving host build scripts/proc macros
+compatible. Release binaries are in `target/x86_64-pc-windows-msvc/release` and setup
+in `build/windows/installer`. See `data/packaging/windows/README.md` for recovery.
+Never replace/stop the personal installed app as a validator. Full installer tests
+require a clean disposable user and refuse existing Tidemark integration; use
+`scripts/test-windows-installer.ps1 -CompileOnly` locally. Skip `windows_store`
+credential tests against a running personal installation. Live-transport tests can
+fail behind a system proxy (HTTP 503); they are not a packaging regression signal.

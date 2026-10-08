@@ -72,6 +72,7 @@ wayland-server = "0.31.14"
 
 [build-dependencies]
 slint-build = "1.18.1"
+winresource = "0.1.31"
 
 # The Debian package. It carries binaries from two crates, so it is built from a prior
 # `cargo build --release --workspace` and invoked with `--no-build`. The metadata lives
