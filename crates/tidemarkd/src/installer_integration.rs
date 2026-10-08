@@ -359,6 +359,7 @@ pub fn remove(shortcut: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use windows::Win32::System::Registry::{
         REG_BINARY, REG_VALUE_TYPE, RegQueryValueExW, RegSetValueExW,
     };
@@ -366,13 +367,15 @@ mod tests {
     struct Scratch(String);
     impl Scratch {
         fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
             Self(format!(
-                r"Software\Tidemark.IntegrationTest.{}-{stamp}",
-                std::process::id()
+                r"Software\Tidemark.IntegrationTest.{}-{stamp}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
             ))
         }
         fn branch(&self, name: &str) -> String {
