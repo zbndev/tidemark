@@ -518,10 +518,16 @@ mod native {
         // gate and may respawn its daemon, so close it first and rescan afterwards.
         for (ui, event) in order {
             let processes = installer_process::running(install)?;
+            // Each signalled event stays alive until the role's waits finish, so a
+            // process that is still creating its listener inherits the request.
+            let mut pending = Vec::new();
             for process in processes.iter().filter(|p| p.ui == ui) {
-                process.signal_stop(event)?;
+                if let Some(signal) = process.stop_signal(event)? {
+                    pending.push((signal, process));
+                }
             }
-            for process in processes.iter().filter(|p| p.ui == ui) {
+            for (signal, process) in &pending {
+                let _signal = signal;
                 if !process.wait(Duration::from_secs(if legacy { 2 } else { 30 }))? {
                     if legacy {
                         process.force_stop()?;

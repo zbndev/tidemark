@@ -123,11 +123,16 @@ pub struct Process {
     pub visible: bool,
 }
 impl Process {
-    pub fn signal_stop(&self, prefix: &str) -> io::Result<()> {
-        if !self.wait(Duration::ZERO)? {
-            StopEvent::new(&stop_event_name(prefix, self.pid))?.signal()?;
+    /// Signal this process's stop event and return the live handle. The handle
+    /// must outlive the caller's wait: a target that has not created its own
+    /// listener yet would otherwise destroy the request with this handle.
+    pub fn stop_signal(&self, prefix: &str) -> io::Result<Option<StopEvent>> {
+        if self.wait(Duration::ZERO)? {
+            return Ok(None);
         }
-        Ok(())
+        let event = StopEvent::new(&stop_event_name(prefix, self.pid))?;
+        event.signal()?;
+        Ok(Some(event))
     }
     pub fn wait(&self, timeout: Duration) -> io::Result<bool> {
         // SAFETY: the original process handle remains open, so PID reuse is irrelevant.

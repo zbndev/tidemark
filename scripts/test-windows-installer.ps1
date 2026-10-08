@@ -252,9 +252,12 @@ try {
 
     Run-Setup '1.0.100'
     Set-FixtureStartup
+    # The append-only fixture log already holds earlier phases' ready lines; only
+    # this pair's fresh readiness proves both stop listeners exist.
+    $readyBefore = @(Read-Log | Where-Object { $_ -like '*|ready|*' }).Count
     $client = Start-Fixture 'tidemark.exe' @('--background')
     $old = @(Assert-HiddenPair)
-    Wait-Until { @(Read-Log | Where-Object { $_ -like '*|ready|*' }).Count -ge 2 } 'cooperative stop event readiness'
+    Wait-Until { @(Read-Log | Where-Object { $_ -like '*|ready|*' }).Count -ge $readyBefore + 2 } 'cooperative stop event readiness'
     # Same executable basename outside the selected install is never signalled.
     $shadowDirectory = Join-Path $testRoot 'other-app'
     New-Item -ItemType Directory -Path $shadowDirectory | Out-Null
