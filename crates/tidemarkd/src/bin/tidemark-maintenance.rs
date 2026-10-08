@@ -232,9 +232,14 @@ mod native {
         match operation {
             "prepare" | "prepare-remove" => {
                 if installation::state_file(install, state, STATE)?.exists() {
-                    return Err(Error::State(
-                        "unfinished installation state exists; recover it before retrying",
-                    ));
+                    // A removal whose owned files are all gone stranded only its
+                    // bookkeeping (an interrupted uninstall tail); finishing it
+                    // here keeps the promised "rerun the uninstaller" recovery.
+                    if !removal_already_complete(install, state)? {
+                        return Err(Error::State(
+                            "unfinished installation state exists; recover it before retrying",
+                        ));
+                    }
                 }
                 let processes = installer_process::running(install)?;
                 let ui = processes.iter().find(|process| process.ui);
@@ -495,6 +500,35 @@ mod native {
         }
     }
 
+    /// Finish a stranded removal whose owned files are already gone, so the
+    /// promised "rerun the uninstaller" recovery needs no manual helper run.
+    fn removal_already_complete(install: &Path, state: &Path) -> Result<bool, Error> {
+        let saved = load(install, state)?;
+        if saved.mode != Mode::Remove || saved.finalizing {
+            return Ok(false);
+        }
+        let files: Vec<_> = saved
+            .remove_files
+            .iter()
+            .filter(|path| {
+                !path.eq_ignore_ascii_case("unins000.exe")
+                    && !path.eq_ignore_ascii_case("unins000.dat")
+            })
+            .cloned()
+            .collect();
+        if !installation::remaining(install, &files)?.is_empty() {
+            return Ok(false);
+        }
+        installer_integration::remove(
+            saved
+                .shortcut
+                .as_deref()
+                .ok_or(Error::State("uninstall state has no shortcut path"))?,
+        )?;
+        finalize(install, state, &saved)?;
+        Ok(true)
+    }
+
     fn restore_startup(install: &Path, state: &Path) -> Result<(), Error> {
         lifecycle::restore_ui_run(load(install, state)?.run.as_deref()).map_err(Error::Task)?;
         restore_task(install, state)
@@ -656,7 +690,26 @@ mod native {
             Mode::LegacyDirectory => installation::finalize_directory(state)?,
             Mode::Remove => (),
         }
-        fs::remove_file(installation::state_file(install, state, STATE)?)?;
+        // A scanner can hold the freshly published state file for a moment; a
+        // plain remove would strand the transaction and block the next setup.
+        let state_file = installation::state_file(install, state, STATE)?;
+        let mut removal = match fs::remove_file(&state_file) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Some(error),
+            _ => None,
+        };
+        for _ in 0..5 {
+            if removal.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            removal = match fs::remove_file(&state_file) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => Some(error),
+                _ => None,
+            };
+        }
+        if let Some(error) = removal {
+            return Err(error.into());
+        }
         match fs::remove_dir(state) {
             Ok(()) => (),
             Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => (),
@@ -736,6 +789,23 @@ mod native {
             fn drop(&mut self) {
                 let _ = fs::remove_dir_all(&self.0);
             }
+        }
+
+        #[test]
+        fn a_stranded_removal_with_no_files_left_is_finalized_automatically() {
+            let f = Fixture::new();
+            let mut saved = f.saved(Mode::Remove);
+            saved.remove_files = vec!["tidemark.exe".into()];
+            saved.shortcut = Some(f.install().join("Tidemark.lnk"));
+            fs::create_dir_all(f.state()).unwrap();
+            publish_state(&f.install(), &f.state(), &saved).unwrap();
+            // The owned file still exists: no self-heal, the state stays for recovery.
+            fs::write(f.install().join("tidemark.exe"), b"present").unwrap();
+            assert!(!removal_already_complete(&f.install(), &f.state()).unwrap());
+            assert!(f.state().join(STATE).exists());
+            fs::remove_file(f.install().join("tidemark.exe")).unwrap();
+            assert!(removal_already_complete(&f.install(), &f.state()).unwrap());
+            assert!(!f.state().join(STATE).exists());
         }
 
         #[test]

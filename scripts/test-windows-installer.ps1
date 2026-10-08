@@ -97,7 +97,14 @@ function Run-Setup([string] $Version, [bool] $Success = $true, [string[]] $Extra
     $process = Start-Process -FilePath $path -ArgumentList $arguments -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit(120000)) { $process.Kill(); throw 'Setup exceeded 120 seconds' }
     if (($process.ExitCode -eq 0) -ne $Success) {
-        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 40 | ForEach-Object { Write-Host "  setup: $_" } }
+        # The whole story matters, not just this run: dump every setup and
+        # uninstall log tail, oldest first, so one failed round names the
+        # scenario that left state behind.
+        Get-ChildItem -LiteralPath $testRoot -Filter '*.log' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime | ForEach-Object {
+                Write-Host "--- $($_.Name):"
+                Get-Content -LiteralPath $_.FullName -Tail 12 | ForEach-Object { Write-Host "  $_" }
+            }
         throw "Setup $Version exit=$($process.ExitCode), expected success=$Success. Logs: $testRoot"
     }
 }
@@ -106,9 +113,15 @@ function Uninstall-Fixture {
     $process = Start-Process -FilePath $path -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$testRoot/uninstall.log`"") -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit(120000)) { $process.Kill(); throw 'Fixture uninstall exceeded 120 seconds' }
     Assert-That ($process.ExitCode -eq 0) "Uninstall failed: $($process.ExitCode)"
-    # The uninstaller relaunches a temporary copy that removes unins000.* only after
-    # this process exits; a reinstall scanning the directory must not race it.
-    Wait-Until { @(Get-ChildItem -LiteralPath $install -Filter 'unins*' -File -ErrorAction SilentlyContinue).Count -eq 0 } 'uninstaller removed its own files'
+    # The uninstaller relaunches itself as a %TEMP% copy that runs this suite's
+    # verify/finalize helpers and removes unins000.* only after the original
+    # process exits. Nothing may touch the directory until that second phase is
+    # fully done: its completion marker is the removed recovery state directory.
+    Wait-Until {
+        @(Get-ChildItem -LiteralPath $install -Filter 'unins*' -File -ErrorAction SilentlyContinue).Count -eq 0 -and
+        -not (Test-Path -LiteralPath "$install.install-state") -and
+        @(Get-Process -Name '_unins*' -ErrorAction SilentlyContinue).Count -eq 0
+    } 'uninstaller second phase finished (files, recovery state and processes gone)'
     Wait-Until { @(Installed-Processes).Count -eq 0 } 'fixture processes exit after uninstall'
     foreach ($name in @($appId, "${appId}_is1")) {
         $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("$uninstallBase\$name")

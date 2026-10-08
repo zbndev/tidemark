@@ -268,6 +268,21 @@ begin
   if CommitFailed then Result := 20 else Result := 0;
 end;
 
+function FinalizeHelper(Command: String): Boolean;
+var Code: Integer;
+begin
+  // Both commands are idempotent; a transient failure (for example a scanner
+  // briefly holding the fresh state file) deserves one immediate retry before
+  // the leftover state blocks the next setup.
+  Code := CallHelper(Command, '');
+  if Code <> 0 then begin
+    Sleep(1000);
+    Code := CallHelper(Command, '');
+  end;
+  Result := Code = 0;
+  if not Result then Log(Command + ' retry failed: ' + HelperError);
+end;
+
 procedure DeinitializeSetup;
 var Ready: Boolean;
 begin
@@ -281,7 +296,7 @@ begin
   ReleaseGate;
   if Transaction and Ready then begin
     if CallHelper('resume', '') = 0 then begin
-      if CallHelper('finalize', '') <> 0 then Log('Recovery backup retained: ' + HelperError);
+      if not FinalizeHelper('finalize') then Log('Recovery backup retained: ' + HelperError);
     end else SuppressibleMsgBox('Program files are ready, but Tidemark could not restart. ' + HelperError, mbError, MB_OK, IDOK);
   end;
 end;
@@ -330,5 +345,5 @@ begin
   if Transaction and not FilesStarted then CallHelper('resume', '');
   // Once file deletion starts an uninstaller is not an upgrade transaction.
   // Keep a failed deletion's state; successful uninstall deliberately stays stopped.
-  if Transaction and (Completed or not FilesStarted) then CallHelper('finalize-remove', '');
+  if Transaction and (Completed or not FilesStarted) then FinalizeHelper('finalize-remove');
 end;
