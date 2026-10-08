@@ -57,6 +57,10 @@ pub async fn fetch_for_account(
     let response = client
         .post(&url)
         .bearer_auth(access_token)
+        .header(
+            reqwest::header::USER_AGENT,
+            super::oauth::cloud_code_user_agent(),
+        )
         .json(&payload)
         .send()
         .await
@@ -605,6 +609,38 @@ mod tests {
         tokio::runtime::Runtime::new()
             .expect("runtime")
             .block_on(future)
+    }
+
+    #[test]
+    fn direct_quota_requests_announce_hub_compatibility_and_tidemark() {
+        let (base, requests, server) = one_request_server(
+            r#"{"models":{"m":{"modelProvider":"MODEL_PROVIDER_GOOGLE","quotaInfo":{"remainingFraction":0.5,"windowId":"weekly"}}}}"#,
+        );
+        let client = crate::providers::http::client().expect("client");
+        let account = AccountId::new("second");
+        let snapshot = block_on(fetch_for_account(
+            &client,
+            &base,
+            "token",
+            Some("project-1"),
+            &account,
+        ))
+        .expect("quota fetched");
+        assert_eq!(snapshot.account, account);
+        assert_eq!(snapshot.windows[0].used_percent, 50.0);
+
+        let request = requests.recv().expect("request captured");
+        server.join().expect("server stopped");
+        let agent = request
+            .lines()
+            .find(|line| line.starts_with("user-agent:"))
+            .expect("product identified");
+        assert!(agent.starts_with("user-agent: Tidemark/"), "{agent}");
+        assert!(
+            agent.contains("(compatible; antigravity/hub/2.9.1 "),
+            "Cloud Code otherwise rejects this client: {agent}"
+        );
+        assert!(request.contains(r#""project":"project-1""#));
     }
 
     #[test]
