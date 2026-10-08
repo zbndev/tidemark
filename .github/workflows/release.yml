@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libfontconfig-dev libsqlite3-dev pkg-config cmake \
+            libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev \
             dbus-daemon desktop-file-utils appstream shellcheck
 
       - name: The tag must agree with Cargo.toml
@@ -30,13 +30,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: dbus-run-session -- cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: dbus-run-session -- cargo test --workspace --locked
       - run: scripts/check-layering.sh
       - run: scripts/check-desktop-integration.sh
       - run: scripts/test-restart-user-daemon.sh
+      - run: scripts/test-package-deps.sh
+      - run: scripts/test-release.sh
       - run: |
-          shellcheck scripts/*.sh data/restart-user-daemon \
+          shellcheck scripts/*.sh data/restart-user-daemon data/packaging/windows/stage-runtime.sh \
             data/packaging/deb/postinst data/packaging/rpm/post-install.sh
 
   deb:
@@ -54,7 +56,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libfontconfig-dev libsqlite3-dev pkg-config cmake dpkg-dev
+            libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev dpkg-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-deb --locked
       - run: cargo build --release --locked --workspace
@@ -109,8 +111,8 @@ jobs:
   # The Windows setup executable, built against the same pinned MSYS2 UCRT64 runtime the
   # binaries link against: package name, version and archive SHA-256 are all locked in
   # msys2-runtime-packages.txt, so what is linked and what is shipped cannot drift apart.
-  # Nothing is tested here — CI's windows-tests job has already run fmt, clippy and the
-  # whole suite on this target, on the commit the tag points at.
+  # The Windows gate runs on the tag itself and the pinned release runtime before any
+  # installer is staged. Main-branch CI is not evidence that this tag passed Windows tests.
   windows:
     needs: checks
     runs-on: windows-latest
@@ -166,10 +168,18 @@ jobs:
         run: |
           rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
           rustup default stable-x86_64-pc-windows-gnu
+          rustup component add rustfmt clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: ucrt64-release
+
+      - name: Windows release checks
+        shell: msys2 {0}
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
 
       - name: Release binaries
         shell: msys2 {0}

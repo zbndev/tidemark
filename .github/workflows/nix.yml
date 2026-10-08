@@ -13,6 +13,7 @@
 # - `Cargo.toml`, `Cargo.lock` — a new dependency changes what the build fetches and may
 #   need a nixpkgs buildInput the expression does not have yet
 # - `rust-toolchain.toml` — the channel the expression builds with
+# - `crates/tidemark/build.rs`, `crates/tidemark/ui/**` — compiled Slint markup and icons
 # - `data/**` — files the derivation installs (desktop, metainfo, icons, D-Bus service)
 # - `scripts/test-nix-flake.sh`, this file — the check and its own triggers
 name: Nix flake
@@ -28,6 +29,8 @@ on:
       - '**/Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'crates/tidemark/build.rs'
+      - 'crates/tidemark/ui/**'
       - 'data/**'
       - 'scripts/test-nix-flake.sh'
       - '.github/workflows/nix.yml'
@@ -41,6 +44,8 @@ on:
       - '**/Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'crates/tidemark/build.rs'
+      - 'crates/tidemark/ui/**'
       - 'data/**'
       - 'scripts/test-nix-flake.sh'
       - '.github/workflows/nix.yml'

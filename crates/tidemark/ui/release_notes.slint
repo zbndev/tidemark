@@ -1,10 +1,10 @@
-// The changelog preview behind the header's update button, as the GTK client's AdwDialog
-// laid it out: the version in the title bar, the notes on a recessed surface, and Cancel
+// The changelog preview behind the header's update button: the version in the title bar,
+// the notes on a recessed surface, and Cancel
 // beside Download on GitHub. The blocks are `markdown.rs`'s.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Button } from "adw.slint";
+import { Button } from "widgets.slint";
 
 // 0 heading, 1 paragraph, 2 list item, 3 code, 4 rule.
 export struct NoteBlock {

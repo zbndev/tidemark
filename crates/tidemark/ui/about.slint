@@ -1,10 +1,10 @@
-// The About dialog, as AdwAboutDialog lays it out: the icon over the name, the developer,
+// The About dialog, with the icon over the name, the developer,
 // the version pill, then Details, Report an Issue, Legal and Troubleshooting. The texts
 // and links are `about.rs`'s.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ActionRow, BoxedList, Button, Toast } from "adw.slint";
+import { ActionRow, BoxedList, Button, Toast } from "widgets.slint";
 
 export global About {
     in-out property <bool> open;
@@ -32,7 +32,7 @@ export global About {
 component LinkRow inherits ActionRow {
     activatable: true;
     Image {
-        source: @image-url("icons/adw-external-link-symbolic.svg");
+        source: @image-url("icons/external-link-symbolic.svg");
         colorize: Theme.fg;
         width: 16px;
         height: 16px;

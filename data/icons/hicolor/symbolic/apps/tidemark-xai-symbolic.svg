@@ -1,7 +1,7 @@
 <!-- The xAI mark belongs to xAI Corp. Not covered by Tidemark's MIT licence; used nominatively
      to identify the service a card reports on. See docs/TRADEMARKS.md. -->
 <!-- Geometry from the official mark (Wikimedia Commons, File:XAI Logo.svg), scaled to sit on
-     the same baseline as its neighbours. Filled polygons: GTK's symbolic renderer paints
+     the same baseline as its neighbours. Filled polygons: symbolic recolouring uses
      fill only, so a mark drawn with strokes renders as nothing at all. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#000">
   <path d="M18.221 8.086L18.601 23L21.642 23L22.023 2.657Z"/>

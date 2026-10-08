@@ -4,15 +4,11 @@
 //! the percentage of their shortest window. It is the program's minimised form — closing
 //! the window hides it and leaves this behind, and the only way out is the menu's Quit.
 //!
-//! # Why ksni and not GDBus by hand
+//! # Linux protocol backend
 //!
-//! The plan's original instruction was to speak StatusNotifierItem and
-//! `com.canonical.dbusmenu` directly, because `libayatana-appindicator-glib` is GPL-3 and
-//! cannot be linked into an MIT project. `ksni` is the third option and the one taken:
-//! it is **Unlicense** — public domain, compatible with anything — and it is built on the
+//! `ksni` speaks StatusNotifierItem and `com.canonical.dbusmenu`.
+//! It is **Unlicense** — public domain, compatible with anything — and it is built on the
 //! same zbus 5 with the same async-io backend this crate already uses to reach the daemon.
-//! Hand-rolling `com.canonical.dbusmenu` would have been several hundred lines of protocol
-//! for no licence benefit.
 //!
 //! # Which thread runs what
 //!

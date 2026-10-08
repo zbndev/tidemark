@@ -1,6 +1,6 @@
 //! The desktop's appearance, read from the XDG settings portal: whether the user prefers a
-//! dark style, and their accent colour. libadwaita follows both on its own; Slint follows
-//! neither, so this asks the same portal and keeps asking while the program runs.
+//! dark style, and their accent colour. This asks the portal and keeps following changes
+//! while the program runs.
 
 use std::future::poll_fn;
 use std::pin::pin;
@@ -15,7 +15,7 @@ const COLOR_SCHEME: &str = "color-scheme";
 const ACCENT_COLOR: &str = "accent-color";
 
 /// Reports the current appearance, then every change to it. Silently gives up on a desktop
-/// without the portal: the window keeps libadwaita's defaults.
+/// without the portal: the window keeps the defaults from `ui/theme.slint`.
 pub fn watch(on: impl Fn(Appearance) + 'static) {
     let spawned = slint::spawn_local(async move {
         if let Err(error) = serve(&on).await {

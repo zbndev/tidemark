@@ -64,9 +64,11 @@ while ((${#queue[@]})); do
   seen["$key"]=1
 
   mapfile -t imports < <(objdump -p "$binary" | sed -n 's/^[[:space:]]*DLL Name:[[:space:]]*//p')
-  printf '%s:' "$binary" >> "$IMPORT_LOG"
-  printf ' %s' "${imports[@]}" >> "$IMPORT_LOG"
-  printf '\n' >> "$IMPORT_LOG"
+  {
+    printf '%s:' "$binary"
+    printf ' %s' "${imports[@]}"
+    printf '\n'
+  } >> "$IMPORT_LOG"
   for name in "${imports[@]}"; do
     lower="${name,,}"
     if [[ -n "${available[$lower]:-}" ]]; then

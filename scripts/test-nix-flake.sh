@@ -1,5 +1,5 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
 project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 image=nixos/nix:2.35.2
@@ -15,7 +15,13 @@ trap cleanup EXIT HUP INT TERM
 mkdir -p "$source_root" "$state_root"
 (
     cd "$project_root"
+    # Exclude tracked files removed by an uncommitted cleanup, but include new files.
     git ls-files --cached --others --exclude-standard -z \
+        | while IFS= read -r -d '' path; do
+            if [ -e "$path" ] || [ -L "$path" ]; then
+                printf '%s\0' "$path"
+            fi
+        done \
         | tar --null -T - -cf -
 ) | tar -xf - -C "$source_root"
 
@@ -42,6 +48,30 @@ grep -Fx "Exec=$output/bin/tidemarkd" "$service"
 grep -Fx 'SystemdService=tidemarkd.service' "$service"
 
 export TIDEMARK_OUTPUT="$output"
+nix shell --inputs-from . nixpkgs#patchelf -c sh -eu -s <<'RUNTIME'
+# Slint/winit dlopen these libraries, so DT_NEEDED and the daemon probe cannot validate
+# them. Check the GUI's actual search path without creating a window or a display server.
+rpath=$(patchelf --print-rpath "$TIDEMARK_OUTPUT/bin/tidemark")
+for soname in libxkbcommon.so.0 libxkbcommon-x11.so.0 libwayland-client.so.0 \
+    libEGL.so.1 libGL.so.1 libX11.so.6 libX11-xcb.so.1 libXcursor.so.1 libXi.so.6 libXrandr.so.2; do
+    found=false
+    previous_ifs=$IFS
+    IFS=:
+    for directory in $rpath; do
+        if [ -f "$directory/$soname" ]; then
+            found=true
+            break
+        fi
+    done
+    IFS=$previous_ifs
+    if [ "$found" != true ]; then
+        printf 'Slint runtime library missing from the GUI search path: %s\n' "$soname" >&2
+        exit 1
+    fi
+done
+printf '%s\n' 'Slint runtime search path ok'
+RUNTIME
+
 nix shell --inputs-from . nixpkgs#dbus nixpkgs#systemd -c sh -eu -s <<'DAEMON'
 dbus_daemon=$(command -v dbus-daemon)
 dbus_prefix=${dbus_daemon%/bin/dbus-daemon}

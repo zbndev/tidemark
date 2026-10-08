@@ -1,5 +1,4 @@
-//! The daemon connection: the GTK client's `bus.rs` with Slint's event loop in place of
-//! GLib's. The same proxy, the same signals; zbus's `async-io` backend drives the
+//! The daemon connection on Slint's event loop. zbus's `async-io` backend drives the
 //! connection on its own thread, so these futures run on the UI thread.
 //!
 //! On Linux the daemon is on the session bus and its name is watched, so a restart is

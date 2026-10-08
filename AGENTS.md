@@ -37,7 +37,7 @@ tidemark/
 | Credentials or browser sources | `crates/tidemark-core/src/oauth_file.rs`, `secrets.rs`, `browser/` | Ownership and explicit source selection matter |
 | Charts or notice identity | `crates/tidemark-core/src/storage/` | Segmentation, retention and migrations |
 | Installation | `README.md`, `PKGBUILD`, `data/packaging/`, `nix/` | deb/rpm metadata also lives in GUI Cargo manifest |
-| Ownership rationale | `CONTEXT.md`, `docs/adr/` | Normative design and binding decisions; dated superpowers plans/specs are historical, not current-code proof |
+| Ownership rationale | `CONTEXT.md`, `docs/adr/` | Normative design and binding decisions |
 | Release and CI | `scripts/release.sh`, `.github/workflows/` | Release helper commits, tags and pushes |
 
 ## CODE MAP
@@ -86,9 +86,9 @@ On the GUI side, `bus::watch` drives `DaemonProxy` on Slint's event loop; signal
 ## UNIQUE STYLES
 - Outbound application identity is `Tidemark/<version>`, not browser/executable impersonation; T3 Chat separately uses a browser-emulating transport stack.
 - Linux uses session D-Bus and systemd user services; Windows uses per-user zbus p2p AF_UNIX, Task Scheduler/HKCU Run, jobs and native tray/toasts.
-- The Linux tray uses ksni, not libayatana-appindicator-glib; Windows uses tray-icon on its own thread. Rubik and the UI icons are compiled into the client; provider marks are runtime assets.
+- The Linux tray uses ksni; Windows uses tray-icon on its own thread. Rubik and the UI icons are compiled into the client; provider marks are runtime assets.
 - Provider SVG marks use filled outlines rather than strokes; desktop integration checks enforce this.
-- UI is `.slint` markup under `crates/tidemark/ui/` drawn to libadwaita's palette and metrics (`theme.slint`, `adw.slint`); decisions are pure Rust, state uses `Rc<RefCell<_>>`/`Cell`/`Weak`. FemtoVG blurs text under rounded clips and `opacity` layers, so neither is used. Card and notification thresholds share 70% / 90%.
+- UI is `.slint` markup under `crates/tidemark/ui/` drawn with the palette and widgets in `theme.slint` and `widgets.slint`; decisions are pure Rust, state uses `Rc<RefCell<_>>`/`Cell`/`Weak`. FemtoVG blurs text under rounded clips and `opacity` layers, so neither is used. Card and notification thresholds share 70% / 90%.
 - Simple API-key providers register alphabetically in `keyed::CATALOG`; unusual auth/multi-request clients use `HandSpec` and daemon `HAND_WRITTEN`, not forced `Keyed` implementations. Provider additions also update README and `docs/TRADEMARKS.md`.
 
 ## COMMANDS
@@ -116,7 +116,7 @@ busctl --user call io.github.zbndev.Tidemark.Daemon /io/github/zbndev/Tidemark i
 - Commands above are documented entry points, not a claim they passed during knowledge-base generation.
 - Secret Service tests skip without a session bus; use plain `cargo test --workspace` for the local gate. Linux validation does not cover Windows-only branches; T3 Chat is Unix-only and Windows Antigravity local agy remains gated.
 - Build prerequisites (Debian/Ubuntu): `libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev`; Fedora: `fontconfig-devel sqlite-devel pkgconf-pkg-config cmake gcc-c++ clang-devel`. At run time the client opens xkbcommon, the Wayland client (or X11) and libEGL with dlopen.
-- T3 Chat's BoringSSL client needs CMake, a C++ compiler, and libclang; `bindgen` generates its bindings at build time. The repository has no `build.rs`, no Blueprint, and no gresource files to precompile.
+- T3 Chat's BoringSSL client needs CMake, a C++ compiler, and libclang; `bindgen` generates its bindings at build time. The GUI `build.rs` compiles `.slint` markup and embeds Rubik and UI icons through `slint-build`.
 - Release only with `scripts/release.sh X.X.X` from clean, up-to-date `main`. It bumps workspace/dependency versions, lockfile, AppStream release entry, and PKGBUILD; commits, tags, and pushes without running tests. AppStream release prose is human work; tag push starts release CI.
 - SQLite is system-linked; TLS uses rustls. Arch packaging disables makepkg LTO for aws-lc-sys.
 - CI uses ubuntu-26.04 and Windows MSYS2 UCRT64 with `stable-x86_64-pc-windows-gnu`, not MSVC. Windows packaging documents pinned SHA-256 archives and PE import-closure staging.

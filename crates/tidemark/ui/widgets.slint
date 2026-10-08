@@ -1,4 +1,4 @@
-// The libadwaita widgets the dialogs are built from, drawn to its metrics: buttons, boxed
+// Shared Slint widgets the dialogs are built from: buttons, boxed
 // lists and their rows, entries, switches, the toggle pill, the spinner, the toast and the
 // context menu.
 
@@ -58,7 +58,7 @@ export component Button inherits Rectangle {
     }
 }
 
-// libadwaita's spinner: a three-quarter ring turning once a second.
+// A three-quarter ring turning once a second.
 export component Spinner inherits Rectangle {
     in property <length> size: 16px;
     width: root.size;
@@ -110,7 +110,7 @@ export component Switch inherits Rectangle {
     }
 }
 
-// AdwToggleGroup: a row of equal toggles on a sunken pill, one of them raised.
+// Toggle group: a row of equal toggles on a sunken pill, one of them raised.
 export component ToggleGroup inherits Rectangle {
     in property <[string]> labels;
     in property <int> active;
@@ -154,7 +154,7 @@ export component ToggleGroup inherits Rectangle {
     }
 }
 
-// An entry on a faint fill, as GtkEntry and GtkSearchEntry are drawn.
+// A text entry on a faint fill.
 export component Entry inherits Rectangle {
     in-out property <string> text <=> input.text;
     in property <string> placeholder;
@@ -222,7 +222,7 @@ export component Entry inherits Rectangle {
     }
 }
 
-// AdwPreferencesGroup's boxed list: rows on one rounded card.
+// Boxed list: rows on one rounded card.
 export component BoxedList inherits Rectangle {
     background: Theme.card-bg;
     border-radius: 12px;
@@ -246,7 +246,7 @@ component Separator inherits Rectangle {
     background: Theme.ink(0.1);
 }
 
-// AdwActionRow: a prefix mark, a title over a subtitle, and suffix widgets at the end.
+// Action row: a prefix mark, a title over a subtitle, and suffix widgets at the end.
 // Strings are the daemon's words and are drawn as text, never markup.
 export component ActionRow inherits Rectangle {
     in property <string> title;
@@ -344,7 +344,7 @@ export component ActionRow inherits Rectangle {
     }
 }
 
-// AdwEntryRow and AdwPasswordEntryRow: the title sits in the field until there is text or
+// Text and password rows: the title sits in the field until there is text or
 // focus, then shrinks above it.
 export component EntryRow inherits Rectangle {
     in property <string> title;
@@ -352,7 +352,7 @@ export component EntryRow inherits Rectangle {
     in property <bool> number: false;
     in property <bool> first: true;
     in property <bool> enabled: true;
-    // AdwEntryRow's `.error`: the field says it is the one that is wrong.
+    // Error state: the field says it is the one that is wrong.
     in property <bool> error: false;
     in-out property <string> text <=> input.text;
     callback accepted();
@@ -420,7 +420,7 @@ export component EntryRow inherits Rectangle {
     }
 }
 
-// AdwComboRow: the title, the chosen value, and a menu of the choices.
+// Combo row: the title, the chosen value, and a menu of the choices.
 export component ComboRow inherits Rectangle {
     in property <string> title;
     // Shown under the title when the choice is not, or when there is no choice to show.
@@ -428,7 +428,7 @@ export component ComboRow inherits Rectangle {
     in property <[string]> choices;
     // -1: a value this build does not know, which is shown rather than guessed at.
     in property <int> selected;
-    // AdwComboRow's `use-subtitle`: the choice under the title rather than at the end.
+    // Subtitle mode: the choice under the title rather than at the end.
     in property <bool> value-as-subtitle: false;
     in property <bool> enabled: true;
     in property <bool> first: true;
@@ -551,7 +551,7 @@ export component ComboRow inherits Rectangle {
     }
 }
 
-// AdwSpinRow: a whole number, typed or stepped, between two bounds.
+// Spin row: a whole number, typed or stepped, between two bounds.
 export component SpinRow inherits Rectangle {
     in property <string> title;
     in property <string> subtitle;
@@ -664,7 +664,7 @@ export component SpinRow inherits Rectangle {
     }
 }
 
-// AdwViewSwitcher in a header bar: flat toggles, each an icon beside its page's name.
+// Page switcher in a header bar: flat toggles, each an icon beside its page's name.
 export component ViewSwitcher inherits HorizontalLayout {
     in property <[string]> labels;
     in property <[image]> icons;
@@ -729,14 +729,14 @@ export component GroupHeading inherits VerticalLayout {
     }
 }
 
-// A dim caption under a list, as the GTK dialogs' captions are.
+// A dim caption under a list.
 export component Caption inherits Text {
     color: Theme.ink(Theme.dim);
     font-size: Theme.caption;
     wrap: word-wrap;
 }
 
-// AdwToast: one line on a dark pill near the bottom, for a few seconds.
+// Toast: one line on a dark pill near the bottom, for a few seconds.
 export component Toast inherits Rectangle {
     in property <string> text;
     in property <int> serial;
@@ -786,7 +786,7 @@ export struct MenuEntry {
     enabled: bool,
 }
 
-// A GtkPopoverMenu opened at a point: drawn over the whole window, so a press anywhere
+// A context menu opened at a point: drawn over the whole window, so a press anywhere
 // outside it dismisses it and goes no further, as a popover's grab does. Arrow keys move
 // the highlight, Return chooses and Escape dismisses.
 export component ContextMenu inherits Rectangle {

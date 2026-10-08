@@ -17,7 +17,7 @@ shortcut, and every installed file. Nothing machine-wide, no elevation.
   found there, the provider marks under `share/icons/hicolor` and
   `share/tidemark.ico`. The client draws with Slint and imports only system
   DLLs, with Rubik compiled in; what is staged is the daemon's SQLite and its
-  closure. An upgrade from the GTK client removes the GTK runtime it left.
+  closure. Upgrades remove obsolete runtime files before staging the current closure.
 - `msys2-runtime-packages.txt` — exact package versions and package-archive
   SHA-256 hashes for every staged DLL/data owner. The release workflow
   downloads and verifies these archives before it builds, so linked and

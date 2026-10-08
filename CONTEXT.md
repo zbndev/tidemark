@@ -118,8 +118,10 @@ Daemon plus client, split over D-Bus.
 - **CLI** — `tidemarkctl`. The third client, and the one the interface was shaped for:
   one round trip draws a window, a Waybar module, or a line of output.
 
-Language is Rust; GUI is Slint, drawn to libadwaita's look. It replaced a GTK4 +
-libadwaita client, which stays the reference for how the interface looks and behaves. Rust was chosen for packaging above all —
+Language is Rust; the GUI is Slint with FemtoVG (OpenGL on Linux, wgpu on
+Direct3D 12 on Windows). Its palette and widgets live in `ui/theme.slint` and
+`ui/widgets.slint`; Rubik and UI icons are embedded at build time. Rust was chosen for
+packaging above all —
 `deb`/`rpm`/`PKGBUILD` from a single binary is the cheap path — and for `serde`, which
 turns "the provider silently changed their undocumented JSON" from a blank screen into a
 named field in an error.
@@ -534,8 +536,8 @@ history that does not exist yet.
 
 ## Interface
 
-Several items below were written for the GTK client and name its widgets. The decisions
-they record bind the Slint client all the same; it draws them in `crates/tidemark/ui/`.
+The Slint markup in `crates/tidemark/ui/` draws published state; Rust controllers own
+IPC, dialog lifetimes and pure presentation decisions.
 
 - **Grid of provider cards**, columns by width, **in the order the user put them in**.
   How many columns the width turns into is a preference: Auto (the default) fits as many
@@ -543,18 +545,10 @@ they record bind the Slint client all the same; it draws them in `crates/tidemar
   ever changes that order: there is no urgency sort underneath it, a new account goes on
   the end, and the sequence is persisted by the daemon and republished to every client.
   The grid the tray menu lists and the grid the settings dialog lists are this one.
-- **The grid is a widget of ours, not a `GtkFlowBox`.** Reordering has to be *live* — the
-  cards a held card displaces move out of its way before the button is released, and move
-  back if the pointer changes its mind — and `gtk_flow_box_invalidate_sort()` sorts a
-  sequence and queues a resize, so a card that loses its place teleports. There is nothing
-  to interpolate, because the position *is* the allocation. Nothing in GTK 4.22 or
-  libadwaita 1.9 does this generally; the one upstream implementation of exactly this
-  behaviour is libadwaita's private `AdwTabGrid`, and `grid.rs` is its architecture: a
-  `GtkGestureDrag` on the container, a per-card offset in **index units** animated by an
-  `AdwTimedAnimation` restarted from its current value, an animation callback that queues an
-  allocation, and a `size_allocate` that turns a fractional index into a position.
-  `GtkDragSource` / `GtkDropTarget` are the wrong controllers for it: they carry a payload
-  and draw a detached icon, and an icon that is not in the grid cannot push anything.
+- **The grid animates reordering in Slint.** A held card follows the pointer while
+  displaced cards move into their prospective slots. Each slot retains its current
+  position so a changed target can animate from where the card already is. The grid
+  uses pointer events, a drag threshold and a separate carrying layer in `ui/app.slint`.
 - **The order is committed on release, not on the way.** A file write and a D-Bus round trip
   per pixel is not a design. The drop is applied locally first and sent afterwards, because
   a grid that waited for the daemon before showing where the card landed would feel broken;
@@ -570,11 +564,8 @@ they record bind the Slint client all the same; it draws them in `crates/tidemar
   weekly input pool is the subscription and the hundred-images-a-day allowance beside it
   would otherwise be the headline at zero, every day. The plan is a convention rather than
   a field: the first row of the detail section a provider titles `Plan`.
-- **The mark, the name and the plan stand on one baseline**, and the mark is the largest
-  thing in the row — it is what the eye finds a card by. Bottom-aligning the widgets does
-  not achieve this: GTK aligns allocations, and a label's allocation ends at its font's
-  descent line. Each icon is drawn standing on the floor of its own square, and the row
-  lifts each part by the depth it does not use.
+- **The mark, the name and the plan stand on one baseline.** Each mark is framed on
+  the floor of its square, with text aligned beside it in `ui/card.slint`.
 - **When the next poll is due is not on the card.** It is the daemon's schedule rather than
   news about the account, and on a window that updates itself it was one more number moving
   for no reason the reader has to act on.
@@ -586,39 +577,22 @@ they record bind the Slint client all the same; it draws them in `crates/tidemar
   currently reports, drawn from the last reading rather than from a fixed list, because the
   window set is whatever arrived. An account nobody has polled yet has no switches to
   offer and the group is not drawn at all.
-- **The bar is drawn, not a `GtkLevelBar`**, because of the pace mark. Its colours come
-  from the CSS names `@accent_bg_color`, `@warning_bg_color` and `@error_bg_color` rather
-  than from `AdwStyleManager`, so that a user who has themed their accent gets a bar in
-  their colour rather than the one libadwaita would have picked. **It changes colour at 70%
-  and 90% — the notification thresholds** — so the card and the notification never disagree
-  about when a window became worth worrying about.
-- **A card raises on hover** — two pixels and a soft shadow. The `:hover` is matched on the
-  slot around the card and the card is what moves, because a CSS transform moves what GTK
-  picks and a card that lifted itself out from under the pointer would flicker. That slot
-  is an `AdwBin`; it was a `GtkFlowBoxChild`, which also tinted its own square allocation
-  behind a card with rounded corners and had to be told not to. `.card.activatable`
-  supplies the platform's own hover and active states.
-- **A card being carried is opaque.** `.card` takes `@card_bg_color`, which in the dark
-  style is 8% white over whatever is behind it — right for a card lying on the window, and
-  wrong for one crossing its neighbours, which then read straight through it. The dragged
-  card takes `@popover_bg_color`, the platform's own name for a surface floating above the
-  content, and a deeper shadow. Its foreground is deliberately left alone: the bar's track
-  and pace mark inherit the text colour, and changing it would make them shift tone for the
-  length of a drag.
-- **The grid is homogeneous.** Every card gets the same allocation, so cards in a row share
-  a height and their footers line up; the cost is a short card in a single-column window
-  carrying the height of the tallest one. The last row is left ragged: a filler card would
-  be something to click on that does nothing.
-- **A card's width is the card's, not the daemon's.** The cell is the widest card's
-  *minimum* width — its own width request — and never its natural width, because a natural
-  width is the width of whatever text arrived: a provider that answered with an error
-  message longer than a card, or a window title nobody sized a card for, used to set the
-  width of every card on screen and collapse three columns into one. So every label that
-  shows a string from the daemon ellipsizes, and the one that shows prose whole wraps at any
-  character and stops after three lines — a D-Bus error name and a URL have no space in them
-  to wrap at, and a label that cannot shorten itself asks for the width of its text as its
-  *minimum*. The rest of a long message is in the provider's settings pane, and in the
-  tooltip.
+- **The bar and pace mark are drawn in Slint.** Their colours come from `Theme`, whose
+  accent follows the desktop portal on Linux and the registry on Windows. Warning and
+  error colours change at **70% and 90%**, the shared notification thresholds.
+- **A card raises on hover** by two pixels with a soft shadow. The slot retains the
+  pointer area while the card moves, so the lift cannot make hover flicker.
+- **A card being carried is opaque.** It takes the popover surface colour and a deeper
+  shadow, while its foreground stays unchanged.
+- **Cards are fixed at 300 × 220 logical pixels**, including before the first reading
+  and while every provider reports an error. Rows share a height and their footers line
+  up; the last row stays left aligned within the centred grid. Long card content scrolls
+  inside the card. Labels ellipsize or wrap within the allocation, so neither a URL in
+  an error nor a provider title can change the grid geometry. The full error is available
+  in provider settings and through the failed-check footer.
+- **The footer reports check progress.** A spinner replaces the last-check time while
+  the daemon publishes `checking`. A failed check shows red `check failed`; clicking it
+  opens an alert with the daemon's diagnostic. The last good metrics remain visible.
 - **A window the provider did not send is not drawn.** No placeholder, no explanation. The
   window set is whatever arrived; the card rearranges silently when it changes. Needs
   hysteresis in the daemon so a single malformed response does not make a window blink.
@@ -647,22 +621,15 @@ they record bind the Slint client all the same; it draws them in `crates/tidemar
   not own. That last sentence is ADR 0001, and it is stated in the open next to the choice
   rather than left to be discovered: a program that edits another program's credentials
   says so where the decision is made.
-- **The primary menu is the platform's, and so are its dialogs.** The header's rightmost
-  button opens the menu every GNOME application keeps there. Preferences and About
-  Tidemark are separate sections; provider and credential management stays on its existing
-  header button because accounts are managed, not application preferences. Preferences is
-  an `AdwPreferencesDialog` with General, Network and Data pages and standard rows. The
-  release-check switch lives on Network beside the proxy rather than on a page of its own:
-  it is one switch, and what it switches is whether this program reaches the network at all
-  on its own behalf. About
-  is an `AdwAboutDialog` with properties set and no layout of ours: the icon over the name,
-  the version pill, Details, Report an Issue and
-  Legal are what the platform draws from `application-icon`, `version`, `website`,
-  `issue-url`, `copyright` and `license-type`. The warranty sentence and the licence link
-  are GTK's own text for `MIT_X11` rather than a second copy of a legal notice to keep in
-  agreement — and the issue link goes to `/issues/new/choose`, because the repository has
-  templates and a report that skips them has to be asked for the version and the desktop
-  all over again.
+- **The primary menu and dialogs are Slint components.** The header menu opens
+  Preferences and About; provider management has its own header button. Preferences
+  has General, Network and Data pages. The release-check switch lives on Network beside
+  the proxy, because it controls application network access. About shows the icon, name,
+  version, developer, website, report link and MIT legal notice. The report link goes to
+  `/issues/new/choose` so repository templates collect the version and desktop.
+- **Cards and provider-list rows share an account menu.** Icon-labelled actions add an
+  account, edit it, refresh it or remove it. Provider-list rows expose the same menu
+  through one button rather than separate action buttons.
 - **The three proxy rows are one form, and the mode row opens the other two.** Choosing
   `SOCKS5` before typing where the proxy is, is how the group gets filled in, so the
   choice alone is not sent - the daemon would refuse half a proxy and be right to - and the
@@ -700,15 +667,20 @@ they record bind the Slint client all the same; it draws them in `crates/tidemar
   Cargo feature is enabled by default for upstream builds; a distribution can build with
   `--no-default-features`, in which case Preferences shows the switch off and unavailable.
 - **An update offer is a preview, not an updater.** The header button opens the release
-  notes in a dialog — Markdown rendered into Pango markup, bare URLs linked, raw HTML
+  notes in a dialog — Markdown parsed into Slint text blocks, bare URLs linked, raw HTML
   dropped — and its two buttons are Cancel and Download on GitHub. Tidemark is installed by
   a package manager, an installer or a distribution, so the dialog ends at the release page
   rather than pretending this process can replace itself. A release published without notes
   opens that page directly: a dialog whose only content is "no notes" is a click that told
   the reader nothing.
-- **`libayatana-appindicator-glib` is GPL-3** and cannot be linked into an MIT project. The
-  protocol is spoken through `ksni`, which is Unlicense — public domain, so compatible —
-  and which is built on the same zbus the interface already reaches the daemon over.
+- **Tray backends are platform-specific.** Linux speaks StatusNotifierItem and
+  `com.canonical.dbusmenu` through `ksni` (Unlicense), on the same zbus async-io backend
+  as the daemon connection. Windows uses `tray-icon` with unused Linux features disabled.
+- **The window owns its frame.** Rounded transparent corners, header controls and native
+  dragging are drawn through Slint and winit. Windows supplies its native shadow; Wayland
+  uses a click-through subsurface outside the window geometry. Maximized and full-screen
+  windows have square corners and no custom shadow. Showing a hidden window requests a
+  new frame so a background Wayland launch maps when opened from the tray.
 
 ## Packaging
 
@@ -721,9 +693,8 @@ module registers only the D-Bus-activated user daemon; it does not autostart the
 The scheduled workflow proposes `flake.lock` updates through a reviewed pull request. DEB,
 RPM, and the local `PKGBUILD` retain their distinct installation and upgrade behavior.
 
-The `rpm` targets Fedora 44+ and the `deb` Ubuntu 26.04+. That floor was set by the GTK
-4.22 / libadwaita 1.9 the former client needed, which only those two shipped; the Slint
-client no longer needs it, and lowering it is a packaging decision rather than a code one.
+The `rpm` targets Fedora 44+ and the `deb` Ubuntu 26.04+. Those are the current
+release build targets; lowering their floors is a separate packaging decision.
 
 glibc is forward- but not backward-compatible, so a build host must be no newer than the
 oldest target. That is settled by construction rather than by choosing a host: each format

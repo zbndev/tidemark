@@ -1,8 +1,6 @@
 //! The About dialog: who wrote this, which version is running, and where to report it.
 //!
-//! Laid out as `AdwAboutDialog` lays itself out — the icon over the name, the version
-//! pill, Details, Report an Issue, Legal — with the licence sentence the MIT licence gets
-//! there, rather than a layout of our own.
+//! The icon over the name, the version pill, Details, Report an Issue and Legal.
 //!
 //! The one thing that is ours is the troubleshooting page. It answers the questions every
 //! bug report about this program starts with — which daemon is on the other end, which
@@ -22,7 +20,7 @@ const WEBSITE_URL: &str = "https://github.com/zbndev/tidemark";
 /// repository has templates and a report that skips them is a report that has to be asked
 /// for the version, the desktop and the provider all over again.
 const ISSUES_URL: &str = "https://github.com/zbndev/tidemark/issues/new/choose";
-/// The link GTK's Legal page gives the MIT licence.
+/// The MIT licence text linked from Legal.
 const LICENSE_URL: &str = "https://opensource.org/licenses/mit";
 /// The file the troubleshooting page's save button offers.
 const DEBUG_INFO_FILENAME: &str = "tidemark-debug-info.txt";

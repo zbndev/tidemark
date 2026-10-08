@@ -1,10 +1,10 @@
-// libadwaita's palette, spelled out: Slint has no stylesheet to inherit it from.
-// Opaque everywhere: a card is the composite of `@card_bg_color` over the window,
+// The application palette, shared by all Slint components.
+// Opaque everywhere: the card colour includes its background composite,
 // so cards that overlap during a reorder never show through each other.
 
 export global Theme {
     in-out property <bool> dark: false;
-    // The desktop's accent, as the XDG portal reports it; libadwaita's blue otherwise.
+    // The desktop's accent, as the XDG portal reports it; blue otherwise.
     in-out property <color> accent: #3584e4;
 
     out property <color> window-bg: dark ? #222226 : #fafafb;
@@ -20,10 +20,10 @@ export global Theme {
     out property <color> warning: dark ? #f8e45c : #9c6e03;
     out property <color> error: dark ? #ff938c : #c30000;
     out property <color> success: dark ? #78e9ab : #007c3d;
-    // `@accent_color`: the accent made readable as text, lighter on dark and darker on light.
+    // The accent made readable as text, lighter on dark and darker on light.
     out property <color> link: dark ? accent.mix(#ffffff, 0.65) : accent.mix(#000000, 0.8);
 
-    // The text colour, and how much of it libadwaita lets through.
+    // The text colour and the emphasis levels for secondary text.
     property <color> fg-rgb: dark ? #ffffff : #000006;
     property <float> fg-alpha: dark ? 1.0 : 0.8;
     out property <color> fg: fg-rgb.with-alpha(fg-alpha);

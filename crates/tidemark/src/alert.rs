@@ -1,5 +1,4 @@
-//! Questions asked through the window's alert dialog, answered by awaiting them — what
-//! `AdwAlertDialog::choose_future` is to the GTK client.
+//! Questions asked through the window's alert dialog, answered by awaiting them.
 //!
 //! One question is on screen at a time. A second one replaces the first, which is answered
 //! with its close response, as if it had been dismissed.

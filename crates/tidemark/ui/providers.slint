@@ -5,7 +5,7 @@
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Alert } from "alert.slint";
-import { ActionRow, BoxedList, Button, Caption, ComboRow, ContextMenu, Entry, EntryRow, GroupHeading, MenuEntry, Spinner, Switch, Toast, ToggleGroup } from "adw.slint";
+import { ActionRow, BoxedList, Button, Caption, ComboRow, ContextMenu, Entry, EntryRow, GroupHeading, MenuEntry, Spinner, Switch, Toast, ToggleGroup } from "widgets.slint";
 
 // 0 a provider and its first account, 1 a further account under it, 2 an installed plugin
 // nobody has configured.
@@ -538,7 +538,7 @@ component DetailPage inherits ScrollView {
     }
 }
 
-// AdwPreferencesDialog: a floating sheet over the dimmed window, with its own header bar
+// A provider dialog: a floating sheet over the dimmed window, with its own header bar
 // and a back button on every page but the list.
 export component ProviderDialog inherits Rectangle {
     background: Theme.dark ? #00000080 : #00000040;

@@ -1,8 +1,8 @@
 #![allow(unsafe_code)]
 //! One desktop client per session (Windows).
 //!
-//! GApplication's single-instance rides the session bus, and there is none on Windows
-//! (GIO logs "win32 session dbus binary not found"), so every Start launch would open a
+//! Linux single-instance activation uses the session bus, which is absent on Windows,
+//! so every Start launch would open a
 //! second window with a second tray icon. A named session-local mutex is the guard
 //! instead: the kernel releases it when the holder dies, so a crashed client never locks
 //! the next one out. A second instance forwards activation through the daemon —

@@ -17,7 +17,7 @@ winget=data/packaging/windows/winget
 
 fixture=
 cleanup() {
-    [ -n "$fixture" ] && rm -rf "$fixture" "$fixture.origin.git"
+    [ -n "$fixture" ] && rm -rf "$fixture" "$fixture.origin.git" "$fixture.log"
     fixture=
 }
 trap cleanup EXIT
@@ -27,15 +27,13 @@ trap cleanup EXIT
 make_fixture() {
     fixture=$(mktemp -d "${TMPDIR:-/tmp}/tidemark-release-test.XXXXXX")
 
-    mkdir -p "$fixture/scripts" "$fixture/data/metainfo" "$fixture/$winget" \
-        "$fixture/crates/tidemark-types/src" "$fixture/crates/tidemark-core/src" \
-        "$fixture/crates/tidemarkd/src" "$fixture/crates/tidemark/src"
+    mkdir -p "$fixture/scripts" "$fixture/data/metainfo" "$fixture/$winget"
     cp "$project_root/Cargo.toml" "$project_root/Cargo.lock" \
         "$project_root/rust-toolchain.toml" "$project_root/PKGBUILD" "$fixture/"
-    cp "$project_root/crates/tidemark-types/Cargo.toml" "$fixture/crates/tidemark-types/"
-    cp "$project_root/crates/tidemark-core/Cargo.toml" "$fixture/crates/tidemark-core/"
-    cp "$project_root/crates/tidemarkd/Cargo.toml" "$fixture/crates/tidemarkd/"
-    cp "$project_root/crates/tidemark/Cargo.toml" "$fixture/crates/tidemark/"
+    for crate in tidemark-types tidemark-ipc tidemark-core tidemarkd tidemark tidemark-cli; do
+        mkdir -p "$fixture/crates/$crate/src"
+        cp "$project_root/crates/$crate/Cargo.toml" "$fixture/crates/$crate/"
+    done
     cp "$project_root/data/metainfo/io.github.zbndev.Tidemark.metainfo.xml" \
         "$fixture/data/metainfo/"
     cp "$project_root/$winget"/io.github.zbndev.Tidemark*.yaml "$fixture/$winget/"
@@ -45,9 +43,12 @@ make_fixture() {
     # `cargo update` must be able to load the workspace, and target auto-discovery needs
     # these; empty stubs do — nothing ever compiles in the fixture.
     : >"$fixture/crates/tidemark-types/src/lib.rs"
+    : >"$fixture/crates/tidemark-ipc/src/lib.rs"
     : >"$fixture/crates/tidemark-core/src/lib.rs"
     : >"$fixture/crates/tidemarkd/src/main.rs"
     : >"$fixture/crates/tidemark/src/main.rs"
+    : >"$fixture/crates/tidemark-cli/src/lib.rs"
+    : >"$fixture/crates/tidemark-cli/src/main.rs"
 
     git -C "$fixture" init -q -b main
     git -C "$fixture" config user.name fixture
@@ -123,7 +124,10 @@ metainfo=data/metainfo/io.github.zbndev.Tidemark.metainfo.xml
 
 printf 'cutting a full release\n'
 make_fixture
-(cd "$fixture" && scripts/release.sh "$next_version") >/dev/null 2>&1
+if ! (cd "$fixture" && scripts/release.sh "$next_version") >"$fixture.log" 2>&1; then
+    cat "$fixture.log" >&2
+    exit 1
+fi
 
 [ "$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' \
     "$fixture/Cargo.toml")" = "$next_version" ]
@@ -131,7 +135,7 @@ grep -q "^tidemark-types = { version = \"$next_version\", path = \"../tidemark-t
     "$fixture/crates/tidemark-core/Cargo.toml"
 grep -q "^tidemark-core = { version = \"$next_version\", path = \"../tidemark-core\" }\$" \
     "$fixture/crates/tidemarkd/Cargo.toml"
-for crate in tidemark-types tidemark-core tidemarkd tidemark; do
+for crate in tidemark-types tidemark-ipc tidemark-core tidemarkd tidemark tidemark-cli; do
     grep -A1 "^name = \"$crate\"$" "$fixture/Cargo.lock" \
         | grep -q "^version = \"$next_version\"\$"
 done
@@ -175,7 +179,10 @@ sed -i "/^\[workspace\.package\]/,/^\[/ s/^version = \"\(.*\)\"\$/version = \"0.
 sed -i '/^    <release version=/d' "$fixture/$metainfo"
 git -C "$fixture" commit -qam 'fixture at 0.1.9'
 git -C "$fixture" push -q origin main
-(cd "$fixture" && scripts/release.sh 0.1.10) >/dev/null 2>&1
+if ! (cd "$fixture" && scripts/release.sh 0.1.10) >"$fixture.log" 2>&1; then
+    cat "$fixture.log" >&2
+    exit 1
+fi
 [ "$(git -C "$fixture" log -1 --format=%s)" = 'chore: bump to v0.1.10' ]
 cleanup
 

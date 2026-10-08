@@ -1,11 +1,11 @@
-// The Preferences dialog: General, Network and Data, as AdwPreferencesDialog lays them out.
+// The Preferences dialog: General, Network and Data, with shared form widgets.
 // The daemon owns every value; `preferences.rs` decides what is shown and sends what a
 // row asks for. A switch, a choice or a mode moves at once and is put back if refused.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Alert } from "alert.slint";
-import { ActionRow, BoxedList, Button, ComboRow, EntryRow, GroupHeading, SpinRow, Switch, Toast, ViewSwitcher } from "adw.slint";
+import { ActionRow, BoxedList, Button, ComboRow, EntryRow, GroupHeading, SpinRow, Switch, Toast, ViewSwitcher } from "widgets.slint";
 
 export global Prefs {
     in-out property <bool> open;

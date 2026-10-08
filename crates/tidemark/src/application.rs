@@ -1,10 +1,9 @@
-//! One desktop client per session (Linux), the way GApplication made it one: the first
+//! One desktop client per session (Linux): the first
 //! client owns the application ID on the session bus and serves
 //! `org.freedesktop.Application` at the ID's path; a second launch finds the name taken,
 //! asks the owner to activate, and exits.
 //!
-//! The interface is the freedesktop one, not a private method, so a running GTK client of
-//! an older version is raised by a new launch too, and the other way round.
+//! The standard freedesktop interface preserves activation across client upgrades.
 
 use std::collections::HashMap;
 
@@ -98,9 +97,9 @@ pub async fn claim(activate: bool, launch: &Launch) -> zbus::Result<Claim> {
     }
 }
 
-/// Passes the launcher's activation token on, as GApplication does: a GTK owner uses it to
-/// take focus on Wayland. This client cannot yet — winit has no way to activate an existing
-/// window with someone else's token — and asks for focus with its own.
+/// Forwards the launcher's activation token through the standard platform data.
+/// Winit cannot activate an existing window with someone else's token, so the receiving
+/// client currently asks for focus with its own.
 async fn activate_running(connection: &zbus::Connection, launch: &Launch) -> zbus::Result<()> {
     let platform_data = launch.platform_data();
     connection

@@ -25,7 +25,7 @@ hidpi_icon=data/icons/hicolor/512x512@2/apps/io.github.zbndev.Tidemark.png
 file "$hidpi_icon" | grep -Fq 'PNG image data, 1024 x 1024,'
 
 # Symbolic marks are filled outlines: the icon-theme convention, which renderers that
-# recolour symbolic icons by fill alone (GTK's among them) depend on, and which keeps every
+# recolour symbolic icons by fill alone depend on, and which keeps every
 # mark the same weight when the client colours it. Outline the strokes instead.
 stroked=$(grep -lE 'stroke[=:]' data/icons/hicolor/symbolic/apps/*.svg || true)
 if [ -n "$stroked" ]; then

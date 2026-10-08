@@ -5,7 +5,7 @@ import { Theme } from "theme.slint";
 import { Card, CardData, GaugeData, RowData } from "card.slint";
 import { ProviderDialog, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData } from "providers.slint";
 import { Alert, AlertDialog, AlertForm, AlertResponse, PreviewRow } from "alert.slint";
-import { ContextMenu, MenuEntry } from "adw.slint";
+import { ContextMenu, MenuEntry } from "widgets.slint";
 import { Prefs, PreferencesDialog } from "preferences.slint";
 import { About, AboutDialog } from "about.slint";
 import { NoteBlock, ReleaseNotes, ReleaseNotesDialog } from "release_notes.slint";
@@ -40,7 +40,7 @@ component HeaderButton inherits Rectangle {
     }
 }
 
-// libadwaita's window controls: a small round button with a faint fill, for windows that
+// Window controls: a small round button with a faint fill, for windows that
 // draw their own title bar.
 component WindowButton inherits Rectangle {
     in property <image> icon;
@@ -64,7 +64,7 @@ component WindowButton inherits Rectangle {
     }
 }
 
-// libadwaita's status page: a large dim icon, a title, and what to do about it.
+// A status page: a large dim icon, a title, and what to do about it.
 component StatusPage inherits Rectangle {
     in property <image> icon;
     in property <string> title;
@@ -160,7 +160,7 @@ export component AppWindow inherits Window {
         Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
     }
 
-    // Grid geometry, in the GTK grid's numbers.
+    // Fixed card geometry, independent of provider state and content.
     property <length> cell-width: 300px;
     // Statuses, errors and account expansion never change the grid's geometry.
     property <length> cell-height: 220px;
@@ -275,7 +275,7 @@ export component AppWindow inherits Window {
     }
 
     VerticalLayout {
-        // A header bar drawn by the window itself, as libadwaita's is.
+        // A header bar drawn by the window itself.
         Rectangle {
             height: 47px;
             background: Theme.header-bg;
@@ -488,7 +488,7 @@ export component AppWindow inherits Window {
                                 return;
                             }
                             if (!root.carrying) {
-                                // GTK's drag threshold: a click that wobbles is still a click.
+                                // A click that wobbles within the drag threshold is still a click.
                                 if (abs(self.mouse-x - self.pressed-x) < 8px && abs(self.mouse-y - self.pressed-y) < 8px) {
                                     return;
                                 }

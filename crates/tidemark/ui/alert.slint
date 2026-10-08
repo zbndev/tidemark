@@ -1,9 +1,9 @@
-// AdwAlertDialog: a heading, a sentence, an optional form, and a row of responses, over a
+// An alert dialog: a heading, a sentence, an optional form, and a row of responses, over a
 // dimmed window. Rust asks a question through the `Alert` global and awaits the answer.
 
 import { Theme } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
-import { Button, Caption, Entry } from "adw.slint";
+import { Button, Caption, Entry } from "widgets.slint";
 
 // 0 plain, 1 suggested, 2 destructive.
 export struct AlertResponse {
@@ -65,7 +65,7 @@ export component AlertDialog inherits Rectangle {
     property <string> key-text;
     property <bool> insecure;
     property <string> warning: Alert.content == 2 && Alert.ask-endpoint ? Alert.endpoint-warning(root.endpoint-text) : "";
-    // Whether the suggested response can be taken. The form's checks are the GTK dialog's:
+    // Whether the suggested response can be taken. The form requires:
     // a name that suggests a usable id, an endpoint the daemon would not refuse outright,
     // plain http only once acknowledged, and a key.
     property <bool> valid: Alert.content == 1 ? Alert.name-usable(root.name-text, Alert.current)

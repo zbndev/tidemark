@@ -16,14 +16,10 @@ mod daemon_job;
 mod detail;
 #[cfg(windows)]
 mod file_log;
-mod frame;
-// Carried over from the GTK client whole; the parts nothing reads yet are for the dialogs
-// still to come.
-#[allow(dead_code)]
 mod format;
+mod frame;
 mod markdown;
 mod marks;
-#[allow(dead_code)]
 mod model;
 #[cfg(unix)]
 mod portal;
@@ -98,7 +94,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     };
 
-    // No session bus on Windows, so nothing like GApplication's single instance: a second
+    // No session bus on Windows, so single-instance activation uses the daemon: a second
     // launch asks the running window to come forward through the daemon and leaves.
     // The guard lives until `main` returns; the kernel releases it if the process dies.
     #[cfg(windows)]

@@ -51,7 +51,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libfontconfig-dev libsqlite3-dev pkg-config cmake \
+            libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev \
             dbus-daemon desktop-file-utils appstream shellcheck
 
       # rust-toolchain.toml pins the channel; rustup reads it on first use.
@@ -64,13 +64,13 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # A session bus, because tidemark-core's Secret Service tests skip themselves
       # without one and tidemarkd opens a session connection. With a bus but no Secret
       # Service the keyring assertions still skip, which is the designed behaviour.
       - name: Tests
-        run: dbus-run-session -- cargo test --workspace
+        run: dbus-run-session -- cargo test --workspace --locked
 
       - name: Layering
         run: scripts/check-layering.sh
@@ -81,9 +81,15 @@ jobs:
       - name: The user-daemon restart helper
         run: scripts/test-restart-user-daemon.sh
 
+      - name: Package dependency checks
+        run: scripts/test-package-deps.sh
+
+      - name: Release helper
+        run: scripts/test-release.sh
+
       - name: Shell
         run: |
-          shellcheck scripts/*.sh data/restart-user-daemon \
+          shellcheck scripts/*.sh data/restart-user-daemon data/packaging/windows/stage-runtime.sh \
             data/packaging/deb/postinst data/packaging/rpm/post-install.sh
 
   # The same gate on Windows: fmt, clippy and the whole suite, on MSYS2 UCRT64. The
@@ -153,8 +159,8 @@ jobs:
 
       - name: Clippy
         shell: msys2 {0}
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Tests
         shell: msys2 {0}
-        run: cargo test --workspace
+        run: cargo test --workspace --locked

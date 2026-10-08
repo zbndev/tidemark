@@ -8,7 +8,7 @@ set -eu
 #
 # Run by hand. This has no GitHub Actions trigger on purpose: it needs systemd as PID 1 in
 # a privileged container, and the thing it guards changes about once a release. See
-# docs/superpowers/specs/2026-08-22-ci-release-packaging-design.md.
+# CONTEXT.md, Packaging.
 #
 # # Why the packages are built inside the target containers
 #

@@ -26,7 +26,7 @@ license=('MIT')
 # The client links fontconfig and nothing else of the desktop's: winit loads xkbcommon and
 # the Wayland client with dlopen, and Slint's OpenGL renderer libEGL, so namcap and ldd
 # cannot see them and they are named here.
-depends=('sqlite' 'dbus' 'fontconfig' 'libxkbcommon' 'wayland' 'libglvnd')
+depends=('sqlite' 'dbus' 'fontconfig' 'hicolor-icon-theme' 'libxkbcommon' 'wayland' 'libglvnd')
 optdepends=(
     'libx11: an X11 session'
     'libxcursor: an X11 session'
@@ -70,7 +70,7 @@ package() {
     # These are high-quality reductions of the owner's 1024px source; the small variants
     # also trim only transparent margin so the mark remains legible in a 16px panel. The
     # source itself is a 512px icon at 2x scale, a directory declared by hicolor rather
-    # than an unindexed 1024x1024 directory GTK would never select.
+    # than an unindexed 1024x1024 directory an icon-theme consumer would never select.
     local size
     for size in 16 22 24 32 48 64 128 256 512; do
         install -Dm644 \

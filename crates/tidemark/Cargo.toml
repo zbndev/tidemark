@@ -48,14 +48,14 @@ windows = { version = "0.62.2", features = [
 ] }
 # The Windows tray. tray-icon drives the Win32 tray APIs on a thread of its own; `windows`
 # supplies the message pump that thread must run for menu events to be delivered.
-tray-icon = "0.25.0"
+# Disable unused Linux backends; the Linux tray uses ksni below.
+tray-icon = { version = "0.25.0", default-features = false }
 # AF_UNIX on Windows: std has no sockets there. The daemon serves its p2p endpoint with
 # the same crate.
 uds_windows = "1.2.1"
 
 [target.'cfg(unix)'.dependencies]
-# StatusNotifierItem and com.canonical.dbusmenu. Unlicense (public domain), so unlike
-# libayatana-appindicator-glib it can be linked into an MIT project; built on the same
+# StatusNotifierItem and com.canonical.dbusmenu. Unlicense (public domain); built on the same
 # zbus 5 and async-io backend this crate already talks to the daemon over.
 ksni = { version = "0.3.6", default-features = false, features = ["async-io"] }
 

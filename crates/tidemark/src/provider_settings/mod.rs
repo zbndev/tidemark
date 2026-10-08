@@ -1,6 +1,5 @@
 //! Navigable provider configuration: the configured list on two tabs, the catalog picker,
-//! and one account's page, drawn over the main window as libadwaita's preferences dialog
-//! is.
+//! and one account's page, drawn in a Slint dialog over the main window.
 //!
 //! The built-in tab's "+" opens the catalog picker and the custom tab's imports a plugin
 //! file. A plugin lives on the custom tab in both of its states: configured, where it is

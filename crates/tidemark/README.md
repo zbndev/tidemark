@@ -1,9 +1,8 @@
 # tidemark — the desktop client
 
 The desktop client, drawn with Slint (FemtoVG: OpenGL on Linux, wgpu on Direct3D 12 on
-Windows). It speaks to `tidemarkd` over D-Bus and nothing else. It replaced the GTK and
-libadwaita client, whose look it keeps: `ui/theme.slint` and `ui/adw.slint` spell out
-libadwaita's palette and widgets.
+Windows). It speaks to `tidemarkd` over D-Bus and nothing else. `ui/theme.slint` and
+`ui/widgets.slint` define its palette and shared widgets.
 
 ```bash
 cargo run -p tidemark                                # against the running tidemarkd
@@ -79,5 +78,4 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
 
 ## Not yet
 
-The GTK client had these; they are still to be drawn here: keyboard focus on cards,
-and F10 for the primary menu.
+Keyboard focus on cards and F10 for the primary menu.

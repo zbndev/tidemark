@@ -16,6 +16,17 @@ cd "$(dirname "$0")/.."
 
 status=0
 
+# Resolve every platform: a Windows-only dependency can enable a Linux toolkit feature
+# in Cargo.lock even when that feature is never built on the current host.
+resolved=$(cargo tree --quiet --locked --workspace --target all --edges normal,build,dev \
+    --prefix none --format '{p}' | awk '{print $1}' | sort -u)
+toolkits=$(printf '%s\n' "$resolved" \
+    | grep -E '^(gtk[34]?(-sys|-macros)?|gdk[34]?(-sys)?|gdk-pixbuf(-sys)?|glib(-sys|-macros)?|gio(-sys)?|gobject-sys|pango(-sys)?|cairo-rs|cairo-sys-rs|atk(-sys)?|libadwaita(-sys)?|libappindicator(-sys)?)$' || true)
+if [ -n "$toolkits" ]; then
+    printf 'the workspace must use Slint without the retired display stack:\n%s\n' "$toolkits" >&2
+    status=1
+fi
+
 forbid() {
     local package=$1 reason=$2
     shift 2

@@ -17,7 +17,7 @@ Slint presentation and desktop lifecycle, an IPC client of `tidemarkd`. Markup i
 | Tray and close-to-tray | `src/tray.rs`, `window.rs` (`start_tray`, `on_close_requested`) | Menu model is pure; backends on their own threads send `Command`s |
 | Card content | `src/view.rs`, `ui/card.slint` | Pure status-to-card decisions; markup only draws |
 | Grid, drag and window | `ui/app.slint` | Slot geometry, drag, settle, header bar |
-| Widgets and palette | `ui/adw.slint`, `ui/theme.slint` | libadwaita metrics and colours |
+| Widgets and palette | `ui/widgets.slint`, `ui/theme.slint` | Shared Slint widgets and palette |
 | Pure presentation | `src/model.rs`, `src/format.rs` | Ordering, catalog titles, chips, relative times |
 | Marks and desktop style | `src/marks.rs`, `src/portal.rs`, `src/registry.rs` | Provider SVG lookup; XDG portal / Windows registry |
 | Windows lifetime | `src/daemon_job.rs`, `src/single_instance.rs`, `src/frame.rs`, `src/file_log.rs` | Audited `unsafe` islands |

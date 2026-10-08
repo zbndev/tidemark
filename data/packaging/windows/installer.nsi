@@ -70,8 +70,8 @@ Section "Install"
 
   File "${SRC_DIR}\tidemark.exe"
   File "${SRC_DIR}\tidemarkd.exe"
-  ; An upgrade from the GTK client leaves its runtime behind otherwise: DLLs, schemas,
-  ; icon themes and fontconfig nothing loads any more.
+  ; Remove obsolete runtime files from earlier versions before installing the current
+  ; import closure and application assets.
   RMDir /r "$INSTDIR\lib"
   RMDir /r "$INSTDIR\etc"
   RMDir /r "$INSTDIR\share"

@@ -1,4 +1,4 @@
-//! The window's state and the decisions the GTK `window.rs` makes, over a Slint model.
+//! The window's state and presentation decisions over a Slint model.
 //!
 //! The model keeps one row per account in the order the account was first seen, and never
 //! reorders it: each row carries its visible slot instead. A repeater instance therefore
@@ -948,7 +948,7 @@ impl MainWindow {
         self.redraw();
     }
 
-    /// A completed drag. Applied here first and sent afterwards, as the GTK window does: the
+    /// A completed drag. Applied here first and sent afterwards: the
     /// daemon's echo is a no-op when it agrees, and a refusal puts back what it really has.
     fn reorder(self: &Rc<Self>, from: usize, to: usize) {
         let statuses = self.statuses.borrow().clone();
