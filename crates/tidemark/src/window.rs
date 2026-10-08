@@ -16,6 +16,7 @@ use tidemark_types::{DataInfo, Preferences, ProviderDefinition, ProviderStatus, 
 
 use crate::alert::{Alerts, Appearance as Look, Content, Question};
 use crate::bus::{self, DaemonProxy, Update};
+use crate::detail::DetailDialog;
 use crate::marks::Marks;
 use crate::preferences::PreferencesDialog;
 use crate::provider_settings::{self, CardAction, ProviderDialog};
@@ -147,6 +148,7 @@ pub struct MainWindow {
     alerts: Rc<Alerts>,
     /// The open provider dialog, fed everything the daemon says while it is open.
     providers: RefCell<Option<Rc<ProviderDialog>>>,
+    detail: RefCell<Option<Rc<DetailDialog>>>,
     /// The account whose card menu is open.
     menu_target: RefCell<Option<(String, String)>>,
     /// What the daemon last said, for the Preferences dialog to open on.
@@ -200,6 +202,7 @@ impl MainWindow {
             marks: Rc::default(),
             alerts: Alerts::install(ui),
             providers: RefCell::default(),
+            detail: RefCell::default(),
             menu_target: RefCell::default(),
             preferences: RefCell::default(),
             data: RefCell::new(DataInfo {
@@ -271,6 +274,14 @@ impl MainWindow {
                 });
             }
         });
+        ui.on_open_detail({
+            let weak = weak.clone();
+            move |index| {
+                if let (Some(main), Ok(index)) = (weak.upgrade(), usize::try_from(index)) {
+                    main.open_detail(index);
+                }
+            }
+        });
         ui.on_toggle_group({
             let weak = weak.clone();
             move |index| {
@@ -293,6 +304,9 @@ impl MainWindow {
             move || {
                 if let Some(main) = weak.upgrade() {
                     main.redraw();
+                    if let Some(detail) = main.detail.borrow().clone() {
+                        detail.tick();
+                    }
                 }
             }
         });
@@ -443,11 +457,13 @@ impl MainWindow {
                 self.data.replace(data);
                 self.update_preferences();
                 self.redraw();
+                self.update_detail();
             }
             Update::Catalog(definitions) => {
                 self.definitions.replace(definitions);
                 self.marks.forget();
                 self.redraw();
+                self.update_detail();
             }
             Update::Activate => present(&ui),
             Update::Waiting(reason) => {
@@ -457,6 +473,9 @@ impl MainWindow {
                 self.show_update("");
                 ui.set_message(reason.into());
                 ui.set_page(PAGE_WAITING);
+                if let Some(detail) = self.detail.borrow().clone() {
+                    detail.disconnected();
+                }
             }
         }
         self.update_providers();
@@ -576,6 +595,65 @@ impl MainWindow {
         }
     }
 
+    fn open_detail(self: &Rc<Self>, row: usize) {
+        if self.detail.borrow().is_some() || self.daemon.borrow().is_none() {
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let Some((provider, account)) = self.rows.borrow().get(row).cloned() else {
+            return;
+        };
+        let Some(status) = self
+            .statuses
+            .borrow()
+            .iter()
+            .find(|status| status.provider == provider && status.account == account)
+            .cloned()
+        else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        let daemon = Rc::new({
+            let weak = weak.clone();
+            move || weak.upgrade().and_then(|main| main.daemon.borrow().clone())
+        });
+        let name = model::name(&model::titles(&self.definitions.borrow()), &provider);
+        let dialog = DetailDialog::open(
+            &ui,
+            daemon,
+            &status,
+            &name,
+            self.marks.get(&provider),
+            move || {
+                if let Some(main) = weak.upgrade() {
+                    main.detail.replace(None);
+                }
+            },
+        );
+        self.detail.replace(Some(dialog));
+    }
+
+    fn update_detail(&self) {
+        let dialog = self.detail.borrow().clone();
+        let Some(dialog) = dialog else {
+            return;
+        };
+        let status = self
+            .statuses
+            .borrow()
+            .iter()
+            .find(|status| dialog.matches(&status.provider, &status.account))
+            .cloned();
+        if let Some(status) = status {
+            let name = model::name(&model::titles(&self.definitions.borrow()), &status.provider);
+            dialog.apply(&status, &name, self.marks.get(&status.provider));
+        } else {
+            dialog.close();
+        }
+    }
+
     /// Replaces everything with what the daemon just said it knows.
     fn show_all(&self, statuses: Vec<ProviderStatus>) {
         let Some(ui) = self.ui.upgrade() else {
@@ -586,6 +664,7 @@ impl MainWindow {
             self.statuses.borrow_mut().clear();
             self.sync_rows();
             ui.set_page(PAGE_WELCOME);
+            self.update_detail();
             return;
         }
         self.expanded
@@ -600,11 +679,17 @@ impl MainWindow {
         self.sync_rows();
         self.redraw();
         ui.set_page(PAGE_GRID);
+        self.update_detail();
     }
 
     /// One account's update. A card for an account seen for the first time opens its group,
     /// so the new account is on screen rather than behind a counter.
     fn show_one(&self, status: ProviderStatus) {
+        let detail_changed = self
+            .detail
+            .borrow()
+            .as_ref()
+            .is_some_and(|dialog| dialog.matches(&status.provider, &status.account));
         let known = self
             .statuses
             .borrow()
@@ -616,6 +701,9 @@ impl MainWindow {
                 self.redraw();
                 if let Some(ui) = self.ui.upgrade() {
                     ui.set_page(PAGE_GRID);
+                }
+                if detail_changed {
+                    self.update_detail();
                 }
             }
             None => {

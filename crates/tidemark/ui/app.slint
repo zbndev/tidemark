@@ -9,9 +9,10 @@ import { ContextMenu, MenuEntry } from "adw.slint";
 import { Prefs, PreferencesDialog } from "preferences.slint";
 import { About, AboutDialog } from "about.slint";
 import { NoteBlock, ReleaseNotes, ReleaseNotesDialog } from "release_notes.slint";
+import { QuotaDetails, QuotaDetailsDialog, QuotaWindowData, QuotaDetailRow, QuotaSectionData } from "detail.slint";
 import "../../../data/fonts/rubik/Rubik%5Bwght%5D.ttf";
 
-export { Theme, CardData, GaugeData, RowData, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData, Alert, AlertForm, AlertResponse, PreviewRow, MenuEntry, Prefs, About, NoteBlock, ReleaseNotes }
+export { Theme, CardData, GaugeData, RowData, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData, Alert, AlertForm, AlertResponse, PreviewRow, MenuEntry, Prefs, About, NoteBlock, ReleaseNotes, QuotaDetails, QuotaWindowData, QuotaDetailRow, QuotaSectionData }
 
 component HeaderButton inherits Rectangle {
     in property <image> icon;
@@ -140,6 +141,7 @@ export component AppWindow inherits Window {
     callback card-menu(int) -> [MenuEntry];
     callback card-action(string);
     callback card-check-error(string);
+    callback open-detail(int);
     callback open-preferences();
     callback open-about();
 
@@ -425,6 +427,9 @@ export component AppWindow inherits Window {
                     // travelled far enough to start carrying it.
                     property <bool> grabbed: root.drag-index == index;
                     property <bool> settling: root.settle-index == index;
+                    // Retained through release(): clearing the global drag must not turn
+                    // its final pointer release into a card click.
+                    property <bool> was-dragged: false;
                     // The slot in index units, so a window resize repositions instantly
                     // while a reorder animates.
                     property <float> position: root.shifted(card.slot);
@@ -446,6 +451,9 @@ export component AppWindow inherits Window {
                         mouse-cursor: slot.grabbed ? MouseCursor.grabbing : MouseCursor.default;
 
                         pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                slot.was-dragged = false;
+                            }
                             if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down && root.shown-count > 1) {
                                 root.drag-index = index;
                                 root.drag-slot = card.slot;
@@ -469,6 +477,12 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        clicked => {
+                            if (!slot.was-dragged) {
+                                root.open-detail(index);
+                            }
+                        }
+
                         moved => {
                             if (root.drag-index != index) {
                                 return;
@@ -479,6 +493,7 @@ export component AppWindow inherits Window {
                                     return;
                                 }
                                 root.carrying = true;
+                                slot.was-dragged = true;
                             }
                             // The slot moves with the pointer, so what the pointer has moved
                             // since the last event is its distance from the grip point.
@@ -498,7 +513,7 @@ export component AppWindow inherits Window {
                         lifted: touch.has-hover && !root.carrying;
                         carried: slot.grabbed;
                         interactive: card.shown && !root.menu-open && !Alert.open && !Prefs.open && !About.open
-                            && !ReleaseNotes.open && !ProviderSettings.open;
+                            && !ReleaseNotes.open && !ProviderSettings.open && !QuotaDetails.open;
                         check-error => { root.card-check-error(card.error); }
                     }
 
@@ -555,6 +570,12 @@ export component AppWindow inherits Window {
         dismissed => {
             root.menu-open = false;
         }
+    }
+
+    if QuotaDetails.open: QuotaDetailsDialog {
+        width: root.width;
+        height: root.height;
+        border-radius: root.frame-radius;
     }
 
     if Prefs.open: PreferencesDialog {

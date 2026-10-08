@@ -10,8 +10,10 @@ mod alert;
 #[cfg(unix)]
 mod application;
 mod bus;
+mod chart;
 #[cfg(windows)]
 mod daemon_job;
+mod detail;
 #[cfg(windows)]
 mod file_log;
 mod frame;
@@ -47,7 +49,8 @@ mod ui {
 use ui::{
     About, Alert, AlertForm, AlertResponse, AppWindow, CandidateData, CardData, DetailData,
     GaugeData, MenuEntry, NoteBlock, OptionData, PickerRowData, Prefs, PreviewRow, ProviderRowData,
-    ProviderSettings, ReleaseNotes, RowData, SwitchData, Theme,
+    ProviderSettings, QuotaDetailRow, QuotaDetails, QuotaSectionData, QuotaWindowData,
+    ReleaseNotes, RowData, SwitchData, Theme,
 };
 
 fn main() -> Result<(), slint::PlatformError> {

@@ -231,6 +231,18 @@ fn presentation_row<'a>(presentation: &'a Presentation, widget: &'a Widget) -> O
     })
 }
 
+/// The same widget validation and formatting in a published detail section.
+pub fn detail_row(
+    presentation: &Presentation,
+    widget: &Widget,
+) -> Option<tidemark_types::DetailRow> {
+    let row = presentation_row(presentation, widget)?;
+    Some(tidemark_types::DetailRow {
+        label: row.metric.title.clone(),
+        value: row.text()?,
+    })
+}
+
 /// Published order is authoritative. Only an absent presentation takes the rolling-upgrade path.
 fn card_rows(status: &ProviderStatus) -> Vec<Row<'_>> {
     if let Some(presentation) = &status.presentation {

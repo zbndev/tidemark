@@ -51,6 +51,10 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
   checks; a failed check shows red `check failed`, opening the daemon's diagnostic on
   click. Last good metrics stay visible. Progress needs a daemon with the `checking`
   status field; older daemons still provide failure details and the last check time.
+- Card click opens the account's quota detail dialog: window selection, current-segment
+  burn-down chart with even pace when the schedule is known, and published detail sections.
+  Live updates preserve selection; history loads over D-Bus, with loading, empty and error
+  states. Late replies cannot replace a newer selection or reopen a closed dialog.
 - Grid: fixed 300 × 220 px cells, Auto or capped columns from preferences, centred.
   Status changes and account expansion keep the same geometry; overflowing card content
   scrolls inside its card.
@@ -75,6 +79,5 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
 
 ## Not yet
 
-The GTK client had these; they are still to be drawn here: the detail (history chart)
-dialog; release notes preview and the restart prompt; keyboard
-focus on cards, and F10 for the primary menu.
+The GTK client had these; they are still to be drawn here: keyboard focus on cards,
+and F10 for the primary menu.

@@ -1,0 +1,210 @@
+// One account's quota windows, current-segment history, and published detail sections.
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ActionRow, BoxedList, Button, Caption, GroupHeading, Spinner } from "adw.slint";
+
+export struct QuotaWindowData { title: string, summary: string }
+export struct QuotaDetailRow { label: string, value: string }
+export struct QuotaSectionData { title: string, rows: [QuotaDetailRow] }
+
+export global QuotaDetails {
+    in property <bool> open;
+    in property <string> name;
+    in property <string> account;
+    in property <string> state;
+    in property <image> mark;
+    in property <bool> has-mark;
+    in property <[QuotaWindowData]> windows;
+    in property <int> selected: -1;
+    in property <[QuotaSectionData]> sections;
+    in property <string> schedule;
+    in property <bool> has-schedule;
+    in property <string> message;
+    in property <bool> loading;
+    in property <bool> failed;
+    // Coordinates in a 1000 by 1000 view box, scaled to the plot's dimensions.
+    in property <string> actual;
+    in property <bool> has-marker;
+    in property <float> marker-x;
+    in property <float> marker-y;
+    callback close();
+    callback select(int);
+}
+
+export component QuotaDetailsDialog inherits Rectangle {
+    background: Theme.dark ? #00000080 : #00000040;
+    TouchArea { }
+
+    scope := FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                QuotaDetails.close();
+                return accept;
+            }
+            reject
+        }
+
+        Rectangle {
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            width: min(720px, root.width - 24px);
+            height: min(680px, root.height - 24px);
+            background: Theme.window-bg;
+            border-radius: 14px;
+            drop-shadow-blur: 24px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: #00000050;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 47px;
+                    Text {
+                        text: QuotaDetails.name + " details";
+                        color: Theme.fg;
+                        font-weight: 700;
+                        overflow: elide;
+                        width: parent.width - 90px;
+                    }
+                    HorizontalLayout {
+                        padding-right: 6px;
+                        alignment: end;
+                        VerticalLayout {
+                            alignment: center;
+                            Button {
+                                kind: 3;
+                                has-icon: true;
+                                icon: @image-url("icons/window-close-symbolic.svg");
+                                clicked => { QuotaDetails.close(); }
+                            }
+                        }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    mouse-drag-pan-enabled: false;
+                    content-width: self.visible-width;
+                    VerticalLayout {
+                        padding: 24px;
+                        spacing: 18px;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            if QuotaDetails.has-mark: Image {
+                                source: QuotaDetails.mark;
+                                colorize: Theme.fg;
+                                width: 32px;
+                                height: 32px;
+                            }
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text {
+                                    text: QuotaDetails.name;
+                                    color: Theme.fg;
+                                    font-size: Theme.body * 1.36;
+                                    font-weight: 800;
+                                    wrap: word-wrap;
+                                }
+                                if QuotaDetails.account != "": Caption { text: QuotaDetails.account; }
+                                if QuotaDetails.state != "": Caption { text: QuotaDetails.state; }
+                            }
+                        }
+
+                        if QuotaDetails.windows.length > 0: VerticalLayout {
+                            GroupHeading { title: "Quota windows"; }
+                            BoxedList {
+                                for window[index] in QuotaDetails.windows: ActionRow {
+                                    title: window.title;
+                                    subtitle: window.summary;
+                                    first: index == 0;
+                                    last: index == QuotaDetails.windows.length - 1;
+                                    activatable: true;
+                                    activated => { QuotaDetails.select(index); }
+                                    if index == QuotaDetails.selected: Image {
+                                        source: @image-url("icons/object-select-symbolic.svg");
+                                        colorize: Theme.link;
+                                        width: 16px;
+                                        height: 16px;
+                                    }
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 6px;
+                            GroupHeading { title: "Burn-down"; description: QuotaDetails.schedule; }
+                            Caption { text: QuotaDetails.has-schedule ? "Actual · Even pace" : "Actual"; }
+                            Rectangle {
+                                height: 220px;
+                                // Leave space for the stroke and a single observation's dot.
+                                plot := Rectangle {
+                                    x: 4px;
+                                    y: 4px;
+                                    width: parent.width - 8px;
+                                    height: parent.height - 8px;
+                                    if QuotaDetails.message == "": Rectangle {
+                                        if QuotaDetails.has-schedule: Rectangle {
+                                            for dash in 20: Path {
+                                                viewbox-width: 1;
+                                                viewbox-height: 1;
+                                                fit: fill;
+                                                stroke: Theme.ink(0.38);
+                                                stroke-width: 1.5px;
+                                                MoveTo { x: dash / 20; y: 1 - dash / 20; }
+                                                LineTo { x: (dash + 0.5) / 20; y: 1 - (dash + 0.5) / 20; }
+                                            }
+                                        }
+                                        Path {
+                                            viewbox-width: 1000;
+                                            viewbox-height: 1000;
+                                            fit: fill;
+                                            commands: QuotaDetails.actual;
+                                            stroke: Theme.fg;
+                                            stroke-width: 2.5px;
+                                        }
+                                        if QuotaDetails.has-marker: Rectangle {
+                                            x: QuotaDetails.marker-x / 1000 * plot.width - 4px;
+                                            y: QuotaDetails.marker-y / 1000 * plot.height - 4px;
+                                            width: 8px;
+                                            height: 8px;
+                                            border-radius: 4px;
+                                            background: Theme.fg;
+                                        }
+                                    }
+                                    if QuotaDetails.message != "": VerticalLayout {
+                                        alignment: center;
+                                        spacing: 10px;
+                                        if QuotaDetails.loading: HorizontalLayout {
+                                            alignment: center;
+                                            Spinner { size: 24px; }
+                                        }
+                                        Text {
+                                            text: QuotaDetails.message;
+                                            color: QuotaDetails.failed ? Theme.error : Theme.ink(Theme.dim);
+                                            horizontal-alignment: center;
+                                            wrap: char-wrap;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        for section in QuotaDetails.sections: VerticalLayout {
+                            GroupHeading { title: section.title; }
+                            BoxedList {
+                                for row[index] in section.rows: ActionRow {
+                                    title: row.label;
+                                    subtitle: row.value;
+                                    first: index == 0;
+                                    last: index == section.rows.length - 1;
+                                    wrap-anywhere: true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

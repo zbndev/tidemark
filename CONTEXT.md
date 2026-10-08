@@ -622,9 +622,10 @@ they record bind the Slint client all the same; it draws them in `crates/tidemar
 - **A window the provider did not send is not drawn.** No placeholder, no explanation. The
   window set is whatever arrived; the card rearranges silently when it changes. Needs
   hysteresis in the daemon so a single malformed response does not make a window blink.
-- **Click opens a detail dialog** (`AdwDialog`, standard dimming; real blur via
-  `gtk_snapshot_push_blur()` is possible and deferred) with the burn-down chart for the
-  current segment.
+- **Click opens a detail dialog** inside the Slint window with standard dimming, quota
+  window selection, the burn-down chart for the current segment, and published detail
+  sections. Live updates keep a still-reported selection; D-Bus request generations discard
+  stale history replies. Even pace is drawn only with a reported reset and window length.
 - **Failure states** are distinguished in data but collapsed in the UI into three groups by
   what the user must do: *you fix it* / *it fixes itself* / *they broke it*. The first group
   has somewhere to go: the provider's settings detail page.
