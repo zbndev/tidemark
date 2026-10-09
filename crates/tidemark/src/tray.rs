@@ -29,6 +29,7 @@ use tidemark_types::{DANGER_AT, ProviderStatus, present};
 
 use crate::format;
 use crate::model;
+use crate::view;
 
 /// What a menu row asks the interface to do.
 ///
@@ -115,21 +116,26 @@ fn label(all: &[ProviderStatus], status: &ProviderStatus, titles: &model::Titles
     }
 }
 
-/// The right-hand half of a row: how full the shortest window is, or what is in the way.
+/// The right-hand half of a row: how full the shortest window is, the balance of an
+/// account that has only a balance, or what is in the way.
 ///
 /// A reading survives a failed poll — `ProviderStatus::windows` keeps the last good one —
 /// so a rate-limited account that has numbers shows them, and the chip is what says the
-/// numbers are not fresh. Only an account with no reading at all falls back to the chip.
+/// numbers are not fresh. A balance is shown on the card's terms, only while it is current.
+/// Only an account with neither falls back to the chip.
 fn value(status: &ProviderStatus) -> String {
     let dominant = status
         .to_snapshot()
         .and_then(|snapshot| snapshot.dominant_window().map(|window| window.used_percent));
-    match dominant {
-        Some(used) => present::percent(used),
-        None => format::chip(status)
-            .map(|chip| chip.text)
-            .unwrap_or_else(|| "no reading".to_owned()),
+    if let Some(used) = dominant {
+        return present::percent(used);
     }
+    if let Some(balance) = view::balance_for(status) {
+        return balance.to_owned();
+    }
+    format::chip(status)
+        .map(|chip| chip.text)
+        .unwrap_or_else(|| "no reading".to_owned())
 }
 
 /// Everything the menu needs, computed on the event loop and shipped to the tray's thread.
@@ -1300,6 +1306,27 @@ mod tests {
             rows[0].line(),
             "Z.ai — 44%",
             "a failed poll does not blank the numbers on the card either"
+        );
+    }
+
+    #[test]
+    fn a_balance_only_account_shows_its_balance_while_it_is_current() {
+        let mut status = reading("deepseek", "default", Vec::new());
+        status.details = vec![tidemark_types::DetailSection {
+            title: tidemark_types::DetailSection::BALANCE.to_owned(),
+            rows: vec![tidemark_types::DetailRow {
+                label: "Balance".to_owned(),
+                value: "$454.5426".to_owned(),
+            }],
+        }];
+        let rows = entries(std::slice::from_ref(&status), &model::Titles::new());
+        assert_eq!(rows[0].value, "$454.5426", "the amount the card leads with");
+
+        status.set_state(tidemark_types::ProviderState::RateLimited, None);
+        let rows = entries(&[status], &model::Titles::new());
+        assert_eq!(
+            rows[0].value, "rate limited",
+            "the card hides a stale balance behind the daemon's explanation, and so does the row"
         );
     }
 
