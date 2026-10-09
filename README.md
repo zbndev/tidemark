@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="data/icons/hicolor/512x512@2/apps/io.github.zbndev.Tidemark.png" width="160" alt="Vibe Tavern" />
+<img src="data/icons/hicolor/512x512@2/apps/io.github.zbndev.Tidemark.png" width="160" alt="Tidemark" />
 
 # Tidemark
 
