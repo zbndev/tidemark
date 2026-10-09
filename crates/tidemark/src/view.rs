@@ -368,7 +368,7 @@ fn metric_window(metric: &Metric, used_percent: f64) -> Option<Window> {
 
 /// An amount-only balance from a successful reading. Failed polls keep old details, which
 /// must not hide the daemon's current explanation.
-fn balance_for(status: &ProviderStatus) -> Option<&str> {
+pub fn balance_for(status: &ProviderStatus) -> Option<&str> {
     (status.state() == Some(ProviderState::Ok))
         .then(|| status.balance())
         .flatten()
