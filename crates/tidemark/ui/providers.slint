@@ -372,7 +372,10 @@ component DetailPage inherits ScrollView {
                         first: root.data.choices.length == 0;
                         title: "OAuth login";
                         subtitle: root.data.sign-in-subtitle;
-                        if root.data.waiting: Spinner { }
+                        if root.data.waiting: VerticalLayout {
+                            alignment: center;
+                            Spinner { }
+                        }
                         if root.data.waiting: Button {
                             text: "Copy link";
                             clicked => {
