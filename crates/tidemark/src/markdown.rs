@@ -18,9 +18,12 @@
 //!   comes through as text.
 //! * **Bare URLs become links.** GitHub's generated notes are mostly bare pull-request
 //!   URLs, which CommonMark leaves as plain text. A preview of those notes where the links
-//!   are dead would send every reader to the browser this dialog exists to postpone.
+//!   are dead would send every reader to the browser this dialog exists to postpone. The
+//!   ones GitHub shortens, to `#69` or `v0.1.0...v0.2.0`, are shortened the same way.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+use crate::update;
 
 /// One block of a rendered document: one element's worth.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,11 +360,53 @@ fn linkify(text: &str, out: &mut String) {
         escape(&rest[..start], out);
         let (url, tail) = split_url(&rest[start..]);
         out.push('[');
-        escape(url, out);
+        match github_label(url) {
+            Some(label) => escape(&label, out),
+            None => escape(url, out),
+        }
         close_link(url, out);
         rest = tail;
     }
     escape(rest, out);
+}
+
+/// The label GitHub itself gives a bare link to a pull request, an issue, a comparison or
+/// a commit, with `owner/repo` in front when it is not Tidemark's own. Anything else keeps
+/// its address.
+///
+/// Slint only answers a click on the last line of a link that wraps, and a full GitHub
+/// address in a narrow dialog nearly always does; the short label rarely wraps at all.
+fn github_label(url: &str) -> Option<String> {
+    let mut parts = url.strip_prefix("https://github.com/")?.split('/');
+    let (owner, repo, kind, target) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some()
+        || [owner, repo, target].iter().any(|part| part.is_empty())
+        || target.contains(['?', '#'])
+    {
+        return None;
+    }
+    let repository = format!("{owner}/{repo}");
+    let ours = update::RELEASES_URL
+        .strip_suffix("/releases")
+        .and_then(|home| home.strip_prefix("https://github.com/"))
+        .is_some_and(|home| home.eq_ignore_ascii_case(&repository));
+    let repository = if ours { String::new() } else { repository };
+    match kind {
+        "pull" | "issues" if target.bytes().all(|byte| byte.is_ascii_digit()) => {
+            Some(format!("{repository}#{target}"))
+        }
+        "compare" if ours => Some(target.to_owned()),
+        "compare" => Some(format!("{repository}@{target}")),
+        "commit" if target.len() >= 7 && target.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+            let short = &target[..7];
+            Some(if ours {
+                short.to_owned()
+            } else {
+                format!("{repository}@{short}")
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Where the next bare URL begins, if any. Only at a word boundary: `nothttps://x` is a
@@ -449,17 +494,19 @@ mod tests {
                 marker: "•".into(),
                 markdown: concat!(
                     "fix\\(ui\\)\\: a fix by \\@zbndev in ",
-                    "[https\\:\\/\\/github\\.com\\/zbndev\\/tidemark\\/pull\\/69]",
-                    "(<https://github.com/zbndev/tidemark/pull/69>)",
+                    "[\\#69](<https://github.com/zbndev/tidemark/pull/69>)",
                 )
                 .into(),
             },
             "a bare pull-request URL is a link, or the whole preview is dead text"
         );
-        assert!(
-            markdown(&rendered[2]).starts_with("**Full Changelog**\\: [https"),
-            "got {:?}",
-            rendered[2]
+        assert_eq!(
+            markdown(&rendered[2]),
+            concat!(
+                "**Full Changelog**\\: ",
+                "[v0\\.1\\.0\\.\\.\\.v0\\.2\\.0]",
+                "(<https://github.com/zbndev/tidemark/compare/v0.1.0...v0.2.0>)",
+            )
         );
         for block in &rendered {
             styled(markdown(block));
@@ -550,6 +597,35 @@ mod tests {
                 "See [https\\:\\/\\/example\\.com\\/a\\_\\(b\\)](<https://example.com/a_(b)>)\\, ",
                 "then [https\\:\\/\\/example\\.com\\/c](<https://example.com/c>)\\.",
             )
+        );
+        styled(markdown(&rendered[0]));
+    }
+
+    #[test]
+    fn github_links_are_labelled_the_way_github_labels_them() {
+        let rendered = blocks(concat!(
+            "https://github.com/zbndev/tidemark/issues/7 ",
+            "https://github.com/ZBNdev/Tidemark/commit/0123456789abcdef ",
+            "https://github.com/slint-ui/slint/pull/12 ",
+            "https://github.com/slint-ui/slint/compare/v1.17.0...v1.18.0 ",
+            "https://github.com/zbndev/tidemark/pull/69/files ",
+            "https://github.com/zbndev/tidemark/pull/69#issuecomment-1\n",
+        ));
+
+        assert_eq!(
+            markdown(&rendered[0]),
+            concat!(
+                "[\\#7](<https://github.com/zbndev/tidemark/issues/7>) ",
+                "[0123456](<https://github.com/ZBNdev/Tidemark/commit/0123456789abcdef>) ",
+                "[slint\\-ui\\/slint\\#12](<https://github.com/slint-ui/slint/pull/12>) ",
+                "[slint\\-ui\\/slint\\@v1\\.17\\.0\\.\\.\\.v1\\.18\\.0]",
+                "(<https://github.com/slint-ui/slint/compare/v1.17.0...v1.18.0>) ",
+                "[https\\:\\/\\/github\\.com\\/zbndev\\/tidemark\\/pull\\/69\\/files]",
+                "(<https://github.com/zbndev/tidemark/pull/69/files>) ",
+                "[https\\:\\/\\/github\\.com\\/zbndev\\/tidemark\\/pull\\/69\\#issuecomment\\-1]",
+                "(<https://github.com/zbndev/tidemark/pull/69#issuecomment-1>)",
+            ),
+            "anything GitHub would not shorten keeps its full address"
         );
         styled(markdown(&rendered[0]));
     }
