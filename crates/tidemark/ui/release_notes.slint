@@ -115,28 +115,36 @@ export component ReleaseNotesDialog inherits Rectangle {
                                 spacing: 10px;
                                 alignment: start;
 
+                                // Slint measures a repeated layout's height at its one-line
+                                // width, so wrapped text would leave the scroll short of the
+                                // notes' end. Each block states the height its text wraps to.
                                 for block in ReleaseNotes.blocks: VerticalLayout {
                                     // A heading belongs to what follows it, so the air goes
                                     // above. The dialog's title already names the release,
                                     // so the scale starts one step below a document's.
                                     if block.kind == 0: VerticalLayout {
                                         padding-top: 8px;
-                                        Prose {
+                                        min-height: self.padding-top + heading.preferred-height;
+                                        heading := Prose {
                                             text: block.text;
                                             default-font-size: block.level <= 2 ? 15pt : block.level == 3 ? 13pt : Theme.body;
                                         }
                                     }
-                                    if block.kind == 1: Prose {
-                                        text: block.text;
+                                    if block.kind == 1: VerticalLayout {
+                                        min-height: paragraph.preferred-height;
+                                        paragraph := Prose {
+                                            text: block.text;
+                                        }
                                     }
                                     if block.kind == 2: HorizontalLayout {
                                         padding-left: 4px + 18px * block.depth;
                                         spacing: 8px;
+                                        min-height: item.preferred-height;
                                         Text {
                                             text: block.marker;
                                             color: Theme.ink(Theme.dim);
                                         }
-                                        Prose {
+                                        item := Prose {
                                             horizontal-stretch: 1;
                                             text: block.text;
                                         }
@@ -146,12 +154,13 @@ export component ReleaseNotesDialog inherits Rectangle {
                                         border-radius: 12px;
                                         border-width: 1px;
                                         border-color: Theme.card-outline;
+                                        min-height: code.preferred-height + 16px;
                                         VerticalLayout {
                                             padding-left: 10px;
                                             padding-right: 10px;
                                             padding-top: 8px;
                                             padding-bottom: 8px;
-                                            Prose {
+                                            code := Prose {
                                                 text: block.text;
                                             }
                                         }
