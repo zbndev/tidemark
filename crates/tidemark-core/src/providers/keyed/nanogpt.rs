@@ -33,6 +33,10 @@
 //! `tidemark_types::lead_window_key` — and it is published first; the images allowance
 //! beside it is a secondary row.
 //!
+//! An account without a subscription answers `"active": false` and still reports the
+//! weekly input pool, zeroed against the plan's limit. Those pools meter nothing, so such
+//! an account publishes no windows and the card shows its balance alone.
+//!
 //! A prepaid balance has no denominator. USD is therefore the first row of
 //! [`DetailSection::BALANCE`], which lets the card show the amount without inventing a bar;
 //! NANO and the deposit address remain detail rows. The fixtures below are recorded
@@ -333,9 +337,16 @@ fn parse_for_account(
     let usd = amount(&balance.usd_balance, "usd_balance")?;
     amount(&balance.nano_balance, "nano_balance")?;
 
+    // An account without a subscription still reports the plan's pools, zeroed against
+    // their limits. Nothing meters them, so a bar drawn from them would be a fabrication.
+    let subscribed = match usage.get("active") {
+        None => true,
+        Some(serde_json::Value::Bool(active)) => *active,
+        Some(_) => return Err(ProviderError::malformed("active is not a boolean")),
+    };
     let limits = usage.get("limits").and_then(serde_json::Value::as_object);
     let mut windows = Vec::new();
-    for (name, reported) in &usage {
+    for (name, reported) in usage.iter().filter(|_| subscribed) {
         // A metric the account has no allowance for arrives as `null`. That is an absent
         // window, not a broken one: nothing is reported, so nothing is published.
         if name == "limits" || reported.is_null() {
@@ -424,6 +435,10 @@ mod tests {
     /// the account has no allowance for reported as `null`. The `daily`/`monthly` pair in
     /// NanoGPT's reference does not appear.
     const LIVE: &str = r#"{"active":true,"provider":"balance","providerStatus":null,"providerStatusRaw":null,"stripeSubscriptionId":null,"cancellationReason":null,"canceledAt":null,"endedAt":null,"cancelAt":null,"cancelAtPeriodEnd":false,"limits":{"weeklyInputTokens":60000000,"dailyInputTokens":null,"dailyImages":100},"allowOverage":false,"period":{"currentPeriodEnd":"2026-09-19T22:57:50.820Z"},"dailyImages":{"used":0,"remaining":100,"percentUsed":0,"resetAt":1787616000000},"dailyInputTokens":null,"weeklyInputTokens":{"used":93176,"remaining":59906824,"percentUsed":0.0015529333333333334,"resetAt":1788134400000},"state":"active","graceUntil":null}"#;
+
+    /// A recorded response for an account with no subscription. The weekly input pool is
+    /// still reported, zeroed against the plan's limit, although nothing meters it.
+    const INACTIVE: &str = r#"{"active":false,"provider":null,"providerStatus":null,"providerStatusRaw":null,"stripeSubscriptionId":null,"cancellationReason":null,"canceledAt":null,"endedAt":null,"cancelAt":null,"cancelAtPeriodEnd":false,"limits":{"weeklyInputTokens":60000000,"dailyInputTokens":null,"dailyImages":null},"allowOverage":false,"period":{"currentPeriodEnd":null},"dailyImages":null,"dailyInputTokens":null,"weeklyInputTokens":{"used":0,"remaining":60000000,"percentUsed":0,"resetAt":1791763200000},"state":"inactive","graceUntil":null,"routing":{"scope":"text","recommendedMode":"paygo","reason":"subscription_inactive","billingMode":"both","subscriptionRequestsPermitted":true,"subscriptionQuotaAvailable":false,"paidSpendPolicyAllowsBalance":true,"paidOverageEnabled":false}}"#;
 
     /// The example published in NanoGPT's API reference. No account has been observed
     /// returning it, but the periods it names are read the same way as the live ones.
@@ -552,6 +567,25 @@ mod tests {
         let snapshot = parse(&nothing, BALANCE, at(1_787_600_000)).expect("parses");
         assert!(snapshot.windows.is_empty());
         assert_eq!(snapshot.details[0].rows[0].value, "$129.47");
+    }
+
+    #[test]
+    fn an_account_without_a_subscription_reports_only_the_balance() {
+        let snapshot = parse(INACTIVE, BALANCE, at(1_791_700_000)).expect("parses");
+
+        assert!(snapshot.windows.is_empty());
+        assert_eq!(snapshot.details[0].title, DetailSection::BALANCE);
+        assert_eq!(snapshot.details[0].rows[0].value, "$129.47");
+    }
+
+    #[test]
+    fn an_active_flag_that_is_not_a_boolean_fails_the_snapshot() {
+        let malformed = LIVE.replacen(r#""active":true"#, r#""active":"yes""#, 1);
+
+        assert!(matches!(
+            parse(&malformed, BALANCE, at(1_787_600_000)),
+            Err(super::ProviderError::Malformed { .. })
+        ));
     }
 
     #[test]
