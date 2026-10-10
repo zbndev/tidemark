@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # fontconfig is the one desktop library the client links; Slint's windowing and GPU
       # libraries are loaded at run time and need no headers.
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install the validators
         run: |
@@ -121,7 +121,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: MSVC toolchain
         shell: pwsh
         run: |

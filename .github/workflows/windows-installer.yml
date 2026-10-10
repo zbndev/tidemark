@@ -59,7 +59,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: MSVC toolchain
         shell: pwsh
         run: rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal

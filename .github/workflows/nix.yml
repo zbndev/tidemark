@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Build and exercise the flake in Docker
         run: scripts/test-nix-flake.sh
