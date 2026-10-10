@@ -49,7 +49,7 @@ windows = { version = "0.62.2", features = [
 # The Windows tray. tray-icon drives the Win32 tray APIs on a thread of its own; `windows`
 # supplies the message pump that thread must run for menu events to be delivered.
 # Disable unused Linux backends; the Linux tray uses ksni below.
-tray-icon = { version = "0.25.0", default-features = false }
+tray-icon = { version = "0.26.1", default-features = false }
 # AF_UNIX on Windows: std has no sockets there. The daemon serves its p2p endpoint with
 # the same crate.
 uds_windows = "1.2.1"
