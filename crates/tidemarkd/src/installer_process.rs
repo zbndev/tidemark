@@ -5,8 +5,8 @@
 use std::{io, path::Path, time::Duration};
 
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, GetLastError,
-    HANDLE, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER,
+    ERROR_NO_MORE_FILES, GetLastError, HANDLE, LPARAM, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Networking::WinSock::{
     SIO_AF_UNIX_GETPEERPID, SOCKET, SOCKET_ERROR, WSAGetLastError, WSAIoctl,
@@ -204,53 +204,15 @@ pub fn running(install: &Path) -> io::Result<Vec<Process>> {
                 .position(|c| *c == 0)
                 .unwrap_or(entry.szExeFile.len())],
         );
-        if name.eq_ignore_ascii_case("tidemark.exe") || name.eq_ignore_ascii_case("tidemarkd.exe") {
-            // SAFETY: query and wait access only; no termination right is requested
-            // for another installed copy or another Windows user/session.
-            let handle = unsafe {
-                OpenProcess(
-                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                    false,
-                    entry.th32ProcessID,
-                )
-            }
-            .map_err(io::Error::other)?;
-            let handle = OwnedHandle(handle);
-            let mut buffer = vec![0u16; 32768];
-            let mut length = buffer.len() as u32;
-            // SAFETY: allocated writable buffer whose length is supplied to the API.
-            unsafe {
-                QueryFullProcessImageNameW(
-                    handle.0,
-                    PROCESS_NAME_WIN32,
-                    PWSTR(buffer.as_mut_ptr()),
-                    &mut length,
-                )
-            }
-            .map_err(io::Error::other)?;
-            let image =
-                std::path::PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]))
-                    .canonicalize()?;
-            if let Some(ui) = paths.iter().position(|path| {
-                path.as_ref().is_some_and(|path| {
-                    path.to_string_lossy()
-                        .eq_ignore_ascii_case(&image.to_string_lossy())
-                })
-            }) {
-                if session_id(entry.th32ProcessID)? != session || !same_user(handle.0)? {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "Tidemark is running as another user or in another Windows session",
-                    ));
-                }
-                result.push(Process {
-                    handle,
-                    pid: entry.th32ProcessID,
-                    parent_pid: entry.th32ParentProcessID,
-                    ui: ui == 0,
-                    visible: visible(entry.th32ProcessID)?,
-                });
-            }
+        if (name.eq_ignore_ascii_case("tidemark.exe") || name.eq_ignore_ascii_case("tidemarkd.exe"))
+            && let Some(process) = inspect(
+                entry.th32ProcessID,
+                entry.th32ParentProcessID,
+                &paths,
+                session,
+            )?
+        {
+            result.push(process);
         }
         // SAFETY: same live snapshot and entry buffer.
         next = unsafe { Process32NextW(snapshot.0, &mut entry) };
@@ -261,6 +223,73 @@ pub fn running(install: &Path) -> io::Result<Vec<Process>> {
         return Err(io::Error::other(error));
     }
     Ok(result)
+}
+
+/// A process that has exited holds no files, so it is skipped, also when it exits between
+/// the snapshot and these queries: Windows answers queries about an exited process that
+/// someone still holds open with errors such as ERROR_GEN_FAILURE.
+fn inspect(
+    pid: u32,
+    parent_pid: u32,
+    paths: &[Option<std::path::PathBuf>],
+    session: u32,
+) -> io::Result<Option<Process>> {
+    // SAFETY: query and wait access only; no termination right is requested
+    // for another installed copy or another Windows user/session.
+    let handle = match unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+    } {
+        Ok(handle) => OwnedHandle(handle),
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(None),
+        Err(error) => return Err(io::Error::other(error)),
+    };
+    let identify = || -> io::Result<Option<(bool, bool)>> {
+        let mut buffer = vec![0u16; 32768];
+        let mut length = buffer.len() as u32;
+        // SAFETY: allocated writable buffer whose length is supplied to the API.
+        unsafe {
+            QueryFullProcessImageNameW(
+                handle.0,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+        }
+        .map_err(io::Error::other)?;
+        let image = std::path::PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]))
+            .canonicalize()?;
+        let Some(ui) = paths.iter().position(|path| {
+            path.as_ref().is_some_and(|path| {
+                path.to_string_lossy()
+                    .eq_ignore_ascii_case(&image.to_string_lossy())
+            })
+        }) else {
+            return Ok(None);
+        };
+        if session_id(pid)? != session || !same_user(handle.0)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Tidemark is running as another user or in another Windows session",
+            ));
+        }
+        Ok(Some((ui == 0, visible(pid)?)))
+    };
+    let identity = identify();
+    // SAFETY: the handle above is live and was opened with wait access.
+    if unsafe { WaitForSingleObject(handle.0, 0) } == WAIT_OBJECT_0 {
+        return Ok(None);
+    }
+    Ok(identity?.map(|(ui, visible)| Process {
+        handle,
+        pid,
+        parent_pid,
+        ui,
+        visible,
+    }))
 }
 
 fn user_token(process: HANDLE) -> io::Result<Vec<u64>> {
@@ -398,6 +427,23 @@ mod tests {
         );
         drop(first);
         assert!(MaintenanceGuard::named(&name).is_ok());
+    }
+
+    #[test]
+    fn an_exited_process_still_held_open_is_not_running() {
+        let image = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let mut child = std::process::Command::new(&image)
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        let session = session_id(std::process::id()).unwrap();
+        assert!(
+            inspect(child.id(), 0, &[Some(image)], session)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
