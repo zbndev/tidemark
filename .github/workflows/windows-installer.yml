@@ -1,0 +1,91 @@
+# The Inno setup, built from release binaries and exercised in an isolated install.
+#
+# A release build and the setup compile take a dozen minutes on top of the Windows tests
+# in `ci.yml`, and an ordinary Rust diff cannot fail them differently: the installer tests
+# install fixture executables, not the real client and daemon. So a pull request runs
+# this only when it changes something the payload or the setup is made of:
+# - `.cargo/**`, the manifests, `Cargo.lock`, `rust-toolchain.toml` — the static CRT and
+#   the dependency closure that `stage-runtime.ps1` checks the PE imports of
+# - `crates/*/build.rs` — resources compiled into the binaries
+# - the maintenance helper and the installation code it is built from
+# - `data/packaging/windows/**`, `data/icons/**`, `LICENSE` — the setup and its payload
+# - the PowerShell scripts, the installer fixture, and this file
+#
+# Every push to `main` runs it regardless, which is also what keeps its cache warm for
+# the release; `release.yml` calls it on the tag with the version to stamp and publish.
+name: Windows installer
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/*/build.rs'
+      - 'crates/tidemarkd/src/bin/**'
+      - 'crates/tidemarkd/src/installation.rs'
+      - 'crates/tidemarkd/src/installer_*.rs'
+      - 'data/packaging/windows/**'
+      - 'data/icons/**'
+      - 'LICENSE'
+      - 'scripts/*.ps1'
+      - 'scripts/windows-installer-fixture.rs'
+      - '.github/workflows/windows-installer.yml'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'docs/**'
+  workflow_call:
+    inputs:
+      version:
+        description: The version to stamp into the setup; set, the setup is uploaded.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installer:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: MSVC toolchain
+        shell: pwsh
+        run: rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal
+      # Saved from `main` only; the release restores it to start its build warm.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msvc-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Payload checks
+        shell: pwsh
+        run: ./data/packaging/windows/test-stage-runtime.ps1
+      # The tag's version without its `v`; without one the script reads Cargo.toml's.
+      - name: Build Inno setup
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: ./scripts/build-windows.ps1 -AppVersion ($env:VERSION -replace '^v', '')
+      - name: Isolated installer tests
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem build/windows/installer/Tidemark-v*-setup.exe
+          if (@($setup).Count -ne 1) { throw 'Expected one setup artifact' }
+          ./scripts/test-windows-installer.ps1 -SetupPath $setup.FullName
+      - if: inputs.version
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-setup
+          path: build/windows/installer/Tidemark-v*-setup.exe
+          if-no-files-found: error

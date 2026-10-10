@@ -10,7 +10,7 @@ on:
       - 'docs/**'
   push:
     # `main` only, and so tags too are excluded by saying so: a tag push belongs to the
-    # release workflow, which runs this same Linux gate itself before it builds anything.
+    # release workflow, which calls this same gate itself before it drafts anything.
     #
     # A branch push is deliberately not here. A branch with a pull request open is already
     # covered by the `pull_request` event above, and better: that event builds the merge
@@ -19,11 +19,16 @@ on:
     # of them redundantly — the two events produce different refs, so `concurrency` below
     # never collapsed them. Before a pull request exists, the local gate in `CLAUDE.md` is
     # the one that matters. `nix.yml` has always been shaped this way.
+    #
+    # The push to `main` is also the only run that saves the Rust caches (see `save-if`
+    # below), so it stays even though the pull request has already passed.
     branches: [main]
     paths-ignore:
       - '*.md'
       - '**/*.md'
       - 'docs/**'
+  # `release.yml` runs this gate on the tag instead of keeping a copy of it.
+  workflow_call:
 
 # Read-only is all this workflow ever does; declaring it keeps the repository's default
 # permissions from silently applying.
@@ -38,27 +43,32 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  checks:
+  rust:
     # The release builds the .deb on the same image, so the gate sees the libraries the
     # package is linked against.
     runs-on: ubuntu-26.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
 
       # fontconfig is the one desktop library the client links; Slint's windowing and GPU
       # libraries are loaded at run time and need no headers.
-      - name: Install the libraries and the shell-check tools
+      - name: Install the libraries
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev \
-            dbus-daemon desktop-file-utils appstream shellcheck
+            libfontconfig-dev libsqlite3-dev pkg-config cmake g++ libclang-dev dbus-daemon
 
       # rust-toolchain.toml pins the channel; rustup reads it on first use.
       - name: Show the toolchain
         run: rustup show && cargo --version
 
+      # Only `main` saves: a cache saved from a pull request is visible to that pull
+      # request alone, while every pull request restores the one `main` saved.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-tests
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
         run: cargo fmt --all --check
@@ -72,6 +82,21 @@ jobs:
       - name: Tests
         run: dbus-run-session -- cargo test --workspace --locked
 
+  # Everything that compiles nothing, so it reports in seconds instead of after the tests.
+  # `scripts/test-release.sh` is absent on purpose: it is run by hand, like
+  # `scripts/test-package-upgrade.sh`, by the owner's decision of 2026-08-22.
+  scripts:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            desktop-file-utils appstream shellcheck
+
       - name: Layering
         run: scripts/check-layering.sh
 
@@ -84,48 +109,32 @@ jobs:
       - name: Package dependency checks
         run: scripts/test-package-deps.sh
 
-      - name: Release helper
-        run: scripts/test-release.sh
-
       - name: Shell
         run: |
           shellcheck scripts/*.sh data/restart-user-daemon \
             data/packaging/deb/postinst data/packaging/rpm/post-install.sh
 
-  windows-tests:
-    runs-on: windows-latest
+  # Clippy and the tests for the Windows-only code. Formatting is not repeated here:
+  # rustfmt ignores `cfg`, so the Linux job already formats the Windows modules. The
+  # installer is built and exercised by `windows-installer.yml`.
+  windows:
+    runs-on: windows-2025
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: MSVC toolchain
         shell: pwsh
         run: |
-          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --component rustfmt --component clippy
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --component clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: msvc-static-tests
+          shared-key: msvc-tests
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Native Windows checks
         shell: pwsh
         run: |
           . ./scripts/windows-env.ps1
-          cargo fmt --all --check
-          if ($LASTEXITCODE -ne 0) { throw 'Format failed' }
           cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'Clippy failed' }
           cargo test --workspace --locked --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
-          ./data/packaging/windows/test-stage-runtime.ps1
-      - name: Build Inno setup
-        shell: pwsh
-        run: ./scripts/build-windows.ps1
-      - name: Isolated installer tests
-        shell: pwsh
-        run: |
-          $setup = Get-ChildItem build/windows/installer/Tidemark-v*-setup.exe
-          if (@($setup).Count -ne 1) { throw 'Expected one setup artifact' }
-          ./scripts/test-windows-installer.ps1 -SetupPath $setup.FullName
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-setup-preview
-          path: build/windows/installer/Tidemark-v*-setup.exe
-          if-no-files-found: error
