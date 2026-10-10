@@ -17,7 +17,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: The tag must agree with Cargo.toml
         run: scripts/check-tag-version.sh "${GITHUB_REF_NAME}"
 
@@ -37,7 +37,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install the libraries
         run: |
           sudo apt-get update
@@ -79,7 +79,7 @@ jobs:
         run: |
           dnf install -y git gcc gcc-c++ cmake clang-devel fontconfig-devel \
             sqlite-devel pkgconf-pkg-config rpm-build
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install rustup
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -131,7 +131,7 @@ jobs:
         run: |
           mv artifacts/*.deb "artifacts/Tidemark-${GITHUB_REF_NAME}.deb"
           mv artifacts/*.rpm "artifacts/Tidemark-${GITHUB_REF_NAME}.rpm"
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           draft: true
           files: artifacts/*
