@@ -51,6 +51,11 @@ build() {
     # and sharing one target directory with plain `cargo build` makes the two invalidate
     # each other's cache on every switch.
     export CARGO_TARGET_DIR="$startdir/target/makepkg"
+    # aws-lc-sys must compile jitterentropy at -O0 and strips -O flags from CFLAGS for it,
+    # but since cc 1.5 a cc::Build snapshots the environment before that happens, so
+    # makepkg's -O2 lands last and trips jitterentropy's #error. cc already passes the
+    # profile's own -O level, so dropping makepkg's changes nothing for the other C code.
+    CFLAGS="${CFLAGS//-O[0-9sz]/}"
     cargo build --release --locked --workspace
 }
 
