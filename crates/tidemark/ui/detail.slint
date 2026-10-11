@@ -89,7 +89,10 @@ export component QuotaDetailsDialog inherits Scrim {
                     horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
                     mouse-drag-pan-enabled: false;
                     content-width: self.visible-width;
+                    // Sections keep their own height: a short page leaves the space below empty
+                    // rather than stretching its rows to fill the dialog.
                     VerticalLayout {
+                        alignment: start;
                         padding: 24px;
                         spacing: 18px;
                         HorizontalLayout {
