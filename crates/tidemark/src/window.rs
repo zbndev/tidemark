@@ -829,6 +829,7 @@ impl MainWindow {
                 self.cards.set_row_data(row, data);
             }
         }
+        ui.set_refreshing(statuses.iter().any(|status| status.checking == Some(true)));
         ui.set_shown_count(
             placements
                 .iter()

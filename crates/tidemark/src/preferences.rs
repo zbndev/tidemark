@@ -500,7 +500,7 @@ impl PreferencesDialog {
                     "Clear history?".to_owned(),
                     "This permanently deletes recorded quota history and notification records. \
                      Provider accounts and credentials are not affected.",
-                    "Clear History",
+                    "Clear history",
                 ))
                 .await;
             if answer.confirmed() {

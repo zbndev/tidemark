@@ -18,6 +18,9 @@ pub struct Geometry {
     pub diagonal: Option<[Coord; 2]>,
     /// A single observation deserves a visible dot rather than a line with an invented end.
     pub marker: Option<Coord>,
+    /// The span the x axis covers, in Unix seconds: the window when its schedule is known,
+    /// otherwise the readings themselves.
+    pub domain: Option<(i64, i64)>,
 }
 
 pub fn geometry(
@@ -63,6 +66,7 @@ pub fn geometry(
         actual,
         diagonal,
         marker,
+        domain,
     }
 }
 
@@ -119,6 +123,7 @@ mod tests {
             geometry.actual,
             vec![Coord { x: 0.0, y: 100.0 }, Coord { x: 50.0, y: 50.0 }]
         );
+        assert_eq!(geometry.domain, Some((0, 18_000)));
     }
 
     #[test]

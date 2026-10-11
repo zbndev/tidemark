@@ -5,7 +5,7 @@ import { Theme } from "theme.slint";
 import { Card, CardData, GaugeData, RowData } from "card.slint";
 import { ProviderDialog, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData } from "providers.slint";
 import { Alert, AlertDialog, AlertForm, AlertResponse, PreviewRow } from "alert.slint";
-import { ContextMenu, MenuEntry } from "widgets.slint";
+import { Button, ContextMenu, MenuEntry } from "widgets.slint";
 import { Prefs, PreferencesDialog } from "preferences.slint";
 import { About, AboutDialog } from "about.slint";
 import { NoteBlock, ReleaseNotes, ReleaseNotesDialog } from "release_notes.slint";
@@ -17,11 +17,13 @@ export { Theme, CardData, GaugeData, RowData, ProviderSettings, ProviderRowData,
 component HeaderButton inherits Rectangle {
     in property <image> icon;
     in property <bool> enabled: true;
+    in property <bool> spinning: false;
     callback clicked();
     width: 34px;
     height: 34px;
     border-radius: 6px;
     background: !enabled ? transparent : touch.pressed ? Theme.ink(0.16) : touch.has-hover ? Theme.ink(0.07) : transparent;
+    animate background { duration: 100ms; }
 
     // Faded through the colour: `opacity` on an item with children is drawn through an
     // off-grid texture, which blurs.
@@ -30,6 +32,8 @@ component HeaderButton inherits Rectangle {
         colorize: Theme.fg.transparentize(root.enabled ? 0 : 0.5);
         width: 16px;
         height: 16px;
+        transform-origin: { x: self.width / 2, y: self.height / 2 };
+        transform-rotation: root.spinning ? mod(animation-tick() / 1ms, 800) / 800 * 360deg : 0deg;
     }
 
     touch := TouchArea {
@@ -49,6 +53,7 @@ component WindowButton inherits Rectangle {
     height: 24px;
     border-radius: self.height / 2;
     background: touch.pressed ? Theme.ink(0.3) : touch.has-hover ? Theme.ink(0.15) : Theme.ink(0.1);
+    animate background { duration: 100ms; }
 
     Image {
         source: root.icon;
@@ -64,11 +69,13 @@ component WindowButton inherits Rectangle {
     }
 }
 
-// A status page: a large dim icon, a title, and what to do about it.
+// A status page: a large dim icon, a title, what to do about it, and a button doing it.
 component StatusPage inherits Rectangle {
     in property <image> icon;
     in property <string> title;
     in property <string> description;
+    in property <string> action;
+    callback acted();
 
     VerticalLayout {
         alignment: center;
@@ -97,6 +104,19 @@ component StatusPage inherits Rectangle {
             horizontal-alignment: center;
             wrap: word-wrap;
         }
+        if root.action != "": HorizontalLayout {
+            alignment: center;
+            padding-top: 6px;
+            Button {
+                text: root.action;
+                kind: 1;
+                has-icon: true;
+                icon: @image-url("icons/list-add-symbolic.svg");
+                clicked => {
+                    root.acted();
+                }
+            }
+        }
     }
 }
 
@@ -116,6 +136,8 @@ export component AppWindow inherits Window {
     in property <int> page: 0;
     in property <string> message: "";
     in property <bool> connected: false;
+    // Some account is being polled: the refresh button turns until none is.
+    in property <bool> refreshing: false;
     in property <string> available: "";
     in property <[CardData]> cards;
     // Zero means Auto: as many columns as fit.
@@ -324,6 +346,7 @@ export component AppWindow inherits Window {
                         HeaderButton {
                             icon: @image-url("icons/view-refresh-symbolic.svg");
                             enabled: root.connected;
+                            spinning: root.refreshing && root.connected;
                             clicked => {
                                 root.refresh();
                             }
@@ -412,6 +435,12 @@ export component AppWindow inherits Window {
                 icon: @image-url("icons/view-grid-symbolic.svg");
                 title: "Welcome to Tidemark";
                 description: "Add a provider to start tracking your quota.";
+                action: "Add provider";
+                // Straight to the catalog: the dialog's list would only be empty.
+                acted => {
+                    root.open-providers();
+                    ProviderSettings.add();
+                }
             }
 
             scroller := ScrollView {

@@ -337,7 +337,22 @@ impl DetailDialog {
             )
             .expect("writing to a String");
         }
+        // The line closed down to the baseline, for the fill under it.
+        let area = match (geometry.actual.first(), geometry.actual.last()) {
+            (Some(first), Some(last)) if geometry.actual.len() > 1 => {
+                format!("{path}L {} 1000 L {} 1000 Z", last.x, first.x)
+            }
+            _ => String::new(),
+        };
+        let (start, end) = axis_labels(
+            geometry.domain,
+            geometry.diagonal.is_some(),
+            Timestamp::now().as_unix(),
+        );
         global.set_actual(path.into());
+        global.set_area(area.into());
+        global.set_start_label(start.into());
+        global.set_end_label(end.into());
         global.set_has_marker(geometry.marker.is_some());
         if let Some(marker) = geometry.marker {
             global.set_marker_x(marker.x as f32);
@@ -408,6 +423,32 @@ fn window_summary(window: &WindowStatus, now: Timestamp) -> String {
     summary
 }
 
+/// What the two ends of the x axis are, relative to now: a scheduled window runs from its
+/// start to its reset, anything else from the first reading to the last.
+fn axis_labels(domain: Option<(i64, i64)>, scheduled: bool, now: i64) -> (String, String) {
+    let Some((start, end)) = domain else {
+        return Default::default();
+    };
+    let sentence = |text: String| {
+        let mut chars = text.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().chain(chars).collect())
+            .unwrap_or_default()
+    };
+    if scheduled {
+        (
+            format!("Started {}", format::ago(now - start)),
+            sentence(format::resets_in(end - now)),
+        )
+    } else {
+        (
+            sentence(format::ago(now - start)),
+            sentence(format::ago(now - end)),
+        )
+    }
+}
+
 fn schedule_text(window: &WindowStatus) -> String {
     match (window.resets_at, window.length_secs) {
         (Some(_), Some(_)) => "Actual consumption compared with even pace.".into(),
@@ -419,7 +460,21 @@ fn schedule_text(window: &WindowStatus) -> String {
 mod tests {
     use tidemark_types::{AccountId, ProviderId, ProviderStatus, Timestamp, WindowStatus};
 
-    use super::{RequestGeneration, Selection, window_summary};
+    use super::{RequestGeneration, Selection, axis_labels, window_summary};
+
+    #[test]
+    fn axis_ends_are_the_window_when_scheduled_and_the_readings_otherwise() {
+        let hour = 3_600;
+        assert_eq!(
+            axis_labels(Some((0, 5 * hour)), true, 2 * hour),
+            ("Started 2 hours ago".to_owned(), "Resets in 3 h".to_owned())
+        );
+        assert_eq!(
+            axis_labels(Some((0, 2 * hour)), false, 2 * hour),
+            ("2 hours ago".to_owned(), "Just now".to_owned())
+        );
+        assert_eq!(axis_labels(None, false, 0), (String::new(), String::new()));
+    }
 
     #[test]
     fn detail_sections_come_from_the_presentation_in_its_own_order() {

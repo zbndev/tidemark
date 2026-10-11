@@ -22,6 +22,7 @@ export component Button inherits Rectangle {
     // children into a texture off the pixel grid, which blurs the label.
     property <float> fade: root.enabled ? 0 : 0.5;
     background: self.base.transparentize(self.fade);
+    animate background { duration: 100ms; }
     property <brush> base: root.kind == 1 ? (touch.pressed ? Theme.accent.darker(0.2) : touch.has-hover ? Theme.accent.brighter(0.1) : Theme.accent)
         : root.kind == 2 ? (touch.pressed ? Theme.error-bg.darker(0.2) : touch.has-hover ? Theme.error-bg.brighter(0.1) : Theme.error-bg)
         : root.kind == 3 ? (touch.pressed ? Theme.ink(0.16) : touch.has-hover ? Theme.ink(0.07) : transparent)
@@ -147,6 +148,7 @@ export component ToggleGroup inherits Rectangle {
             horizontal-stretch: 1;
             border-radius: 6px;
             background: (index != root.active && touch.has-hover ? Theme.ink(0.07) : transparent).transparentize(root.fade);
+            animate background { duration: 100ms; }
 
             Text {
                 text: label;
@@ -183,8 +185,9 @@ export component Entry inherits Rectangle {
     height: 34px;
     border-radius: 6px;
     background: Theme.ink(0.1);
-    border-width: input.has-focus ? 2px : 0px;
-    border-color: Theme.accent.with-alpha(0.5);
+    border-width: 2px;
+    border-color: Theme.accent.with-alpha(input.has-focus ? 0.5 : 0);
+    animate border-color { duration: 120ms; }
 
     public function focus-input() {
         input.focus();
@@ -283,6 +286,7 @@ export component ActionRow inherits Rectangle {
 
     min-height: 50px;
     background: root.activatable && root.enabled ? (touch.pressed ? Theme.ink(0.1) : touch.has-hover ? Theme.ink(0.04) : transparent) : transparent;
+    animate background { duration: 100ms; }
     border-top-left-radius: root.first ? 12px : 0px;
     border-top-right-radius: root.first ? 12px : 0px;
     border-bottom-left-radius: root.last ? 12px : 0px;
@@ -455,6 +459,7 @@ export component ComboRow inherits Rectangle {
     property <string> under: root.value-as-subtitle && root.known ? root.choices[root.selected] : root.subtitle;
     min-height: 50px;
     background: !root.enabled ? transparent : touch.pressed ? Theme.ink(0.1) : touch.has-hover ? Theme.ink(0.04) : transparent;
+    animate background { duration: 100ms; }
     border-top-left-radius: root.first ? 12px : 0px;
     border-top-right-radius: root.first ? 12px : 0px;
     border-bottom-left-radius: root.last ? 12px : 0px;
@@ -529,6 +534,7 @@ export component ComboRow inherits Rectangle {
                     height: 34px;
                     border-radius: 6px;
                     background: item.has-hover ? Theme.ink(0.07) : transparent;
+                    animate background { duration: 100ms; }
 
                     HorizontalLayout {
                         padding-left: 10px;
@@ -633,6 +639,7 @@ export component SpinRow inherits Rectangle {
                     height: 34px;
                     border-radius: 6px;
                     background: field.has-focus ? Theme.ink(0.1) : transparent;
+                    animate background { duration: 120ms; }
                     field := TextInput {
                         width: parent.width - 8px;
                         text: root.value;
@@ -679,44 +686,74 @@ export component SpinRow inherits Rectangle {
     }
 }
 
-// Page switcher in a header bar: flat toggles, each an icon beside its page's name.
-export component ViewSwitcher inherits HorizontalLayout {
+// Page switcher in a header bar: flat toggles, each an icon beside its page's name, and
+// one highlight that slides to the active page.
+export component ViewSwitcher inherits Rectangle {
     in property <[string]> labels;
     in property <[image]> icons;
     in property <int> active;
     callback chosen(int);
-    spacing: 3px;
+    // Where the active toggle sits, reported by the toggle itself: they are as wide as
+    // their labels, so the highlight cannot work it out from the index.
+    property <length> mark-x;
+    property <length> mark-width;
 
-    for label[index] in root.labels: Rectangle {
+    Rectangle {
+        x: root.mark-x;
+        width: root.mark-width;
         height: 34px;
         border-radius: 6px;
-        background: index == root.active ? Theme.ink(touch.pressed ? 0.2 : 0.13) : touch.pressed ? Theme.ink(0.16) : touch.has-hover ? Theme.ink(0.07) : transparent;
+        background: Theme.ink(0.13);
+        animate x, width { duration: 200ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
+    }
 
-        HorizontalLayout {
-            padding-left: 12px;
-            padding-right: 12px;
-            spacing: 6px;
-            VerticalLayout {
-                alignment: center;
-                Image {
-                    source: root.icons[index];
-                    colorize: Theme.fg;
-                    width: 16px;
-                    height: 16px;
+    HorizontalLayout {
+        spacing: 3px;
+        for label[index] in root.labels: Rectangle {
+            property <bool> current: index == root.active;
+            init => {
+                if (self.current) {
+                    root.mark-x = self.x;
+                    root.mark-width = self.width;
                 }
             }
-            Text {
-                text: label;
-                color: Theme.fg;
-                font-weight: 700;
-                vertical-alignment: center;
+            changed current => {
+                if (self.current) {
+                    root.mark-x = self.x;
+                    root.mark-width = self.width;
+                }
             }
-        }
+            height: 34px;
+            border-radius: 6px;
+            background: touch.pressed ? Theme.ink(0.16) : touch.has-hover && !self.current ? Theme.ink(0.07) : transparent;
+            animate background { duration: 100ms; }
 
-        touch := TouchArea {
-            clicked => {
-                if (index != root.active) {
-                    root.chosen(index);
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 6px;
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: root.icons[index];
+                        colorize: Theme.fg;
+                        width: 16px;
+                        height: 16px;
+                    }
+                }
+                Text {
+                    text: label;
+                    color: Theme.fg;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+
+            touch := TouchArea {
+                clicked => {
+                    if (index != root.active) {
+                        root.chosen(index);
+                    }
                 }
             }
         }
@@ -770,9 +807,14 @@ export component Toast inherits Rectangle {
         }
     }
 
-    if root.showing: Rectangle {
+    // Rises from below the bottom edge and sinks back, cut off by a square clip: a
+    // rounded one would blur the text, and the pill never reaches the corners.
+    clip: true;
+
+    Rectangle {
         x: (parent.width - self.width) / 2;
-        y: parent.height - self.height - 24px;
+        y: root.showing ? parent.height - self.height - 24px : parent.height + 8px;
+        animate y { duration: 250ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
         width: min(parent.width - 24px, label.preferred-width + 48px);
         height: max(42px, label.preferred-height + 20px);
         border-radius: 21px;
@@ -880,6 +922,7 @@ export component ContextMenu inherits Rectangle {
                     height: 32px;
                     border-radius: 6px;
                     background: index == root.highlighted && entry.enabled ? (item.pressed ? Theme.ink(0.16) : Theme.ink(0.07)) : transparent;
+                    animate background { duration: 100ms; }
 
                     HorizontalLayout {
                         padding-left: 12px;
@@ -918,5 +961,39 @@ export component ContextMenu inherits Rectangle {
                 }
             }
         }
+    }
+}
+
+// The dimmed window under a dialog. It fades in as the dialog opens while the dialog's
+// sheet rises by `rise`, and swallows presses meant for the window underneath.
+export component Scrim inherits Rectangle {
+    out property <float> reveal: 0;
+    out property <length> rise: (1 - self.reveal) * 24px;
+    animate reveal { duration: 250ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
+    init => {
+        self.reveal = 1;
+    }
+    background: (Theme.dark ? #00000080 : #00000040).transparentize(1 - self.reveal);
+
+    TouchArea { }
+}
+
+// A dialog page sliding in from the side it comes from: 1 the right, going deeper,
+// -1 the left, going back, and 0 not at all. Moved, not faded: a translucent layer
+// would blur its text.
+export component SlideIn inherits Rectangle {
+    in property <int> from;
+    property <float> reveal: 0;
+    animate reveal { duration: 220ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
+    init => {
+        self.reveal = 1;
+    }
+    clip: true;
+
+    HorizontalLayout {
+        x: (1 - root.reveal) * root.from * 32px;
+        width: parent.width;
+        height: parent.height;
+        @children
     }
 }
