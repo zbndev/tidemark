@@ -24,6 +24,11 @@ export global QuotaDetails {
     in property <bool> failed;
     // Coordinates in a 1000 by 1000 view box, scaled to the plot's dimensions.
     in property <string> actual;
+    // The same line closed down to the baseline, filled under it.
+    in property <string> area;
+    // When the two ends of the x axis are, relative to now.
+    in property <string> start-label;
+    in property <string> end-label;
     in property <bool> has-marker;
     in property <float> marker-x;
     in property <float> marker-y;
@@ -129,10 +134,32 @@ export component QuotaDetailsDialog inherits Scrim {
                             }
                         }
 
-                        VerticalLayout {
+                        // A balance-only account has no window to chart, so no chart and no
+                        // placeholder for one.
+                        if QuotaDetails.windows.length > 0: VerticalLayout {
                             spacing: 6px;
                             GroupHeading { title: "Burn-down"; description: QuotaDetails.schedule; }
-                            Caption { text: QuotaDetails.has-schedule ? "Actual · Even pace" : "Actual"; }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle { width: 14px; height: 2.5px; background: Theme.accent; }
+                                }
+                                Caption { text: "Actual"; }
+                                if QuotaDetails.has-schedule: HorizontalLayout {
+                                    spacing: 6px;
+                                    padding-left: 10px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        HorizontalLayout {
+                                            spacing: 2px;
+                                            for dash in 3: Rectangle { width: 3px; height: 1.5px; background: Theme.ink(0.38); }
+                                        }
+                                    }
+                                    Caption { text: "Even pace"; }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
                             Rectangle {
                                 height: 220px;
                                 // Leave space for the stroke and a single observation's dot.
@@ -141,9 +168,40 @@ export component QuotaDetailsDialog inherits Scrim {
                                     y: 4px;
                                     width: parent.width - 8px;
                                     height: parent.height - 8px;
+
+                                    // Full and half use, the scale every reading is read against.
+                                    for level in [0, 0.5, 1]: Rectangle {
+                                        y: (1 - level) * plot.height;
+                                        height: 1px;
+                                        background: Theme.ink(level == 0 ? 0.15 : 0.07);
+                                    }
+                                    for level in [0.5, 1]: Text {
+                                        x: 2px;
+                                        y: (1 - level) * plot.height + 3px;
+                                        text: level == 1 ? "100%" : "50%";
+                                        color: Theme.ink(0.4);
+                                        font-size: Theme.caption;
+                                    }
+
+                                    // Drawn in from the left each time a segment loads: the square
+                                    // clip widens while everything in it keeps the plot's size.
                                     if QuotaDetails.message == "": Rectangle {
+                                        property <float> reveal: 0;
+                                        animate reveal { duration: 600ms; easing: ease-in-out; }
+                                        init => {
+                                            self.reveal = 1;
+                                        }
+                                        x: 0;
+                                        width: plot.width * self.reveal;
+                                        clip: true;
+
                                         if QuotaDetails.has-schedule: Rectangle {
+                                            x: 0;
+                                            width: plot.width;
+                                            height: plot.height;
                                             for dash in 20: Path {
+                                                width: plot.width;
+                                                height: plot.height;
                                                 viewbox-width: 1;
                                                 viewbox-height: 1;
                                                 fit: fill;
@@ -153,12 +211,25 @@ export component QuotaDetailsDialog inherits Scrim {
                                                 LineTo { x: (dash + 0.5) / 20; y: 1 - (dash + 0.5) / 20; }
                                             }
                                         }
+                                        if QuotaDetails.area != "": Path {
+                                            x: 0;
+                                            width: plot.width;
+                                            height: plot.height;
+                                            viewbox-width: 1000;
+                                            viewbox-height: 1000;
+                                            fit: fill;
+                                            commands: QuotaDetails.area;
+                                            fill: @linear-gradient(180deg, Theme.accent.with-alpha(0.3) 0%, Theme.accent.with-alpha(0.02) 100%);
+                                        }
                                         Path {
+                                            x: 0;
+                                            width: plot.width;
+                                            height: plot.height;
                                             viewbox-width: 1000;
                                             viewbox-height: 1000;
                                             fit: fill;
                                             commands: QuotaDetails.actual;
-                                            stroke: Theme.fg;
+                                            stroke: Theme.accent;
                                             stroke-width: 2.5px;
                                         }
                                         if QuotaDetails.has-marker: Rectangle {
@@ -167,7 +238,7 @@ export component QuotaDetailsDialog inherits Scrim {
                                             width: 8px;
                                             height: 8px;
                                             border-radius: 4px;
-                                            background: Theme.fg;
+                                            background: Theme.accent;
                                         }
                                     }
                                     if QuotaDetails.message != "": VerticalLayout {
@@ -184,6 +255,13 @@ export component QuotaDetailsDialog inherits Scrim {
                                             wrap: char-wrap;
                                         }
                                     }
+                                }
+                            }
+                            if QuotaDetails.message == "": HorizontalLayout {
+                                Caption { text: QuotaDetails.start-label; }
+                                Caption {
+                                    text: QuotaDetails.end-label;
+                                    horizontal-alignment: right;
                                 }
                             }
                         }
