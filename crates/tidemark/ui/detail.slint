@@ -60,27 +60,38 @@ export component QuotaDetailsDialog inherits Scrim {
             drop-shadow-color: #00000050;
 
             VerticalLayout {
-                Rectangle {
-                    height: 47px;
-                    Text {
-                        text: QuotaDetails.name + " details";
-                        color: Theme.fg;
-                        font-weight: 700;
-                        overflow: elide;
-                        width: parent.width - 90px;
-                    }
-                    HorizontalLayout {
-                        padding-right: 6px;
-                        alignment: end;
-                        VerticalLayout {
-                            alignment: center;
-                            Button {
-                                kind: 3;
-                                has-icon: true;
-                                icon: @image-url("icons/window-close-symbolic.svg");
-                                clicked => { QuotaDetails.close(); }
-                            }
+                // The account itself heads the dialog, centred like the provider dialog's
+                // account page, and stays put while the sections below scroll.
+                VerticalLayout {
+                    padding-top: 18px;
+                    padding-bottom: 6px;
+                    padding-left: 60px;
+                    padding-right: 60px;
+                    spacing: 6px;
+                    if QuotaDetails.has-mark: HorizontalLayout {
+                        alignment: center;
+                        Image {
+                            source: QuotaDetails.mark;
+                            colorize: Theme.fg;
+                            width: 72px;
+                            height: 72px;
                         }
+                    }
+                    Text {
+                        text: QuotaDetails.name;
+                        color: Theme.fg;
+                        font-size: Theme.body * 1.36;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                    }
+                    if QuotaDetails.account != "": Caption {
+                        text: QuotaDetails.account;
+                        horizontal-alignment: center;
+                    }
+                    if QuotaDetails.state != "": Caption {
+                        text: QuotaDetails.state;
+                        horizontal-alignment: center;
                     }
                 }
 
@@ -94,28 +105,8 @@ export component QuotaDetailsDialog inherits Scrim {
                     VerticalLayout {
                         alignment: start;
                         padding: 24px;
+                        padding-top: 12px;
                         spacing: 18px;
-                        HorizontalLayout {
-                            spacing: 12px;
-                            if QuotaDetails.has-mark: Image {
-                                source: QuotaDetails.mark;
-                                colorize: Theme.fg;
-                                width: 32px;
-                                height: 32px;
-                            }
-                            VerticalLayout {
-                                spacing: 2px;
-                                Text {
-                                    text: QuotaDetails.name;
-                                    color: Theme.fg;
-                                    font-size: Theme.body * 1.36;
-                                    font-weight: 800;
-                                    wrap: word-wrap;
-                                }
-                                if QuotaDetails.account != "": Caption { text: QuotaDetails.account; }
-                                if QuotaDetails.state != "": Caption { text: QuotaDetails.state; }
-                            }
-                        }
 
                         if QuotaDetails.windows.length > 0: VerticalLayout {
                             GroupHeading { title: "Quota windows"; }
@@ -283,6 +274,18 @@ export component QuotaDetailsDialog inherits Scrim {
                         }
                     }
                 }
+            }
+
+            // Over the hero's corner rather than in a header row of its own.
+            // Sized here: outside a layout an element fills its parent.
+            Button {
+                width: self.button-height;
+                x: parent.width - self.width - 6px;
+                y: 6px;
+                kind: 3;
+                has-icon: true;
+                icon: @image-url("icons/window-close-symbolic.svg");
+                clicked => { QuotaDetails.close(); }
             }
         }
     }
