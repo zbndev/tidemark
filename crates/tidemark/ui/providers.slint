@@ -149,24 +149,6 @@ component HeaderIcon inherits Button {
     has-icon: true;
 }
 
-component Pill inherits Rectangle {
-    in property <[string]> labels;
-    in property <int> active;
-    in property <bool> enabled: true;
-    callback chosen(int);
-    VerticalLayout {
-        padding: 8px;
-        ToggleGroup {
-            labels: root.labels;
-            active: root.active;
-            enabled: root.enabled;
-            chosen(index) => {
-                root.chosen(index);
-            }
-        }
-    }
-}
-
 component ListPage inherits ScrollView {
     callback show-menu(string, string, bool, length, length);
     VerticalLayout {
@@ -175,13 +157,11 @@ component ListPage inherits ScrollView {
         padding-top: 12px;
         spacing: 18px;
 
-        BoxedList {
-            Pill {
-                labels: ["Built-in", "Custom"];
-                active: ProviderSettings.tab;
-                chosen(index) => {
-                    ProviderSettings.choose-tab(index);
-                }
+        ToggleGroup {
+            labels: ["Built-in", "Custom"];
+            active: ProviderSettings.tab;
+            chosen(index) => {
+                ProviderSettings.choose-tab(index);
             }
         }
 
@@ -357,19 +337,18 @@ component DetailPage inherits ScrollView {
 
             if root.data.auth == 1: VerticalLayout {
                 spacing: 6px;
-                BoxedList {
-                    if root.data.choices.length > 0: Pill {
-                        labels: root.data.choices;
-                        active: root.data.choice;
-                        // A login in progress holds a loopback port; the pill stays put
-                        // until it finishes, so its Cancel stays on screen.
-                        enabled: !root.data.waiting;
-                        chosen(index) => {
-                            ProviderSettings.choose-source(index);
-                        }
+                if root.data.choices.length > 0: ToggleGroup {
+                    labels: root.data.choices;
+                    active: root.data.choice;
+                    // A login in progress holds a loopback port; the switch stays put
+                    // until it finishes, so its Cancel stays on screen.
+                    enabled: !root.data.waiting;
+                    chosen(index) => {
+                        ProviderSettings.choose-source(index);
                     }
+                }
+                BoxedList {
                     if root.data.tidemark-half: ActionRow {
-                        first: root.data.choices.length == 0;
                         title: "OAuth login";
                         subtitle: root.data.sign-in-subtitle;
                         if root.data.waiting: VerticalLayout {
@@ -400,7 +379,6 @@ component DetailPage inherits ScrollView {
                         }
                     }
                     if !root.data.tidemark-half: ActionRow {
-                        first: false;
                         title: root.data.local-label;
                         subtitle: root.data.local-location;
                         if root.data.presence != 0: Text {
@@ -439,14 +417,12 @@ component DetailPage inherits ScrollView {
             }
 
             if root.data.auth == 3: VerticalLayout {
-                spacing: 12px;
-                BoxedList {
-                    Pill {
-                        labels: root.data.modes;
-                        active: root.data.mode;
-                        chosen(index) => {
-                            ProviderSettings.choose-mode(index);
-                        }
+                spacing: 6px;
+                ToggleGroup {
+                    labels: root.data.modes;
+                    active: root.data.mode;
+                    chosen(index) => {
+                        ProviderSettings.choose-mode(index);
                     }
                 }
                 BoxedList {
