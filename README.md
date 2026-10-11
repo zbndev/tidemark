@@ -10,11 +10,11 @@
 ![GitHub Downloads](https://shieldcn.dev/github/downloads/zbndev/tidemark.svg?variant=secondary)
 ![GitHub Stars](https://www.shieldcn.dev/github/stars/zbndev/tidemark.svg?variant=secondary&size=sm&theme=zinc)
 
-</div>
-
 ---
 
-https://github.com/user-attachments/assets/9f85980f-4735-4bbd-886d-b4720186f4c9
+![Tidemark](./docs/main.png)
+
+</div>
 
 ---
 
@@ -36,6 +36,18 @@ notifications stay current. Native Rust and Slint — no Electron, no embedded b
   switched on per window so you only hear about the ones you care about.
 - **History and a burn-down chart.** Click a card to see how the current window was spent.
 - **Lives in the tray.** Closing the window hides it; readings keep arriving.
+
+---
+
+## Screenshots
+
+| Details | Provider settings |
+| --- | --- |
+| ![Page with more info about account](docs/details.png) | ![Provider settings page](docs/provider_settings.png) |
+
+| Providers | Preferences |
+| --- | --- |
+| ![List of configured providers](docs/providers_list.png) | ![Preferences window](docs/settings.png) |
 
 ## Installation
 
