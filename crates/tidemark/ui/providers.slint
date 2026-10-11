@@ -583,6 +583,9 @@ export component ProviderDialog inherits Rectangle {
             VerticalLayout {
                 Rectangle {
                     height: ProviderSettings.page == 2 ? 150px : 47px;
+                    animate height { duration: 250ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
+                    // The account's mark and name are revealed as the header grows, not squeezed.
+                    clip: true;
 
                     HorizontalLayout {
                         y: 0;
@@ -644,7 +647,7 @@ export component ProviderDialog inherits Rectangle {
 
                     if ProviderSettings.page == 2: VerticalLayout {
                         y: 10px;
-                        height: parent.height - 16px;
+                        height: 134px;
                         width: parent.width - 120px;
                         x: 60px;
                         spacing: 6px;

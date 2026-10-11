@@ -89,6 +89,7 @@ component SummaryPage inherits ScrollView {
                 width: version.preferred-width + 24px;
                 border-radius: 13px;
                 background: Theme.accent.with-alpha(touch.pressed ? 0.25 : touch.has-hover ? 0.18 : 0.12);
+                animate background { duration: 100ms; }
                 version := Text {
                     text: About.version;
                     color: Theme.accent;
