@@ -121,17 +121,32 @@ export component ToggleGroup inherits Rectangle {
     border-radius: 9px;
     background: Theme.ink(0.1);
     property <float> fade: root.enabled ? 0 : 0.5;
+    property <length> pad: 3px;
+    property <length> segment: (self.width - 2 * self.pad - (root.labels.length - 1) * self.pad) / max(1, root.labels.length);
+
+    // One highlight that slides to the active segment instead of each segment lighting up.
+    Rectangle {
+        x: root.pad + root.active * (root.segment + root.pad);
+        y: root.pad;
+        width: root.segment;
+        height: root.height - 2 * root.pad;
+        border-radius: 6px;
+        background: (Theme.dark ? #ffffff26 : #ffffff).transparentize(root.fade);
+        drop-shadow-blur: 3px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #00000026;
+        animate x { duration: 200ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
+    }
 
     HorizontalLayout {
-        padding: 3px;
-        spacing: 3px;
+        padding: root.pad;
+        spacing: root.pad;
+        // Equal shares to match the highlight: by preferred width, a long label would widen its segment.
         for label[index] in root.labels: Rectangle {
+            preferred-width: 0px;
             horizontal-stretch: 1;
             border-radius: 6px;
-            background: (index == root.active ? (Theme.dark ? #ffffff26 : #ffffff) : touch.has-hover ? Theme.ink(0.07) : transparent).transparentize(root.fade);
-            drop-shadow-blur: index == root.active ? 3px : 0px;
-            drop-shadow-offset-y: 1px;
-            drop-shadow-color: #00000026;
+            background: (index != root.active && touch.has-hover ? Theme.ink(0.07) : transparent).transparentize(root.fade);
 
             Text {
                 text: label;
