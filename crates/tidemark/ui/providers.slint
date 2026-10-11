@@ -167,7 +167,7 @@ component ListPage inherits ScrollView {
 
         VerticalLayout {
             spacing: 6px;
-            HorizontalLayout {
+            if ProviderSettings.rows.length > 0: HorizontalLayout {
                 alignment: center;
                 Button {
                     text: "Add provider";
@@ -195,6 +195,19 @@ component ListPage inherits ScrollView {
                     color: Theme.fg;
                     horizontal-alignment: center;
                     wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    padding-top: 6px;
+                    Button {
+                        text: "Add provider";
+                        kind: 1;
+                        has-icon: true;
+                        icon: @image-url("icons/list-add-symbolic.svg");
+                        clicked => {
+                            ProviderSettings.add();
+                        }
+                    }
                 }
             }
 

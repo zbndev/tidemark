@@ -5,7 +5,7 @@ import { Theme } from "theme.slint";
 import { Card, CardData, GaugeData, RowData } from "card.slint";
 import { ProviderDialog, ProviderSettings, ProviderRowData, PickerRowData, OptionData, SwitchData, CandidateData, DetailData } from "providers.slint";
 import { Alert, AlertDialog, AlertForm, AlertResponse, PreviewRow } from "alert.slint";
-import { ContextMenu, MenuEntry } from "widgets.slint";
+import { Button, ContextMenu, MenuEntry } from "widgets.slint";
 import { Prefs, PreferencesDialog } from "preferences.slint";
 import { About, AboutDialog } from "about.slint";
 import { NoteBlock, ReleaseNotes, ReleaseNotesDialog } from "release_notes.slint";
@@ -69,11 +69,13 @@ component WindowButton inherits Rectangle {
     }
 }
 
-// A status page: a large dim icon, a title, and what to do about it.
+// A status page: a large dim icon, a title, what to do about it, and a button doing it.
 component StatusPage inherits Rectangle {
     in property <image> icon;
     in property <string> title;
     in property <string> description;
+    in property <string> action;
+    callback acted();
 
     VerticalLayout {
         alignment: center;
@@ -101,6 +103,19 @@ component StatusPage inherits Rectangle {
             font-size: Theme.body;
             horizontal-alignment: center;
             wrap: word-wrap;
+        }
+        if root.action != "": HorizontalLayout {
+            alignment: center;
+            padding-top: 6px;
+            Button {
+                text: root.action;
+                kind: 1;
+                has-icon: true;
+                icon: @image-url("icons/list-add-symbolic.svg");
+                clicked => {
+                    root.acted();
+                }
+            }
         }
     }
 }
@@ -420,6 +435,12 @@ export component AppWindow inherits Window {
                 icon: @image-url("icons/view-grid-symbolic.svg");
                 title: "Welcome to Tidemark";
                 description: "Add a provider to start tracking your quota.";
+                action: "Add provider";
+                // Straight to the catalog: the dialog's list would only be empty.
+                acted => {
+                    root.open-providers();
+                    ProviderSettings.add();
+                }
             }
 
             scroller := ScrollView {

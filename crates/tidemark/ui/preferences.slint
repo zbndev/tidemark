@@ -115,10 +115,22 @@ component GeneralPage inherits Page {
             title: "Behavior";
         }
         BoxedList {
+            ComboRow {
+                title: "Start at login";
+                subtitle: Prefs.startup-unknown;
+                value-as-subtitle: true;
+                choices: ["App and tray", "Daemon only", "Off"];
+                selected: Prefs.startup;
+                enabled: Prefs.startup >= 0 && !Prefs.busy-startup;
+                chosen(index) => {
+                    Prefs.startup = index;
+                    Prefs.choose-startup(index);
+                }
+            }
             SwitchRow {
                 title: "Minimize to tray on close";
                 subtitle: "Keep Tidemark running when a tray icon can bring the window back.";
-                first: true;
+                first: false;
                 last: true;
                 checked: Prefs.minimize-on-close;
                 busy: Prefs.busy-minimize;
@@ -131,27 +143,7 @@ component GeneralPage inherits Page {
     }
     VerticalLayout {
         GroupHeading {
-            title: "Startup";
-        }
-        BoxedList {
-            ComboRow {
-                title: "Start at login";
-                subtitle: Prefs.startup-unknown;
-                value-as-subtitle: true;
-                choices: ["App and tray", "Daemon only", "Off"];
-                selected: Prefs.startup;
-                enabled: Prefs.startup >= 0 && !Prefs.busy-startup;
-                last: true;
-                chosen(index) => {
-                    Prefs.startup = index;
-                    Prefs.choose-startup(index);
-                }
-            }
-        }
-    }
-    VerticalLayout {
-        GroupHeading {
-            title: "Theme";
+            title: "Appearance";
         }
         BoxedList {
             ComboRow {
@@ -161,10 +153,33 @@ component GeneralPage inherits Page {
                 choices: ["System", "Light", "Dark"];
                 selected: Prefs.theme;
                 enabled: Prefs.theme >= 0 && !Prefs.busy-theme;
-                last: true;
                 chosen(index) => {
                     Prefs.theme = index;
                     Prefs.choose-theme(index);
+                }
+            }
+            SwitchRow {
+                title: "Automatic columns";
+                subtitle: "Column count follows the window width.";
+                first: false;
+                checked: Prefs.columns-auto;
+                busy: Prefs.busy-columns-auto;
+                toggled(on) => {
+                    Prefs.columns-auto = on;
+                    Prefs.set-switch("columns-auto", on);
+                }
+            }
+            SpinRow {
+                title: "Maximum columns";
+                subtitle: "Most columns when automatic columns are off.";
+                first: false;
+                last: true;
+                value: Prefs.max-columns;
+                minimum: 1;
+                maximum: 999;
+                enabled: !Prefs.columns-auto && !Prefs.busy-columns;
+                changed(columns) => {
+                    Prefs.set-columns(columns);
                 }
             }
         }
@@ -198,36 +213,6 @@ component GeneralPage inherits Page {
                 enabled: !Prefs.refresh-auto && !Prefs.busy-minutes;
                 changed(minutes) => {
                     Prefs.set-minutes(minutes);
-                }
-            }
-        }
-    }
-    VerticalLayout {
-        GroupHeading {
-            title: "Card columns";
-        }
-        BoxedList {
-            SwitchRow {
-                title: "Auto";
-                subtitle: "Column count follows the window width.";
-                checked: Prefs.columns-auto;
-                busy: Prefs.busy-columns-auto;
-                toggled(on) => {
-                    Prefs.columns-auto = on;
-                    Prefs.set-switch("columns-auto", on);
-                }
-            }
-            SpinRow {
-                title: "Maximum columns";
-                subtitle: "Most columns when Auto is off.";
-                first: false;
-                last: true;
-                value: Prefs.max-columns;
-                minimum: 1;
-                maximum: 999;
-                enabled: !Prefs.columns-auto && !Prefs.busy-columns;
-                changed(columns) => {
-                    Prefs.set-columns(columns);
                 }
             }
         }
@@ -323,7 +308,7 @@ component NetworkPage inherits Page {
     // own behalf: it lives beside the proxy rather than on a page of its own.
     VerticalLayout {
         GroupHeading {
-            title: "Release Updates";
+            title: "Release updates";
         }
         BoxedList {
             SwitchRow {
@@ -366,7 +351,7 @@ component DataPage inherits Page {
                 first: false;
                 last: true;
                 Button {
-                    text: "Clear History";
+                    text: "Clear history";
                     kind: 2;
                     enabled: !Prefs.busy-clear;
                     clicked => {
@@ -402,7 +387,7 @@ component DataPage inherits Page {
     }
     VerticalLayout {
         GroupHeading {
-            title: "System Keyring";
+            title: "System keyring";
             description: "Secrets stay in the desktop Secret Service, not in config.toml.";
         }
         BoxedList {

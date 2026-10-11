@@ -1,6 +1,6 @@
 //! The About dialog: who wrote this, which version is running, and where to report it.
 //!
-//! The icon over the name, the version pill, Details, Report an Issue and Legal.
+//! The icon over the name, the version pill, Details, Report an issue and Legal.
 //!
 //! The one thing that is ours is the troubleshooting page. It answers the questions every
 //! bug report about this program starts with — which daemon is on the other end, which
@@ -16,7 +16,7 @@ use crate::{About, AppWindow};
 
 /// Where **Website** goes.
 const WEBSITE_URL: &str = "https://github.com/zbndev/tidemark";
-/// Where **Report an Issue** goes. `/new/choose` rather than the issue list, because the
+/// Where **Report an issue** goes. `/new/choose` rather than the issue list, because the
 /// repository has templates and a report that skips them is a report that has to be asked
 /// for the version, the desktop and the provider all over again.
 const ISSUES_URL: &str = "https://github.com/zbndev/tidemark/issues/new/choose";
@@ -74,7 +74,7 @@ pub fn install(ui: &AppWindow) {
 
 async fn choose_destination() -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
-        .set_title("Save Debugging Information")
+        .set_title("Save debugging information")
         .set_file_name(DEBUG_INFO_FILENAME)
         .save_file()
         .await
