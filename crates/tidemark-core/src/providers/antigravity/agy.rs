@@ -129,7 +129,7 @@ impl Agy {
                     // Not a fault of ours and not one a relaunch mends. Let go of the
                     // server rather than keeping 170 MB warm for a quota nobody can read.
                     tracing::info!(port, %detail, "the agy server has nobody logged in");
-                    shutdown(held.take());
+                    *held = None;
                     return Err(ProviderError::NoCredential);
                 }
                 Err(Gate::Unreachable(error)) => {
@@ -138,7 +138,7 @@ impl Agy {
                 }
             }
         }
-        shutdown(held.take());
+        *held = None;
         Err(last.unwrap_or_else(|| {
             ProviderError::Local("the agy server did not answer after a relaunch".to_owned())
         }))
@@ -178,7 +178,7 @@ impl Agy {
         relaunch: bool,
     ) -> Result<(u16, bool), ProviderError> {
         if relaunch {
-            shutdown(held.take());
+            *held = None;
         }
         if let Some(server) = held.as_mut() {
             if server.is_alive() {
@@ -215,12 +215,6 @@ impl Agy {
             }
             tokio::time::sleep(READY_POLL_INTERVAL).await;
         }
-    }
-}
-
-impl Drop for Agy {
-    fn drop(&mut self) {
-        shutdown(self.server.get_mut().take());
     }
 }
 
@@ -264,26 +258,29 @@ struct Owned {
     _pty: std::fs::File,
 }
 
-/// Ends a server we started. A server we adopted is only let go of.
-fn shutdown(server: Option<Server>) {
-    let Some(mut server) = server else { return };
-    let Some(mut owned) = server.own.take() else {
-        return;
-    };
-    // The whole group, because the child was given one of its own precisely so that
-    // anything it started leaves with it.
-    if let Some(pid) = rustix::process::Pid::from_raw(server.pid) {
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
-    }
-    let deadline = Instant::now() + TERM_GRACE;
-    while Instant::now() < deadline {
-        if matches!(owned.child.try_wait(), Ok(Some(_))) {
-            return;
+/// Ends a server we started, however it is let go of: a relaunch, a logged-out gate, the
+/// provider being dropped, or a poll cancelled halfway through starting it. A server we
+/// adopted has no [`Owned`] and is only let go of.
+impl Drop for Owned {
+    fn drop(&mut self) {
+        // The whole group, because the child was given one of its own precisely so that
+        // anything it started leaves with it.
+        if let Some(pid) = i32::try_from(self.child.id())
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
         }
-        std::thread::sleep(Duration::from_millis(20));
+        let deadline = Instant::now() + TERM_GRACE;
+        while Instant::now() < deadline {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
-    let _ = owned.child.kill();
-    let _ = owned.child.wait();
 }
 
 /// Starts `agy` on a pseudoterminal and finds the port it answers on.
@@ -302,7 +299,7 @@ async fn spawn(client: &reqwest::Client) -> Result<Server, ProviderError> {
         .stdin(Stdio::from(dup(&slave)?))
         .stdout(Stdio::from(dup(&slave)?))
         .stderr(Stdio::from(dup(&slave)?))
-        // Its own group, so `shutdown` can end the whole tree with one signal and so a
+        // Its own group, so dropping it can end the whole tree with one signal and so a
         // signal sent to *us* is not delivered to it by the terminal.
         .process_group(0)
         // Something that looks like a terminal to a program that checks.
@@ -330,7 +327,7 @@ async fn spawn(client: &reqwest::Client) -> Result<Server, ProviderError> {
         ProviderError::Local(format!("could not watch the {BINARY} terminal: {error}"))
     })?);
 
-    let mut owned = Owned {
+    let owned = Owned {
         child,
         _pty: master,
     };
@@ -341,8 +338,7 @@ async fn spawn(client: &reqwest::Client) -> Result<Server, ProviderError> {
             own: Some(owned),
         }),
         None => {
-            let _ = owned.child.kill();
-            let _ = owned.child.wait();
+            drop(owned);
             Err(ProviderError::Local(format!(
                 "{BINARY} started but never bound a port to talk to"
             )))

@@ -25,7 +25,7 @@ use tidemark_types::{
     ProviderOption, ProviderState, ProviderStatus, Snapshot, Timestamp, WindowKey, WindowStatus,
 };
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinError, JoinSet};
 
 use crate::notify::{self, Notifier};
 use crate::plugins;
@@ -327,6 +327,23 @@ pub struct Account {
     failures: u32,
     retry_after: Option<Duration>,
     due: Instant,
+    fetch: Option<Fetch>,
+}
+
+/// A poll in flight for one account, and the client and id it was started with.
+///
+/// Dropping it cancels the poll: an account that is removed, or whose client is replaced
+/// while the answer is on its way, has no use for that answer.
+struct Fetch {
+    task: AbortHandle,
+    client: Arc<dyn Provider>,
+    account: AccountId,
+}
+
+impl Drop for Fetch {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 /// Whether a string can serve as an account id in `config.toml`, the Secret Service and
@@ -379,6 +396,7 @@ impl Account {
             failures: 0,
             retry_after: None,
             due: Instant::now(),
+            fetch: None,
         }
     }
 
@@ -405,6 +423,7 @@ impl Account {
             failures: 0,
             retry_after: None,
             due: Instant::now(),
+            fetch: None,
         }
     }
 
@@ -430,6 +449,7 @@ impl Account {
             failures: 0,
             retry_after: None,
             due: Instant::now(),
+            fetch: None,
         }
     }
 
@@ -537,6 +557,17 @@ impl Account {
         self.status.set_state(state, message);
     }
 
+    /// Whether a poll is in flight with the client and id this account still has.
+    fn fetching(&self) -> bool {
+        self.fetch.as_ref().is_some_and(|fetch| {
+            fetch.account == self.account
+                && self
+                    .client
+                    .as_ref()
+                    .is_some_and(|client| Arc::ptr_eq(client, &fetch.client))
+        })
+    }
+
     fn state(&self) -> ProviderState {
         self.status.state().unwrap_or(ProviderState::Pending)
     }
@@ -581,6 +612,9 @@ pub struct Engine {
     /// The installed plugin definitions. Detached until [`Engine::with_plugins`] attaches
     /// one, so a test that says nothing about plugins names no directory.
     plugins: plugins::Store,
+    /// Polls in flight. Held here rather than awaited in place, so a provider that takes a
+    /// minute to answer does not hold every command — and shutdown — up behind it.
+    fetches: JoinSet<Result<Reading, ProviderError>>,
 }
 
 impl Engine {
@@ -604,6 +638,7 @@ impl Engine {
             last_thin: None,
             notifier,
             plugins: plugins::Store::detached(),
+            fetches: JoinSet::new(),
         }
     }
 
@@ -1721,12 +1756,14 @@ impl Engine {
             let next_due = self
                 .accounts
                 .iter()
+                .filter(|account| account.fetch.is_none())
                 .map(|account| account.due)
                 .min()
                 .unwrap_or_else(|| Instant::now() + scheduler::BASELINE);
 
             tokio::select! {
                 _ = tokio::time::sleep_until(next_due.into()) => {}
+                Some(joined) = self.fetches.join_next_with_id() => self.finish(joined).await,
                 command = commands.recv() => match command {
                     Some(Command::Refresh(target)) => self.mark_due(target.as_deref()),
                     Some(Command::Reload { provider }) => self.reload(provider.as_deref()).await,
@@ -1820,17 +1857,35 @@ impl Engine {
             }
 
             self.thin_if_due();
-            self.poll_due(Instant::now()).await;
+            self.start_due(Instant::now()).await;
         }
     }
 
-    /// Brings every account whose next poll has come due up to date.
+    /// Brings every account whose next poll has come due up to date, and waits for the
+    /// answers.
+    #[cfg(test)]
     pub async fn poll_due(&mut self, now: Instant) {
+        self.start_due(now).await;
+        while let Some(joined) = self.fetches.join_next_with_id().await {
+            self.finish(joined).await;
+        }
+    }
+
+    /// Starts a poll for every account that has come due and is not being polled already.
+    async fn start_due(&mut self, now: Instant) {
+        for account in &mut self.accounts {
+            if account.fetch.is_some() && !account.fetching() {
+                // Its client or id changed under the poll, so the answer would belong to
+                // neither: cancel it and ask the new client instead.
+                account.fetch = None;
+                account.due = now;
+            }
+        }
         let due: Vec<usize> = self
             .accounts
             .iter()
             .enumerate()
-            .filter(|(_, account)| account.due <= now)
+            .filter(|(_, account)| account.fetch.is_none() && account.due <= now)
             .map(|(index, _)| index)
             .collect();
 
@@ -1848,33 +1903,52 @@ impl Engine {
             }
         }
 
-        let mut fetches = JoinSet::new();
         for &index in &due {
-            if let Some(client) = self.accounts[index].client.clone() {
-                fetches.spawn(async move { (index, client.fetch_reading().await) });
+            let account = &mut self.accounts[index];
+            if let Some(client) = account.client.clone() {
+                let fetching = Arc::clone(&client);
+                let task = self
+                    .fetches
+                    .spawn(async move { fetching.fetch_reading().await });
+                account.fetch = Some(Fetch {
+                    task,
+                    client,
+                    account: account.account.clone(),
+                });
             }
         }
+    }
 
-        while let Some(joined) = fetches.join_next().await {
-            match joined {
-                Ok((index, result)) => self.apply(index, result).await,
-                Err(error) => tracing::error!(%error, "a fetch task did not finish"),
+    /// Files one finished poll, if its account is still waiting for that answer.
+    async fn finish(
+        &mut self,
+        joined: Result<(tokio::task::Id, Result<Reading, ProviderError>), JoinError>,
+    ) {
+        let (id, result) = match joined {
+            Ok(finished) => finished,
+            // Cancelled here, on purpose, by dropping its [`Fetch`].
+            Err(error) if error.is_cancelled() => return,
+            Err(error) => {
+                tracing::error!(%error, "a fetch task did not finish");
+                // A panicked fetch must not leave a permanent spinner in the client.
+                let lost = ProviderError::Local("The metrics check did not finish.".into());
+                (error.id(), Err(lost))
             }
-        }
-
-        // Anything still checking here lost its fetch task instead of returning a result.
-        for &index in &due {
-            if self.accounts[index].status.checking != Some(true) {
-                continue;
-            }
-            // A panicked fetch must not leave a permanent spinner in the client.
-            self.apply(
-                index,
-                Err(ProviderError::Local(
-                    "The metrics check did not finish.".into(),
-                )),
-            )
-            .await;
+        };
+        let Some(index) = self.accounts.iter().position(|account| {
+            account
+                .fetch
+                .as_ref()
+                .is_some_and(|fetch| fetch.task.id() == id)
+        }) else {
+            return;
+        };
+        let current = self.accounts[index].fetching();
+        self.accounts[index].fetch = None;
+        if current {
+            self.apply(index, result).await;
+        } else {
+            self.accounts[index].due = Instant::now();
         }
     }
 
@@ -5136,6 +5210,76 @@ svg = '''
         polling.abort();
         let status = completed.expect("the missing-key check completes independently");
         assert_eq!(status.state(), Some(ProviderState::NoCredential));
+    }
+
+    #[tokio::test]
+    async fn a_poll_that_never_answers_holds_up_neither_commands_nor_shutdown() {
+        #[derive(Debug)]
+        struct Hangs(Arc<std::sync::atomic::AtomicBool>);
+        struct Cancelled(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Cancelled {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        impl Provider for Hangs {
+            fn id(&self) -> ProviderId {
+                ProviderId::new("hangs")
+            }
+            fn fetch(&self) -> BoxFuture<'_, Result<Snapshot, ProviderError>> {
+                let cancelled = Cancelled(Arc::clone(&self.0));
+                Box::pin(async move {
+                    let _cancelled = cancelled;
+                    std::future::pending().await
+                })
+            }
+        }
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (updates, mut published) = mpsc::channel(64);
+        let mut engine = Engine::new(
+            vec![Account::with_client(Arc::new(Hangs(Arc::clone(
+                &cancelled,
+            ))))],
+            History::in_memory().expect("history opens"),
+            unlocked(),
+            updates,
+            std::env::temp_dir().join("tidemark-engine-hung-poll.toml"),
+            scheduler::RefreshMode::Auto,
+            Arc::new(Recorder::default()) as Arc<dyn Notifier>,
+        );
+        let (commands, mut queue) = mpsc::channel(4);
+        let running = tokio::spawn(async move {
+            engine.run(&mut queue).await;
+        });
+        tokio::spawn(async move { while published.recv().await.is_some() {} });
+        // Let the first turn of the loop start the poll that will never finish.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (reply, answer) = oneshot::channel();
+        commands
+            .send(Command::SetOrder {
+                providers: vec!["hangs".to_owned()],
+                reply,
+            })
+            .await
+            .expect("engine is running");
+        // Refused, since this test has no settings file to write the order to; what is
+        // asserted is that the refusal arrives at all.
+        tokio::time::timeout(Duration::from_secs(2), answer)
+            .await
+            .expect("a command is answered while a poll hangs")
+            .expect("engine replied")
+            .expect_err("no settings file");
+
+        commands
+            .send(Command::Shutdown)
+            .await
+            .expect("engine is running");
+        tokio::time::timeout(Duration::from_secs(2), running)
+            .await
+            .expect("shutdown does not wait for a hung poll")
+            .expect("engine task did not panic");
+        assert!(cancelled.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
