@@ -963,3 +963,37 @@ export component ContextMenu inherits Rectangle {
         }
     }
 }
+
+// The dimmed window under a dialog. It fades in as the dialog opens while the dialog's
+// sheet rises by `rise`, and swallows presses meant for the window underneath.
+export component Scrim inherits Rectangle {
+    out property <float> reveal: 0;
+    out property <length> rise: (1 - self.reveal) * 24px;
+    animate reveal { duration: 250ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
+    init => {
+        self.reveal = 1;
+    }
+    background: (Theme.dark ? #00000080 : #00000040).transparentize(1 - self.reveal);
+
+    TouchArea { }
+}
+
+// A dialog page sliding in from the side it comes from: 1 the right, going deeper,
+// -1 the left, going back, and 0 not at all. Moved, not faded: a translucent layer
+// would blur its text.
+export component SlideIn inherits Rectangle {
+    in property <int> from;
+    property <float> reveal: 0;
+    animate reveal { duration: 220ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
+    init => {
+        self.reveal = 1;
+    }
+    clip: true;
+
+    HorizontalLayout {
+        x: (1 - root.reveal) * root.from * 32px;
+        width: parent.width;
+        height: parent.height;
+        @children
+    }
+}

@@ -1,7 +1,7 @@
 // One account's quota windows, current-segment history, and published detail sections.
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { ActionRow, BoxedList, Button, Caption, GroupHeading, Spinner } from "widgets.slint";
+import { ActionRow, BoxedList, Button, Caption, GroupHeading, Spinner, Scrim } from "widgets.slint";
 
 export struct QuotaWindowData { title: string, summary: string }
 export struct QuotaDetailRow { label: string, value: string }
@@ -31,9 +31,7 @@ export global QuotaDetails {
     callback select(int);
 }
 
-export component QuotaDetailsDialog inherits Rectangle {
-    background: Theme.dark ? #00000080 : #00000040;
-    TouchArea { }
+export component QuotaDetailsDialog inherits Scrim {
 
     scope := FocusScope {
         init => { self.focus(); }
@@ -47,7 +45,7 @@ export component QuotaDetailsDialog inherits Rectangle {
 
         Rectangle {
             x: (root.width - self.width) / 2;
-            y: (root.height - self.height) / 2;
+            y: (root.height - self.height) / 2 + root.rise;
             width: min(720px, root.width - 24px);
             height: min(680px, root.height - 24px);
             background: Theme.window-bg;
