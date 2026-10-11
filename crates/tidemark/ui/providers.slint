@@ -188,8 +188,9 @@ component ListPage inherits ScrollView {
         VerticalLayout {
             spacing: 6px;
             HorizontalLayout {
-                alignment: end;
+                alignment: center;
                 Button {
+                    text: "Add provider";
                     has-icon: true;
                     icon: @image-url("icons/list-add-symbolic.svg");
                     clicked => {
