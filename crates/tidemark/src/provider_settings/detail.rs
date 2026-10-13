@@ -61,6 +61,9 @@ pub struct Detail {
     pub stored: bool,
     pub choices: Vec<String>,
     pub choice: usize,
+    /// The pill half another account already holds: drawn locked, and a click on it
+    /// explains why instead of switching.
+    pub locked: Option<usize>,
     pub tidemark_half: bool,
     pub sign_in_subtitle: String,
     pub waiting: bool,
@@ -82,6 +85,9 @@ pub struct Local<'a> {
     pub login_url: Option<&'a str>,
     /// Controls a click has moved ahead of the write, by [`override_key`].
     pub overrides: Option<&'a HashMap<String, String>>,
+    /// Another account of this provider that reads the vendor login, by the name the list
+    /// gives it. The login serves one account, so this one's half of the pill is locked.
+    pub cli_holder: Option<&'a str>,
     pub browser: Option<&'a BrowserAuth>,
 }
 
@@ -98,7 +104,7 @@ pub fn view(definition: &ProviderDefinition, status: &ProviderStatus, local: &Lo
     let waiting = local.login_url.is_some();
     let auth = auth(definition);
 
-    let sources = source_choices(definition);
+    let sources = source_choices(definition, status);
     let source = model::auth_source(definition, status).map(|published| {
         held(SOURCE)
             .and_then(|value| AuthSource::from_value(value))
@@ -112,6 +118,13 @@ pub fn view(definition: &ProviderDefinition, status: &ProviderStatus, local: &Lo
         .as_ref()
         .and_then(|sources| sources.iter().position(|(value, _)| Some(*value) == source))
         .unwrap_or(0);
+    let locked = local.cli_holder.and_then(|_| {
+        sources
+            .as_ref()?
+            .iter()
+            .position(|(value, _)| *value == AuthSource::Cli)
+            .filter(|&index| index != choice)
+    });
 
     let options = settings_options(definition, status)
         .into_iter()
@@ -164,6 +177,7 @@ pub fn view(definition: &ProviderDefinition, status: &ProviderStatus, local: &Lo
         stored,
         choices,
         choice,
+        locked,
         tidemark_half: source.is_none_or(|source| source == AuthSource::Tidemark),
         sign_in_subtitle: if waiting {
             "Waiting for your browser…".into()
@@ -202,10 +216,20 @@ fn auth(definition: &ProviderDefinition) -> Option<Auth> {
 /// this crate would have to be taught. A choice this build has no screen for is refused
 /// outright: half a pill is worse than none, because the half that is drawn looks like
 /// the whole choice.
-pub fn source_choices(definition: &ProviderDefinition) -> Option<Vec<(AuthSource, String)>> {
+///
+/// Read from the account's own published options, not the catalog's: a further account
+/// cannot read the vendor program's login, and the daemon offers it only Tidemark's.
+pub fn source_choices(
+    definition: &ProviderDefinition,
+    status: &ProviderStatus,
+) -> Option<Vec<(AuthSource, String)>> {
     let external = definition.external.as_ref()?;
-    let option = definition
-        .options
+    let declared = if status.options.is_empty() {
+        &definition.options
+    } else {
+        &status.options
+    };
+    let option = declared
         .iter()
         .find(|option| option.name == external.option)?;
     let toggles: Vec<(AuthSource, String)> = option
@@ -214,6 +238,14 @@ pub fn source_choices(definition: &ProviderDefinition) -> Option<Vec<(AuthSource
         .filter_map(|choice| Some((AuthSource::from_value(&choice.value)?, choice.title.clone())))
         .collect();
     (toggles.len() == option.choices.len() && toggles.len() >= 2).then_some(toggles)
+}
+
+/// Why the vendor login's half of the pill is locked, for the toast a click on it shows.
+pub fn lock_text(external: &ExternalLogin, holder: &str) -> String {
+    format!(
+        "{} is available to only one account, and {holder} already uses it.",
+        external.label
+    )
 }
 
 /// The provider's own settings — every one except the credential choice, which the pill
@@ -404,7 +436,62 @@ mod tests {
         definition.options[0]
             .choices
             .push(choice("token", "Pasted token"));
-        assert_eq!(source_choices(&definition), None);
+        assert_eq!(source_choices(&definition, &status()), None);
+    }
+
+    #[test]
+    fn a_vendor_login_another_account_reads_is_drawn_locked() {
+        let mut work = status();
+        work.account = "work".into();
+        work.auth_source = Some("oauth".into());
+        let locked = view(
+            &claude(),
+            &work,
+            &Local {
+                cli_holder: Some("the default account"),
+                ..Local::default()
+            },
+        );
+        assert_eq!(locked.choices, ["Tidemark login", "Claude Code login"]);
+        assert_eq!(locked.choice, 0);
+        assert_eq!(locked.locked, Some(1));
+
+        let free = view(&claude(), &work, &Local::default());
+        assert_eq!(
+            free.locked, None,
+            "nobody else reads it, so it is free to take"
+        );
+    }
+
+    #[test]
+    fn the_half_an_account_is_on_is_never_locked() {
+        // A hand-edited file can leave two accounts on it; the one being looked at must
+        // still be able to leave.
+        let mut work = status();
+        work.auth_source = Some("cli".into());
+        let view = view(
+            &claude(),
+            &work,
+            &Local {
+                cli_holder: Some("Work"),
+                ..Local::default()
+            },
+        );
+        assert_eq!(view.choice, 1);
+        assert_eq!(view.locked, None);
+    }
+
+    #[test]
+    fn the_lock_names_the_login_and_who_holds_it() {
+        let definition = claude();
+        let external = definition
+            .external
+            .as_ref()
+            .expect("claude has a vendor login");
+        assert_eq!(
+            lock_text(external, "Work"),
+            "Claude Code login is available to only one account, and Work already uses it."
+        );
     }
 
     #[test]

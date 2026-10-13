@@ -24,6 +24,7 @@ use tidemark_types::{
 
 use self::browser_auth::{BrowserAuth, Tone};
 use self::detail::{Auth, Local, SOURCE, override_key};
+use self::model::AuthSource;
 use crate::alert::{Alerts, Appearance, Content, Question};
 use crate::bus::DaemonProxy;
 use crate::marks::Marks;
@@ -417,6 +418,24 @@ impl ProviderDialog {
         Some((identity, definition, status))
     }
 
+    /// Another account of this provider that the daemon says reads the vendor login, by the
+    /// name the list gives it.
+    fn cli_holder(&self, identity: &Identity) -> Option<String> {
+        self.statuses
+            .borrow()
+            .iter()
+            .find(|status| {
+                status.provider == identity.0
+                    && status.account != identity.1
+                    && status.auth_source.as_deref() == Some(AuthSource::Cli.as_value())
+            })
+            .map(|status| match &status.account_label {
+                _ if status.account == DEFAULT_ACCOUNT => "the default account".to_owned(),
+                Some(label) => label.clone(),
+                None => status.account.clone(),
+            })
+    }
+
     fn proxy(&self) -> Option<DaemonProxy<'static>> {
         let proxy = (self.daemon)();
         if proxy.is_none() {
@@ -567,6 +586,7 @@ impl ProviderDialog {
         let urls = self.login_urls.borrow();
         let overrides = self.overrides.borrow();
         let browser = self.browser.borrow();
+        let holder = self.cli_holder(&identity);
         let view = detail::view(
             &definition,
             &status,
@@ -574,6 +594,7 @@ impl ProviderDialog {
                 login_url: urls.get(&identity).map(String::as_str),
                 overrides: overrides.get(&identity),
                 browser: browser.get(&identity),
+                cli_holder: holder.as_deref(),
             },
         );
 
@@ -662,6 +683,7 @@ impl ProviderDialog {
             stored: view.stored,
             choices: ModelRc::from(Rc::clone(&self.detail.choices)),
             choice: view.choice as i32,
+            locked: view.locked.map_or(-1, |index| index as i32),
             tidemark_half: view.tidemark_half,
             sign_in_subtitle: view.sign_in_subtitle.into(),
             signed_in: view.stored,
@@ -1276,11 +1298,11 @@ impl ProviderDialog {
     /// pill is the one control whose two positions are two screens, and leaving the old
     /// screen under a pill that has already moved reads as the click having missed.
     fn choose_source(self: &Rc<Self>, index: usize) {
-        let Some((identity, definition, _)) = self.current() else {
+        let Some((identity, definition, status)) = self.current() else {
             return;
         };
         let (Some(sources), Some(external)) = (
-            detail::source_choices(&definition),
+            detail::source_choices(&definition, &status),
             definition.external.as_ref(),
         ) else {
             return;
@@ -1288,6 +1310,13 @@ impl ProviderDialog {
         let Some((source, _)) = sources.get(index) else {
             return;
         };
+        // The locked half: the pill stays put and says why.
+        if *source == AuthSource::Cli
+            && let Some(holder) = self.cli_holder(&identity)
+        {
+            self.toast(&detail::lock_text(external, &holder));
+            return;
+        }
         self.write_option(
             identity,
             SOURCE.to_owned(),

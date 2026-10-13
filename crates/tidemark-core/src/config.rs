@@ -36,6 +36,13 @@ const ACCOUNT_TABLE: &str = "account";
 const ENDPOINT_KEY: &str = "endpoint";
 /// The insecure-transport acknowledgement key inside it.
 const INSECURE_KEY: &str = "allow_insecure_http";
+/// The further account that reads a vendor program's own login instead of a Tidemark
+/// one: `[provider.claude] cli_account = "work"`. One key rather than a setting per account,
+/// because the vendor program holds one login and so at most one account can read it. The
+/// default account's choice stays where it always was, under [`SOURCE_KEY`].
+const CLI_ACCOUNT_KEY: &str = "cli_account";
+/// The default account's credential choice for a provider with a vendor login.
+const SOURCE_KEY: &str = "source";
 /// The shared storage keys used by browser-cookie authentication providers.
 const AUTH_SOURCE_KEY: &str = "auth-source";
 const AUTH_BROWSER_KEY: &str = "auth-browser";
@@ -755,11 +762,79 @@ impl Config {
         // account id, not to the provider. Leaving them behind would hand a reused id someone
         // else's URL and someone else's acknowledgement.
         self.forget_account_table(provider, account)?;
+        let holder = self.cli_account(provider).map(str::to_owned);
+        if holder.as_deref() == Some(account) {
+            self.remove_provider_key(provider, CLI_ACCOUNT_KEY);
+        }
         if account == "default" {
+            // The survivor keeps the credential it was reading. Taking over `default` moves
+            // a vendor login it held to the default account's own setting.
+            if holder.as_deref() == Some(accounts[0].as_str()) {
+                self.remove_provider_key(provider, CLI_ACCOUNT_KEY);
+                self.set_option_value(provider, SOURCE_KEY, crate::providers::CLI_SOURCE)?;
+            }
             accounts[0] = "default".to_owned();
         }
         self.set_accounts(provider, &accounts)?;
         Ok(true)
+    }
+
+    /// Gives one further account a new id in its place, and writes the file.
+    ///
+    /// The vendor login an account reads follows it to its new id in the same write.
+    pub fn rename_account(
+        &mut self,
+        provider: &str,
+        account: &str,
+        new: &str,
+    ) -> Result<(), ConfigError> {
+        let mut accounts = self.accounts(provider)?;
+        let Some(position) = accounts.iter().position(|held| held == account) else {
+            return Ok(());
+        };
+        accounts[position] = new.to_owned();
+        if self.cli_account(provider) == Some(account) {
+            self.set_option_value(provider, CLI_ACCOUNT_KEY, new)?;
+        }
+        self.set_accounts(provider, &accounts)
+    }
+
+    /// The further account that reads the provider's vendor login, if one does.
+    ///
+    /// `default` is never named here: its choice is its own setting.
+    pub fn cli_account(&self, provider: &str) -> Option<&str> {
+        self.option(provider, CLI_ACCOUNT_KEY)
+            .filter(|account| *account != "default")
+    }
+
+    /// Names the further account that reads the provider's vendor login, or clears the
+    /// name, and writes the file. Which accounts may hold it is the caller's to check.
+    pub fn set_cli_account(
+        &mut self,
+        provider: &str,
+        account: Option<&str>,
+    ) -> Result<(), ConfigError> {
+        self.normalize_providers(None)?;
+        match account {
+            Some(account) => self.set_option_value(provider, CLI_ACCOUNT_KEY, account)?,
+            None if self.option(provider, CLI_ACCOUNT_KEY).is_some() => {
+                self.remove_provider_key(provider, CLI_ACCOUNT_KEY);
+            }
+            None => return Ok(()),
+        }
+        self.write()
+    }
+
+    /// Drops one key of `[provider.<id>]` if it is there.
+    fn remove_provider_key(&mut self, provider: &str, key: &str) {
+        if let Some(table) = self
+            .document
+            .get_mut(PROVIDER_TABLE)
+            .and_then(|table| table.get_mut(provider))
+            .and_then(Item::as_table_like_mut)
+        {
+            table.remove(key);
+        }
     }
 
     /// Sets one provider setting and writes the file.

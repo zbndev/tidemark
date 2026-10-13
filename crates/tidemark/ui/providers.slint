@@ -75,6 +75,8 @@ export struct DetailData {
     // The credential pill; empty for a provider with one credential.
     choices: [string],
     choice: int,
+    // The half another account already holds, or -1.
+    locked: int,
     tidemark-half: bool,
     sign-in-subtitle: string,
     signed-in: bool,
@@ -354,6 +356,7 @@ component DetailPage inherits ScrollView {
                 if root.data.choices.length > 0: ToggleGroup {
                     labels: root.data.choices;
                     active: root.data.choice;
+                    locked: root.data.locked;
                     // A login in progress holds a loopback port; the switch stays put
                     // until it finishes, so its Cancel stays on screen.
                     enabled: !root.data.waiting;
