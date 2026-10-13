@@ -6151,7 +6151,7 @@ dependencies = [
 
 [[package]]
 name = "tidemark"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-channel",
  "async-io",
@@ -6179,7 +6179,7 @@ dependencies = [
 
 [[package]]
 name = "tidemark-cli"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-io",
  "clap",
@@ -6194,7 +6194,7 @@ dependencies = [
 
 [[package]]
 name = "tidemark-core"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm",
@@ -6229,7 +6229,7 @@ dependencies = [
 
 [[package]]
 name = "tidemark-ipc"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-io",
  "tidemark-types",
@@ -6238,7 +6238,7 @@ dependencies = [
 
 [[package]]
 name = "tidemark-types"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "serde",
  "zvariant",
@@ -6246,7 +6246,7 @@ dependencies = [
 
 [[package]]
 name = "tidemarkd"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "reqwest",
  "rusqlite",
