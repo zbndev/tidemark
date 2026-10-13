@@ -81,7 +81,7 @@ cookies — a deliberate scope boundary, not a coincidence.
 | Codex | `GET https://chatgpt.com/backend-api/wham/usage`, Bearer | `~/.codex/auth.json` (`tokens.access_token`), or our own login |
 | Z.ai / GLM | API token, Global or BigModel CN region | user-supplied key |
 | Kimi | `GET https://api.kimi.com/coding/v1/usages` | user-supplied key from Kimi Code Console |
-| Antigravity | Cloud Code Assist `fetchAvailableModels`; optional local `agy` fallback | Tidemark Google OAuth, or an existing `agy` session |
+| Antigravity | Cloud Code Assist `retrieveUserQuotaSummary`, the same per-group summary the local `agy` server reports; optional local `agy` fallback | Tidemark Google OAuth, or an existing `agy` session |
 
 Three of them have **two** credentials rather than one, and which of the two an account
 uses is the user's choice, not a rule hidden in the daemon. It is stored as

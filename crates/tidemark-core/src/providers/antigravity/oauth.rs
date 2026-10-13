@@ -125,6 +125,27 @@ async fn complete_login_at(
     document_from_login(response, project.as_deref(), now_ms)
 }
 
+/// The project `loadCodeAssist` names for this login now, for a login that stored none.
+///
+/// The quota summary is refused without a project, and a login can predate the server
+/// naming one: Google has been seen to answer `loadCodeAssist` with a project for an
+/// account whose login, made earlier, received none.
+pub(super) async fn current_project(
+    client: &reqwest::Client,
+    endpoint: &str,
+    access_token: &str,
+) -> Result<Option<String>, ProviderError> {
+    let loaded = post_json(
+        client,
+        endpoint,
+        "v1internal:loadCodeAssist",
+        access_token,
+        &serde_json::json!({ "metadata": client_metadata() }),
+    )
+    .await?;
+    Ok(project_id(&loaded).map(str::to_owned))
+}
+
 /// The Cloud AI Companion project this account uses, when it has one.
 ///
 /// `None` is an ordinary answer rather than a failure. A tier declaring
