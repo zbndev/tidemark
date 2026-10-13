@@ -1,7 +1,7 @@
 # ANTIGRAVITY KNOWLEDGE BASE
 
 ## OVERVIEW
-Local `agy` supervision and direct OAuth quota acquisition with pool-aware parsing; score 8, distinct lifecycle domain.
+Local `agy` supervision and direct OAuth quota acquisition; both read the same quota summary through one parser; score 8, distinct lifecycle domain.
 
 ## WHERE TO LOOK
 | Task | Location | Notes |
@@ -9,13 +9,15 @@ Local `agy` supervision and direct OAuth quota acquisition with pool-aware parsi
 | Source selection and refresh | `mod.rs` | `Antigravity`, auto/local/direct flows |
 | Local quota meaning | `mod.rs` | `logged_in`, account-aware parser, cadence table |
 | Local process lifecycle | `agy.rs` | PTY spawn, socket discovery, readiness, owned/adopted state |
-| Direct Cloud Code quota | `direct.rs` | Network fetch and independent payload parser |
-| Login completion | `oauth.rs` | OAuth client and account login completion |
-| Recorded model payload | `../../../tests/fixtures/antigravity-available-models.json` | Fixture input |
+| Direct Cloud Code quota | `direct.rs` | `retrieveUserQuotaSummary` transport; parsing is `mod.rs`'s |
+| Login completion | `oauth.rs` | OAuth client, account login completion, project discovery |
+| Recorded summary payload | `../../../tests/fixtures/antigravity-quota-summary.json` | Direct OAuth response |
 
 ## CONVENTIONS
 - `agy` and the local-source implementation compile only on Unix; direct OAuth is separate.
 - Explicit CLI mode uses the local server; explicit OAuth mode uses owned login.
+- OAuth and CLI differ only in authentication: same summary RPC, parser, window keys and titles. Do not group quota by model vendor; Google limits per group (Claude and GPT-OSS share one bucket).
+- The direct summary needs a project or Cloud Code answers 403 `SUBSCRIPTION_REQUIRED`; a login without a stored project asks `loadCodeAssist` each poll and does not persist it.
 - Auto mode has local-first behavior; preserve its documented error/fallback distinctions.
 - `GetUserStatus` establishes authentication before trusting local quota responses.
 - A 200 quota response with all remaining fractions equal to one can be an unauthenticated server.

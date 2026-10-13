@@ -1,9 +1,11 @@
-//! Antigravity, through the local server the `agy` CLI brings up.
+//! Antigravity, through the local server the `agy` CLI brings up or a Tidemark login.
 //!
 //! The hardest of the five, and not because of the payload. Quota here is not an endpoint
 //! on the internet — it is an RPC on a loopback HTTPS server with a self-signed certificate
 //! that only exists while a CLI process is alive. [`agy`] is that half of the work; this
-//! module is the meaning.
+//! module is the meaning. A Tidemark login asks Cloud Code the same question directly
+//! ([`direct`]) and its answer is read by the same parser, so the source changes how the
+//! account authenticates and nothing the card shows.
 //!
 //! # What the payload says, and what it does not
 //!
@@ -111,7 +113,7 @@ mod local {
             Box::pin(async move {
                 let ready = self.agy.ready().await?;
                 let quota = self.agy.rpc(ready.port, agy::QUOTA_SUMMARY_PATH).await?;
-                parse_for_account(&quota, &ready.status_body, Timestamp::now(), &account)
+                parse_for_account(&quota, Some(&ready.status_body), Timestamp::now(), &account)
             })
         }
     }
@@ -365,11 +367,18 @@ impl Antigravity {
         &self,
         credentials: &OwnedCredentials,
     ) -> Result<Snapshot, ProviderError> {
-        direct::fetch_for_account(
+        let access_token = credentials.access_token.expose();
+        let project_id = match &credentials.project_id {
+            Some(project_id) => Some(project_id.clone()),
+            None => {
+                oauth::current_project(&self.client, &self.direct_endpoint, access_token).await?
+            }
+        };
+        direct::fetch(
             &self.client,
             &self.direct_endpoint,
-            credentials.access_token.expose(),
-            credentials.project_id.as_deref(),
+            access_token,
+            project_id.as_deref(),
             &self.account,
         )
         .await
@@ -495,12 +504,14 @@ pub fn logged_in(body: &str) -> Result<(), String> {
 /// inverted fraction, the two pools of one length, the cadence that is sometimes declared
 /// and sometimes only implied by an id — is reachable from a test without a running server.
 pub fn parse(quota: &str, status: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
-    parse_for_account(quota, status, captured_at, &AccountId::default())
+    parse_for_account(quota, Some(status), captured_at, &AccountId::default())
 }
 
-fn parse_for_account(
+/// The same, for an account. `status` is absent for a Tidemark login: `GetUserStatus` is a
+/// local-server RPC, and Cloud Code reports no plan name or credit balance in its terms.
+pub(super) fn parse_for_account(
     quota: &str,
-    status: &str,
+    status: Option<&str>,
     captured_at: Timestamp,
     account: &AccountId,
 ) -> Result<Snapshot, ProviderError> {
@@ -563,8 +574,10 @@ fn parse_for_account(
 /// A user status that will not parse costs the sections and nothing else. It has already
 /// done its real job by the time this runs — it is what let the quota be believed — and
 /// failing a good quota reading over the copy beneath it would be the wrong trade.
-fn details(status: &str, models: Vec<DetailRow>) -> Vec<DetailSection> {
-    let status: UserStatusResponse = serde_json::from_str(status).unwrap_or_default();
+fn details(status: Option<&str>, models: Vec<DetailRow>) -> Vec<DetailSection> {
+    let status: UserStatusResponse = status
+        .and_then(|status| serde_json::from_str(status).ok())
+        .unwrap_or_default();
     let plan_status = status
         .user_status
         .as_ref()
@@ -1236,7 +1249,7 @@ mod tests {
     }
 
     const DIRECT_QUOTA: &str =
-        include_str!("../../../tests/fixtures/antigravity-available-models.json");
+        include_str!("../../../tests/fixtures/antigravity-quota-summary.json");
 
     #[test]
     fn auto_asks_the_local_server_before_the_login() {
@@ -1454,9 +1467,10 @@ mod tests {
     }
 
     #[test]
-    fn refreshing_a_projectless_login_does_not_write_a_null_project() {
-        // A stored `"project_id": null` would be a field that reads back as absent while
-        // looking like a value in the vault. The login omits it; the refresh must agree.
+    fn a_projectless_login_asks_for_its_project_without_storing_it() {
+        // The quota summary is refused without a project, so one the login never received
+        // is asked for. A stored `"project_id": null` would be a field that reads back as
+        // absent while looking like a value in the vault; the refresh must not write one.
         let document = serde_json::json!({
             "access_token": "old",
             "refresh_token": "old-refresh",
@@ -1464,7 +1478,9 @@ mod tests {
         });
         let secrets = FakeSecrets::holding(document);
         let refresh = r#"{"access_token":"new","refresh_token":"rotated","expires_in":3600}"#;
-        let (base, requests, server) = local_server(vec![(200, refresh), (200, DIRECT_QUOTA)]);
+        let loaded = r#"{"cloudaicompanionProject":"discovered-project"}"#;
+        let (base, requests, server) =
+            local_server(vec![(200, refresh), (200, loaded), (200, DIRECT_QUOTA)]);
         let local_calls = Arc::new(AtomicUsize::new(0));
         let provider = Antigravity::with_endpoints_and_local(
             Some(Arc::clone(&secrets) as Arc<dyn Secrets>),
@@ -1478,10 +1494,19 @@ mod tests {
         block_on(provider.fetch_inner()).expect("a projectless login refreshes and fetches");
 
         let _refresh = requests.recv().expect("refresh captured");
+        let load_request = requests.recv().expect("project lookup captured");
+        assert!(
+            load_request.starts_with("POST /v1internal:loadCodeAssist "),
+            "{load_request}"
+        );
+        assert!(
+            load_request.contains("authorization: Bearer new"),
+            "{load_request}"
+        );
         let quota_request = requests.recv().expect("quota captured");
         assert!(
-            !quota_request.contains(r#""project""#),
-            "no project is named because none is known: {quota_request}"
+            quota_request.contains(r#""project":"discovered-project""#),
+            "{quota_request}"
         );
         let stored = secrets.document().expect("rotated document");
         assert_eq!(stored["refresh_token"], "rotated");
