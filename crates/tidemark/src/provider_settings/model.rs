@@ -4,7 +4,8 @@ use tidemark_types::{
     AuthSelection, ExternalLogin, ProviderDefinition, ProviderOption, ProviderState, ProviderStatus,
 };
 
-/// Catalog entries which have not already been configured and match the query.
+/// Catalog entries which have not already been configured and match the query, in
+/// alphabetical order of their titles.
 ///
 /// The catalog only — an installed plugin is the custom tab's to show, add and remove,
 /// so no plugin definition is ever offered here.
@@ -14,7 +15,7 @@ pub fn addable<'a>(
     query: &str,
 ) -> Vec<&'a ProviderDefinition> {
     let query = query.trim().to_lowercase();
-    definitions
+    let mut matches: Vec<_> = definitions
         .iter()
         .filter(|definition| definition.plugin.is_none())
         .filter(|definition| {
@@ -26,7 +27,11 @@ pub fn addable<'a>(
             definition.provider.to_lowercase().contains(&query)
                 || definition.title.to_lowercase().contains(&query)
         })
-        .collect()
+        .collect();
+    // The catalog's order is the daemon's (hand-written providers first); a picker is read
+    // by name.
+    matches.sort_by_cached_key(|definition| definition.title.to_lowercase());
+    matches
 }
 
 /// Which of an account's two credentials is in force.
@@ -332,6 +337,23 @@ mod tests {
             ["codex"]
         );
         assert!(addable(&definitions, &statuses, "claude").is_empty());
+    }
+
+    #[test]
+    fn the_picker_lists_providers_alphabetically_by_title_ignoring_case() {
+        let definitions = vec![
+            definition("zai", "Z.ai"),
+            definition("antigravity", "Antigravity"),
+            definition("clinepass", "ClinePass"),
+            definition("amp", "amp"),
+        ];
+        assert_eq!(
+            addable(&definitions, &[], "")
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            ["amp", "Antigravity", "ClinePass", "Z.ai"]
+        );
     }
 
     #[test]
