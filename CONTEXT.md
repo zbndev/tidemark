@@ -685,7 +685,9 @@ IPC, dialog lifetimes and pure presentation decisions.
   `com.canonical.dbusmenu` through `ksni` (Unlicense), on the same zbus async-io backend
   as the daemon connection. Windows uses `tray-icon` with unused Linux features disabled.
 - **The window owns its frame.** Rounded transparent corners, header controls and native
-  dragging are drawn through Slint and winit. Windows supplies its native shadow; Wayland
+  dragging are drawn through Slint and winit. Windows presents through DirectComposition:
+  a swap chain on the window itself, and Vulkan, are opaque there and fill the corners
+  with the driver's colour. Windows supplies its native shadow; Wayland
   uses a click-through subsurface outside the window geometry. Maximized and full-screen
   windows have square corners and no custom shadow. Showing a hidden window requests a
   new frame so a background Wayland launch maps when opened from the tray.

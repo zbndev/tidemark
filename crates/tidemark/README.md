@@ -35,7 +35,10 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
   hidden is mapped when the user opens it.
 - The window's own header and controls on Linux and Windows, with native dragging and
   resizing and no additional system title bar. Floating windows have transparent rounded
-  corners; maximized and full-screen windows have square corners. `WindowMoveArea`
+  corners; on Windows the window is drawn on Direct3D 12 through DirectComposition, whose
+  surface keeps the corners' alpha, and its 8px radius follows Windows 11's own rounding.
+  Without Direct3D 12 it falls back to an opaque surface and square corners. Maximized
+  and full-screen windows have square corners. `WindowMoveArea`
   hands dragging to the system without retaining Slint's pointer grab. Windows uses
   its native shadow; on Wayland a synchronized, click-through subsurface paints the
   shadow below the content, outside Winit's window geometry. It is removed when
