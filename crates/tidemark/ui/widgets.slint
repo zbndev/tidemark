@@ -116,6 +116,8 @@ export component ToggleGroup inherits Rectangle {
     in property <[string]> labels;
     in property <int> active;
     in property <bool> enabled: true;
+    // A segment drawn unavailable, under a lock. Still clickable, so the click can say why.
+    in property <int> locked: -1;
     callback chosen(int);
 
     height: 40px;
@@ -147,16 +149,32 @@ export component ToggleGroup inherits Rectangle {
             preferred-width: 0px;
             horizontal-stretch: 1;
             border-radius: 6px;
-            background: (index != root.active && touch.has-hover ? Theme.ink(0.07) : transparent).transparentize(root.fade);
+            background: (index != root.active && index != root.locked && touch.has-hover ? Theme.ink(0.07) : transparent).transparentize(root.fade);
             animate background { duration: 100ms; }
 
-            Text {
-                text: label;
-                color: Theme.fg.transparentize(root.fade);
-                font-weight: 700;
-                overflow: elide;
-                horizontal-alignment: center;
-                width: parent.width - 12px;
+            HorizontalLayout {
+                alignment: center;
+                spacing: 6px;
+                padding-left: 6px;
+                padding-right: 6px;
+                if index == root.locked: VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: @image-url("icons/changes-prevent-symbolic.svg");
+                        colorize: Theme.fg.transparentize(0.35);
+                        width: 14px;
+                        height: 14px;
+                    }
+                }
+                // Greyed through its colour, as `fade` is, not through `opacity`.
+                Text {
+                    text: label;
+                    color: Theme.fg.transparentize(index == root.locked ? 0.55 : root.fade);
+                    font-weight: 700;
+                    overflow: elide;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
 
             touch := TouchArea {

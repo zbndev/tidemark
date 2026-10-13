@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use tidemark_core::config::Config;
+use tidemark_core::config::{Config, ConfigError};
 use tidemark_core::debug;
 use tidemark_core::oauth;
 use tidemark_core::plugin::Definition;
@@ -493,7 +493,7 @@ pub(crate) fn account_with_source(
     config: &Config,
     source: Option<Source>,
 ) -> Result<Option<Account>, ProviderError> {
-    let mut published_options = options(provider, config);
+    let mut published_options = account_options(provider, account, config);
     if let Some(source) = source
         && let Some(option) = published_options
             .iter_mut()
@@ -676,7 +676,14 @@ pub fn notify(provider: &str, config: &Config) -> Vec<String> {
 /// `Spec`; either way the row is the same shape.
 pub fn options(provider: &str, config: &Config) -> Vec<ProviderOption> {
     if let Some(entry) = oauth_entry(provider) {
-        return vec![auth_source_option(entry, config)];
+        let value = if local_source_available(entry.slug) {
+            config
+                .option(entry.slug, AUTH_SOURCE)
+                .unwrap_or(AUTO_SOURCE)
+        } else {
+            OAUTH_SOURCE
+        };
+        return vec![auth_source_option(entry, value)];
     }
     keyed::CATALOG
         .iter()
@@ -695,6 +702,26 @@ pub fn options(provider: &str, config: &Config) -> Vec<ProviderOption> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The settings one account publishes: the provider's, with the credential choice set to
+/// the one this account reads rather than the default account's.
+///
+/// The value is what the account's client is rebuilt from, so it is the resolved choice:
+/// a default account left on `auto` while a further account holds the vendor login
+/// publishes `oauth`, or its own automatic rule could reach for that login as well.
+pub fn account_options(
+    provider: &str,
+    account: &AccountId,
+    config: &Config,
+) -> Vec<ProviderOption> {
+    match oauth_entry(provider) {
+        Some(entry) => vec![auth_source_option(
+            entry,
+            source_for_account(provider, account, config).as_value(),
+        )],
+        None => options(provider, config),
+    }
 }
 
 /// One published setting: the provider's schema for it, filled in with the user's value.
@@ -734,16 +761,9 @@ fn published_option(
 ///
 /// No description: the dialog draws this row itself, in the authentication group, with
 /// its own explanation, and a sentence here would be shown twice.
-fn auth_source_option(entry: &OAuthEntry, config: &Config) -> ProviderOption {
+fn auth_source_option(entry: &OAuthEntry, value: &str) -> ProviderOption {
     let available = local_source_available(entry.slug);
-    let value = if available {
-        config
-            .option(entry.slug, AUTH_SOURCE)
-            .unwrap_or(AUTO_SOURCE)
-            .to_owned()
-    } else {
-        OAUTH_SOURCE.to_owned()
-    };
+    let value = if available { value } else { OAUTH_SOURCE }.to_owned();
     let mut choices = vec![OptionChoice {
         value: OAUTH_SOURCE.to_owned(),
         title: "Tidemark login".to_owned(),
@@ -778,12 +798,68 @@ pub(crate) fn source_for_new_account(provider: &str) -> Option<Source> {
     oauth_entry(provider).map(|_| Source::OAuth)
 }
 
-/// Extra configured accounts have no vendor CLI file, so they always use Tidemark's login.
+/// Which credential one account reads.
+///
+/// The vendor program holds one login on this machine, so at most one account reads it.
+/// The default account keeps its own setting, `auto` included, unless a further account
+/// holds the login — then an untouched default reads Tidemark's. A further account reads
+/// it only when the file names it as the holder; an explicit `cli` on the default account
+/// outranks a hand-edited holder, so the two can never both read it.
 pub(crate) fn source_for_account(provider: &str, account: &AccountId, config: &Config) -> Source {
-    if account.as_str() == "default" {
-        supported_source(provider, source_value(provider, config))
+    let own = source_value(provider, config);
+    let holder = cli_holder(provider, config);
+    let source = if account.as_str() == "default" {
+        match own {
+            Source::Auto if holder.is_some() => Source::OAuth,
+            own => own,
+        }
+    } else if holder == Some(account.as_str()) && own != Source::Cli {
+        Source::Cli
     } else {
         Source::OAuth
+    };
+    supported_source(provider, source)
+}
+
+/// The further account named as reading the vendor login, if it is still configured.
+fn cli_holder<'a>(provider: &str, config: &'a Config) -> Option<&'a str> {
+    let holder = config.cli_account(provider)?;
+    config
+        .accounts(provider)
+        .ok()?
+        .iter()
+        .any(|account| account == holder)
+        .then_some(holder)
+}
+
+/// Whether a setting is an OAuth provider's credential choice, which is stored per account
+/// by [`store_source`] rather than as one provider-wide value.
+pub(crate) fn is_source_option(provider: &str, name: &str) -> bool {
+    name == AUTH_SOURCE && oauth_entry(provider).is_some()
+}
+
+/// The vendor login's own name — `Claude Code login` — for a refusal to say what is taken.
+pub(crate) fn external_label(provider: &str) -> Option<&'static str> {
+    oauth_entry(provider).map(|entry| entry.external_label)
+}
+
+/// Stores one account's credential choice: the default account's under its own setting, a
+/// further account's as the provider's one vendor-login holder. Whether the login is free
+/// to take is the caller's to check first.
+pub(crate) fn store_source(
+    provider: &str,
+    account: &AccountId,
+    value: &str,
+    config: &mut Config,
+) -> Result<(), ConfigError> {
+    if account.as_str() == "default" {
+        config.set_option(provider, AUTH_SOURCE, value)
+    } else if value == CLI_SOURCE {
+        config.set_cli_account(provider, Some(account.as_str()))
+    } else if config.cli_account(provider) == Some(account.as_str()) {
+        config.set_cli_account(provider, None)
+    } else {
+        Ok(())
     }
 }
 
@@ -916,14 +992,11 @@ fn antigravity_account(
     .with_rebuild({
         let secrets = Arc::clone(secrets);
         Box::new(move |account, _credential, options| {
-            let source = if account.as_str() == "default" {
-                supported_source(
-                    antigravity::PROVIDER_ID,
-                    Source::from_value(options.get(AUTH_SOURCE).map(String::as_str)),
-                )
-            } else {
-                Source::OAuth
-            };
+            // The published value is already this account's own, resolved choice.
+            let source = supported_source(
+                antigravity::PROVIDER_ID,
+                Source::from_value(options.get(AUTH_SOURCE).map(String::as_str)),
+            );
             Ok(Arc::new(build_antigravity(
                 account.clone(),
                 Arc::clone(&secrets),
@@ -952,11 +1025,8 @@ fn claude_account(
     .with_rebuild({
         let secrets = Arc::clone(secrets);
         Box::new(move |account, _credential, options| {
-            let source = if account.as_str() == "default" {
-                Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
-            } else {
-                Source::OAuth
-            };
+            // The published value is already this account's own, resolved choice.
+            let source = Source::from_value(options.get(AUTH_SOURCE).map(String::as_str));
             Ok(Arc::new(claude::Claude::new(
                 account.clone(),
                 Some(Arc::clone(&secrets)),
@@ -983,11 +1053,8 @@ fn codex_account(
     .with_rebuild({
         let secrets = Arc::clone(secrets);
         Box::new(move |account, _credential, options| {
-            let source = if account.as_str() == "default" {
-                Source::from_value(options.get(AUTH_SOURCE).map(String::as_str))
-            } else {
-                Source::OAuth
-            };
+            // The published value is already this account's own, resolved choice.
+            let source = Source::from_value(options.get(AUTH_SOURCE).map(String::as_str));
             Ok(Arc::new(codex::Codex::new(
                 account.clone(),
                 Some(Arc::clone(&secrets)),
@@ -1688,6 +1755,68 @@ mod tests {
             assert_eq!(source.value, supported_source(slug, Source::Cli).as_value());
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    /// The credential choice one account publishes, by value.
+    fn published_source(provider: &str, account: &str, config: &Config) -> String {
+        account_options(provider, &AccountId::new(account), config)
+            .into_iter()
+            .find(|option| option.name == AUTH_SOURCE)
+            .expect("the credential choice is published")
+            .value
+    }
+
+    #[test]
+    fn the_vendor_login_is_read_by_at_most_one_account() {
+        // The default account's own choice is not a further account's: before, a click
+        // on the second account rewrote the provider-wide value the default one reads.
+        let path = scratch_config(
+            "cli-default",
+            "providers = [\"claude\"]\n\n[provider.claude]\naccounts = [\"default\", \"work\"]\nsource = \"cli\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        assert_eq!(published_source("claude", "default", &config), CLI_SOURCE);
+        assert_eq!(published_source("claude", "work", &config), OAUTH_SOURCE);
+        let choices = account_options("claude", &AccountId::new("work"), &config)[0]
+            .choices
+            .len();
+        assert_eq!(
+            choices, 2,
+            "a further account is offered the vendor login too"
+        );
+        let _ = std::fs::remove_file(path);
+
+        // A further account holding it leaves an untouched default on Tidemark's login,
+        // where its automatic rule could otherwise reach for the same file.
+        let path = scratch_config(
+            "cli-work",
+            "providers = [\"claude\"]\n\n[provider.claude]\naccounts = [\"default\", \"work\"]\ncli_account = \"work\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        assert_eq!(published_source("claude", "default", &config), OAUTH_SOURCE);
+        assert_eq!(published_source("claude", "work", &config), CLI_SOURCE);
+        let _ = std::fs::remove_file(path);
+
+        // A hand-edited file naming both: the default account's explicit choice wins.
+        let path = scratch_config(
+            "cli-both",
+            "providers = [\"claude\"]\n\n[provider.claude]\naccounts = [\"default\", \"work\"]\nsource = \"cli\"\ncli_account = \"work\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        assert_eq!(published_source("claude", "default", &config), CLI_SOURCE);
+        assert_eq!(published_source("claude", "work", &config), OAUTH_SOURCE);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_holder_that_is_no_longer_configured_holds_nothing() {
+        let path = scratch_config(
+            "cli-stale",
+            "providers = [\"codex\"]\n\n[provider.codex]\naccounts = [\"default\"]\ncli_account = \"gone\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        assert_eq!(published_source("codex", "default", &config), AUTO_SOURCE);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

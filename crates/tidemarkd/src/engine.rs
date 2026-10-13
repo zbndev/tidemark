@@ -1009,10 +1009,30 @@ impl Engine {
             promoted.account = AccountId::default();
             promoted.status.account = AccountId::default().to_string();
             promoted.status.account_label = None;
+            // Taking over `default` takes over the vendor program's login too.
+            promoted.status.options =
+                crate::registry::account_options(provider, &promoted.account, &config);
             promoted.source =
                 crate::registry::source_for_account(provider, &promoted.account, &config);
             if promoted.rebuildable() {
                 promoted.client = None;
+            }
+        }
+        // A removed account that read the vendor login releases it, and an untouched
+        // default account goes back to its own automatic rule.
+        for survivor in &mut self.accounts {
+            if survivor.provider.as_str() != provider {
+                continue;
+            }
+            let source = crate::registry::source_for_account(provider, &survivor.account, &config);
+            if source != survivor.source {
+                survivor.status.options =
+                    crate::registry::account_options(provider, &survivor.account, &config);
+                survivor.source = source;
+                if survivor.rebuildable() {
+                    survivor.client = None;
+                }
+                survivor.due = Instant::now();
             }
         }
         self.probe_credentials(Some(provider)).await;
@@ -1093,12 +1113,12 @@ impl Engine {
             return Err(format!("account {provider}/{account} is not configured"));
         };
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
-        let mut accounts = config
+        let accounts = config
             .accounts(provider)
             .map_err(|error| error.to_string())?;
-        let Some(position) = accounts.iter().position(|held| held == account) else {
+        if !accounts.iter().any(|held| held == account) {
             return Err(format!("account {provider}/{account} is not configured"));
-        };
+        }
         if accounts.iter().any(|held| held == new)
             || self
                 .accounts
@@ -1115,9 +1135,9 @@ impl Engine {
         let undo = self.migrate_identity(kind, provider, account, new).await?;
 
         // Position preserved: the new id takes the old one's place in the array, which
-        // is the whole difference between a rename and a remove-then-add.
-        accounts[position] = new.to_owned();
-        if let Err(error) = config.set_accounts(provider, &accounts) {
+        // is the whole difference between a rename and a remove-then-add. A vendor login
+        // the account reads follows it in the same write.
+        if let Err(error) = config.rename_account(provider, account, new) {
             self.undo_migration(undo).await;
             return Err(error.to_string());
         }
@@ -1301,11 +1321,15 @@ impl Engine {
         }
 
         let mut config = Config::at(self.config_path.clone()).map_err(|error| error.to_string())?;
+        if crate::registry::is_source_option(provider, name) {
+            return self.set_source(provider, index, value, config).await;
+        }
         config
             .set_option(provider, name, value)
             .map_err(|error| error.to_string())?;
-        self.accounts[index].status.options = crate::registry::options(provider, &config);
         let account_id = self.accounts[index].account.clone();
+        self.accounts[index].status.options =
+            crate::registry::account_options(provider, &account_id, &config);
         self.accounts[index].source =
             crate::registry::source_for_account(provider, &account_id, &config);
         if self.accounts[index].rebuildable() {
@@ -1315,6 +1339,44 @@ impl Engine {
         self.accounts[index].retry_after = None;
         self.accounts[index].due = Instant::now();
         self.probe_credentials(Some(provider)).await;
+        Ok(())
+    }
+
+    /// Moves one account between Tidemark's login and the vendor program's.
+    ///
+    /// The vendor program holds one login, so it is refused while another account of the
+    /// provider reads it — `auto` resolving to it included. Every account of the provider
+    /// is rebuilt afterwards: one taking or releasing the login changes what an untouched
+    /// default account resolves to.
+    async fn set_source(
+        &mut self,
+        provider: &str,
+        index: usize,
+        value: &str,
+        mut config: Config,
+    ) -> Result<(), String> {
+        let account = self.accounts[index].account.clone();
+        if value == tidemark_core::providers::CLI_SOURCE
+            && let Some(holder) = self.accounts.iter().find(|other| {
+                other.provider.as_str() == provider
+                    && other.account != account
+                    && other.status.auth_source.as_deref()
+                        == Some(tidemark_core::providers::CLI_SOURCE)
+            })
+        {
+            let name = holder
+                .status
+                .account_label
+                .clone()
+                .unwrap_or_else(|| holder.account.as_str().to_owned());
+            let login = crate::registry::external_label(provider).unwrap_or("the vendor login");
+            return Err(format!(
+                "{login} can serve only one account, and {name} already reads it"
+            ));
+        }
+        crate::registry::store_source(provider, &account, value, &mut config)
+            .map_err(|error| error.to_string())?;
+        self.reload(Some(provider)).await;
         Ok(())
     }
 
@@ -1546,12 +1608,7 @@ impl Engine {
             return Err(format!("account {provider}/{account} is not configured"));
         };
         if crate::registry::source_for_new_account(provider).is_some() {
-            if account != AccountId::default().as_str() {
-                return Err(
-                    "the local credential source can only be selected for the default account"
-                        .to_owned(),
-                );
-            }
+            // Any account may read the vendor login; `set_option` refuses a second one.
             if selection.candidate.is_some() {
                 return Err("an OAuth or CLI source does not take a candidate".to_owned());
             }
@@ -1588,7 +1645,8 @@ impl Engine {
             .set_auth_selection(provider, &selection)
             .map_err(|error| error.to_string())?;
         let target = &mut self.accounts[index];
-        target.status.options = crate::registry::options(provider, &config);
+        target.status.options =
+            crate::registry::account_options(provider, &target.account, &config);
         target.status.auth_selection = crate::registry::browser_auth_selection(provider, &config);
         if target.rebuildable() {
             target.client = None;
@@ -2361,8 +2419,11 @@ impl Engine {
                 continue;
             }
             if let Some(config) = &config {
-                account.status.options =
-                    crate::registry::options(account.provider.as_str(), config);
+                account.status.options = crate::registry::account_options(
+                    account.provider.as_str(),
+                    &account.account,
+                    config,
+                );
                 account.status.notify = crate::registry::notify(account.provider.as_str(), config);
                 account.source = crate::registry::source_for_account(
                     account.provider.as_str(),
@@ -3514,8 +3575,19 @@ svg = '''
         );
     }
 
+    fn source_of(harness: &Harness, account: &str) -> tidemark_core::providers::Source {
+        harness
+            .engine
+            .accounts()
+            .iter()
+            .find(|held| held.account.as_str() == account)
+            .expect("configured")
+            .source
+    }
+
     #[tokio::test]
-    async fn an_extra_oauth_account_cannot_change_the_default_accounts_source() {
+    async fn an_extra_oauth_account_reads_the_vendor_login_without_moving_the_default() {
+        use tidemark_core::providers::Source;
         let mut harness = Harness::empty("runtime-select-extra-oauth-source").await;
         harness.engine.add_provider("codex").await.expect("added");
         harness
@@ -3524,7 +3596,34 @@ svg = '''
             .await
             .expect("extra account added");
 
-        let error = harness
+        harness
+            .engine
+            .set_option("codex", "work", crate::registry::AUTH_SOURCE, "cli")
+            .await
+            .expect("the vendor login is free");
+
+        assert_eq!(source_of(&harness, "work"), Source::Cli);
+        assert_eq!(source_of(&harness, "default"), Source::OAuth);
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(
+            config.option("codex", crate::registry::AUTH_SOURCE),
+            Some("oauth"),
+            "the default account's own choice is untouched"
+        );
+        assert_eq!(config.cli_account("codex"), Some("work"));
+    }
+
+    #[tokio::test]
+    async fn a_second_account_cannot_take_a_vendor_login_another_reads() {
+        use tidemark_core::providers::Source;
+        let mut harness = Harness::empty("runtime-cli-one-holder").await;
+        harness.engine.add_provider("codex").await.expect("added");
+        harness
+            .engine
+            .add_account("codex", "work")
+            .await
+            .expect("extra account added");
+        harness
             .engine
             .select_auth_source(
                 "codex",
@@ -3535,14 +3634,71 @@ svg = '''
                 },
             )
             .await
-            .expect_err("an extra account is OAuth-only");
+            .expect("the vendor login is free");
 
-        assert!(error.contains("default account"), "{error}");
+        let error = harness
+            .engine
+            .set_option("codex", "default", crate::registry::AUTH_SOURCE, "cli")
+            .await
+            .expect_err("work already reads it");
+        assert!(error.contains("only one account"), "{error}");
+        assert_eq!(source_of(&harness, "default"), Source::OAuth);
+
+        // Released, it is free for the default account again.
+        harness
+            .engine
+            .set_option("codex", "work", crate::registry::AUTH_SOURCE, "oauth")
+            .await
+            .expect("released");
+        harness
+            .engine
+            .set_option("codex", "default", crate::registry::AUTH_SOURCE, "cli")
+            .await
+            .expect("now free");
+        assert_eq!(source_of(&harness, "default"), Source::Cli);
+        assert_eq!(source_of(&harness, "work"), Source::OAuth);
         let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(config.cli_account("codex"), None);
+    }
+
+    #[tokio::test]
+    async fn the_vendor_login_follows_its_account_through_rename_and_promotion() {
+        use tidemark_core::providers::Source;
+        let mut harness = Harness::empty("runtime-cli-follows").await;
+        harness.engine.add_provider("codex").await.expect("added");
+        harness
+            .engine
+            .add_account("codex", "work")
+            .await
+            .expect("extra account added");
+        harness
+            .engine
+            .set_option("codex", "work", crate::registry::AUTH_SOURCE, "cli")
+            .await
+            .expect("the vendor login is free");
+
+        harness
+            .engine
+            .rename_account("codex", "work", "job")
+            .await
+            .expect("renamed");
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(config.cli_account("codex"), Some("job"));
+        assert_eq!(source_of(&harness, "job"), Source::Cli);
+
+        harness
+            .engine
+            .remove_provider("codex", "default")
+            .await
+            .expect("removed");
+        let config = Config::at(harness.config_path.clone()).expect("parses");
+        assert_eq!(config.cli_account("codex"), None);
         assert_eq!(
             config.option("codex", crate::registry::AUTH_SOURCE),
-            Some("oauth")
+            Some("cli"),
+            "the promoted account keeps reading the vendor login as `default`"
         );
+        assert_eq!(source_of(&harness, "default"), Source::Cli);
     }
 
     #[tokio::test]
