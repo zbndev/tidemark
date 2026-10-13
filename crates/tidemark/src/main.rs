@@ -125,27 +125,51 @@ fn main() -> Result<(), slint::PlatformError> {
     // window, only destroy it, and NVIDIA's Vulkan driver crashes creating the swapchain
     // for the window brought back from the tray. SLINT_BACKEND still overrides this for
     // comparisons; the platform is selected either way so the app ID below can be set.
+    // On Windows, through DirectComposition first (see `composited`), unless SLINT_BACKEND
+    // or WGPU_BACKEND asks for something else.
+    #[cfg(windows)]
+    let composited = std::env::var_os("SLINT_BACKEND").is_none()
+        && std::env::var_os("WGPU_BACKEND").is_none()
+        && slint::BackendSelector::new()
+            .with_winit_window_attributes_hook(|attributes| {
+                surface(window_attributes(attributes), true)
+            })
+            .renderer_name(RENDERER.into())
+            .require_wgpu_30(composited())
+            .select()
+            .inspect_err(|error| {
+                tracing::warn!(%error, "drawing on an opaque surface, without rounded corners");
+            })
+            .is_ok();
+    #[cfg(not(windows))]
+    let composited = false;
     #[cfg(target_os = "linux")]
     let launch = std::cell::RefCell::new(launch);
-    let selector =
-        slint::BackendSelector::new().with_winit_window_attributes_hook(move |attributes| {
-            let attributes = window_attributes(attributes);
-            #[cfg(target_os = "linux")]
-            let attributes = launch.borrow_mut().window_attributes(attributes);
-            attributes
-        });
-    let renderer = match std::env::var("SLINT_BACKEND") {
-        Ok(backend) => match selector.select() {
-            Ok(()) => format!("SLINT_BACKEND={backend}"),
-            Err(error) => format!("Slint's default (SLINT_BACKEND={backend} failed: {error})"),
-        },
-        Err(_) => match selector.renderer_name(RENDERER.into()).select() {
-            Ok(()) => RENDERER.to_owned(),
-            Err(error) => {
-                tracing::warn!(%error, renderer = RENDERER, "using Slint's default renderer");
-                format!("Slint's default ({RENDERER} failed: {error})")
-            }
-        },
+    let renderer = if composited {
+        format!("{RENDERER} (Direct3D 12 through DirectComposition)")
+    } else {
+        let selector =
+            slint::BackendSelector::new().with_winit_window_attributes_hook(move |attributes| {
+                let attributes = window_attributes(attributes);
+                #[cfg(windows)]
+                let attributes = surface(attributes, false);
+                #[cfg(target_os = "linux")]
+                let attributes = launch.borrow_mut().window_attributes(attributes);
+                attributes
+            });
+        match std::env::var("SLINT_BACKEND") {
+            Ok(backend) => match selector.select() {
+                Ok(()) => format!("SLINT_BACKEND={backend}"),
+                Err(error) => format!("Slint's default (SLINT_BACKEND={backend} failed: {error})"),
+            },
+            Err(_) => match selector.renderer_name(RENDERER.into()).select() {
+                Ok(()) => RENDERER.to_owned(),
+                Err(error) => {
+                    tracing::warn!(%error, renderer = RENDERER, "using Slint's default renderer");
+                    format!("Slint's default ({RENDERER} failed: {error})")
+                }
+            },
+        }
     };
     // The Wayland app ID and X11 class: the desktop file's name, so compositors' rules
     // and the dock treat this window as Tidemark.
@@ -154,6 +178,10 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     let ui = AppWindow::new()?;
+    // Windows 11 rounds the window as well, at 8px, so the window's own corners follow
+    // its curve. An opaque surface has none of its own to show.
+    #[cfg(windows)]
+    ui.set_corner_radius(if composited { 8.0 } else { 0.0 });
     #[cfg(windows)]
     maintenance::watch_stop().map_err(|error| slint::PlatformError::from(error.to_string()))?;
     frame::install(&ui);
@@ -180,13 +208,17 @@ const RENDERER: &str = "femtovg-wgpu";
 #[cfg(not(windows))]
 const RENDERER: &str = "femtovg";
 
-/// A window that draws its own frame still wants the system's shadow around it.
+/// A window that draws its own frame still wants the system's shadow and, on Windows 11,
+/// its rounded corners around it. Windows 10 has no rounded corners and ignores the
+/// preference.
 fn window_attributes(
     attributes: slint::winit_030::winit::window::WindowAttributes,
 ) -> slint::winit_030::winit::window::WindowAttributes {
     #[cfg(windows)]
     let attributes = {
-        use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
+        use slint::winit_030::winit::platform::windows::{
+            CornerPreference, WindowAttributesExtWindows,
+        };
         let icon = slint::winit_030::winit::window::Icon::from_rgba(
             tray_icon_rgba::ICON_RGBA.to_vec(),
             32,
@@ -195,7 +227,37 @@ fn window_attributes(
         .ok();
         attributes
             .with_undecorated_shadow(true)
+            .with_corner_preference(CornerPreference::Round)
             .with_window_icon(icon)
     };
     attributes
+}
+
+/// Direct3D 12 presenting through a DirectComposition visual. A swap chain on the window
+/// itself, and Vulkan, which wgpu would otherwise try first, are opaque on Windows: the
+/// transparent corners come out in whatever colour the driver leaves there. A visual
+/// keeps the scene's alpha, so the corners show the desktop on Windows 10 as well.
+#[cfg(windows)]
+fn composited() -> slint::wgpu_30::WGPUConfiguration {
+    use slint::wgpu_30::wgpu;
+    let mut settings = slint::wgpu_30::WGPUSettings::default();
+    settings.backends = wgpu::Backends::DX12;
+    settings.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+    slint::wgpu_30::WGPUConfiguration::Automatic(settings)
+}
+
+/// Whether the window's surface keeps its alpha. A visual covers the window, so it has no
+/// redirection bitmap of its own to show through the corners. Otherwise the window is not
+/// transparent: Slint asks for that by default, and DWM would only blur behind it.
+#[cfg(windows)]
+fn surface(
+    attributes: slint::winit_030::winit::window::WindowAttributes,
+    composited: bool,
+) -> slint::winit_030::winit::window::WindowAttributes {
+    use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
+    if composited {
+        attributes.with_no_redirection_bitmap(true)
+    } else {
+        attributes.with_transparent(false)
+    }
 }

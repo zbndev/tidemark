@@ -33,7 +33,9 @@ zbus = { version = "5.13.2", features = ["p2p"] }
 
 [target.'cfg(windows)'.dependencies]
 # FemtoVG on Direct3D 12. Linux draws FemtoVG on OpenGL, which Slint builds by default.
-slint = { version = "~1.18.1", features = ["renderer-femtovg-wgpu"] }
+# `unstable-wgpu-30` presents it through DirectComposition, so the window's corners can be
+# transparent; like the winit accessor, it may change in any minor release.
+slint = { version = "~1.18.1", features = ["renderer-femtovg-wgpu", "unstable-wgpu-30"] }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     # The desktop's light/dark choice and accent colour.

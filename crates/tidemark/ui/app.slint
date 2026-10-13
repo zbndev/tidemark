@@ -149,7 +149,10 @@ export component AppWindow inherits Window {
     // system, so a snap or a keyboard shortcut shows on the maximize button too.
     no-frame: true;
     resize-border-width: !self.maximized ? 6px : 0px;
-    property <length> frame-radius: self.maximized || self.full-screen ? 0px : 12px;
+    // Set by the platform: Windows 11 draws its own rounding at a smaller radius, and an
+    // opaque surface cannot show through corners at all.
+    in property <length> corner-radius: 12px;
+    property <length> frame-radius: self.maximized || self.full-screen ? 0px : self.corner-radius;
 
     callback refresh();
     callback open-providers();
