@@ -326,7 +326,7 @@ fn escape(text: &str, out: &mut String) {
 
 /// Appends a code span holding `code` verbatim. The fence is one backtick longer than any
 /// run inside it, and the padding space on either side is the one CommonMark strips.
-fn code_span(code: &str, out: &mut String) {
+pub(crate) fn code_span(code: &str, out: &mut String) {
     let mut longest = 0;
     let mut run = 0;
     for character in code.chars() {

@@ -164,6 +164,7 @@ impl Agy {
                 body: Some("{}"),
             },
             response,
+            &[],
         )
         .await
     }

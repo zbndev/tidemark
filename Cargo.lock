@@ -6159,6 +6159,7 @@ dependencies = [
  "pulldown-cmark",
  "rfd",
  "semver",
+ "serde_json",
  "slint",
  "slint-build",
  "tempfile",

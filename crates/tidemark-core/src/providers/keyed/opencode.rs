@@ -295,7 +295,11 @@ impl OpenCode {
                 match self.payg(&workspace, &session.header, now).await {
                     Ok(Some(snapshot)) => Ok(snapshot),
                     Ok(None) => Err(error),
-                    Err(refused @ ProviderError::Credential { .. }) => Err(refused),
+                    Err(refused)
+                        if matches!(refused.reason(), ProviderError::Credential { .. }) =>
+                    {
+                        Err(refused)
+                    }
                     Err(_) => Err(error),
                 }
             }
@@ -309,7 +313,12 @@ impl OpenCode {
         };
         match super::validate(&self.client, request).await {
             Ok(()) => crate::browser::auth::Validation::Ready,
-            Err(ProviderError::Credential { status: 401 | 403 }) => {
+            Err(error)
+                if matches!(
+                    error.reason(),
+                    ProviderError::Credential { status: 401 | 403 }
+                ) =>
+            {
                 crate::browser::auth::Validation::Rejected
             }
             Err(_) => crate::browser::auth::Validation::Unreachable,
@@ -456,7 +465,7 @@ fn instance_id() -> String {
 /// way there.
 fn can_fall_back(error: &ProviderError) -> bool {
     matches!(
-        error,
+        error.reason(),
         ProviderError::Malformed(_) | ProviderError::Http { .. }
     )
 }
@@ -1022,7 +1031,7 @@ mod tests {
         server.join().expect("server exits");
 
         assert!(matches!(
-            result,
+            result.as_ref().map_err(ProviderError::reason),
             Err(ProviderError::Credential { status: 401 })
         ));
     }

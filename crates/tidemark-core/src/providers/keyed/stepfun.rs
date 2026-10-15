@@ -915,7 +915,7 @@ mod tests {
 
         let error = result.expect_err("the token was rejected");
         assert!(
-            matches!(error, ProviderError::Credential { status: 401 }),
+            matches!(error.reason(), ProviderError::Credential { status: 401 }),
             "{error}"
         );
         let request = requests.recv().expect("the one request");

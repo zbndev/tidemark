@@ -235,6 +235,7 @@ impl Claude {
             PROVIDER_ID,
             crate::debug::Sent::get(&self.usage_url),
             response,
+            &[access_token.expose()],
         )
         .await?;
         let mut snapshot = parse_for_account(&body, Timestamp::now(), &self.account)?;
@@ -448,12 +449,16 @@ impl Claude {
             || status == reqwest::StatusCode::UNAUTHORIZED
             || status == reqwest::StatusCode::FORBIDDEN
         {
-            return Err(ProviderError::Credential {
-                status: status.as_u16(),
-            });
+            return Err(http::response_error(
+                ProviderError::Credential {
+                    status: status.as_u16(),
+                },
+                response,
+                &[refresh_token],
+            )
+            .await);
         }
-        let retry_after = http::retry_after_header(&response).map(str::to_owned);
-        http::check(status, retry_after.as_deref())?;
+        let response = http::checked(response, &[refresh_token]).await?;
         let refreshed: RefreshResponse = response.json().await.map_err(|error| {
             ProviderError::malformed(format!("Claude refresh response is not readable: {error}"))
         })?;

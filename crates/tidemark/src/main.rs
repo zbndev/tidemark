@@ -14,6 +14,7 @@ mod chart;
 #[cfg(windows)]
 mod daemon_job;
 mod detail;
+mod diagnostic;
 #[cfg(windows)]
 mod file_log;
 mod format;

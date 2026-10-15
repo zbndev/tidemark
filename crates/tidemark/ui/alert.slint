@@ -31,6 +31,9 @@ export global Alert {
     in property <int> serial;
     in property <string> heading;
     in property <string> body;
+    in property <string> response-body;
+    in property <int> response-status;
+    in property <bool> response-truncated;
     in property <[AlertResponse]> responses;
     in property <string> close-response;
     in property <string> default-response;
@@ -54,9 +57,17 @@ export global Alert {
     pure callback name-usable(string, string) -> bool;
     pure callback endpoint-valid(string) -> bool;
     pure callback endpoint-warning(string) -> string;
+    pure callback highlight(string, color, color, color, color, color) -> styled-text;
 }
 
 export component AlertDialog inherits Scrim {
+
+    clipboard := TextInput { visible: false; read-only: true; }
+    function copy-details() {
+        clipboard.text = Alert.response-status > 0 ? Alert.response-body : Alert.body;
+        clipboard.select-all();
+        clipboard.copy();
+    }
 
     property <int> serial: Alert.serial;
     property <string> name-text;
@@ -152,18 +163,30 @@ export component AlertDialog inherits Scrim {
 
                 if Alert.content == 4: ScrollView {
                     height: min(320px, max(48px, root.height - 180px));
-                    content-width: self.visible-width;
+                    content-width: max(self.visible-width, diagnostic.preferred-width);
                     content-height: max(self.visible-height, diagnostic.preferred-height);
-                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
                     mouse-drag-pan-enabled: false;
-                    diagnostic := TextInput {
-                        text: Alert.body;
-                        read-only: true;
-                        single-line: false;
-                        wrap: char-wrap;
-                        color: Theme.fg;
-                        selection-background-color: Theme.accent.with-alpha(0.3);
-                        selection-foreground-color: Theme.fg;
+                    diagnostic := VerticalLayout {
+                        spacing: 12px;
+                        if Alert.response-status > 0: Text {
+                            text: Alert.body;
+                            color: Theme.fg;
+                            wrap: word-wrap;
+                        }
+                        if Alert.response-status > 0: Caption {
+                            text: "HTTP " + Alert.response-status;
+                        }
+                        StyledText {
+                            text: Alert.highlight(Alert.response-status > 0
+                                ? (Alert.response-body == "" ? "The provider returned an empty response body." : Alert.response-body)
+                                : Alert.body, Theme.link, Theme.success, Theme.warning, Theme.link, Theme.ink(0.85));
+                            default-color: Theme.ink(0.85);
+                            default-font-family: "monospace";
+                            default-font-size: Theme.footer;
+                        }
+                        if Alert.response-truncated: Caption {
+                            text: "Response truncated at 64 KiB.";
+                        }
                     }
                 }
 
@@ -305,6 +328,13 @@ export component AlertDialog inherits Scrim {
                 HorizontalLayout {
                     padding-top: 12px;
                     spacing: 12px;
+                    if Alert.content == 4: Button {
+                        preferred-width: 0px;
+                        horizontal-stretch: 1;
+                        button-height: 38px;
+                        text: Alert.response-status > 0 ? "Copy response" : "Copy details";
+                        clicked => { root.copy-details(); }
+                    }
                     for response in Alert.responses: Button {
                         // Equal widths, whatever the labels say.
                         preferred-width: 0px;

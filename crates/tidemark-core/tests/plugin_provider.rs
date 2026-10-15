@@ -395,7 +395,7 @@ async fn a_redirect_to_another_origin_is_not_followed_and_the_key_does_not_move(
 
     let error = provider.fetch().await.expect_err("a 302 is not a reading");
     assert!(
-        matches!(error, ProviderError::Http { status: 302 }),
+        matches!(error.reason(), ProviderError::Http { status: 302 }),
         "{error:?}"
     );
     assert!(
@@ -436,7 +436,7 @@ async fn each_status_maps_onto_the_state_the_engine_already_knows() {
             .fetch()
             .await
             .expect_err("none of these is a reading");
-        let actual = match &error {
+        let actual = match error.reason() {
             ProviderError::Credential { .. } => "credential",
             ProviderError::RateLimited { retry_after } => {
                 assert_eq!(
@@ -452,6 +452,32 @@ async fn each_status_maps_onto_the_state_the_engine_already_knows() {
         };
         assert_eq!(actual, expected, "{error:?}");
     }
+}
+
+#[tokio::test]
+async fn an_http_error_keeps_its_body_and_masks_the_accounts_known_key() {
+    let reply = Reply {
+        status: 429,
+        headers: vec![("Retry-After".into(), "90".into())],
+        body: format!(r#"{{"custom":"an unusual explanation","echo":"{KEY}"}}"#),
+    };
+    let server = Recording::start(reply).await;
+    let provider = plugin_over(&server, "GET", "X-Acme-Credential", "Acme:").await;
+    let error = provider.fetch().await.expect_err("429");
+    assert_eq!(
+        error.retry_after(),
+        Some(std::time::Duration::from_secs(90))
+    );
+    let response = error
+        .response()
+        .expect("response available without enabling debug");
+    assert_eq!(response.status, 429);
+    assert_eq!(
+        response.body,
+        r#"{"custom":"an unusual explanation","echo":"<REDACTED>"}"#
+    );
+    assert!(!error.to_string().contains("unusual explanation"));
+    assert!(!format!("{error:?}").contains("unusual explanation"));
 }
 
 #[tokio::test]

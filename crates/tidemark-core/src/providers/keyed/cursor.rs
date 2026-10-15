@@ -433,7 +433,12 @@ impl Cursor {
         };
         match super::validate(&self.client, request).await {
             Ok(()) => crate::browser::auth::Validation::Ready,
-            Err(ProviderError::Credential { status: 401 | 403 }) => {
+            Err(error)
+                if matches!(
+                    error.reason(),
+                    ProviderError::Credential { status: 401 | 403 }
+                ) =>
+            {
                 crate::browser::auth::Validation::Rejected
             }
             Err(_) => crate::browser::auth::Validation::Unreachable,
@@ -1725,7 +1730,10 @@ mod tests {
             .expect("runtime")
             .block_on(provider.fetch_inner())
             .expect_err("the selected session was rejected");
-        assert!(matches!(error, ProviderError::Credential { status: 401 }));
+        assert!(matches!(
+            error.reason(),
+            ProviderError::Credential { status: 401 }
+        ));
 
         let request = requests.recv().expect("the selected summary request");
         assert!(request.contains("WorkosCursorSessionToken=expired-session"));

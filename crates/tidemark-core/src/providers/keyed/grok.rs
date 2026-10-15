@@ -909,7 +909,10 @@ mod tests {
         server.join().expect("server exits");
 
         assert!(
-            matches!(result, Err(ProviderError::NoCredential)),
+            matches!(
+                result.as_ref().map_err(ProviderError::reason),
+                Err(ProviderError::NoCredential)
+            ),
             "{result:?}"
         );
     }

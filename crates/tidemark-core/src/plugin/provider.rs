@@ -136,6 +136,9 @@ impl PluginProvider {
                 ProviderError::Local(format!("the user agent is not a header: {error}"))
             })?;
         let headers = request.headers_mut();
+        if let Some(value) = headers.get_mut(&self.definition.api_key_header) {
+            value.set_sensitive(true);
+        }
         headers.insert(reqwest::header::USER_AGENT, identity);
         headers.insert(
             reqwest::header::ACCEPT,
@@ -170,7 +173,8 @@ impl Provider for PluginProvider {
 pub async fn poll(provider: &PluginProvider) -> Result<Reading, ProviderError> {
     let request = provider.build_request()?;
     let body = crate::providers::keyed::request(&provider.definition.id, &provider.client, request)
-        .await?;
+        .await
+        .map_err(|error| error.redact(provider.credential.expose()))?;
     render(
         &provider.definition,
         body.as_bytes(),

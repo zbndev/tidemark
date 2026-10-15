@@ -209,13 +209,23 @@ impl Abacus {
         // Abacus refuses a session inside a 200 envelope, so the proof must read the body:
         // a status-only check would call an expired login ready.
         match super::validate_body(&self.client, request).await {
-            Err(ProviderError::Credential { status: 401 | 403 }) => {
+            Err(error)
+                if matches!(
+                    error.reason(),
+                    ProviderError::Credential { status: 401 | 403 }
+                ) =>
+            {
                 crate::browser::auth::Validation::Rejected
             }
             Err(_) => crate::browser::auth::Validation::Unreachable,
             Ok(body) => match envelope(&body, "compute points") {
                 Ok(_) => crate::browser::auth::Validation::Ready,
-                Err(ProviderError::Credential { status: 401 | 403 }) => {
+                Err(error)
+                    if matches!(
+                        error.reason(),
+                        ProviderError::Credential { status: 401 | 403 }
+                    ) =>
+                {
                     crate::browser::auth::Validation::Rejected
                 }
                 Err(_) => crate::browser::auth::Validation::Unreachable,
@@ -678,7 +688,7 @@ mod tests {
         server.join().expect("server exits");
 
         assert!(matches!(
-            result,
+            result.as_ref().map_err(ProviderError::reason),
             Err(ProviderError::Credential { status: 401 })
         ));
     }
@@ -695,7 +705,7 @@ mod tests {
         server.join().expect("server exits");
 
         assert!(matches!(
-            result,
+            result.as_ref().map_err(ProviderError::reason),
             Err(ProviderError::Credential { status: 401 })
         ));
     }

@@ -210,6 +210,7 @@ impl T3Chat {
     /// request must wear a browser's fingerprint and `request_inspected` speaks
     /// `reqwest`.
     async fn send_inspected(&self, request: wreq::Request) -> Result<String, ProviderError> {
+        let secrets = http::request_secrets(request.headers(), request.url());
         let url = request.url().as_str().to_owned();
         let sent = crate::debug::enabled().then(|| crate::debug::Sent::get(&url));
         let note = |answer| {
@@ -239,14 +240,40 @@ impl T3Chat {
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        if is_vercel_challenge(&response) {
-            note(crate::debug::Answer::Refused { status });
-            return Err(ProviderError::Challenged(
+        let refusal = if is_vercel_challenge(&response) {
+            Some(ProviderError::Challenged(
                 "T3 Chat asked for a browser check".to_owned(),
-            ));
-        }
-        if let Err(error) = http::check(wire_status(status), retry_after.as_deref()) {
-            note(crate::debug::Answer::Refused { status });
+            ))
+        } else {
+            http::check(wire_status(status), retry_after.as_deref()).err()
+        };
+        if let Some(error) = refusal {
+            let mut response = response;
+            let mut bytes = Vec::new();
+            let mut truncated = false;
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        let remaining = http::ERROR_BODY_LIMIT - bytes.len();
+                        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                        if chunk.len() > remaining {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        bytes.extend_from_slice(b"\n[Could not finish reading the response body]");
+                        break;
+                    }
+                }
+            }
+            let secrets: Vec<_> = secrets.iter().map(String::as_str).collect();
+            let error = http::with_response(error, status, &bytes, truncated, &secrets);
+            note(crate::debug::Answer::Body {
+                status,
+                body: &error.response().expect("attached response").body,
+            });
             return Err(error);
         }
 
@@ -291,7 +318,14 @@ impl T3Chat {
             .and_then(|value| value.to_str().ok());
         match http::check(wire_status(response.status().as_u16()), retry_after) {
             Ok(()) => Validation::Ready,
-            Err(ProviderError::Credential { status: 401 | 403 }) => Validation::Rejected,
+            Err(error)
+                if matches!(
+                    error.reason(),
+                    ProviderError::Credential { status: 401 | 403 }
+                ) =>
+            {
+                Validation::Rejected
+            }
             Err(_) => Validation::Unreachable,
         }
     }
@@ -781,10 +815,10 @@ mod tests {
         let result = fetch(&provider(&home, &base_url));
         server.join().expect("server exits");
 
-        assert!(matches!(
-            result,
-            Err(ProviderError::Challenged(sentence)) if sentence == "T3 Chat asked for a browser check"
-        ));
+        assert!(
+            matches!(result.as_ref().map_err(ProviderError::reason), Err(ProviderError::Challenged(sentence)) if sentence == "T3 Chat asked for a browser check"
+            )
+        );
     }
 
     #[test]
@@ -820,7 +854,7 @@ mod tests {
         server.join().expect("server exits");
 
         assert!(matches!(
-            result,
+            result.as_ref().map_err(ProviderError::reason),
             Err(ProviderError::RateLimited { retry_after: None })
         ));
     }
@@ -838,7 +872,7 @@ mod tests {
         server.join().expect("server exits");
 
         assert!(matches!(
-            result,
+            result.as_ref().map_err(ProviderError::reason),
             Err(ProviderError::Credential { status: 401 })
         ));
     }

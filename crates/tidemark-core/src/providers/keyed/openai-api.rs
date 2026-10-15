@@ -238,7 +238,7 @@ impl OpenAiApi {
                         // The source surfaces the balance error only when the usage
                         // path was a credential rejection; otherwise the usage error
                         // is the truer one.
-                        if matches!(usage_error, ProviderError::Credential { .. }) {
+                        if matches!(usage_error.reason(), ProviderError::Credential { .. }) {
                             Err(balance_error)
                         } else {
                             Err(usage_error)
