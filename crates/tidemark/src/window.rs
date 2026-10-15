@@ -263,15 +263,11 @@ impl MainWindow {
             }
         });
         ui.on_card_check_error({
-            let alerts = Rc::clone(&main.alerts);
-            move |detail| {
-                let answer = alerts.ask(Question {
-                    content: crate::alert::Content::Details,
-                    ..Question::notice("Check failed", detail.into())
-                });
-                spawn(async move {
-                    answer.await;
-                });
+            let weak = weak.clone();
+            move |index| {
+                if let (Some(main), Ok(index)) = (weak.upgrade(), usize::try_from(index)) {
+                    main.check_error(index);
+                }
             }
         });
         ui.on_open_detail({
@@ -595,6 +591,29 @@ impl MainWindow {
         }
     }
 
+    fn check_error(&self, row: usize) {
+        let Some((provider, account)) = self.rows.borrow().get(row).cloned() else {
+            return;
+        };
+        let statuses = self.statuses.borrow();
+        let Some(status) = statuses
+            .iter()
+            .find(|status| status.provider == provider && status.account == account)
+        else {
+            return;
+        };
+        let answer = self.alerts.ask(Question {
+            content: crate::alert::Content::Details(status.error_response.clone()),
+            ..Question::notice(
+                "Check failed",
+                crate::diagnostic::message(status, tidemark_types::Timestamp::now()),
+            )
+        });
+        spawn(async move {
+            answer.await;
+        });
+    }
+
     fn open_detail(self: &Rc<Self>, row: usize) {
         if self.detail.borrow().is_some() || self.daemon.borrow().is_none() {
             return;
@@ -880,12 +899,6 @@ impl MainWindow {
             footer: card.footer.unwrap_or_default().into(),
             checking: card.checking,
             check_failed: card.check_failed,
-            error: status
-                .message
-                .clone()
-                .filter(|message| !message.trim().is_empty())
-                .unwrap_or_else(|| status.state.clone())
-                .into(),
             slot: placement.slot as i32,
             shown: placement.shown,
             main: placement.main,

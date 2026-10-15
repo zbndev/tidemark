@@ -411,7 +411,10 @@ impl Alibaba {
             return Ok(token);
         }
         match last_error {
-            Some(ProviderError::Credential { .. }) | None => Err(Attempt::LoginRequired),
+            None => Err(Attempt::LoginRequired),
+            Some(error) if matches!(error.reason(), ProviderError::Credential { .. }) => {
+                Err(Attempt::LoginRequired)
+            }
             Some(error) => Err(Attempt::Exchange(error)),
         }
     }
@@ -790,7 +793,7 @@ impl Attempt {
 /// or an authenticated account with no plan can all differ between the international and
 /// China-mainland console deployments.
 fn region_shaped(error: &ProviderError) -> bool {
-    match error {
+    match error.reason() {
         ProviderError::Transport(_)
         | ProviderError::Credential { .. }
         | ProviderError::Http { status: 404, .. } => true,

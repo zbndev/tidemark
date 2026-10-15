@@ -281,12 +281,16 @@ impl Antigravity {
             .map_err(ProviderError::Transport)?;
         let status = response.status();
         if status == reqwest::StatusCode::BAD_REQUEST {
-            return Err(ProviderError::Credential {
-                status: status.as_u16(),
-            });
+            return Err(http::response_error(
+                ProviderError::Credential {
+                    status: status.as_u16(),
+                },
+                response,
+                &[refresh_token.expose(), client_secret],
+            )
+            .await);
         }
-        let retry_after = http::retry_after_header(&response).map(str::to_owned);
-        http::check(status, retry_after.as_deref())?;
+        let response = http::checked(response, &[refresh_token.expose(), client_secret]).await?;
         let refreshed: RefreshResponse = response.json().await.map_err(|error| {
             ProviderError::malformed(format!(
                 "the Antigravity refresh response is not readable: {error}"
@@ -1314,7 +1318,7 @@ mod tests {
 
         let error = block_on(provider.fetch_inner()).expect_err("the login is the only source");
         assert!(
-            matches!(error, ProviderError::RateLimited { .. }),
+            matches!(error.reason(), ProviderError::RateLimited { .. }),
             "{error:?}"
         );
         assert_eq!(local_calls.load(Ordering::SeqCst), 0);
@@ -1407,7 +1411,7 @@ mod tests {
 
         let error = block_on(provider.fetch_inner()).expect_err("nothing else to ask");
         assert!(
-            matches!(error, ProviderError::RateLimited { .. }),
+            matches!(error.reason(), ProviderError::RateLimited { .. }),
             "{error:?}"
         );
         assert_eq!(local_calls.load(Ordering::SeqCst), 0);
@@ -1575,7 +1579,10 @@ mod tests {
         barrier.stop.send(()).ok();
         barrier.server.join().expect("server stopped");
 
-        assert!(matches!(result, Err(ProviderError::NoCredential)));
+        assert!(matches!(
+            result.as_ref().map_err(ProviderError::reason),
+            Err(ProviderError::NoCredential)
+        ));
         assert!(secrets.document().is_none(), "sign-out must remain final");
         assert_eq!(local_calls.load(Ordering::SeqCst), 0);
     }
@@ -1614,7 +1621,10 @@ mod tests {
         barrier.stop.send(()).ok();
         barrier.server.join().expect("server stopped");
 
-        assert!(matches!(result, Err(ProviderError::NoCredential)));
+        assert!(matches!(
+            result.as_ref().map_err(ProviderError::reason),
+            Err(ProviderError::NoCredential)
+        ));
         assert!(
             secrets.document().is_none(),
             "an unconfigured provider must have no token"
@@ -1752,7 +1762,7 @@ mod tests {
         let error = block_on(provider.fetch_inner()).expect_err("owned token is rejected");
 
         assert!(
-            matches!(error, ProviderError::Credential { status: 401 }),
+            matches!(error.reason(), ProviderError::Credential { status: 401 }),
             "{error:?}"
         );
         assert_eq!(local_calls.load(Ordering::SeqCst), 1);

@@ -274,9 +274,7 @@ async fn post_json(
         .send()
         .await
         .map_err(ProviderError::Transport)?;
-    let status = response.status();
-    let retry_after = http::retry_after_header(&response).map(str::to_owned);
-    http::check(status, retry_after.as_deref())?;
+    let response = http::checked(response, &[access_token]).await?;
     response.json().await.map_err(|error| {
         ProviderError::malformed(format!(
             "the Antigravity {method} response is not readable: {error}"

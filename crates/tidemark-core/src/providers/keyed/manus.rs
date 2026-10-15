@@ -170,7 +170,12 @@ impl Manus {
         // the body: a status-only check would call an expired login ready. An envelope the
         // parser cannot read at all is inconclusive, not a rejection.
         match super::validate_body(&self.client, request).await {
-            Err(ProviderError::Credential { status: 401 | 403 }) => {
+            Err(error)
+                if matches!(
+                    error.reason(),
+                    ProviderError::Credential { status: 401 | 403 }
+                ) =>
+            {
                 crate::browser::auth::Validation::Rejected
             }
             Err(_) => crate::browser::auth::Validation::Unreachable,
@@ -581,7 +586,7 @@ mod tests {
         server.join().expect("server exits");
 
         assert!(matches!(
-            result,
+            result.as_ref().map_err(ProviderError::reason),
             Err(ProviderError::Credential { status: 401 })
         ));
     }

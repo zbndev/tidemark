@@ -245,7 +245,12 @@ impl Mistral {
         };
         match super::validate(&self.client, request).await {
             Ok(()) => crate::browser::auth::Validation::Ready,
-            Err(ProviderError::Credential { status: 401 | 403 }) => {
+            Err(error)
+                if matches!(
+                    error.reason(),
+                    ProviderError::Credential { status: 401 | 403 }
+                ) =>
+            {
                 crate::browser::auth::Validation::Rejected
             }
             Err(_) => crate::browser::auth::Validation::Unreachable,
@@ -1030,7 +1035,7 @@ mod tests {
         server.join().expect("server exits");
 
         assert!(matches!(
-            result,
+            result.as_ref().map_err(ProviderError::reason),
             Err(ProviderError::Credential { status: 401 })
         ));
     }

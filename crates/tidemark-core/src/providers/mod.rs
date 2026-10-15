@@ -169,6 +169,7 @@ pub(crate) async fn read_body(
     provider: &str,
     sent: crate::debug::Sent<'_>,
     response: reqwest::Response,
+    secrets: &[&str],
 ) -> Result<String, ProviderError> {
     use crate::debug::{Answer, Exchange, record};
 
@@ -183,10 +184,10 @@ pub(crate) async fn read_body(
     };
 
     if let Err(error) = http::check(status, retry_after.as_deref()) {
-        // Refused on its status: nothing has read the body, so the line says what came
-        // back rather than pretending to a body it never held.
-        note(Answer::Refused {
+        let error = http::response_error(error, response, secrets).await;
+        note(Answer::Body {
             status: status.as_u16(),
+            body: &error.response().expect("attached response").body,
         });
         return Err(error);
     }
@@ -305,6 +306,13 @@ impl fmt::Debug for Credential {
 /// normally. Which provider failed is not carried here — the caller made the call.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    /// A classified failure with the server's response available to the client.
+    #[error("{error}")]
+    Response {
+        #[source]
+        error: Box<Self>,
+        response: tidemark_types::ErrorResponse,
+    },
     /// The HTTP client could not be constructed at all.
     #[error("could not build an HTTP client: {0}")]
     Client(#[source] reqwest::Error),
@@ -358,6 +366,36 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// The underlying classification, independent of attached diagnostics.
+    pub fn reason(&self) -> &Self {
+        match self {
+            Self::Response { error, .. } => error.reason(),
+            other => other,
+        }
+    }
+
+    /// The failed exchange, when one was received.
+    pub fn response(&self) -> Option<&tidemark_types::ErrorResponse> {
+        match self {
+            Self::Response { response, .. } => Some(response),
+            _ => None,
+        }
+    }
+
+    /// The account's exact key may be echoed without its request-header prefix.
+    pub(crate) fn redact(self, secret: &str) -> Self {
+        match self {
+            Self::Response { error, response } => http::with_response(
+                *error,
+                response.status,
+                response.body.as_bytes(),
+                response.truncated,
+                &[secret],
+            ),
+            other => other,
+        }
+    }
+
     /// Shorthand for the malformed case.
     pub fn malformed(detail: impl Into<String>) -> Self {
         Self::Malformed(detail.into())
@@ -365,7 +403,7 @@ impl ProviderError {
 
     /// How long the provider asked us to wait, when it asked.
     pub fn retry_after(&self) -> Option<Duration> {
-        match self {
+        match self.reason() {
             Self::RateLimited { retry_after } => retry_after.map(Duration::from_secs),
             _ => None,
         }
@@ -373,7 +411,7 @@ impl ProviderError {
 
     /// True when retrying with the same credential is pointless until the user acts.
     pub fn needs_user_action(&self) -> bool {
-        matches!(self, Self::NoCredential | Self::Credential { .. })
+        matches!(self.reason(), Self::NoCredential | Self::Credential { .. })
     }
 
     /// The provider-neutral translation of a Secret Service failure.

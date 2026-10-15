@@ -84,7 +84,6 @@ mod tests {
                 badge: "+1".into(),
                 check_failed: true,
                 footer: "check failed".into(),
-                error: "network unavailable".into(),
                 ..Default::default()
             },
             crate::CardData {
@@ -104,8 +103,8 @@ mod tests {
         let failures = Rc::new(Cell::new(0));
         ui.on_card_check_error({
             let failures = failures.clone();
-            move |error| {
-                assert_eq!(error, "network unavailable");
+            move |index| {
+                assert_eq!(index, 0);
                 failures.set(failures.get() + 1);
             }
         });

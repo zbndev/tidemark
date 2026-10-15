@@ -657,6 +657,27 @@ pub struct HistoryPoint {
     pub used_percent: f64,
 }
 
+/// The body of a failed HTTP exchange, kept separately from the short state message.
+#[derive(Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
+#[zvariant(signature = "a{sv}")]
+pub struct ErrorResponse {
+    pub status: u16,
+    pub body: String,
+    /// True when the diagnostic size limit was reached.
+    pub truncated: bool,
+}
+
+impl std::fmt::Debug for ErrorResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Ordinary status/error logging must not become an implicit raw-response log.
+        f.debug_struct("ErrorResponse")
+            .field("status", &self.status)
+            .field("bytes", &self.body.len())
+            .field("truncated", &self.truncated)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Everything the daemon currently knows about one account.
 #[derive(Debug, Clone, PartialEq, SerializeDict, DeserializeDict, Type)]
 #[zvariant(signature = "a{sv}")]
@@ -673,6 +694,8 @@ pub struct ProviderStatus {
     /// Human-readable detail for a state that is not `ok`. Absent when there is nothing
     /// to add beyond the state itself.
     pub message: Option<String>,
+    /// The last failed HTTP response. Absent from older daemons and after recovery.
+    pub error_response: Option<ErrorResponse>,
     /// Whether a metrics check is currently running, independently of the last result.
     /// Absent from older daemons. The last good reading and its state survive a check.
     pub checking: Option<bool>,
@@ -744,6 +767,7 @@ impl ProviderStatus {
             account_label: None,
             state: ProviderState::Pending.as_wire().to_owned(),
             message: None,
+            error_response: None,
             checking: None,
             captured_at: None,
             next_poll_at: None,
@@ -802,6 +826,7 @@ impl ProviderStatus {
     pub fn set_state(&mut self, state: ProviderState, message: Option<String>) {
         self.state = state.as_wire().to_owned();
         self.message = message;
+        self.error_response = None;
     }
 
     /// Replaces the reading and its layout, and sets the state to [`ProviderState::Ok`].
@@ -990,6 +1015,48 @@ mod tests {
         let decoded: HashMap<String, OwnedValue> =
             encode(&pending).deserialize().expect("decodes").0;
         assert!(!decoded.contains_key("presentation"), "absent means absent");
+    }
+
+    #[test]
+    fn error_responses_round_trip_and_clear_without_losing_the_reading() {
+        let mut original = status();
+        original.set_state(ProviderState::RateLimited, Some("rate limited".into()));
+        original.error_response = Some(ErrorResponse {
+            status: 429,
+            body: "{\"error\":\"arbitrary provider message\"}".into(),
+            truncated: false,
+        });
+        let decoded: ProviderStatus = encode(&original).deserialize().expect("status").0;
+        assert_eq!(decoded, original);
+        assert!(!format!("{decoded:?}").contains("arbitrary provider message"));
+        let reading = original.to_snapshot().expect("last good reading");
+        original.set_reading(&reading, original.presentation.clone().unwrap());
+        assert!(original.error_response.is_none());
+        assert_eq!(original.windows, decoded.windows);
+
+        #[derive(SerializeDict, Type)]
+        #[zvariant(signature = "a{sv}")]
+        struct OlderStatus {
+            provider: String,
+            account: String,
+            state: String,
+            windows: Vec<WindowStatus>,
+            details: Vec<DetailSection>,
+            options: Vec<ProviderOption>,
+            notify: Vec<String>,
+        }
+        let older = OlderStatus {
+            provider: "claude".into(),
+            account: "default".into(),
+            state: "rate-limited".into(),
+            windows: vec![],
+            details: vec![],
+            options: vec![],
+            notify: vec![],
+        };
+        let bytes = to_bytes(Context::new_dbus(LE, 0), &older).unwrap();
+        let (decoded, _): (ProviderStatus, _) = bytes.deserialize().unwrap();
+        assert!(decoded.error_response.is_none());
     }
 
     #[test]

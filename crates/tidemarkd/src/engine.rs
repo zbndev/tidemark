@@ -2172,6 +2172,7 @@ impl Engine {
                 account.failures = account.failures.saturating_add(1);
                 account.retry_after = error.retry_after();
                 account.set_state(state, Some(error.to_string()));
+                account.status.error_response = error.response().cloned();
                 if state == ProviderState::CredentialRejected && account.factory.is_some() {
                     // Re-read the key next time round: the user's fix is to store a new
                     // one, and nothing else would tell us they had.
@@ -2604,6 +2605,7 @@ enum Loaded {
 /// Which state a failed fetch leaves the account in.
 fn state_for(error: &ProviderError) -> ProviderState {
     match error {
+        ProviderError::Response { error, .. } => state_for(error),
         ProviderError::NoCredential => ProviderState::NoCredential,
         ProviderError::KeyringLocked => ProviderState::WaitingForKeyring,
         ProviderError::KeyringUnavailable(_) => ProviderState::KeyringUnavailable,
@@ -5599,6 +5601,37 @@ svg = '''
         let status = harness.published().pop().expect("published");
         assert_eq!(status.state(), Some(ProviderState::RateLimited));
         assert_eq!(harness.wait_secs(), 2400);
+    }
+
+    #[tokio::test]
+    async fn a_response_is_published_without_changing_backoff_and_clears_on_recovery() {
+        let response = tidemark_types::ErrorResponse {
+            status: 429,
+            body: r#"{"error":"the provider's actual explanation"}"#.into(),
+            truncated: false,
+        };
+        let mut harness = with_provider(Fake::new(vec![
+            Ok(snapshot(42.0, 18_000)),
+            Err(ProviderError::Response {
+                error: Box::new(ProviderError::RateLimited {
+                    retry_after: Some(2400),
+                }),
+                response: response.clone(),
+            }),
+            Ok(snapshot(43.0, 18_000)),
+        ]));
+        harness.engine.poll_due(Instant::now()).await;
+        harness.poll_again().await;
+        let status = harness.published().pop().expect("published failure");
+        assert_eq!(status.state(), Some(ProviderState::RateLimited));
+        assert_eq!(status.error_response.as_ref(), Some(&response));
+        assert_eq!(status.windows[0].used_percent, 42.0);
+        assert_eq!(harness.wait_secs(), 2400);
+        assert!(!status.message.unwrap().contains("actual explanation"));
+        harness.poll_again().await;
+        let status = harness.published().pop().expect("recovered");
+        assert!(status.error_response.is_none());
+        assert_eq!(status.state(), Some(ProviderState::Ok));
     }
 
     #[tokio::test]

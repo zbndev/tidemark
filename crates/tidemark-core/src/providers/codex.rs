@@ -254,6 +254,7 @@ impl Codex {
                 PROVIDER_ID,
                 crate::debug::Sent::get(&self.usage_url),
                 response,
+                &[credentials.access_token.expose()],
             )
             .await?;
             return parse_for_account(&body, Timestamp::now(), &self.account);
@@ -420,12 +421,16 @@ impl Codex {
             || status == reqwest::StatusCode::UNAUTHORIZED
             || status == reqwest::StatusCode::FORBIDDEN
         {
-            return Err(ProviderError::Credential {
-                status: status.as_u16(),
-            });
+            return Err(http::response_error(
+                ProviderError::Credential {
+                    status: status.as_u16(),
+                },
+                response,
+                &[refresh_token],
+            )
+            .await);
         }
-        let retry_after = http::retry_after_header(&response).map(str::to_owned);
-        http::check(status, retry_after.as_deref())?;
+        let response = http::checked(response, &[refresh_token]).await?;
         let refreshed: RefreshResponse = response.json().await.map_err(|error| {
             ProviderError::malformed(format!("Codex refresh response is not readable: {error}"))
         })?;
@@ -1420,7 +1425,7 @@ mod tests {
         let error = block_on(provider.fetch_inner()).expect_err("a rejection is reported");
 
         assert!(
-            matches!(error, ProviderError::Credential { status: 401 }),
+            matches!(error.reason(), ProviderError::Credential { status: 401 }),
             "{error:?}"
         );
         server.join().expect("server stopped");

@@ -211,7 +211,7 @@ impl Provider for OpenRouter {
 /// carries. The source keeps its reason in a secondary line; the row here folds it in
 /// after a middle dot.
 fn reason(error: ProviderError) -> String {
-    match error {
+    match error.reason() {
         ProviderError::Http { status } | ProviderError::Credential { status } => {
             format!("HTTP {status}")
         }

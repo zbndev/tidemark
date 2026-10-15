@@ -315,6 +315,11 @@ fn statuses() -> Vec<ProviderStatus> {
         ProviderState::RateLimited,
         Some("Asked to wait 20 minutes.".into()),
     );
+    kimi.error_response = Some(tidemark_types::ErrorResponse {
+        status: 429,
+        body: r#"{"error":{"type":"rate_limit_error","message":"Too many usage checks. Try again later."},"retry_after":1200,"retryable":true,"request_id":null}"#.into(),
+        truncated: false,
+    });
 
     // The case that used to widen every card on screen, in the words the keyring actually
     // used: a message longer than a card, with a D-Bus error name in it that word wrapping

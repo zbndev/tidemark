@@ -193,8 +193,7 @@ impl ZoomMate {
             .execute(request)
             .await
             .map_err(|error| ProviderError::Transport(redact_query(error)))?;
-        let retry_after = http::retry_after_header(&response).map(str::to_owned);
-        http::check(response.status(), retry_after.as_deref())?;
+        let response = http::checked(response, &[&session.header]).await?;
         let body = response
             .text()
             .await
@@ -238,7 +237,12 @@ impl ZoomMate {
         };
         match super::validate(&self.client, request).await {
             Ok(()) => crate::browser::auth::Validation::Ready,
-            Err(ProviderError::Credential { status: 401 | 403 }) => {
+            Err(error)
+                if matches!(
+                    error.reason(),
+                    ProviderError::Credential { status: 401 | 403 }
+                ) =>
+            {
                 crate::browser::auth::Validation::Rejected
             }
             Err(_) => crate::browser::auth::Validation::Unreachable,
@@ -813,7 +817,9 @@ mod tests {
 
         assert!(
             matches!(
-                result,
+                result
+                    .as_ref()
+                    .map_err(crate::providers::ProviderError::reason),
                 Err(crate::providers::ProviderError::Credential { status: 401 })
             ),
             "unexpected result: {result:?}"

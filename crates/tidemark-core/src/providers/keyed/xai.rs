@@ -172,8 +172,8 @@ impl Xai {
         // interface should ask for a new key, not draw a balance over a dead one.
         let history = match self.history(now).await {
             Ok(history) => history,
-            Err(ProviderError::Credential { status }) => {
-                return Err(ProviderError::Credential { status });
+            Err(error) if matches!(error.reason(), ProviderError::Credential { .. }) => {
+                return Err(error);
             }
             Err(_) => History::Unavailable,
         };

@@ -165,7 +165,7 @@ export component AppWindow inherits Window {
     // what a chosen one does belongs to the window.
     callback card-menu(int) -> [MenuEntry];
     callback card-action(string);
-    callback card-check-error(string);
+    callback card-check-error(int);
     callback open-detail(int);
     callback open-preferences();
     callback open-about();
@@ -546,7 +546,7 @@ export component AppWindow inherits Window {
                         carried: slot.grabbed;
                         interactive: card.shown && !root.menu-open && !Alert.open && !Prefs.open && !About.open
                             && !ReleaseNotes.open && !ProviderSettings.open && !QuotaDetails.open;
-                        check-error => { root.card-check-error(card.error); }
+                        check-error => { root.card-check-error(index); }
                     }
 
                     // A notification-style counter on the provider's card, outside the title

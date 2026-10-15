@@ -287,7 +287,14 @@ impl Keyed {
         }
         builder = match self.spec.auth {
             Auth::Bearer => builder.bearer_auth(self.credential.expose()),
-            Auth::Header(name) => builder.header(name, self.credential.expose()),
+            Auth::Header(name) => {
+                let mut value = reqwest::header::HeaderValue::from_str(self.credential.expose())
+                    .map_err(|_| {
+                        ProviderError::Local("the key is not a valid HTTP header".into())
+                    })?;
+                value.set_sensitive(true);
+                builder.header(name, value)
+            }
             Auth::Query(name) => builder.query(&[(name, self.credential.expose())]),
         };
         builder
@@ -299,7 +306,9 @@ impl Keyed {
         if self.credential.is_blank() {
             return Err(ProviderError::Credential { status: 401 });
         }
-        let body = request(self.spec.id, &self.client, self.build_request()?).await?;
+        let body = request(self.spec.id, &self.client, self.build_request()?)
+            .await
+            .map_err(|error| error.redact(self.credential.expose()))?;
         (self.spec.parse)(&body, Timestamp::now(), &self.account)
     }
 }
@@ -355,6 +364,7 @@ where
     F: FnOnce(&reqwest::Response) -> Result<(), ProviderError>,
 {
     let sent = debug::Recorded::of(&request);
+    let secrets = http::request_secrets(request.headers(), request.url());
     let note = |answer| {
         if let Some(sent) = &sent {
             debug::record(debug::Exchange {
@@ -380,16 +390,20 @@ where
     let url = response.url().clone();
     let retry_after = http::retry_after_header(&response).map(str::to_owned);
     if let Err(error) = inspect(&response) {
-        note(debug::Answer::Refused {
+        let secrets: Vec<_> = secrets.iter().map(String::as_str).collect();
+        let error = http::response_error(error, response, &secrets).await;
+        note(debug::Answer::Body {
             status: status.as_u16(),
+            body: &error.response().expect("attached response").body,
         });
         return Err(error);
     }
     if let Err(error) = http::check(status, retry_after.as_deref()) {
-        // Refused on its status: `reqwest` has not read the body and neither have we, so
-        // the line says what came back without pretending to a body it never held.
-        note(debug::Answer::Refused {
+        let secrets: Vec<_> = secrets.iter().map(String::as_str).collect();
+        let error = http::response_error(error, response, &secrets).await;
+        note(debug::Answer::Body {
             status: status.as_u16(),
+            body: &error.response().expect("attached response").body,
         });
         return Err(error);
     }
@@ -445,12 +459,13 @@ pub async fn validate_body(
     client: &reqwest::Client,
     request: reqwest::Request,
 ) -> Result<String, ProviderError> {
+    let secrets = http::request_secrets(request.headers(), request.url());
     let response = client
         .execute(request)
         .await
         .map_err(|error| ProviderError::Transport(redact_query(error)))?;
-    let retry_after = http::retry_after_header(&response).map(str::to_owned);
-    http::check(response.status(), retry_after.as_deref())?;
+    let secrets: Vec<_> = secrets.iter().map(String::as_str).collect();
+    let response = http::checked(response, &secrets).await?;
     response
         .text()
         .await

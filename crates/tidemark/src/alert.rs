@@ -25,8 +25,8 @@ pub enum Appearance {
 #[derive(Debug)]
 pub enum Content {
     None,
-    /// A diagnostic that may be longer than the window; selectable and scrollable.
-    Details,
+    /// A diagnostic that may be longer than the window, with an optional HTTP response.
+    Details(Option<tidemark_types::ErrorResponse>),
     /// An account name, previewed as the id it suggests.
     Name {
         prefill: String,
@@ -167,6 +167,9 @@ impl Alerts {
         });
         alert.on_endpoint_valid(|url| plugins::valid_endpoint(&url));
         alert.on_endpoint_warning(|url| plugins::endpoint_warning(&url).unwrap_or_default().into());
+        alert.on_highlight(|body, key, string, number, literal, punctuation| {
+            crate::diagnostic::highlight(&body, key, string, number, literal, punctuation)
+        });
         alerts
     }
 
@@ -221,7 +224,23 @@ impl Alerts {
         alert.set_has_mark(false);
         match question.content {
             Content::None => alert.set_content(0),
-            Content::Details => alert.set_content(4),
+            Content::Details(response) => {
+                alert.set_content(4);
+                alert.set_response_status(
+                    response
+                        .as_ref()
+                        .map_or(0, |response| i32::from(response.status)),
+                );
+                alert.set_response_truncated(
+                    response.as_ref().is_some_and(|response| response.truncated),
+                );
+                alert.set_response_body(
+                    response
+                        .map(|response| response.body)
+                        .unwrap_or_default()
+                        .into(),
+                );
+            }
             Content::Name { prefill, current } => {
                 alert.set_content(1);
                 alert.set_prefill(prefill.into());

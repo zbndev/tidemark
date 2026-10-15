@@ -213,9 +213,206 @@ pub fn retry_after_header(response: &reqwest::Response) -> Option<&str> {
     response.headers().get(RETRY_AFTER)?.to_str().ok()
 }
 
+/// Bounds diagnostics before they enter account state or IPC, including decompressed bodies.
+pub(crate) const ERROR_BODY_LIMIT: usize = 64 * 1024;
+
+/// Known request credentials, matched literally rather than guessing at response JSON fields.
+pub(crate) fn request_secrets(
+    headers: &reqwest::header::HeaderMap,
+    url: &reqwest::Url,
+) -> Vec<String> {
+    let mut secrets = Vec::new();
+    for (name, value) in headers {
+        if (value.is_sensitive()
+            || matches!(name.as_str(), "authorization" | "cookie")
+            || name.as_str().contains("key")
+            || name.as_str().contains("token"))
+            && let Ok(value) = value.to_str()
+        {
+            secrets.push(value.to_owned());
+            if let Some((_, token)) = value.split_once(' ') {
+                secrets.push(token.to_owned());
+            }
+            if name == reqwest::header::COOKIE {
+                secrets.extend(value.split(';').filter_map(|cookie| {
+                    cookie
+                        .trim()
+                        .split_once('=')
+                        .map(|(_, value)| value.to_owned())
+                }));
+            }
+        }
+    }
+    secrets.extend(url.query_pairs().map(|(_, value)| value.into_owned()));
+    secrets
+}
+
+/// Attaches a response without changing the error's classification or normal log output.
+pub(crate) async fn response_error(
+    error: ProviderError,
+    mut response: reqwest::Response,
+    secrets: &[&str],
+) -> ProviderError {
+    let status = response.status().as_u16();
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = ERROR_BODY_LIMIT - bytes.len();
+                bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                if chunk.len() > remaining {
+                    truncated = true;
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                bytes.extend_from_slice(b"\n[Could not finish reading the response body]");
+                break;
+            }
+        }
+    }
+    with_response(error, status, &bytes, truncated, secrets)
+}
+
+/// Shared with the browser-emulating transport, whose response type is not reqwest's.
+pub(crate) fn with_response(
+    error: ProviderError,
+    status: u16,
+    bytes: &[u8],
+    mut truncated: bool,
+    secrets: &[&str],
+) -> ProviderError {
+    let mut body = String::from_utf8_lossy(bytes).into_owned();
+    for secret in secrets.iter().filter(|secret| secret.len() >= 8) {
+        body = body.replace(secret, "<REDACTED>");
+    }
+    if body.len() > ERROR_BODY_LIMIT {
+        let mut end = ERROR_BODY_LIMIT;
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        body.truncate(end);
+        truncated = true;
+    }
+    ProviderError::Response {
+        error: Box::new(error),
+        response: tidemark_types::ErrorResponse {
+            status,
+            body,
+            truncated,
+        },
+    }
+}
+
+/// Status-only checks remain useful for credential probes; polls also retain the refusal.
+pub(crate) async fn checked(
+    response: reqwest::Response,
+    secrets: &[&str],
+) -> Result<reqwest::Response, ProviderError> {
+    match check(response.status(), retry_after_header(&response)) {
+        Ok(()) => Ok(response),
+        Err(error) => Err(response_error(error, response, secrets).await),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn reply(status: u16, body: &str, length: usize) -> reqwest::Response {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/usage", listener.local_addr().unwrap());
+        let body = body.to_owned();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Length: {length}\r\nRetry-After: 120\r\nConnection: close\r\n\r\n{body}"
+            );
+        });
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn refusals_keep_arbitrary_bodies_and_the_original_classification() {
+        for (status, body) in [
+            (429, r#"{"custom":"not the usual rate-limit message"}"#),
+            (403, "<html>Access denied</html>"),
+            (502, ""),
+            (500, "upstream is restarting"),
+        ] {
+            let response = reply(status, body, body.len()).await;
+            let error = super::super::read_body(
+                "claude",
+                crate::debug::Sent::get("https://example.invalid/usage"),
+                response,
+                &[],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.response().unwrap().body, body);
+            assert_eq!(error.response().unwrap().status, status);
+            assert!(!error.response().unwrap().truncated);
+            if status == 429 {
+                assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+            }
+            if status == 403 {
+                assert!(error.needs_user_action());
+            }
+            assert!(!format!("{error:?}").contains("not the usual"));
+            assert!(!error.to_string().contains("not the usual"));
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_bounded_and_a_broken_body_does_not_erase_the_429() {
+        let body = "я".repeat(ERROR_BODY_LIMIT);
+        let error = checked(reply(429, &body, body.len()).await, &[])
+            .await
+            .unwrap_err();
+        let response = error.response().unwrap();
+        assert!(response.truncated);
+        assert!(response.body.len() <= ERROR_BODY_LIMIT);
+
+        let error = checked(reply(429, "partial", 100).await, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+        assert!(
+            error
+                .response()
+                .unwrap()
+                .body
+                .contains("Could not finish reading")
+        );
+    }
+
+    #[tokio::test]
+    async fn known_credentials_are_redacted_independently_of_json_field_names() {
+        let body = r#"{"anything":"sk-secret-for-the-test","message":"retry later"}"#;
+        let error = checked(
+            reply(429, body, body.len()).await,
+            &["sk-secret-for-the-test"],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.response().unwrap().body,
+            r#"{"anything":"<REDACTED>","message":"retry later"}"#
+        );
+    }
 
     #[test]
     fn the_client_announces_the_product() {

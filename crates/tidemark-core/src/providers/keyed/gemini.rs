@@ -299,12 +299,17 @@ impl Gemini {
                 | reqwest::StatusCode::UNAUTHORIZED
                 | reqwest::StatusCode::FORBIDDEN
         ) {
-            return Err(ProviderError::Credential {
-                status: status.as_u16(),
-            });
+            return Err(super::http::response_error(
+                ProviderError::Credential {
+                    status: status.as_u16(),
+                },
+                response,
+                &[refresh_token, &self.client_secret],
+            )
+            .await);
         }
-        let retry_after = super::http::retry_after_header(&response).map(str::to_owned);
-        super::http::check(status, retry_after.as_deref())?;
+        let response =
+            super::http::checked(response, &[refresh_token, &self.client_secret]).await?;
         let refreshed: Refreshed = response.json().await.map_err(|error| {
             ProviderError::malformed(format!(
                 "the Gemini refresh response is not readable: {error}"
@@ -1196,7 +1201,10 @@ mod tests {
         server.join().expect("server exits");
 
         assert!(
-            matches!(result, Err(ProviderError::NoCredential)),
+            matches!(
+                result.as_ref().map_err(ProviderError::reason),
+                Err(ProviderError::NoCredential)
+            ),
             "{result:?}"
         );
     }

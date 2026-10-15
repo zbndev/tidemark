@@ -56,6 +56,7 @@ pub async fn fetch(
             body: Some(&sent_body),
         },
         response,
+        &[access_token],
     )
     .await?;
     // No user status to go with it: that is a local-server RPC, and an OAuth token is
