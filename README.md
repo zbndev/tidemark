@@ -220,8 +220,8 @@ Antigravity · Claude · Codex
 
 ai& · Amp · Chutes · ClawRouter · ClinePass · Codebuff · Crof · Deepgram · DeepInfra · DeepSeek ·
 ElevenLabs · Factory · Fireworks · Groq · IBM Bob · Kilo · Kimi · LiteLLM · LLM Proxy · MiniMax ·
-Moonshot · NanoGPT · Neuralwatt · OpenAI · OpenCode Go · OpenRouter · Poe · StepFun · sub2api ·
-Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
+Moonshot · NanoGPT · Neuralwatt · Ollama · OpenAI · OpenCode Go · OpenRouter · Poe · StepFun ·
+sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 **Local session**
 

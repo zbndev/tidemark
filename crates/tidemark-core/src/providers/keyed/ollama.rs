@@ -1,26 +1,37 @@
-//! Ollama Cloud usage, read from the browser session that signs in to ollama.com.
+//! Ollama Cloud usage, read with an ollama.com API key or from a signed-in browser session.
 //!
-//! The site meters its cloud plans on the settings page itself, so the numbers are
-//! scraped out of server-rendered HTML. (A JSON `/api/usage` endpoint exists, but it is
-//! Bearer-API-key-only and reports no session windows, so the cookie path stays on the
-//! page.) The parser is deliberately shallow — labels, a `data-time` attribute, a
-//! percent — rather than a document model, because the page is HTML and can move; when
-//! it moves, the fetch fails loudly as a malformed page instead of quietly inventing
-//! numbers. An expired session shows up as a bounce to a sign-in landing — recognised
-//! by where the request finally lands, or by the sign-in form served on a 200 — and is
-//! reported as a rejected session, not a broken provider.
+//! The key is the primary source: `GET /api/balance` is documented
+//! (<https://docs.ollama.com/api/balance>) and Bearer-only. It answers in one of two
+//! shapes. Current plans report included credits in dollars over a monthly period: an
+//! amount, so it is drawn as one and never turned into a percentage. Legacy plans, the
+//! ones with session and weekly limits, report each limit's remaining percent: quota
+//! windows, on the same keys the settings page fills, so an account that switches source
+//! keeps its history. The dollars are one [`DetailSection::BALANCE`] section, as Z.ai's
+//! and NanoGPT's are: the included credits left come first — the amount the card shows —
+//! then purchased credits, the monthly allowance and the renewal day. Like Z.ai's wallet,
+//! an empty purchased balance is not shown at all.
+//!
+//! The browser session is the fallback, for an account without a key. The site meters
+//! its plans on the settings page itself, so the numbers are scraped out of
+//! server-rendered HTML. The parser is deliberately shallow — labels, a `data-time`
+//! attribute, a percent — rather than a document model, because the page is HTML and can
+//! move; when it moves, the fetch fails loudly as a malformed page instead of quietly
+//! inventing numbers. An expired session shows up as a bounce to a sign-in landing —
+//! recognised by where the request finally lands, or by the sign-in form served on a 200
+//! — and is reported as a rejected session, not a broken provider.
 
-use super::{HandSpec, Options, ProviderError, http, redact_query, session};
+use super::{HandSpec, OptionSchema, Options, ProviderError, http, redact_query, session};
 #[cfg(test)]
 use crate::browser::auth::Selection;
 use crate::browser::{self, Keyring, SafeStorage};
-use crate::providers::{BoxFuture, Credential, Provider};
+use crate::providers::{BoxFuture, Credential, Provider, parse_rfc3339};
+use serde::Deserialize;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tidemark_types::{
-    AccountId, AuthCandidate, CredentialKind, DetailRow, DetailSection, ProviderId, Snapshot,
-    Timestamp, Window, WindowKey, WindowLength,
+    AccountId, AuthCandidate, AuthCandidateState, CredentialKind, DetailRow, DetailSection,
+    ProviderId, Snapshot, Timestamp, Window, WindowKey, WindowLength, ids,
 };
 use time::OffsetDateTime;
 
@@ -30,6 +41,7 @@ use std::path::Path;
 /// The stable slug this provider's history is filed under.
 pub const PROVIDER_ID: &str = "ollama";
 
+const BALANCE_URL: &str = "https://ollama.com/api/balance";
 const SETTINGS_URL: &str = "https://ollama.com/settings";
 const SESSION_URL: &str = "https://ollama.com/";
 const SITE_HOST: &str = "ollama.com";
@@ -50,13 +62,35 @@ const WEEKLY: u64 = 7 * 24 * 60 * 60;
 /// The free plan's included usage, which the page renews monthly.
 const MONTHLY: u64 = 30 * 24 * 60 * 60;
 
+/// The source mode an account reads, under `[provider.ollama]`.
+pub const AUTH_SOURCE: &str = "auth-source";
+/// The mode an account reads its stored API key under.
+pub const API_KEY_SOURCE: &str = ids::API_KEY_AUTH_MODE;
+
+static OPTIONS: &[OptionSchema] = &[
+    OptionSchema {
+        name: AUTH_SOURCE,
+        title: "Authentication source",
+        description: None,
+        default: "",
+        choices: &[
+            (API_KEY_SOURCE, "API key"),
+            (session::BROWSER_SOURCE, "Browser"),
+            (session::PASTE_SOURCE, "Paste session"),
+        ],
+        required: false,
+    },
+    session::OPTIONS[0],
+    session::OPTIONS[1],
+];
+
 /// Ollama as the settings dialog sees it.
 pub static SPEC: HandSpec = HandSpec {
     id: PROVIDER_ID,
     title: "Ollama",
     credential: CredentialKind::External,
-    credential_hint: "Choose a signed-in ollama.com browser session.",
-    options: session::OPTIONS,
+    credential_hint: "Paste an ollama.com API key, or choose a signed-in browser session.",
+    options: OPTIONS,
     build,
 };
 
@@ -83,6 +117,8 @@ pub struct Ollama {
     /// profile directory — so rooting the scan at one would find no browser there at all.
     browser_home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
+    /// The stored API key, when the account reads one; it then reads no browser at all.
+    api_key: Option<Credential>,
     source: Option<session::Source>,
     #[cfg(test)]
     base_url: Option<String>,
@@ -102,12 +138,19 @@ impl Ollama {
         credential: &Credential,
         options: &Options,
     ) -> Result<Self, ProviderError> {
+        // Asked first: `session::source` would read a stored key as a pasted Cookie header.
+        let api_key = (options.get(AUTH_SOURCE).map(String::as_str) == Some(API_KEY_SOURCE))
+            .then(|| credential.clone());
         Ok(Self {
             tidemark_account: account_id.clone(),
             client: http::client()?,
             browser_home: None,
             storage: Arc::new(Keyring),
-            source: session::source(credential, options),
+            source: api_key
+                .is_none()
+                .then(|| session::source(credential, options))
+                .flatten(),
+            api_key,
             #[cfg(test)]
             base_url: None,
         })
@@ -124,6 +167,7 @@ impl Ollama {
             client: http::client()?,
             browser_home: Some(home.to_path_buf()),
             storage,
+            api_key: None,
             source: Some(session::Source::Browser(Selection {
                 browser: "firefox".into(),
                 profile: None,
@@ -166,7 +210,28 @@ impl Ollama {
             .map_err(|error| ProviderError::Client(redact_query(error)))
     }
 
+    fn balance_request(&self, key: &str) -> Result<reqwest::Request, ProviderError> {
+        self.client
+            .get(self.url(BALANCE_URL))
+            .bearer_auth(key)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .build()
+            .map_err(|error| ProviderError::Client(redact_query(error)))
+    }
+
+    async fn fetch_balance(&self, key: &Credential) -> Result<Snapshot, ProviderError> {
+        if key.is_blank() {
+            return Err(ProviderError::NoCredential);
+        }
+        let request = self.balance_request(key.expose())?;
+        let body = super::request(PROVIDER_ID, &self.client, request).await?;
+        parse_balance_for_account(&body, Timestamp::now(), &self.tidemark_account)
+    }
+
     async fn fetch_inner(&self) -> Result<Snapshot, ProviderError> {
+        if let Some(key) = &self.api_key {
+            return self.fetch_balance(key).await;
+        }
         let source = self.source.as_ref().ok_or(ProviderError::NoCredential)?;
         let session = session::session(
             self.browser_home.as_deref(),
@@ -216,7 +281,40 @@ impl Ollama {
         }
     }
 
+    async fn validate_key(&self, key: &str) -> crate::browser::auth::Validation {
+        let Ok(request) = self.balance_request(key) else {
+            return crate::browser::auth::Validation::Unreachable;
+        };
+        let Ok(response) = self.client.execute(request).await else {
+            return crate::browser::auth::Validation::Unreachable;
+        };
+        let retry_after = http::retry_after_header(&response).map(str::to_owned);
+        match http::check(response.status(), retry_after.as_deref()) {
+            Ok(()) => crate::browser::auth::Validation::Ready,
+            Err(error) if matches!(error.reason(), ProviderError::Credential { .. }) => {
+                crate::browser::auth::Validation::Rejected
+            }
+            Err(_) => crate::browser::auth::Validation::Unreachable,
+        }
+    }
+
+    /// The API-key mode, proved by asking for the balance it would read.
+    async fn api_key_source(&self) -> AuthCandidate {
+        let state = match self.api_key.as_ref().filter(|key| !key.is_blank()) {
+            Some(key) => validation_state(self.validate_key(key.expose()).await),
+            None => AuthCandidateState::Missing,
+        };
+        AuthCandidate {
+            id: API_KEY_SOURCE.into(),
+            title: "Stored API key".into(),
+            subtitle: Some("Create one at ollama.com/settings/keys".into()),
+            state: state.as_wire().to_owned(),
+            children: Vec::new(),
+        }
+    }
+
     async fn inspect_sources(&self) -> Vec<AuthCandidate> {
+        let api_key = self.api_key_source().await;
         let browsers = session::inspect_sources(
             self.browser_home.as_deref(),
             self.storage.as_ref(),
@@ -226,12 +324,25 @@ impl Ollama {
             |credential| async move { self.validate_header(credential.header()).await },
         )
         .await;
-        session::modes(
-            browsers,
-            self.source.as_ref().and_then(session::Source::pasted),
-            |header| async move { self.validate_header(&header).await },
-        )
-        .await
+        let mut sources = vec![api_key];
+        sources.extend(
+            session::modes(
+                browsers,
+                self.source.as_ref().and_then(session::Source::pasted),
+                |header| async move { self.validate_header(&header).await },
+            )
+            .await,
+        );
+        sources
+    }
+}
+
+fn validation_state(validation: crate::browser::auth::Validation) -> AuthCandidateState {
+    match validation {
+        crate::browser::auth::Validation::Ready => AuthCandidateState::Ready,
+        crate::browser::auth::Validation::Rejected => AuthCandidateState::Rejected,
+        crate::browser::auth::Validation::Unreachable => AuthCandidateState::Unreachable,
+        crate::browser::auth::Validation::Challenged => AuthCandidateState::Challenged,
     }
 }
 
@@ -279,6 +390,144 @@ fn is_signin_redirect(url: &reqwest::Url, site_host: &str) -> bool {
         return true;
     }
     host.ends_with(".workos.com") && path.starts_with("/user_management/authorize")
+}
+
+/// `/api/balance` as the documentation describes it: included credits on a current plan,
+/// or the session and weekly limits on a legacy one, beside the purchased credits.
+#[derive(Debug, Deserialize)]
+struct Balance {
+    included: Included,
+    purchased: Purchased,
+}
+
+/// Tried in order: a body carrying neither complete shape matches neither and is refused.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Included {
+    Credits {
+        balance_usd: f64,
+        allowance_usd: f64,
+        period: Period,
+    },
+    Limits {
+        session: Limit,
+        weekly: Limit,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct Period {
+    until: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Limit {
+    remaining_percent: f64,
+    resets_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Purchased {
+    balance_usd: f64,
+}
+
+/// The balance endpoint's body as a snapshot.
+pub fn parse_balance(body: &str, captured_at: Timestamp) -> Result<Snapshot, ProviderError> {
+    parse_balance_for_account(body, captured_at, &AccountId::default())
+}
+
+fn parse_balance_for_account(
+    body: &str,
+    captured_at: Timestamp,
+    account_id: &AccountId,
+) -> Result<Snapshot, ProviderError> {
+    let balance: Balance = serde_json::from_str(body)
+        .map_err(|error| ProviderError::malformed(format!("not an Ollama balance: {error}")))?;
+    let mut windows = Vec::new();
+    let mut rows = Vec::new();
+    let mut context = Vec::new();
+    match balance.included {
+        // No allowance: such an account spends purchased credits only.
+        Included::Credits { allowance_usd, .. } if allowance_usd <= 0.0 => {}
+        Included::Credits {
+            balance_usd,
+            allowance_usd,
+            period,
+        } => {
+            rows.push(labeled("Included credits", balance_usd));
+            context.push(labeled("Monthly allowance", allowance_usd));
+            context.push(DetailRow {
+                label: "Renews".to_owned(),
+                value: day_of(instant(&period.until)?),
+            });
+        }
+        Included::Limits { session, weekly } => {
+            windows.push(limit_window("Session", SESSION, &session)?);
+            windows.push(limit_window("Weekly", WEEKLY, &weekly)?);
+        }
+    }
+    // An empty wallet is not something to show, on the card or anywhere else.
+    if balance.purchased.balance_usd > 0.0 {
+        rows.push(labeled("Purchased credits", balance.purchased.balance_usd));
+    }
+    rows.extend(context);
+    let details = if rows.is_empty() {
+        Vec::new()
+    } else {
+        vec![DetailSection {
+            title: DetailSection::BALANCE.to_owned(),
+            rows,
+        }]
+    };
+    Ok(Snapshot {
+        provider: ProviderId::new(PROVIDER_ID),
+        account: account_id.clone(),
+        captured_at,
+        windows,
+        details,
+    })
+}
+
+fn labeled(label: &str, amount: f64) -> DetailRow {
+    DetailRow {
+        label: label.to_owned(),
+        value: dollars(amount),
+    }
+}
+
+/// A legacy limit, which reports what remains rather than what is used.
+fn limit_window(title: &str, length_secs: u64, limit: &Limit) -> Result<Window, ProviderError> {
+    let length = WindowLength::from_secs(length_secs).expect("a fixed span is not zero");
+    Ok(Window {
+        key: WindowKey::for_length(length),
+        title: title.to_owned(),
+        subtitle: None,
+        used_percent: (100.0 - limit.remaining_percent).clamp(0.0, 100.0),
+        resets_at: Some(instant(&limit.resets_at)?),
+        length: Some(length),
+    })
+}
+
+fn instant(raw: &str) -> Result<Timestamp, ProviderError> {
+    parse_rfc3339(raw)
+        .ok_or_else(|| ProviderError::malformed(format!("Ollama sent an unreadable time: {raw}")))
+}
+
+fn dollars(amount: f64) -> String {
+    format!("${amount:.2}")
+}
+
+/// The `YYYY-MM-DD` a whole-second timestamp falls on, for the renewal row.
+fn day_of(at: Timestamp) -> String {
+    let date = OffsetDateTime::from_unix_timestamp(at.as_unix())
+        .expect("a plausible timestamp converts")
+        .date();
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.year(),
+        u8::from(date.month()),
+        date.day()
+    )
 }
 
 /// The page's meters as a snapshot: the session (or hourly) window, the weekly window,
@@ -541,15 +790,15 @@ fn looks_signed_out(html: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ollama, is_signin_redirect, parse};
+    use super::{API_KEY_SOURCE, AUTH_SOURCE, Ollama, is_signin_redirect, parse, parse_balance};
     use crate::browser::SafeStorage;
-    use crate::providers::{Provider, ProviderError};
+    use crate::providers::{Credential, Provider, ProviderError};
     use crate::secrets::SecretError;
     use rusqlite::Connection;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::sync::Arc;
-    use tidemark_types::{Timestamp, WindowKey, WindowLength};
+    use tidemark_types::{DetailSection, Timestamp, WindowKey, WindowLength};
 
     #[derive(Debug)]
     struct NoKeyring;
@@ -657,6 +906,12 @@ mod tests {
 
     const SETTINGS: &str = include_str!("../../../tests/fixtures/ollama/settings.html");
     const SETTINGS_FREE: &str = include_str!("../../../tests/fixtures/ollama/settings-free.html");
+    /// The documentation's example response for a current plan.
+    const BALANCE: &str = include_str!("../../../tests/fixtures/ollama/balance.json");
+    /// The documentation's legacy-plan example; no live legacy response has been seen.
+    const BALANCE_LEGACY: &str = include_str!("../../../tests/fixtures/ollama/balance-legacy.json");
+    /// Recorded from a live free account with nothing spent.
+    const BALANCE_FREE: &str = include_str!("../../../tests/fixtures/ollama/balance-free.json");
     const CAPTURED_AT: i64 = 1_700_000_000;
 
     fn session_key() -> WindowKey {
@@ -910,5 +1165,196 @@ mod tests {
             result.as_ref().map_err(ProviderError::reason),
             Err(ProviderError::Credential { status: 401 })
         ));
+    }
+
+    fn key_provider(home: &crate::browser::tests::TestHome, base_url: &str, key: &str) -> Ollama {
+        let mut provider = provider(home, base_url);
+        provider.api_key = Some(Credential::new(key));
+        provider.source = None;
+        provider
+    }
+
+    fn captured_at() -> Timestamp {
+        Timestamp::from_unix(CAPTURED_AT).expect("plausible")
+    }
+
+    fn rows(snapshot: &tidemark_types::Snapshot) -> Vec<(&str, &str)> {
+        snapshot.details[0]
+            .rows
+            .iter()
+            .map(|row| (row.label.as_str(), row.value.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn the_documented_balance_is_an_amount_and_not_a_bar() {
+        let snapshot = parse_balance(BALANCE, captured_at()).expect("parses");
+
+        assert!(snapshot.windows.is_empty());
+        assert_eq!(snapshot.details.len(), 1);
+        assert_eq!(snapshot.details[0].title, DetailSection::BALANCE);
+        // The first row is the amount the card shows.
+        assert_eq!(
+            rows(&snapshot),
+            [
+                ("Included credits", "$72.50"),
+                ("Purchased credits", "$25.00"),
+                ("Monthly allowance", "$100.00"),
+                ("Renews", "2026-10-15"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_legacy_balance_draws_what_is_used_of_the_session_and_weekly_limits() {
+        let snapshot = parse_balance(BALANCE_LEGACY, captured_at()).expect("parses");
+
+        let session = &snapshot.windows[0];
+        assert_eq!(session.title, "Session");
+        assert_eq!(session.key, session_key());
+        assert!((session.used_percent - 25.0).abs() < 0.000_001);
+        assert_eq!(
+            session.resets_at,
+            Some(Timestamp::from_unix(1_790_838_000).expect("2026-10-01T07:00:00Z"))
+        );
+        let weekly = &snapshot.windows[1];
+        assert_eq!(weekly.title, "Weekly");
+        assert_eq!(weekly.key, weekly_key());
+        assert!((weekly.used_percent - 60.0).abs() < 0.000_001);
+        assert_eq!(
+            weekly.resets_at,
+            Some(Timestamp::from_unix(1_791_158_400).expect("2026-10-05T00:00:00Z"))
+        );
+        assert_eq!(snapshot.details.len(), 1);
+        assert_eq!(snapshot.details[0].title, DetailSection::BALANCE);
+        assert_eq!(snapshot.details[0].rows.len(), 1);
+        assert_eq!(snapshot.details[0].rows[0].label, "Purchased credits");
+        assert_eq!(snapshot.details[0].rows[0].value, "$25.00");
+    }
+
+    #[test]
+    fn the_recorded_free_balance_reads_its_fractional_second_renewal() {
+        let snapshot = parse_balance(BALANCE_FREE, captured_at()).expect("parses");
+
+        assert!(snapshot.windows.is_empty());
+        // Nothing purchased: the empty wallet has no row.
+        assert_eq!(
+            rows(&snapshot),
+            [
+                ("Included credits", "$2.50"),
+                ("Monthly allowance", "$2.50"),
+                ("Renews", "2026-11-10"),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_allowance_draws_no_included_window_rather_than_a_full_one() {
+        let body = r#"{"included":{"balance_usd":0,"allowance_usd":0,
+            "period":{"from":"2026-10-10T00:00:00Z","until":"2026-11-10T00:00:00Z"}},
+            "purchased":{"balance_usd":5}}"#;
+
+        let snapshot = parse_balance(body, captured_at()).expect("parses");
+
+        assert!(snapshot.windows.is_empty());
+        assert_eq!(snapshot.details[0].title, DetailSection::BALANCE);
+        assert_eq!(snapshot.details[0].rows.len(), 1);
+        assert_eq!(snapshot.details[0].rows[0].value, "$5.00");
+    }
+
+    #[test]
+    fn a_balance_in_neither_documented_shape_is_malformed() {
+        for body in [
+            r#"{"included":{"session":{"remaining_percent":75,"resets_at":"2026-10-01T07:00:00Z"}},"purchased":{"balance_usd":0}}"#,
+            r#"{"included":{"balance_usd":1,"allowance_usd":2},"purchased":{"balance_usd":0}}"#,
+            r#"{"included":{"balance_usd":1,"allowance_usd":2,"period":{"until":"soon"}},"purchased":{"balance_usd":0}}"#,
+            r#"{"purchased":{"balance_usd":0}}"#,
+        ] {
+            assert!(
+                matches!(
+                    parse_balance(body, captured_at()),
+                    Err(ProviderError::Malformed(_))
+                ),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_account_on_its_api_key_reads_no_browser_and_one_on_a_browser_reads_no_key() {
+        let key = Credential::new("ollama-key");
+        let mut options = crate::providers::keyed::Options::new();
+        options.insert(AUTH_SOURCE.into(), API_KEY_SOURCE.into());
+        options.insert("auth-browser".into(), "firefox".into());
+        let on_key = Ollama::new_for_account(Default::default(), &key, &options).expect("builds");
+        assert_eq!(on_key.api_key.as_ref(), Some(&key));
+        assert!(on_key.source.is_none());
+
+        options.insert(AUTH_SOURCE.into(), "browser".into());
+        let on_browser =
+            Ollama::new_for_account(Default::default(), &key, &options).expect("builds");
+        assert!(on_browser.api_key.is_none());
+        assert!(matches!(
+            on_browser.source,
+            Some(super::session::Source::Browser(_))
+        ));
+    }
+
+    #[test]
+    fn the_balance_is_fetched_with_the_key_and_without_a_cookie() {
+        let home = gecko_home();
+        let (base_url, requests, server) =
+            chained_server(&[("GET /api/balance", 200, &[], BALANCE)]);
+        let snapshot = fetch(&key_provider(&home, &base_url, "ollama-key")).expect("fetches");
+        let request = requests
+            .recv()
+            .expect("request captured")
+            .to_ascii_lowercase();
+        server.join().expect("server exits");
+
+        assert_eq!(snapshot.details[0].rows[0].value, "$72.50");
+        assert!(
+            request.contains("authorization: bearer ollama-key"),
+            "{request}"
+        );
+        assert!(!request.contains("cookie:"), "{request}");
+    }
+
+    #[test]
+    fn a_refused_key_is_a_rejected_credential_and_a_blank_one_is_none() {
+        let home = gecko_home();
+        let (base_url, _requests, server) = chained_server(&[(
+            "GET /api/balance",
+            401,
+            &[],
+            r#"{"error":"invalid credentials"}"#,
+        )]);
+        let result = fetch(&key_provider(&home, &base_url, "ollama-key"));
+        server.join().expect("server exits");
+        assert!(matches!(
+            result.as_ref().map_err(ProviderError::reason),
+            Err(ProviderError::Credential { status: 401 })
+        ));
+
+        let blank = fetch(&key_provider(&home, "http://127.0.0.1:9", " "));
+        assert!(matches!(blank, Err(ProviderError::NoCredential)));
+    }
+
+    #[test]
+    fn the_api_key_mode_is_inspected_first_and_proved_by_the_balance() {
+        let home = crate::browser::tests::TestHome::new();
+        let (base_url, _requests, server) =
+            chained_server(&[("GET /api/balance", 200, &[], BALANCE)]);
+        let sources = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(key_provider(&home, &base_url, "ollama-key").inspect_auth_sources())
+            .expect("inspects");
+        server.join().expect("server exits");
+
+        let ids: Vec<_> = sources.iter().map(|source| source.id.as_str()).collect();
+        assert_eq!(ids, [API_KEY_SOURCE, "browser", "paste"]);
+        assert_eq!(sources[0].state, "ready");
     }
 }

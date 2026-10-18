@@ -159,9 +159,14 @@ impl BrowserAuth {
             .unwrap_or(0)
     }
 
-    /// Whether the half on screen is the one a session is pasted into.
+    /// Whether the half on screen is one a secret is pasted into: a session, or a key.
     pub fn pasting(&self) -> bool {
-        self.mode == ids::PASTE_AUTH_MODE
+        self.mode == ids::PASTE_AUTH_MODE || self.keying()
+    }
+
+    /// Whether what that half takes is the vendor's API key rather than a session.
+    pub fn keying(&self) -> bool {
+        self.mode == ids::API_KEY_AUTH_MODE
     }
 
     #[cfg(test)]
@@ -455,5 +460,14 @@ mod tests {
         auth.apply_report(browser_report());
         assert_eq!(auth.lines()[0].title, "Not offered right now");
         assert!(auth.pasting());
+        assert!(!auth.keying());
+    }
+
+    #[test]
+    fn the_api_key_half_takes_a_key_where_the_paste_half_takes_a_session() {
+        let mut auth = BrowserAuth::new(&[mode("api-key"), mode("browser")], None);
+        assert!(auth.pasting() && auth.keying());
+        auth.choose_mode(1);
+        assert!(!auth.pasting() && !auth.keying());
     }
 }

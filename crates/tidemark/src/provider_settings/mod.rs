@@ -703,6 +703,12 @@ impl ProviderDialog {
             modes: ModelRc::from(Rc::clone(&self.detail.modes)),
             mode: view.mode as i32,
             paste: view.pasting,
+            paste_title: if view.keying {
+                "API key"
+            } else {
+                "Cookie header"
+            }
+            .into(),
             candidates: ModelRc::from(Rc::clone(&self.detail.candidates)),
             options: ModelRc::from(Rc::clone(&self.detail.options)),
             notifications: ModelRc::from(Rc::clone(&self.detail.notifications)),
@@ -1449,7 +1455,7 @@ impl ProviderDialog {
     /// the poll is what says whether the session works.
     fn paste_session(self: &Rc<Self>, session: String) {
         let session = session.trim().to_owned();
-        let Some(((provider, account), _, _)) = self.current() else {
+        let Some((identity, _, _)) = self.current() else {
             return;
         };
         if session.is_empty() {
@@ -1458,13 +1464,29 @@ impl ProviderDialog {
         let Some(proxy) = self.proxy() else {
             return;
         };
+        // The API-key half shares this field; its key is stored as a key, not a session.
+        let keying = self
+            .browser
+            .borrow()
+            .get(&identity)
+            .is_some_and(BrowserAuth::keying);
+        let (provider, account) = identity;
         let dialog = Rc::clone(self);
         spawn(async move {
-            if let Err(error) = proxy.set_session(&provider, &account, &session).await {
+            let stored = if keying {
+                proxy.set_key(&provider, &account, &session).await
+            } else {
+                proxy.set_session(&provider, &account, &session).await
+            };
+            if let Err(error) = stored {
                 dialog.toast(&reason(&error));
                 return;
             }
-            dialog.toast("Session saved. Checking the account…");
+            dialog.toast(if keying {
+                "Key saved. Checking the account…"
+            } else {
+                "Session saved. Checking the account…"
+            });
             dialog.inspect();
         });
     }

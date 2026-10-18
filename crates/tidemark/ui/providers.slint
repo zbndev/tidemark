@@ -93,6 +93,8 @@ export struct DetailData {
     modes: [string],
     mode: int,
     paste: bool,
+    // What the paste field takes: a cookie header, or the vendor's API key.
+    paste-title: string,
     candidates: [CandidateData],
     options: [OptionData],
     notifications: [SwitchData],
@@ -444,7 +446,7 @@ component DetailPage inherits ScrollView {
                 }
                 BoxedList {
                     if root.data.paste: cookie := EntryRow {
-                        title: "Cookie header";
+                        title: root.data.paste-title;
                         password: true;
                         accepted => {
                             if (ProviderSettings.filled(self.text)) {
