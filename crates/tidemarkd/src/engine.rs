@@ -23,6 +23,7 @@ use tidemark_types::{
     AccountId, AuthCandidate, AuthCandidateState, AuthSelection, CredentialKind, HistoryPoint,
     PluginEndpoint, PluginInfo, Preferences, Presentation, ProviderDefinition, ProviderId,
     ProviderOption, ProviderState, ProviderStatus, Snapshot, Timestamp, WindowKey, WindowStatus,
+    ids,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinError, JoinSet};
@@ -1632,6 +1633,15 @@ impl Engine {
                 mode: selection.mode,
                 candidate: None,
             }
+        } else if selection.mode == ids::API_KEY_AUTH_MODE {
+            // Stored like a paste, and proved the same way: by the poll this schedules.
+            if !crate::registry::has_api_key_auth(provider) {
+                return Err(format!("{provider} does not take an API key"));
+            }
+            AuthSelection {
+                mode: selection.mode,
+                candidate: None,
+            }
         } else {
             let sources = self.inspect_auth_sources(provider, account).await?;
             let Some(resolved) = resolvable_auth_selection(&sources, &selection) else {
@@ -2010,9 +2020,10 @@ impl Engine {
         }
     }
 
-    /// The pasted session one account was rebuilt from, if that is what it runs on.
+    /// The pasted session — or, on the API-key mode, the key — one account was rebuilt
+    /// from, if that is what it runs on.
     ///
-    /// The slot is read only for an account whose selected mode *is* the pasted session.
+    /// The slot is read only for an account whose selected mode *is* the one it stores.
     /// An account reading its own browser profile never touches it — the common case
     /// everywhere a browser jar is readable, which is every Linux profile and, until
     /// Chrome M127, was every profile anywhere. Reading it anyway would put that account
@@ -2026,18 +2037,15 @@ impl Engine {
         &mut self,
         index: usize,
     ) -> Result<Credential, (ProviderState, Option<String>)> {
-        let on_a_paste = self.accounts[index]
-            .status
-            .auth_selection
-            .as_ref()
-            .is_some_and(|selection| selection.mode == session::PASTE_SOURCE);
-        if !on_a_paste {
-            return Ok(Credential::new(String::new()));
-        }
+        let slot = match self.accounts[index].status.auth_selection.as_ref() {
+            Some(selection) if selection.mode == session::PASTE_SOURCE => Kind::Session,
+            Some(selection) if selection.mode == ids::API_KEY_AUTH_MODE => Kind::Key,
+            _ => return Ok(Credential::new(String::new())),
+        };
         let provider = self.accounts[index].provider.clone();
         let account = self.accounts[index].account.clone();
         let secrets = Arc::clone(&self.secrets);
-        match secrets.get(Kind::Session, &provider, &account).await {
+        match secrets.get(slot, &provider, &account).await {
             Ok(Some(credential)) => Ok(credential),
             // Selected the mode, stored nothing under it: the provider is handed an empty
             // credential and says `NoCredential`, which is what the settings dialog draws
@@ -5697,6 +5705,41 @@ svg = '''
         assert_eq!(
             on_a_paste.engine.accounts[0].status.state(),
             Some(ProviderState::WaitingForKeyring)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_account_on_its_api_key_is_rebuilt_from_the_key_slot() {
+        let handed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&handed);
+        let secrets = Arc::new(StoredSecrets::default());
+        secrets.insert(Kind::Key, "ollama", "default", "the-key");
+        secrets.insert(Kind::Session, "ollama", "default", "a-cookie");
+        let mut harness = Harness::new(
+            vec![
+                Account::keyless(
+                    ProviderId::new("ollama"),
+                    AccountId::default(),
+                    Box::new(move |_, credential: Credential, _| {
+                        recorder
+                            .lock()
+                            .expect("no test panics here")
+                            .push(credential.expose().to_owned());
+                        Ok(Fake::new(vec![Ok(snapshot(1.0, 3600))]) as Arc<dyn Provider>)
+                    }),
+                )
+                .with_auth_selection(Some(AuthSelection {
+                    mode: ids::API_KEY_AUTH_MODE.into(),
+                    candidate: None,
+                })),
+            ],
+            secrets,
+        );
+        harness.engine.ensure_client(0).await;
+
+        assert_eq!(
+            handed.lock().expect("no test panics here").as_slice(),
+            ["the-key".to_owned()]
         );
     }
 

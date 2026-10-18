@@ -1069,9 +1069,9 @@ impl Config {
         selection: &AuthSelection,
     ) -> Result<(), ConfigError> {
         let browser_profile = match (selection.mode.as_str(), selection.candidate.as_deref()) {
-            // Neither of these names a browser: Cursor's app session and a pasted header
-            // are each one thing, and both clear the browser fields on their way in.
-            ("cursor-app" | "paste", None) => None,
+            // None of these names a browser: Cursor's app session, a pasted header and a
+            // vendor API key are each one thing, and all clear the browser fields.
+            ("cursor-app" | "paste" | "api-key", None) => None,
             ("browser", Some(candidate)) => {
                 Some(parse_browser_candidate(candidate).ok_or_else(|| {
                     ConfigError::InvalidAuthSelection {
@@ -1094,6 +1094,13 @@ impl Config {
                     path: self.path.clone(),
                     provider: provider.to_owned(),
                     reason: "a pasted session does not take a browser candidate".into(),
+                });
+            }
+            ("api-key", Some(_)) => {
+                return Err(ConfigError::InvalidAuthSelection {
+                    path: self.path.clone(),
+                    provider: provider.to_owned(),
+                    reason: "an API key does not take a browser candidate".into(),
                 });
             }
             ("browser", None) => {
@@ -1446,6 +1453,29 @@ mod tests {
             .expect("stores a browser profile");
         assert_eq!(config.option("cursor", "auth-browser"), Some("firefox"));
         assert_eq!(config.option("cursor", "auth-profile"), Some("work"));
+
+        config
+            .set_auth_selection(
+                "cursor",
+                &AuthSelection {
+                    mode: "api-key".into(),
+                    candidate: None,
+                },
+            )
+            .expect("stores an API key mode");
+        assert_eq!(config.option("cursor", "auth-source"), Some("api-key"));
+        assert_eq!(config.option("cursor", "auth-browser"), None);
+        assert!(
+            config
+                .set_auth_selection(
+                    "cursor",
+                    &AuthSelection {
+                        mode: "api-key".into(),
+                        candidate: Some("firefox".into()),
+                    },
+                )
+                .is_err()
+        );
         let _ = std::fs::remove_file(path);
     }
 

@@ -1107,7 +1107,8 @@ impl Daemon {
         let mutation = self.mutation(provider, account).await;
         let _guard = mutation.lock().await;
         let status = self.account(provider, account).await?;
-        if status.credential_kind() != Some(CredentialKind::Key) {
+        let as_mode = registry::has_api_key_auth(provider);
+        if status.credential_kind() != Some(CredentialKind::Key) && !as_mode {
             return Err(fdo::Error::InvalidArgs(format!(
                 "{provider} does not take an API key"
             )));
@@ -1128,7 +1129,20 @@ impl Daemon {
             .await
             .map_err(keyring_error)?;
         tracing::info!(provider, account, "stored an API key");
-        self.reload(provider).await
+        if !as_mode {
+            return self.reload(provider).await;
+        }
+        // As with a pasted session, the selection write is what puts the account on it.
+        self.config_request(|reply| Command::SelectAuthSource {
+            provider: provider.to_owned(),
+            account: account.to_owned(),
+            selection: AuthSelection {
+                mode: tidemark_types::ids::API_KEY_AUTH_MODE.to_owned(),
+                candidate: None,
+            },
+            reply,
+        })
+        .await
     }
 
     /// Stores a browser session the person pasted in, and puts the account on it.
@@ -3745,6 +3759,50 @@ mod tests {
             commands.try_recv().expect("the loop was told"),
             Command::Reload { provider: Some(provider) } if provider == "zai"
         ));
+    }
+
+    #[tokio::test]
+    async fn a_key_for_a_provider_with_an_api_key_mode_selects_that_mode() {
+        let mut ollama = status("ollama");
+        ollama.credential = Some(CredentialKind::External.as_wire().to_owned());
+        let (daemon, secrets, mut commands) = daemon_over(vec![ollama]).await;
+        let daemon = Arc::new(daemon);
+
+        let storing = tokio::spawn({
+            let daemon = Arc::clone(&daemon);
+            async move { daemon.set_key("ollama", "default", " ollama-key ").await }
+        });
+        let Command::SelectAuthSource {
+            selection, reply, ..
+        } = commands
+            .recv()
+            .await
+            .expect("the selection reaches the engine")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(
+            selection,
+            AuthSelection {
+                mode: tidemark_types::ids::API_KEY_AUTH_MODE.into(),
+                candidate: None,
+            }
+        );
+        reply.send(Ok(())).expect("selection completed");
+        storing
+            .await
+            .expect("the task did not panic")
+            .expect("a key is stored");
+
+        assert_eq!(
+            secrets.held(),
+            vec![(
+                "key".to_owned(),
+                "ollama".to_owned(),
+                "default".to_owned(),
+                "ollama-key".to_owned()
+            )]
+        );
     }
 
     #[tokio::test]

@@ -68,6 +68,9 @@ pub mod ids {
     /// selector, and the interface has to know which half of the selector is a place to
     /// paste into rather than a list of sources to choose from.
     pub const PASTE_AUTH_MODE: &str = "paste";
+    /// The authentication mode a provider that also reads a browser session offers its
+    /// vendor's API key under. The key itself is stored like any other key.
+    pub const API_KEY_AUTH_MODE: &str = "api-key";
 
     /// Secret Service schema for a browser session header the user pasted in, for a
     /// provider whose only credential is a session cookie a browser holds — the Windows

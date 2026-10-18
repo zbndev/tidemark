@@ -559,6 +559,24 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
                 },
             ],
         }),
+        // The key first: it is the source Ollama documents, and the browser is the fallback.
+        ollama::PROVIDER_ID => Some(AuthSelector {
+            option: ollama::AUTH_SOURCE.into(),
+            modes: vec![
+                AuthMode {
+                    value: ollama::API_KEY_SOURCE.into(),
+                    title: "API key".into(),
+                },
+                AuthMode {
+                    value: cursor::BROWSER_SOURCE.into(),
+                    title: "Browser".into(),
+                },
+                AuthMode {
+                    value: keyed::session::PASTE_SOURCE.into(),
+                    title: "Paste session".into(),
+                },
+            ],
+        }),
         abacus::PROVIDER_ID
         | alibaba::PROVIDER_ID
         | augment::PROVIDER_ID
@@ -568,7 +586,6 @@ fn browser_auth(provider: &str) -> Option<AuthSelector> {
         | mimo::PROVIDER_ID
         | mistral::PROVIDER_ID
         | notion::PROVIDER_ID
-        | ollama::PROVIDER_ID
         | opencode::PROVIDER_ID
         | perplexity::PROVIDER_ID
         | qoder::PROVIDER_ID
@@ -619,6 +636,17 @@ pub(crate) fn has_pasted_session_auth(provider: &str) -> bool {
     })
 }
 
+/// Whether a provider that reads a browser session also offers its vendor's API key as a
+/// mode — the one case a key is stored for an account that is not a key provider.
+pub(crate) fn has_api_key_auth(provider: &str) -> bool {
+    browser_auth(provider).is_some_and(|selector| {
+        selector
+            .modes
+            .iter()
+            .any(|mode| mode.value == ollama::API_KEY_SOURCE)
+    })
+}
+
 /// The durable config source an account is already constrained to, if it is complete.
 ///
 /// An incomplete or hand-edited value deliberately remains absent: treating it as another
@@ -634,6 +662,10 @@ pub(crate) fn browser_auth_selection(provider: &str, config: &Config) -> Option<
         // and the settings deliberately hold nothing that could identify it.
         Some(keyed::session::PASTE_SOURCE) => Some(AuthSelection {
             mode: keyed::session::PASTE_SOURCE.into(),
+            candidate: None,
+        }),
+        Some(ollama::API_KEY_SOURCE) if has_api_key_auth(provider) => Some(AuthSelection {
+            mode: ollama::API_KEY_SOURCE.into(),
             candidate: None,
         }),
         Some(cursor::BROWSER_SOURCE) => {
@@ -1644,7 +1676,6 @@ mod tests {
             mimo::PROVIDER_ID,
             mistral::PROVIDER_ID,
             notion::PROVIDER_ID,
-            ollama::PROVIDER_ID,
             opencode::PROVIDER_ID,
             perplexity::PROVIDER_ID,
             qoder::PROVIDER_ID,
@@ -1721,6 +1752,48 @@ mod tests {
                 candidate: Some("firefox/Default".into()),
             })
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ollama_offers_its_api_key_first_and_restores_that_mode() {
+        let definition = catalog_with_plugins(&empty_config(), &[])
+            .into_iter()
+            .find(|definition| definition.provider == ollama::PROVIDER_ID)
+            .expect("Ollama is in the catalog");
+        let selector = definition
+            .browser_auth
+            .expect("Ollama has local source selection");
+        assert_eq!(
+            selector
+                .modes
+                .iter()
+                .map(|mode| mode.value.as_str())
+                .collect::<Vec<_>>(),
+            [
+                ollama::API_KEY_SOURCE,
+                cursor::BROWSER_SOURCE,
+                keyed::session::PASTE_SOURCE,
+            ]
+        );
+        assert!(has_api_key_auth(ollama::PROVIDER_ID));
+        assert!(has_pasted_session_auth(ollama::PROVIDER_ID));
+        assert!(!has_api_key_auth(zoommate::PROVIDER_ID));
+
+        let path = scratch_config(
+            "ollama-api-key-selection",
+            "providers = [\"ollama\"]\n\n[provider.ollama]\nauth-source = \"api-key\"\n",
+        );
+        let config = Config::at(path.clone()).expect("config reads");
+        assert_eq!(
+            browser_auth_selection(ollama::PROVIDER_ID, &config),
+            Some(tidemark_types::AuthSelection {
+                mode: ollama::API_KEY_SOURCE.into(),
+                candidate: None,
+            })
+        );
+        // A provider without the mode does not adopt a hand-written one.
+        assert_eq!(browser_auth_selection(zoommate::PROVIDER_ID, &config), None);
         let _ = std::fs::remove_file(path);
     }
 
