@@ -30,7 +30,7 @@ tidemark-types = { path = "../tidemark-types" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 webbrowser = "1.2.4"
-zbus = { version = "5.13.2", features = ["p2p"] }
+zbus = { version = "6.0.0", features = ["p2p"] }
 
 [target.'cfg(windows)'.dependencies]
 # FemtoVG on Direct3D 12. Linux draws FemtoVG on OpenGL, which Slint builds by default.
