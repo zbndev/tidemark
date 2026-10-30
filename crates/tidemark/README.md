@@ -64,6 +64,8 @@ On Windows, build `tidemark` and `tidemarkd` together: the client looks for
   release, autoscroll near the edges; provider and account reorders sent to the daemon,
   optimistic, rolled back on refusal.
 - Account groups: `+N` / `−` badge, accounts slide out from and back under their provider.
+  A provider's card drags its whole group as a counted stack that lands only between
+  groups; an extra account reorders within its group until carried out of it.
 - Refresh, update button (opens the release page), theme preference, and the desktop's
   dark style and accent from the XDG settings portal, or the registry on Windows.
 - Bundled Rubik and embedded symbolic icons, so nothing depends on a system theme.

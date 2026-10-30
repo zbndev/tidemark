@@ -159,8 +159,13 @@ export component AppWindow inherits Window {
     callback close-window();
     callback open-release();
     callback toggle-group(int);
-    // A completed drag, in visible positions. The window decides what it means.
-    callback reorder(int, int);
+    // A completed drag, in visible slots; the window decides what it means. An extra
+    // account moved among its provider's, from one slot to another:
+    callback move-account(int, int);
+    // a whole provider group, carried by the card from one slot and let go over another;
+    // and, while it is in the air, the slot the group would start at.
+    callback move-group(int, int);
+    pure callback group-slot(int, int) -> int;
     // A card's secondary-click menu: which entries it offers is asked as it opens, and
     // what a chosen one does belongs to the window.
     callback card-menu(int) -> [MenuEntry];
@@ -199,17 +204,33 @@ export component AppWindow inherits Window {
     property <length> content-height: 2 * margin + rows * cell-height + max(0, rows - 1) * spacing;
 
     // The drag: which card (model index), from which slot, how far it has travelled, and
-    // the slot its centre is over. Offsets are in content coordinates.
+    // where it would land. Offsets are in content coordinates.
     property <int> drag-index: -1;
     property <int> drag-slot: -1;
     property <bool> carrying: false;
     property <length> drag-dx;
     property <length> drag-dy;
     property <int> drag-target: -1;
+    // The carried card's group: its provider, the card's rank in it, and the slots it rests
+    // in. Carried whole, the group rides in a stack under the card and `drag-target` is the
+    // slot the group would start at, the one slot kept open for it until it is let go;
+    // otherwise one extra account moves among its siblings.
+    property <string> drag-group;
+    property <int> drag-rank;
+    property <int> drag-lead;
+    property <int> drag-span: 1;
+    property <bool> drag-whole: false;
+    // The rest of the group flying in from their slots to the stack.
+    property <bool> gathering: false;
+    property <duration> gather-start;
+    property <length> carry-x: whole-x(drag-slot) + drag-dx;
+    property <length> carry-y: whole-y(drag-slot) + drag-dy;
     // Where the pointer is inside the visible part of the scroller, for autoscroll.
     property <length> pointer-y;
-    // The card settling into its slot after a release, and where it was let go.
+    // The card settling into its slot after a release, and where it was let go; with
+    // `settle-group`, the stack it carried settling along with it.
     property <int> settle-index: -1;
+    property <string> settle-group;
     property <length> settle-x;
     property <length> settle-y;
     property <duration> settle-start;
@@ -228,29 +249,56 @@ export component AppWindow inherits Window {
     pure function slot-y(position: float) -> length {
         return whole-y(floor(position)) + (position - floor(position)) * (whole-y(floor(position) + 1) - whole-y(floor(position)));
     }
-    // Where the other cards go while one is carried from `drag-slot` to `drag-target`.
+    // Where the other cards go while the carried card, or its whole group, is on its way
+    // to `drag-target`: they close up over the slots it rested in and leave one open at
+    // the target, so a large group does not push the rest of the grid away in mid-air.
     pure function shifted(slot: int) -> int {
-        if (!carrying || slot == drag-slot) {
+        let from = drag-whole ? drag-lead : drag-slot;
+        let span = drag-whole ? drag-span : 1;
+        if (!carrying || (slot >= from && slot < from + span)) {
             return slot;
         }
-        if (drag-slot < drag-target && slot > drag-slot && slot <= drag-target) {
-            return slot - 1;
-        }
-        if (drag-slot > drag-target && slot >= drag-target && slot < drag-slot) {
-            return slot + 1;
-        }
-        return slot;
+        let closed = slot < from ? slot : slot - span;
+        return closed < drag-target ? closed : closed + 1;
     }
     // The slot under the carried card's centre, measured against the resting slots so it
     // cannot flicker while the pointer holds still.
-    pure function drop-target() -> int {
+    pure function hovered-slot() -> int {
         if (shown-count == 0) {
             return 0;
         }
-        return min(shown-count - 1, clamp(floor((whole-y(drag-slot) + drag-dy + cell-height / 2 - margin) / (cell-height + spacing)), 0, rows - 1) * columns + clamp(floor((whole-x(drag-slot) + drag-dx + cell-width / 2 - content-left) / (cell-width + spacing)), 0, columns - 1));
+        return min(shown-count - 1, clamp(floor((carry-y + cell-height / 2 - margin) / (cell-height + spacing)), 0, rows - 1) * columns + clamp(floor((carry-x + cell-width / 2 - content-left) / (cell-width + spacing)), 0, columns - 1));
+    }
+    // Points the drag at where it would land. An extra account moves among its siblings,
+    // after their provider's card; carried out of its group, it takes the group along.
+    function aim() {
+        let hovered = hovered-slot();
+        if (!drag-whole && (hovered < drag-lead || hovered >= drag-lead + drag-span)) {
+            gather();
+        }
+        drag-target = drag-whole ? root.group-slot(drag-slot, hovered) : clamp(hovered, drag-lead + 1, drag-lead + drag-span - 1);
+    }
+    function gather() {
+        drag-whole = true;
+        gathering = true;
+        gather-start = animation-tick();
+    }
+    pure function gather-progress() -> float {
+        return gathering ? 1 - pow(1 - clamp((animation-tick() - gather-start) / 250ms, 0, 1), 3) : 1;
     }
     pure function settle-progress() -> float {
         return 1 - pow(1 - clamp((animation-tick() - settle-start) / 200ms, 0, 1), 3);
+    }
+    // The stack a group is carried in: each card behind the carried one a little lower and
+    // turned, the second the other way; any further hide behind the second.
+    pure function stack-x(depth: int) -> length {
+        return min(depth, 2) * 5px;
+    }
+    pure function stack-y(depth: int) -> length {
+        return min(depth, 2) * 4px;
+    }
+    pure function stack-angle(depth: int) -> angle {
+        return depth == 0 ? 0deg : depth == 1 ? 4deg : -3deg;
     }
     // Pixels per second: nothing until the pointer is within 48px of an edge.
     pure function autoscroll-rate() -> float {
@@ -268,13 +316,18 @@ export component AppWindow inherits Window {
 
     function release() {
         if (carrying) {
-            settle-x = whole-x(drag-slot) + drag-dx;
-            settle-y = whole-y(drag-slot) + drag-dy;
+            settle-x = carry-x;
+            settle-y = carry-y;
             settle-start = animation-tick();
             settle-index = drag-index;
+            settle-group = drag-whole ? drag-group : "";
             carrying = false;
             drag-index = -1;
-            root.reorder(drag-slot, drag-target);
+            if (drag-whole) {
+                root.move-group(drag-slot, hovered-slot());
+            } else {
+                root.move-account(drag-slot, drag-target);
+            }
         } else {
             drag-index = -1;
         }
@@ -285,6 +338,15 @@ export component AppWindow inherits Window {
         running: root.settle-index >= 0;
         triggered => {
             root.settle-index = -1;
+            root.settle-group = "";
+        }
+    }
+
+    Timer {
+        interval: 250ms;
+        running: root.gathering;
+        triggered => {
+            root.gathering = false;
         }
     }
 
@@ -295,7 +357,7 @@ export component AppWindow inherits Window {
             let before = scroller.content-y;
             scroller.content-y = clamp(scroller.content-y - root.autoscroll-rate() * 16px / 1000, min(0px, scroller.visible-height - scroller.content-height), 0px);
             root.drag-dy += before - scroller.content-y;
-            root.drag-target = root.drop-target();
+            root.aim();
         }
     }
 
@@ -455,10 +517,17 @@ export component AppWindow inherits Window {
 
                 for card[index] in root.cards: slot := Rectangle {
                     property <bool> carried: root.carrying && root.drag-index == index;
+                    // Another account of a group carried whole: it rides in the stack.
+                    property <bool> stacked: root.carrying && root.drag-whole && card.provider == root.drag-group && !carried;
+                    // On the carried card while it carries a group: how many are in the stack.
+                    property <bool> counting: carried && root.drag-whole && card.members > 1;
+                    // Its place in the stack: the carried card on top, the rest behind it in
+                    // account order.
+                    property <int> depth: card.rank == root.drag-rank ? 0 : card.rank < root.drag-rank ? card.rank + 1 : card.rank;
                     // Pressed with a drag possible: raised at once, before the pointer has
                     // travelled far enough to start carrying it.
                     property <bool> grabbed: root.drag-index == index;
-                    property <bool> settling: root.settle-index == index;
+                    property <bool> settling: root.settle-index == index || (root.settle-group != "" && card.provider == root.settle-group);
                     // Retained through release(): clearing the global drag must not turn
                     // its final pointer release into a card click.
                     property <bool> was-dragged: false;
@@ -470,12 +539,24 @@ export component AppWindow inherits Window {
                         easing: cubic-bezier(0.33, 1, 0.68, 1);
                     }
 
-                    x: carried ? root.whole-x(root.drag-slot) + root.drag-dx : settling ? root.settle-x + root.settle-progress() * (root.whole-x(card.slot) - root.settle-x) : root.slot-x(position);
-                    y: carried ? root.whole-y(root.drag-slot) + root.drag-dy : settling ? root.settle-y + root.settle-progress() * (root.whole-y(card.slot) - root.settle-y) : root.slot-y(position);
+                    // A stacked card flies from its slot to its place behind the carried
+                    // one; a settling one from where it was let go to its slot.
+                    x: carried ? root.carry-x
+                        : stacked ? root.slot-x(position) + root.gather-progress() * (root.carry-x + root.stack-x(depth) - root.slot-x(position))
+                        : settling ? root.settle-x + root.stack-x(depth) + root.settle-progress() * (root.whole-x(card.slot) - root.settle-x - root.stack-x(depth))
+                        : root.slot-x(position);
+                    y: carried ? root.carry-y
+                        : stacked ? root.slot-y(position) + root.gather-progress() * (root.carry-y + root.stack-y(depth) - root.slot-y(position))
+                        : settling ? root.settle-y + root.stack-y(depth) + root.settle-progress() * (root.whole-y(card.slot) - root.settle-y - root.stack-y(depth))
+                        : root.slot-y(position);
+                    transform-rotation: stacked ? root.gather-progress() * root.stack-angle(depth)
+                        : settling ? (1 - root.settle-progress()) * root.stack-angle(depth)
+                        : 0deg;
                     width: root.cell-width;
                     height: root.cell-height;
-                    z: grabbed || settling ? 10 : card.main ? 1 : 0;
-                    opacity: card.shown ? 1 : 0;
+                    z: grabbed || stacked || settling ? 10 - depth : card.main ? 1 : 0;
+                    // A collapsed group's hidden accounts show only while in the stack.
+                    opacity: card.shown || stacked ? 1 : 0;
                     animate opacity { duration: 180ms; easing: cubic-bezier(0.33, 1, 0.68, 1); }
 
                     touch := TouchArea {
@@ -490,6 +571,13 @@ export component AppWindow inherits Window {
                                 root.drag-index = index;
                                 root.drag-slot = card.slot;
                                 root.drag-target = card.slot;
+                                root.drag-group = card.provider;
+                                root.drag-rank = card.rank;
+                                // A group's shown accounts follow its provider's card.
+                                root.drag-lead = card.slot - card.rank;
+                                root.drag-span = card.expanded ? card.members : 1;
+                                // The provider's own card always carries the whole group.
+                                root.drag-whole = card.main;
                                 root.drag-dx = 0;
                                 root.drag-dy = 0;
                             }
@@ -526,13 +614,16 @@ export component AppWindow inherits Window {
                                 }
                                 root.carrying = true;
                                 slot.was-dragged = true;
+                                if (root.drag-whole) {
+                                    root.gather();
+                                }
                             }
                             // The slot moves with the pointer, so what the pointer has moved
                             // since the last event is its distance from the grip point.
                             root.drag-dx += self.mouse-x - self.pressed-x;
                             root.drag-dy += self.mouse-y - self.pressed-y;
                             root.pointer-y = slot.y + self.mouse-y + scroller.content-y;
-                            root.drag-target = root.drop-target();
+                            root.aim();
                         }
                     }
 
@@ -542,7 +633,7 @@ export component AppWindow inherits Window {
                         width: parent.width;
                         height: parent.height;
                         data: card;
-                        lifted: touch.has-hover && !root.carrying;
+                        lifted: slot.stacked || (touch.has-hover && !root.carrying);
                         carried: slot.grabbed;
                         interactive: card.shown && !root.menu-open && !Alert.open && !Prefs.open && !About.open
                             && !ReleaseNotes.open && !ProviderSettings.open && !QuotaDetails.open;
@@ -550,22 +641,25 @@ export component AppWindow inherits Window {
                     }
 
                     // A notification-style counter on the provider's card, outside the title
-                    // row so that nothing in the row can push it around.
-                    if card.badge != "": Rectangle {
+                    // row so that nothing in the row can push it around. A stack wears the
+                    // badge of a collapsed group, popping up on a card that had none, and
+                    // cards inside it wear none, where it would peek out beside that one.
+                    if slot.counting || (card.badge != "" && !slot.stacked): Rectangle {
                         x: parent.width - 18px;
                         y: body.y - 10px;
                         width: 28px;
                         height: 28px;
                         border-radius: 14px;
                         background: Theme.accent;
-                        border-width: card.expanded ? 2px : 0px;
+                        border-width: card.expanded && !slot.counting ? 2px : 0px;
                         border-color: Theme.accent-fg.with-alpha(0.45);
                         drop-shadow-blur: 3px;
                         drop-shadow-offset-y: 1px;
                         drop-shadow-color: #0000004d;
+                        transform-scale: slot.counting && card.badge == "" ? 0.6 + 0.4 * root.gather-progress() : 1;
 
                         Text {
-                            text: card.badge;
+                            text: slot.counting ? "+\{card.members - 1}" : card.badge;
                             color: Theme.accent-fg;
                             font-size: Theme.body * 0.75;
                             font-weight: 700;

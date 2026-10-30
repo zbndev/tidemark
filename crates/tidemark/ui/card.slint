@@ -57,6 +57,11 @@ export struct CardData {
     main: bool,
     badge: string,
     expanded: bool,
+    // Its group, for a drag that carries the whole group: the provider, this account's
+    // place among its accounts (0 for the provider's own card), and how many there are.
+    provider: string,
+    rank: int,
+    members: int,
 }
 
 // A track, a fill, and — only when the provider said enough — the pace mark.

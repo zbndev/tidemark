@@ -556,6 +556,14 @@ IPC, dialog lifetimes and pure presentation decisions.
   displaced cards move into their prospective slots. Each slot retains its current
   position so a changed target can animate from where the card already is. The grid
   uses pointer events, a drag threshold and a separate carrying layer in `ui/app.slint`.
+- **A provider moves with all its accounts.** Its own card carries the whole group as a
+  stack under the pointer: the other accounts fly in behind it, a counter says how many,
+  and the grid closes up over the slots they left. One slot stays open where the group
+  would land, moving only between groups so that none is ever split; the rest of the
+  group's room is made on release, so a large group does not push the grid off screen in
+  mid-air. An extra account dragged inside its group reorders the accounts; carried out
+  of it, the rest of the group joins the stack. Where a group lands is a pure decision in
+  `model.rs`.
 - **The order is committed on release, not on the way.** A file write and a D-Bus round trip
   per pixel is not a design. The drop is applied locally first and sent afterwards, because
   a grid that waited for the daemon before showing where the card landed would feel broken;
