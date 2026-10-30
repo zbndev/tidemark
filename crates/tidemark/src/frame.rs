@@ -35,7 +35,7 @@ pub fn install(ui: &AppWindow) {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     use slint::ComponentHandle;
@@ -164,6 +164,80 @@ mod tests {
             opened.get(),
             1,
             "reordering must not open a dialog on release"
+        );
+    }
+
+    type Moves = Rc<RefCell<Vec<(&'static str, i32, i32)>>>;
+
+    /// A grid of an expanded group of three accounts filling the first row, and a second
+    /// provider below it, recording the moves it asks for.
+    fn group_grid() -> (AppWindow, Moves) {
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::PhysicalSize::new(1000, 640));
+        ui.window().dispatch_event(WindowEvent::Resized {
+            size: slint::LogicalSize::new(1000.0, 640.0),
+        });
+        ui.set_page(2);
+        ui.set_shown_count(4);
+        let account = |slot: i32, provider: &str, rank: i32, members: i32| crate::CardData {
+            shown: true,
+            slot,
+            main: rank == 0,
+            provider: provider.into(),
+            rank,
+            members,
+            expanded: members > 1,
+            ..Default::default()
+        };
+        ui.set_cards(slint::ModelRc::new(slint::VecModel::from(vec![
+            account(0, "zai", 0, 3),
+            account(1, "zai", 1, 3),
+            account(2, "zai", 2, 3),
+            account(3, "claude", 0, 1),
+        ])));
+        let moves = Moves::default();
+        ui.on_move_account({
+            let moves = moves.clone();
+            move |from, to| moves.borrow_mut().push(("account", from, to))
+        });
+        ui.on_move_group({
+            let moves = moves.clone();
+            move |grabbed, hovered| moves.borrow_mut().push(("group", grabbed, hovered))
+        });
+        ui.on_group_slot(|_, hovered| hovered);
+        (ui, moves)
+    }
+
+    fn drag(window: &slint::Window, from: (f32, f32), to: (f32, f32)) {
+        let from = slint::LogicalPosition::new(from.0, from.1);
+        let to = slint::LogicalPosition::new(to.0, to.1);
+        window.dispatch_event(WindowEvent::PointerMoved { position: from });
+        window.dispatch_event(WindowEvent::PointerPressed {
+            position: from,
+            button: PointerEventButton::Left,
+        });
+        window.dispatch_event(WindowEvent::PointerMoved { position: to });
+        window.dispatch_event(WindowEvent::PointerReleased {
+            position: to,
+            button: PointerEventButton::Left,
+        });
+    }
+
+    #[test]
+    fn an_extra_account_moves_among_its_siblings_until_carried_out_with_them() {
+        slint::platform::set_platform(Box::new(HeadlessPlatform)).unwrap();
+        // Cards are 300px wide on a 312px pitch and 234px high on a 246px one; the first
+        // row starts at x38, y65.
+        let (ui, moves) = group_grid();
+        drag(ui.window(), (800.0, 150.0), (488.0, 150.0));
+        assert_eq!(*moves.borrow(), [("account", 2, 1)]);
+
+        let (ui, moves) = group_grid();
+        drag(ui.window(), (500.0, 150.0), (188.0, 396.0));
+        assert_eq!(
+            *moves.borrow(),
+            [("group", 1, 3)],
+            "carried below its group, the account takes the group along"
         );
     }
 

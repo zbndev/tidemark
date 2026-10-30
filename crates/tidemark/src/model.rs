@@ -53,72 +53,79 @@ pub fn provider_groups(statuses: &[ProviderStatus]) -> Vec<Vec<&ProviderStatus>>
     groups
 }
 
-/// The daemon operation a completed card drag represents.
-#[derive(Debug, Eq, PartialEq)]
-pub enum CardReorder {
-    /// Moves a whole provider group among the configured providers.
-    Providers(Vec<String>),
-    /// Moves one extra account within its provider, retaining the default account first.
-    Accounts {
-        provider: String,
-        accounts: Vec<String>,
-    },
-}
-
-/// Classifies a grid move without allowing an extra account to leave its provider group.
-pub fn card_reorder(
+/// The account order a drag between two extra accounts' visible slots makes: the
+/// provider and its accounts, the first still first. `None` for any other pair.
+pub fn account_order(
     statuses: &[ProviderStatus],
     visible: &[ProviderStatus],
     from: usize,
     to: usize,
-) -> Option<CardReorder> {
+) -> Option<(String, Vec<String>)> {
     if from == to {
         return None;
     }
     let source = visible.get(from)?;
     let target = visible.get(to)?;
-    let groups = provider_groups(statuses);
-
-    if source.provider == target.provider {
-        if source.account == "default" || target.account == "default" {
-            return None;
-        }
-        let mut accounts: Vec<String> = groups
-            .iter()
-            .find(|group| group[0].provider == source.provider)?
-            .iter()
-            .map(|status| status.account.clone())
-            .collect();
-        let source_index = accounts
-            .iter()
-            .position(|account| *account == source.account)?;
-        let target_index = accounts
-            .iter()
-            .position(|account| *account == target.account)?;
-        let moved = accounts.remove(source_index);
-        accounts.insert(target_index, moved);
-        Some(CardReorder::Accounts {
-            provider: source.provider.clone(),
-            accounts,
-        })
-    } else {
-        if source.account != "default" {
-            return None;
-        }
-        let mut providers: Vec<String> = groups
-            .iter()
-            .map(|group| group[0].provider.clone())
-            .collect();
-        let source = providers
-            .iter()
-            .position(|provider| *provider == source.provider)?;
-        let target = providers
-            .iter()
-            .position(|provider| *provider == target.provider)?;
-        let moved = providers.remove(source);
-        providers.insert(target, moved);
-        Some(CardReorder::Providers(providers))
+    if source.provider != target.provider
+        || source.account == "default"
+        || target.account == "default"
+    {
+        return None;
     }
+    let mut accounts: Vec<String> = provider_groups(statuses)
+        .iter()
+        .find(|group| group[0].provider == source.provider)?
+        .iter()
+        .map(|status| status.account.clone())
+        .collect();
+    let source_index = accounts
+        .iter()
+        .position(|account| *account == source.account)?;
+    let target_index = accounts
+        .iter()
+        .position(|account| *account == target.account)?;
+    let moved = accounts.remove(source_index);
+    accounts.insert(target_index, moved);
+    Some((source.provider.clone(), accounts))
+}
+
+/// Where a carried provider group lands.
+#[derive(Debug, Eq, PartialEq)]
+pub struct GroupDrop {
+    /// The group's index among the provider groups, before and after the move.
+    pub from: usize,
+    pub to: usize,
+    /// The visible slot its first card then rests in.
+    pub slot: usize,
+}
+
+/// Where a provider group lands when the card carrying it, from visible slot `grabbed`, is
+/// over visible slot `hovered`. A group is never split, so it lands at the boundary between
+/// the others nearest the pointer; of two equally near, the one nearer where it was.
+///
+/// `spans` are the visible slots each group takes, in order. `None` when `grabbed` lies
+/// past them all.
+pub fn group_drop(spans: &[usize], grabbed: usize, hovered: usize) -> Option<GroupDrop> {
+    let mut end = 0;
+    let from = spans.iter().position(|span| {
+        end += span;
+        grabbed < end
+    })?;
+    // Where each of the other groups ends: the boundaries the carried one can land on.
+    let mut boundary = 0;
+    let boundaries = spans
+        .iter()
+        .enumerate()
+        .filter(|&(index, _)| index != from)
+        .map(|(_, span)| {
+            boundary += span;
+            boundary
+        });
+    let (to, slot) = std::iter::once(0)
+        .chain(boundaries)
+        .enumerate()
+        .min_by_key(|&(to, slot)| (slot.abs_diff(hovered), to.abs_diff(from)))?;
+    Some(GroupDrop { from, to, slot })
 }
 
 /// The positions `slugs` take when arranged into `order`.
@@ -315,36 +322,81 @@ mod tests {
         ];
 
         assert_eq!(
-            card_reorder(&statuses, &statuses, 1, 2),
-            Some(CardReorder::Accounts {
-                provider: "zai".into(),
-                accounts: vec!["default".into(), "team".into(), "work".into()],
+            account_order(&statuses, &statuses, 1, 2),
+            Some((
+                "zai".into(),
+                vec!["default".into(), "team".into(), "work".into()]
+            ))
+        );
+    }
+
+    #[test]
+    fn an_extra_account_neither_leaves_its_group_nor_displaces_the_first() {
+        let statuses = [
+            status("zai", "default"),
+            status("zai", "work"),
+            status("claude", "default"),
+        ];
+
+        assert_eq!(account_order(&statuses, &statuses, 1, 2), None);
+        assert_eq!(account_order(&statuses, &statuses, 1, 0), None);
+    }
+
+    // A, then B with three accounts shown, C, D with two, and E.
+    const SPANS: [usize; 5] = [1, 3, 1, 2, 1];
+
+    #[test]
+    fn a_carried_group_lands_on_the_boundary_nearest_the_pointer() {
+        assert_eq!(
+            group_drop(&SPANS, 0, 2),
+            Some(GroupDrop {
+                from: 0,
+                to: 1,
+                slot: 3
+            }),
+            "over B's middle card A is nearer B's end than its start"
+        );
+        assert_eq!(
+            group_drop(&SPANS, 0, 1),
+            Some(GroupDrop {
+                from: 0,
+                to: 0,
+                slot: 0
             })
         );
     }
 
     #[test]
-    fn dragging_a_main_card_across_groups_reorders_providers() {
-        let statuses = [
-            status("zai", "default"),
-            status("zai", "work"),
-            status("claude", "default"),
-        ];
-
+    fn a_group_is_never_split_and_a_tie_keeps_it_where_it_was() {
         assert_eq!(
-            card_reorder(&statuses, &statuses, 0, 2),
-            Some(CardReorder::Providers(vec!["claude".into(), "zai".into()]))
+            group_drop(&SPANS, 4, 5),
+            Some(GroupDrop {
+                from: 2,
+                to: 2,
+                slot: 4
+            }),
+            "over D's first card, C is as near D's end as its start"
+        );
+        assert_eq!(
+            group_drop(&SPANS, 4, 6),
+            Some(GroupDrop {
+                from: 2,
+                to: 3,
+                slot: 6
+            })
         );
     }
 
     #[test]
-    fn dragging_an_extra_account_across_a_group_boundary_is_refused() {
-        let statuses = [
-            status("zai", "default"),
-            status("zai", "work"),
-            status("claude", "default"),
-        ];
-
-        assert_eq!(card_reorder(&statuses, &statuses, 1, 2), None);
+    fn any_shown_account_carries_its_whole_group() {
+        assert_eq!(
+            group_drop(&SPANS, 3, 0),
+            Some(GroupDrop {
+                from: 1,
+                to: 0,
+                slot: 0
+            })
+        );
+        assert_eq!(group_drop(&SPANS, 8, 0), None);
     }
 }

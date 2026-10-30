@@ -48,12 +48,14 @@ fn should_minimize_on_close(tray_available: bool, preference: bool) -> bool {
     tray_available && preference
 }
 
-/// Where one account's card goes.
+/// Where one account's card goes, and its place in its provider's group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Placement {
     slot: usize,
     shown: bool,
-    main: bool,
+    /// Zero for the provider's own card.
+    rank: usize,
+    members: usize,
 }
 
 /// Visible slots for statuses held in card order: a provider's first account always, its
@@ -63,30 +65,17 @@ fn placements(statuses: &[ProviderStatus], expanded: &BTreeSet<String>) -> Vec<P
     let mut placements = Vec::with_capacity(statuses.len());
     let mut next = 0;
     for group in model::provider_groups(statuses) {
-        let main = next;
-        next += 1;
-        placements.push(Placement {
-            slot: main,
-            shown: true,
-            main: true,
-        });
         let open = expanded.contains(&group[0].provider);
-        for _ in &group[1..] {
-            placements.push(if open {
-                next += 1;
-                Placement {
-                    slot: next - 1,
-                    shown: true,
-                    main: false,
-                }
-            } else {
-                Placement {
-                    slot: main,
-                    shown: false,
-                    main: false,
-                }
+        for rank in 0..group.len() {
+            let shown = rank == 0 || open;
+            placements.push(Placement {
+                slot: if shown { next + rank } else { next },
+                shown,
+                rank,
+                members: group.len(),
             });
         }
+        next += if open { group.len() } else { 1 };
     }
     placements
 }
@@ -286,12 +275,28 @@ impl MainWindow {
                 }
             }
         });
-        ui.on_reorder({
+        ui.on_move_account({
             let weak = weak.clone();
             move |from, to| {
                 if let Some(main) = weak.upgrade() {
-                    main.reorder(from as usize, to as usize);
+                    main.move_account(from as usize, to as usize);
                 }
+            }
+        });
+        ui.on_move_group({
+            let weak = weak.clone();
+            move |grabbed, hovered| {
+                if let Some(main) = weak.upgrade() {
+                    main.move_group(grabbed as usize, hovered as usize);
+                }
+            }
+        });
+        ui.on_group_slot({
+            let weak = weak.clone();
+            move |grabbed, hovered| {
+                weak.upgrade()
+                    .and_then(|main| main.group_drop(grabbed as usize, hovered as usize))
+                    .map_or(hovered, |drop| drop.slot as i32)
             }
         });
 
@@ -820,14 +825,9 @@ impl MainWindow {
         let placements = placements(&statuses, &expanded);
         let titles = model::titles(&self.definitions.borrow());
 
-        for (index, (status, placement)) in statuses.iter().zip(&placements).enumerate() {
-            let extra_accounts = statuses[index..]
-                .iter()
-                .skip(1)
-                .take_while(|other| other.provider == status.provider)
-                .count();
-            let badge = if placement.main && extra_accounts > 0 {
-                account_badge(extra_accounts, expanded.contains(&status.provider))
+        for (status, placement) in statuses.iter().zip(&placements) {
+            let badge = if placement.rank == 0 && placement.members > 1 {
+                account_badge(placement.members - 1, expanded.contains(&status.provider))
             } else {
                 String::new()
             };
@@ -871,7 +871,7 @@ impl MainWindow {
         let mark = self.marks.get(&status.provider);
         let (name, caption) = {
             let provider = model::name(titles, &status.provider);
-            if placement.main {
+            if placement.rank == 0 {
                 (provider, String::new())
             } else {
                 let account = status.account_label.as_deref().unwrap_or(&status.account);
@@ -901,9 +901,12 @@ impl MainWindow {
             check_failed: card.check_failed,
             slot: placement.slot as i32,
             shown: placement.shown,
-            main: placement.main,
+            main: placement.rank == 0,
             badge: badge.into(),
             expanded: expanded.contains(&status.provider),
+            provider: status.provider.clone().into(),
+            rank: placement.rank as i32,
+            members: placement.members as i32,
             ..CardData::default()
         };
         match card.body {
@@ -962,9 +965,10 @@ impl MainWindow {
         self.redraw();
     }
 
-    /// A completed drag. Applied here first and sent afterwards: the
-    /// daemon's echo is a no-op when it agrees, and a refusal puts back what it really has.
-    fn reorder(self: &Rc<Self>, from: usize, to: usize) {
+    /// A completed drag of an extra account among its provider's, in visible slots. Applied
+    /// here first and sent afterwards: the daemon's echo is a no-op when it agrees, and a
+    /// refusal puts back what it really has.
+    fn move_account(self: &Rc<Self>, from: usize, to: usize) {
         let statuses = self.statuses.borrow().clone();
         let expanded = self.expanded.borrow().clone();
         let placements = placements(&statuses, &expanded);
@@ -977,33 +981,65 @@ impl MainWindow {
         visible.sort_by_key(|(slot, _)| *slot);
         let visible: Vec<ProviderStatus> = visible.into_iter().map(|(_, status)| status).collect();
 
-        let Some(reorder) = model::card_reorder(&statuses, &visible, from, to) else {
+        let Some((provider, accounts)) = model::account_order(&statuses, &visible, from, to) else {
             return;
         };
         let Some(proxy) = self.daemon.borrow().clone() else {
             return;
         };
         let weak = Rc::downgrade(self);
-        match reorder {
-            model::CardReorder::Providers(order) => {
-                self.show_order(&order);
-                spawn(async move {
-                    if let Err(error) = proxy.set_order(&order).await {
-                        tracing::warn!(%error, "the daemon refused the new provider order");
-                        restore(weak, proxy).await;
-                    }
-                });
+        self.show_account_order(&provider, &accounts);
+        spawn(async move {
+            if let Err(error) = proxy.set_account_order(&provider, accounts).await {
+                tracing::warn!(%error, "the daemon refused the new account order");
+                restore(weak, proxy).await;
             }
-            model::CardReorder::Accounts { provider, accounts } => {
-                self.show_account_order(&provider, &accounts);
-                spawn(async move {
-                    if let Err(error) = proxy.set_account_order(&provider, accounts).await {
-                        tracing::warn!(%error, "the daemon refused the new account order");
-                        restore(weak, proxy).await;
-                    }
-                });
+        });
+    }
+
+    /// Where the provider group carried by the card in visible slot `grabbed` lands with the
+    /// pointer over visible slot `hovered`.
+    fn group_drop(&self, grabbed: usize, hovered: usize) -> Option<model::GroupDrop> {
+        let statuses = self.statuses.borrow();
+        let expanded = self.expanded.borrow();
+        let spans: Vec<usize> = model::provider_groups(&statuses)
+            .iter()
+            .map(|group| {
+                if expanded.contains(&group[0].provider) {
+                    group.len()
+                } else {
+                    1
+                }
+            })
+            .collect();
+        model::group_drop(&spans, grabbed, hovered)
+    }
+
+    /// A completed drag of a whole provider group, applied and sent as an account move is.
+    fn move_group(self: &Rc<Self>, grabbed: usize, hovered: usize) {
+        let Some(drop) = self
+            .group_drop(grabbed, hovered)
+            .filter(|drop| drop.from != drop.to)
+        else {
+            return;
+        };
+        let Some(proxy) = self.daemon.borrow().clone() else {
+            return;
+        };
+        let mut order: Vec<String> = model::provider_groups(&self.statuses.borrow())
+            .iter()
+            .map(|group| group[0].provider.clone())
+            .collect();
+        let moved = order.remove(drop.from);
+        order.insert(drop.to, moved);
+        let weak = Rc::downgrade(self);
+        self.show_order(&order);
+        spawn(async move {
+            if let Err(error) = proxy.set_order(&order).await {
+                tracing::warn!(%error, "the daemon refused the new provider order");
+                restore(weak, proxy).await;
             }
-        }
+        });
     }
 
     fn apply_preferences(&self, preferences: &Preferences) {
