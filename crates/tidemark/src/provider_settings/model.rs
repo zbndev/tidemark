@@ -86,8 +86,8 @@ pub fn auth_source(definition: &ProviderDefinition, status: &ProviderStatus) -> 
 
 /// The candidate row an account's published selection points at within one mode.
 ///
-/// Modes that carry no separate candidate — Cursor App is chosen by choosing the mode —
-/// claim their own availability row, so highlighting a source needs no special case.
+/// Modes that carry no separate candidate claim their own availability row, so
+/// highlighting a source needs no special case.
 pub fn selected_candidate<'a>(
     selection: &'a AuthSelection,
     mode_value: &'a str,
@@ -681,17 +681,5 @@ mod tests {
             Some("zen/profile-a")
         );
         assert_eq!(selected_candidate(&nested, "cursor-app"), None);
-    }
-
-    #[test]
-    fn a_mode_without_a_separate_candidate_claims_its_own_row() {
-        let direct = AuthSelection {
-            mode: "cursor-app".into(),
-            candidate: None,
-        };
-        assert_eq!(
-            selected_candidate(&direct, "cursor-app"),
-            Some("cursor-app")
-        );
     }
 }

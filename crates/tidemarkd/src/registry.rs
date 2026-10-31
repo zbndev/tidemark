@@ -654,10 +654,21 @@ pub(crate) fn has_api_key_auth(provider: &str) -> bool {
 pub(crate) fn browser_auth_selection(provider: &str, config: &Config) -> Option<AuthSelection> {
     browser_auth(provider)?;
     match config.option(provider, cursor::AUTH_SOURCE) {
-        Some(cursor::CURSOR_APP_SOURCE) => Some(AuthSelection {
-            mode: cursor::CURSOR_APP_SOURCE.into(),
-            candidate: None,
-        }),
+        Some(source @ (cursor::CURSOR_APP_SOURCE | cursor::CURSOR_CLI_SOURCE))
+            if provider == cursor::PROVIDER_ID =>
+        {
+            Some(AuthSelection {
+                mode: cursor::CURSOR_APP_SOURCE.into(),
+                candidate: Some(
+                    if source == cursor::CURSOR_CLI_SOURCE {
+                        "cli"
+                    } else {
+                        "app"
+                    }
+                    .into(),
+                ),
+            })
+        }
         // The paste mode names no candidate: the stored header is the whole selection,
         // and the settings deliberately hold nothing that could identify it.
         Some(keyed::session::PASTE_SOURCE) => Some(AuthSelection {
@@ -1520,6 +1531,30 @@ mod tests {
             })
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cursor_local_sources_restore_their_row_without_switching_tabs() {
+        for (source, candidate) in [
+            (cursor::CURSOR_APP_SOURCE, "app"),
+            (cursor::CURSOR_CLI_SOURCE, "cli"),
+        ] {
+            let path = scratch_config(
+                &format!("cursor-{source}-selection"),
+                &format!(
+                    "providers = [\"cursor\"]\n[provider.cursor]\nauth-source = \"{source}\"\n"
+                ),
+            );
+            let config = Config::at(path.clone()).expect("config reads");
+            assert_eq!(
+                browser_auth_selection(cursor::PROVIDER_ID, &config),
+                Some(AuthSelection {
+                    mode: cursor::CURSOR_APP_SOURCE.into(),
+                    candidate: Some(candidate.into()),
+                })
+            );
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

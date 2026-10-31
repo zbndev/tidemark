@@ -427,6 +427,47 @@ mod tests {
     }
 
     #[test]
+    fn local_clients_share_a_tab_but_keep_separate_selection_and_availability() {
+        let mut auth = BrowserAuth::new(
+            &[mode("cursor-app"), mode("browser"), mode("paste")],
+            Some(&AuthSelection {
+                mode: "cursor-app".into(),
+                candidate: Some("cli".into()),
+            }),
+        );
+        auth.apply_report(vec![AuthCandidate {
+            children: vec![
+                candidate("app", AuthCandidateState::Missing),
+                candidate("cli", AuthCandidateState::Ready),
+            ],
+            ..candidate("cursor-app", AuthCandidateState::Ready)
+        }]);
+        let lines = auth.lines();
+        assert_eq!(auth.mode(), "cursor-app");
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| (line.id.as_str(), line.selectable, line.in_use))
+                .collect::<Vec<_>>(),
+            [("app", false, false), ("cli", true, true)]
+        );
+        assert_eq!(
+            auth.selection_for("cli"),
+            AuthSelection {
+                mode: "cursor-app".into(),
+                candidate: Some("cli".into()),
+            }
+        );
+        auth.apply_selection(Some(&AuthSelection {
+            mode: "cursor-app".into(),
+            candidate: Some("app".into()),
+        }));
+        let lines = auth.lines();
+        assert!(lines[0].in_use);
+        assert!(!lines[1].in_use);
+    }
+
+    #[test]
     fn an_untouched_view_follows_the_published_mode_and_a_clicked_one_stays() {
         let modes = [mode("cursor-app"), mode("browser")];
         let mut auth = BrowserAuth::new(&modes, None);
@@ -442,16 +483,6 @@ mod tests {
         auth.choose_mode(0);
         auth.apply_selection(Some(&browser));
         assert_eq!(auth.mode(), "cursor-app");
-    }
-
-    #[test]
-    fn a_self_representing_mode_is_claimed_by_naming_the_mode() {
-        let auth = BrowserAuth::new(&[mode("cursor-app")], None);
-        assert_eq!(auth.selection_for("cursor-app").candidate, None);
-        assert_eq!(
-            auth.selection_for("zen/A").candidate.as_deref(),
-            Some("zen/A")
-        );
     }
 
     #[test]

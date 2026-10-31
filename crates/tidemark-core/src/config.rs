@@ -1059,65 +1059,67 @@ impl Config {
 
     /// Stores one daemon-validated browser-cookie source in one staged config write.
     ///
-    /// Browser candidates travel over D-Bus as opaque `browser` or `browser/profile` paths.
-    /// The daemon resolves and validates that path before it reaches this method; config only
-    /// turns it into the stable fields a provider rebuild consumes. Keeping all three fields
-    /// in this transaction prevents an old profile from surviving a newly selected browser.
+    /// Candidates travel over D-Bus as opaque ids: Cursor's `app`/`cli`, or browser paths.
+    /// The daemon validates the choice before config translates it to provider options.
+    /// Keeping source and browser fields in one write prevents stale profiles surviving
+    /// a newly selected source.
     pub fn set_auth_selection(
         &mut self,
         provider: &str,
         selection: &AuthSelection,
     ) -> Result<(), ConfigError> {
-        let browser_profile = match (selection.mode.as_str(), selection.candidate.as_deref()) {
-            // None of these names a browser: Cursor's app session, a pasted header and a
-            // vendor API key are each one thing, and all clear the browser fields.
-            ("cursor-app" | "paste" | "api-key", None) => None,
-            ("browser", Some(candidate)) => {
-                Some(parse_browser_candidate(candidate).ok_or_else(|| {
-                    ConfigError::InvalidAuthSelection {
+        let (source, browser_profile) =
+            match (selection.mode.as_str(), selection.candidate.as_deref()) {
+                ("cursor-app", Some("app")) if provider == "cursor" => ("cursor-app", None),
+                ("cursor-app", Some("cli")) if provider == "cursor" => ("cursor-cli", None),
+                ("paste" | "api-key", None) => (selection.mode.as_str(), None),
+                ("browser", Some(candidate)) => (
+                    "browser",
+                    Some(parse_browser_candidate(candidate).ok_or_else(|| {
+                        ConfigError::InvalidAuthSelection {
+                            path: self.path.clone(),
+                            provider: provider.to_owned(),
+                            reason: "browser candidates must name a browser and optional profile"
+                                .into(),
+                        }
+                    })?),
+                ),
+                ("cursor-app", _) => {
+                    return Err(ConfigError::InvalidAuthSelection {
                         path: self.path.clone(),
                         provider: provider.to_owned(),
-                        reason: "browser candidates must name a browser and optional profile"
-                            .into(),
-                    }
-                })?)
-            }
-            ("cursor-app", Some(_)) => {
-                return Err(ConfigError::InvalidAuthSelection {
-                    path: self.path.clone(),
-                    provider: provider.to_owned(),
-                    reason: "Cursor App does not take a browser candidate".into(),
-                });
-            }
-            ("paste", Some(_)) => {
-                return Err(ConfigError::InvalidAuthSelection {
-                    path: self.path.clone(),
-                    provider: provider.to_owned(),
-                    reason: "a pasted session does not take a browser candidate".into(),
-                });
-            }
-            ("api-key", Some(_)) => {
-                return Err(ConfigError::InvalidAuthSelection {
-                    path: self.path.clone(),
-                    provider: provider.to_owned(),
-                    reason: "an API key does not take a browser candidate".into(),
-                });
-            }
-            ("browser", None) => {
-                return Err(ConfigError::InvalidAuthSelection {
-                    path: self.path.clone(),
-                    provider: provider.to_owned(),
-                    reason: "Browser needs a selected candidate".into(),
-                });
-            }
-            _ => {
-                return Err(ConfigError::InvalidAuthSelection {
-                    path: self.path.clone(),
-                    provider: provider.to_owned(),
-                    reason: "unknown authentication mode".into(),
-                });
-            }
-        };
+                        reason: "Cursor App needs an app or cli candidate".into(),
+                    });
+                }
+                ("paste", Some(_)) => {
+                    return Err(ConfigError::InvalidAuthSelection {
+                        path: self.path.clone(),
+                        provider: provider.to_owned(),
+                        reason: "a pasted session does not take a browser candidate".into(),
+                    });
+                }
+                ("api-key", Some(_)) => {
+                    return Err(ConfigError::InvalidAuthSelection {
+                        path: self.path.clone(),
+                        provider: provider.to_owned(),
+                        reason: "an API key does not take a browser candidate".into(),
+                    });
+                }
+                ("browser", None) => {
+                    return Err(ConfigError::InvalidAuthSelection {
+                        path: self.path.clone(),
+                        provider: provider.to_owned(),
+                        reason: "Browser needs a selected candidate".into(),
+                    });
+                }
+                _ => {
+                    return Err(ConfigError::InvalidAuthSelection {
+                        path: self.path.clone(),
+                        provider: provider.to_owned(),
+                        reason: "unknown authentication mode".into(),
+                    });
+                }
+            };
 
         self.normalize_providers(None)?;
         let providers = self
@@ -1139,7 +1141,7 @@ impl Config {
                 path: self.path.clone(),
                 table: format!("{PROVIDER_TABLE}.{provider}"),
             })?;
-        table.insert(AUTH_SOURCE_KEY, value(selection.mode.as_str()));
+        table.insert(AUTH_SOURCE_KEY, value(source));
         match browser_profile {
             Some((browser, profile)) => {
                 table.insert(AUTH_BROWSER_KEY, value(browser));
@@ -1422,13 +1424,46 @@ mod tests {
                 "cursor",
                 &AuthSelection {
                     mode: "cursor-app".into(),
-                    candidate: None,
+                    candidate: Some("app".into()),
                 },
             )
             .expect("stores Cursor App");
         assert_eq!(config.option("cursor", "auth-source"), Some("cursor-app"));
         assert_eq!(config.option("cursor", "auth-browser"), None);
         assert_eq!(config.option("cursor", "auth-profile"), None);
+
+        config
+            .set_auth_selection(
+                "cursor",
+                &AuthSelection {
+                    mode: "cursor-app".into(),
+                    candidate: Some("cli".into()),
+                },
+            )
+            .expect("stores Cursor CLI");
+        let written = Config::at(path.clone()).expect("persisted config");
+        assert_eq!(written.option("cursor", "auth-source"), Some("cursor-cli"));
+        assert_eq!(written.option("cursor", "auth-browser"), None);
+        assert_eq!(written.option("cursor", "auth-profile"), None);
+        for candidate in [None, Some("unknown"), Some("cli/profile")] {
+            assert!(
+                config
+                    .set_auth_selection(
+                        "cursor",
+                        &AuthSelection {
+                            mode: "cursor-app".into(),
+                            candidate: candidate.map(str::to_owned),
+                        },
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                Config::at(path.clone())
+                    .expect("unchanged config")
+                    .option("cursor", "auth-source"),
+                Some("cursor-cli")
+            );
+        }
 
         config
             .set_auth_selection(
