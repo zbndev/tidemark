@@ -33,7 +33,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tidemark-ipc = { path = "../tidemark-ipc" }
 tidemark-types = { path = "../tidemark-types" }
-zbus = "5.13.2"
+zbus = "6.1.0"
 
 [dev-dependencies]
 futures-lite = "2.6.1"
