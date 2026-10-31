@@ -288,13 +288,23 @@ is refused while any account still uses it.
 ### Local authentication sources
 
 Some providers hold no key at all — their credential is a session this machine
-already has. Cursor is the first: it reads cursor.com through either the Cursor
-App's local state or one browser's cookie store. Which of them answers is a
+already has. Cursor is the first: it reads cursor.com through the Cursor App's
+local state, Cursor CLI's `auth.json`, or one browser's cookie store. Which answers is a
 recorded choice, not a scan: the daemon discovers every candidate, proves each
 with a real request, and records the pick (`auth-source`, plus `auth-browser`
 and `auth-profile` where they apply) beside the account's other options — the
 same way an OAuth-or-CLI choice is stored. The window sees titles and readiness
 states over D-Bus, never cookie values, tokens, or database paths.
+
+Cursor keeps three authentication tabs. The **Cursor App** tab lists two candidates:
+`app` and `cli`. The daemon stores them as `auth-source = "cursor-app"` and
+`auth-source = "cursor-cli"` respectively, and publishes both under the `cursor-app`
+mode with their candidate id. Existing `cursor-app` settings still select the desktop
+application. CLI credentials come from `$XDG_CONFIG_HOME/cursor/auth.json` on Linux
+(default `~/.config/cursor/auth.json`), or `%APPDATA%\Cursor\auth.json` on Windows
+(default `%USERPROFILE%\AppData\Roaming\Cursor\auth.json`). Tidemark only reads the
+access token; Cursor CLI owns login, refresh and writes to that file. From the CLI,
+select it with `tidemarkctl auth select cursor --mode cursor-app --candidate cli`.
 
 Three boundaries make this acceptable where blanket cookie-scraping would not be:
 
@@ -304,8 +314,8 @@ Three boundaries make this acceptable where blanket cookie-scraping would not be
 - **Snapshot reads.** A browser's cookie database is read through an owner-only
   temporary copy; no browser directory is opened in place or written to.
 - **One recorded source, used exclusively.** A failing source fails the account,
-  and Tidemark reports the gap rather than quietly switching to another browser
-  or the App — quota on screen must belong to the account the user chose.
+  and Tidemark reports the gap rather than quietly switching to another browser,
+  App or CLI — quota on screen must belong to the account the user chose.
 
 Browser slugs and profile identifiers are stable config keys for the same reason
 provider slugs are — not renamable once shipped.

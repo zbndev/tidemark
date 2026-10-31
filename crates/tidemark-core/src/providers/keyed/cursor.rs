@@ -3,10 +3,11 @@
 //! # Why the credential is a browser session
 //!
 //! Cursor publishes no usage API and issues no API key for one. The dashboard authenticates
-//! with a local Cursor session, either the Cursor App's state database or a browser cookie.
-//! Tidemark reads exactly the source the person selected; it never substitutes another
-//! browser, profile, or Cursor App session after a failure. The browser reading machinery is
-//! [`crate::browser`]; this module names Cursor's domains and session-cookie names.
+//! with a local Cursor session, either the Cursor App's state database, Cursor CLI's `auth.json`,
+//! or a browser cookie. Tidemark reads exactly the source the person selected; it never
+//! substitutes another browser, profile, or Cursor App/CLI session after a failure. The browser
+//! reading machinery is [`crate::browser`]; this module names Cursor's domains and session-cookie
+//! names.
 //!
 //! # The four requests
 //!
@@ -77,6 +78,8 @@ pub const AUTH_SOURCE: &str = "auth-source";
 pub const AUTH_BROWSER: &str = "auth-browser";
 /// The selected browser profile directory name, when a browser has multiple usable profiles.
 pub const AUTH_PROFILE: &str = "auth-profile";
+/// Cursor CLI's separate local authentication file source.
+pub const CURSOR_CLI_SOURCE: &str = "cursor-cli";
 /// Cursor's standalone state database source.
 pub const CURSOR_APP_SOURCE: &str = "cursor-app";
 /// A browser-cookie source.
@@ -161,6 +164,7 @@ pub static SPEC: HandSpec = HandSpec {
             default: "",
             choices: &[
                 (CURSOR_APP_SOURCE, "Cursor App"),
+                (CURSOR_CLI_SOURCE, "Cursor CLI"),
                 (BROWSER_SOURCE, "Browser"),
                 (PASTE_SOURCE, "Paste session"),
             ],
@@ -202,6 +206,7 @@ fn build(
 #[derive(Clone, PartialEq, Eq)]
 enum Source {
     CursorApp,
+    CursorCli,
     Browser {
         browser: String,
         profile: Option<String>,
@@ -217,6 +222,7 @@ impl fmt::Debug for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CursorApp => f.write_str("CursorApp"),
+            Self::CursorCli => f.write_str("CursorCli"),
             Self::Browser { browser, profile } => f
                 .debug_struct("Browser")
                 .field("browser", browser)
@@ -231,6 +237,7 @@ impl Source {
     fn from_credential(credential: &Credential, options: &Options) -> Option<Self> {
         match options.get(AUTH_SOURCE).map(String::as_str) {
             Some(CURSOR_APP_SOURCE) => Some(Self::CursorApp),
+            Some(CURSOR_CLI_SOURCE) => Some(Self::CursorCli),
             Some(PASTE_SOURCE) => {
                 let pasted = credential.expose().trim();
                 (!pasted.is_empty()).then(|| Self::Pasted(pasted.to_owned()))
@@ -268,6 +275,7 @@ pub struct Cursor {
     /// never under the user's own profile directory, which is where Cursor's app lives.
     browser_home: Option<PathBuf>,
     storage: Arc<dyn SafeStorage>,
+    cli_config_root: Option<PathBuf>,
     source: Option<Source>,
     #[cfg(test)]
     base_url: Option<String>,
@@ -293,6 +301,7 @@ impl Cursor {
             home: crate::paths::home(),
             browser_home: None,
             storage: Arc::new(Keyring),
+            cli_config_root: None,
             source: Source::from_credential(credential, options),
             #[cfg(test)]
             base_url: None,
@@ -312,6 +321,7 @@ impl Cursor {
             home: Some(home.to_path_buf()),
             browser_home: Some(home.to_path_buf()),
             storage,
+            cli_config_root: Some(home.join(cli_config_directory())),
             source: None,
             base_url: None,
         })
@@ -384,6 +394,10 @@ impl Cursor {
         };
         match source {
             Source::CursorApp => Ok(self.home.as_deref().and_then(standalone_session_header)),
+            Source::CursorCli => Ok(self
+                .home
+                .as_deref()
+                .and_then(|home| cursor_cli_session_header(home, self.cli_config_root.as_deref()))),
             Source::Browser { browser, profile } => {
                 self.browser_session_header(browser, profile).await
             }
@@ -445,13 +459,38 @@ impl Cursor {
         }
     }
 
-    /// Inspects the standalone Cursor App and browser sources without returning cookies.
+    /// Inspects the standalone Cursor App and CLI sources, then browser and pasted sources.
     pub async fn inspect_sources(&self) -> Result<Vec<AuthCandidate>, ProviderError> {
-        let standalone = self.home.as_deref().and_then(standalone_session_header);
-        let standalone_state = match standalone.as_deref() {
+        let app = self.home.as_deref().and_then(standalone_session_header);
+        let app_state = match app.as_deref() {
             Some(header) => validation_state(self.validate_header(header).await),
             None => AuthCandidateState::Missing,
         };
+        let cli = self
+            .home
+            .as_deref()
+            .and_then(|home| cursor_cli_session_header(home, self.cli_config_root.as_deref()));
+        let cli_state = match cli.as_deref() {
+            Some(header) => validation_state(self.validate_header(header).await),
+            None => AuthCandidateState::Missing,
+        };
+        let local_children = vec![
+            AuthCandidate {
+                id: "app".into(),
+                title: "Cursor App".into(),
+                subtitle: None,
+                state: app_state.as_wire().into(),
+                children: Vec::new(),
+            },
+            AuthCandidate {
+                id: "cli".into(),
+                title: "Cursor CLI".into(),
+                subtitle: None,
+                state: cli_state.as_wire().into(),
+                children: Vec::new(),
+            },
+        ];
+        let local_state = candidate_state(&local_children);
         let browsers = session::inspect_sources(
             self.browser_home.as_deref(),
             self.storage.as_ref(),
@@ -475,9 +514,9 @@ impl Cursor {
             AuthCandidate {
                 id: CURSOR_APP_SOURCE.into(),
                 title: "Cursor App".into(),
-                subtitle: Some("Cursor's local session database".into()),
-                state: standalone_state.as_wire().into(),
-                children: Vec::new(),
+                subtitle: None,
+                state: local_state.as_wire().into(),
+                children: local_children,
             },
             AuthCandidate {
                 id: BROWSER_SOURCE.into(),
@@ -575,6 +614,64 @@ fn candidate_state(candidates: &[AuthCandidate]) -> AuthCandidateState {
         return AuthCandidateState::Rejected;
     }
     AuthCandidateState::Missing
+}
+
+/// Reads Cursor CLI's access token without refreshing or writing credentials.
+fn cursor_cli_session_header(home: &Path, config_root: Option<&Path>) -> Option<String> {
+    let environment_root;
+    let config_root = if let Some(root) = config_root {
+        Some(root)
+    } else {
+        environment_root = std::env::var_os(if cfg!(windows) {
+            "APPDATA"
+        } else {
+            "XDG_CONFIG_HOME"
+        })
+        .map(PathBuf::from);
+        environment_root.as_deref()
+    };
+    let path = cursor_cli_auth_path(home, config_root)?;
+    let contents = std::fs::read(path).ok()?;
+    let auth: CursorCliAuth = serde_json::from_slice(&contents).ok()?;
+    standalone_cookie(&auth.access_token)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CursorCliAuth {
+    access_token: String,
+}
+
+#[cfg(test)]
+fn cli_config_directory() -> &'static str {
+    if cfg!(windows) {
+        "AppData/Roaming"
+    } else {
+        ".config"
+    }
+}
+
+fn cursor_cli_auth_path(home: &Path, config_root: Option<&Path>) -> Option<PathBuf> {
+    if cfg!(any(target_os = "linux", windows)) {
+        Some(cursor_cli_auth_path_for(home, config_root, cfg!(windows)))
+    } else {
+        None
+    }
+}
+
+fn cursor_cli_auth_path_for(home: &Path, config_root: Option<&Path>, windows: bool) -> PathBuf {
+    match config_root.filter(|path| path.is_absolute()) {
+        Some(root) => root.join(if windows {
+            "Cursor/auth.json"
+        } else {
+            "cursor/auth.json"
+        }),
+        None => home.join(if windows {
+            "AppData/Roaming/Cursor/auth.json"
+        } else {
+            ".config/cursor/auth.json"
+        }),
+    }
 }
 
 /// Reads Cursor standalone's session JWT and reconstructs the cookie its dashboard accepts.
@@ -1106,7 +1203,10 @@ fn parse_for_account(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, Options, SPEC, STATE_DATABASE, parse};
+    use super::{
+        Cursor, Options, SPEC, STATE_DATABASE, cli_config_directory, cursor_cli_auth_path_for,
+        parse,
+    };
     use crate::providers::{Credential, Provider, ProviderError};
     use tidemark_types::{AccountId, AuthCandidateState, CredentialKind, DetailSection, Timestamp};
 
@@ -1475,6 +1575,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["auth-source", "auth-browser", "auth-profile"]
         );
+        assert!(
+            SPEC.options[0]
+                .choices
+                .iter()
+                .any(|(value, label)| *value == "cursor-cli" && *label == "Cursor CLI")
+        );
 
         let provider = (SPEC.build)(
             AccountId::default(),
@@ -1581,6 +1687,21 @@ mod tests {
             .expect("inserts the access token");
     }
 
+    fn cursor_cli_auth(home: &crate::browser::tests::TestHome, access_token: &str) {
+        let config_root = home.path().join(cli_config_directory());
+        let path = cursor_cli_auth_path_for(home.path(), Some(&config_root), cfg!(windows));
+        std::fs::create_dir_all(path.parent().expect("has parent")).expect("creates");
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "accessToken": access_token,
+                "refreshToken": "refresh-secret-must-not-be-read",
+            })
+            .to_string(),
+        )
+        .expect("writes fixture");
+    }
+
     fn cursor_state_in_wal(
         home: &crate::browser::tests::TestHome,
         access_token: &str,
@@ -1666,7 +1787,7 @@ mod tests {
                 let (status, response) =
                     if request.contains("WorkosCursorSessionToken=payment-required-session") {
                         ("402 Payment Required", "{}")
-                    } else if request.contains("WorkosCursorSessionToken=forbidden-session") {
+                    } else if request.contains("forbidden-session") {
                         ("403 Forbidden", "{}")
                     } else if request.contains("WorkosCursorSessionToken=expired-session") {
                         ("401 Unauthorized", "{}")
@@ -1685,6 +1806,102 @@ mod tests {
             }
         });
         (format!("http://{address}"), request_rx, server)
+    }
+
+    #[test]
+    fn cursor_cli_path_policy_respects_xdg_and_windows_appdata_without_environment_mutation() {
+        let root = std::env::temp_dir().join("tidemark-cursor-cli-paths");
+        let home = root.join("home");
+        let xdg = root.join("xdg");
+        let appdata = root.join("roaming");
+        assert_eq!(
+            cursor_cli_auth_path_for(&home, Some(&xdg), false),
+            xdg.join("cursor/auth.json")
+        );
+        assert_eq!(
+            cursor_cli_auth_path_for(&home, None, false),
+            home.join(".config/cursor/auth.json")
+        );
+        assert_eq!(
+            cursor_cli_auth_path_for(&home, Some(&appdata), true),
+            appdata.join("Cursor/auth.json")
+        );
+        assert_eq!(
+            cursor_cli_auth_path_for(&home, None, true),
+            home.join("AppData/Roaming/Cursor/auth.json")
+        );
+        assert_eq!(
+            cursor_cli_auth_path_for(&home, Some(std::path::Path::new("relative")), false),
+            home.join(".config/cursor/auth.json")
+        );
+    }
+
+    #[test]
+    fn a_selected_cursor_cli_uses_only_its_auth_json_session_for_http() {
+        let home = gecko_home(&[(
+            ".cursor.com",
+            "WorkosCursorSessionToken",
+            "browser-session-must-not-be-used",
+            0,
+        )]);
+        cursor_state(
+            &home,
+            "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2FwcC1zZWNyZXQifQ.signature",
+        );
+        let cli_token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2NsaS1zZWNyZXQifQ.signature";
+        cursor_cli_auth(&home, cli_token);
+        let (base, requests, server) = session_server(3);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("cursor-cli", None, None))
+            .with_test_base(&base);
+        let snapshot = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.fetch_inner())
+            .expect("the Cursor CLI session works");
+        assert_eq!(snapshot.provider.as_str(), "cursor");
+        let requests: Vec<_> = (0..3)
+            .map(|_| requests.recv().expect("request captured"))
+            .collect();
+        server.join().expect("server stopped");
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.contains("user_cli-secret"))
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.contains("app-secret")
+                    && !request.contains("browser-session-must-not-be-used"))
+        );
+    }
+
+    #[test]
+    fn a_missing_or_malformed_cursor_cli_auth_file_is_unavailable() {
+        let home = gecko_home(&[(
+            ".cursor.com",
+            "WorkosCursorSessionToken",
+            "browser-session-must-not-be-used",
+            0,
+        )]);
+        cursor_state(
+            &home,
+            "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2FwcC1zZWNyZXQifQ.signature",
+        );
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_options(cursor_options("cursor-cli", None, None));
+        assert_eq!(header_of(&provider), None);
+
+        let config_root = home.path().join(cli_config_directory());
+        let path = cursor_cli_auth_path_for(home.path(), Some(&config_root), cfg!(windows));
+        std::fs::create_dir_all(path.parent().expect("has parent")).expect("creates");
+        std::fs::write(&path, b"not valid JSON").expect("writes malformed JSON fixture");
+        assert_eq!(header_of(&provider), None);
+        std::fs::write(&path, br#"{"accessToken":"not-a-jwt"}"#)
+            .expect("writes invalid-token fixture");
+        assert_eq!(header_of(&provider), None);
     }
 
     #[test]
@@ -1870,11 +2087,12 @@ mod tests {
             "browser-session",
             0,
         )]);
-        cursor_state(
-            &home,
-            "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature",
-        );
-        let (base, requests, server) = session_server(2);
+        let app_token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2N1cnNvciJ9.signature";
+        let cli_token =
+            "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2NsaS1tZXRhZGF0YS1zZWNyZXQifQ.signature";
+        cursor_state(&home, app_token);
+        cursor_cli_auth(&home, cli_token);
+        let (base, requests, server) = session_server(3);
         let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
             .expect("builds")
             .with_test_base(&base);
@@ -1883,24 +2101,66 @@ mod tests {
             .expect("runtime")
             .block_on(provider.inspect_sources())
             .expect("inspects");
-        let requests: Vec<_> = (0..2)
+        let requests: Vec<_> = (0..3)
             .map(|_| requests.recv().expect("request captured"))
             .collect();
         server.join().expect("server stopped");
 
         assert_eq!(sources[0].id, "cursor-app");
+        assert_eq!(sources[0].title, "Cursor App");
         assert_eq!(sources[0].state, "ready");
+        assert_eq!(sources[0].children[0].id, "app");
+        assert_eq!(sources[0].children[0].title, "Cursor App");
+        assert_eq!(sources[0].children[0].state, "ready");
+        assert_eq!(sources[0].children[1].id, "cli");
+        assert_eq!(sources[0].children[1].title, "Cursor CLI");
+        assert_eq!(sources[0].children[1].state, "ready");
         assert_eq!(sources[1].id, "browser");
         assert_eq!(sources[1].children[0].id, "zen");
         assert_eq!(
             sources[1].children[0].children[0].id,
             "zen/k26qcf29.Default (release)"
         );
-        assert!(!format!("{sources:?}").contains("browser-session"));
+        let metadata = format!("{sources:?}");
+        assert!(!metadata.contains("browser-session"));
+        assert!(!metadata.contains(app_token));
+        assert!(!metadata.contains(cli_token));
+        assert!(!metadata.contains("refresh-secret-must-not-be-read"));
         assert!(
             requests
                 .iter()
                 .any(|request| request.contains("browser-session"))
+        );
+    }
+
+    #[test]
+    fn cursor_cli_inspection_keeps_app_and_cli_statuses_independent() {
+        let home = crate::browser::tests::TestHome::new();
+        cursor_cli_auth(
+            &home,
+            "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyX2ZvcmJpZGRlbi1zZXNzaW9uIn0.signature",
+        );
+        let (base, requests, server) = session_server(1);
+        let provider = Cursor::for_test(home.path(), Arc::new(NoKeyring))
+            .expect("builds")
+            .with_test_base(&base);
+        let sources = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(provider.inspect_sources())
+            .expect("inspects");
+        let _ = requests.recv().expect("CLI validation request");
+        server.join().expect("server stopped");
+
+        assert_eq!(sources[0].state, AuthCandidateState::Rejected.as_wire());
+        assert_eq!(sources[0].children[0].id, "app");
+        assert_eq!(
+            sources[0].children[0].state,
+            AuthCandidateState::Missing.as_wire()
+        );
+        assert_eq!(sources[0].children[1].id, "cli");
+        assert_eq!(
+            sources[0].children[1].state,
+            AuthCandidateState::Rejected.as_wire()
         );
     }
 

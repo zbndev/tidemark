@@ -2556,7 +2556,9 @@ fn resolvable_auth_selection(
         .iter()
         .find(|candidate| candidate.id == selection.mode)?;
     match selection.candidate.as_deref() {
-        None if selectable_state(mode.state()) => Some(selection.clone()),
+        None if mode.children.is_empty() && selectable_state(mode.state()) => {
+            Some(selection.clone())
+        }
         None => None,
         Some(candidate) => {
             selectable_descendant(&mode.children, candidate).map(|candidate| AuthSelection {
@@ -2756,6 +2758,50 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_local_source_group_requires_the_exact_usable_client() {
+        let report = vec![AuthCandidate {
+            id: "cursor-app".into(),
+            title: "Cursor App".into(),
+            subtitle: None,
+            state: "ready".into(),
+            children: vec![
+                AuthCandidate {
+                    id: "app".into(),
+                    title: "Cursor App".into(),
+                    subtitle: None,
+                    state: "ready".into(),
+                    children: Vec::new(),
+                },
+                AuthCandidate {
+                    id: "cli".into(),
+                    title: "Cursor CLI".into(),
+                    subtitle: None,
+                    state: "rejected".into(),
+                    children: Vec::new(),
+                },
+            ],
+        }];
+        for candidate in [None, Some("cli"), Some("unknown")] {
+            assert_eq!(
+                resolvable_auth_selection(
+                    &report,
+                    &AuthSelection {
+                        mode: "cursor-app".into(),
+                        candidate: candidate.map(str::to_owned),
+                    },
+                ),
+                None,
+                "a ready sibling never makes this choice usable"
+            );
+        }
+        let app = AuthSelection {
+            mode: "cursor-app".into(),
+            candidate: Some("app".into()),
+        };
+        assert_eq!(resolvable_auth_selection(&report, &app), Some(app));
     }
 
     /// A provider that answers whatever the test tells it to, without a network.
@@ -4919,7 +4965,7 @@ svg = '''
     }
 
     #[tokio::test]
-    async fn a_browser_parent_persists_its_first_validated_profile_then_rebuilds() {
+    async fn local_and_browser_choices_persist_the_validated_leaf_then_rebuild() {
         // If the validation moved after the write, an unknown candidate could replace the
         // working Cursor App source with a browser the daemon has never proved usable.
         let path = std::env::temp_dir().join(format!(
@@ -4934,7 +4980,7 @@ svg = '''
                 "cursor",
                 &AuthSelection {
                     mode: "cursor-app".into(),
-                    candidate: None,
+                    candidate: Some("app".into()),
                 },
             )
             .expect("Cursor App stored");
@@ -4944,7 +4990,22 @@ svg = '''
                 title: "Cursor App".into(),
                 subtitle: None,
                 state: "ready".into(),
-                children: Vec::new(),
+                children: vec![
+                    AuthCandidate {
+                        id: "app".into(),
+                        title: "Cursor App".into(),
+                        subtitle: None,
+                        state: "ready".into(),
+                        children: Vec::new(),
+                    },
+                    AuthCandidate {
+                        id: "cli".into(),
+                        title: "Cursor CLI".into(),
+                        subtitle: None,
+                        state: "ready".into(),
+                        children: Vec::new(),
+                    },
+                ],
             },
             AuthCandidate {
                 id: "browser".into(),
@@ -5017,6 +5078,29 @@ svg = '''
             harness.engine.accounts[0].client.is_some(),
             "rejection keeps the client"
         );
+
+        let cli = AuthSelection {
+            mode: "cursor-app".into(),
+            candidate: Some("cli".into()),
+        };
+        harness
+            .engine
+            .select_auth_source("cursor", "default", cli.clone())
+            .await
+            .expect("CLI source is committed");
+        assert_eq!(
+            Config::at(path.clone())
+                .expect("config parses")
+                .option("cursor", "auth-source"),
+            Some("cursor-cli")
+        );
+        assert!(harness.engine.accounts[0].client.is_none());
+        assert_eq!(harness.wait_secs(), 0);
+        assert!(matches!(
+            harness.updates.recv().await,
+            Some(Publication::Changed(status)) if status.auth_selection == Some(cli)
+        ));
+        harness.engine.ensure_client(0).await;
 
         harness
             .engine

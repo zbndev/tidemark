@@ -229,6 +229,11 @@ sub2api · Synthetic · Venice · Warp · xAI · Z.ai · ZenMux
 
 Abacus · Alibaba Coding Plan · Augment · CommandCode · Cursor · Gemini · Grok · LongCat · Manus · MiMo · Mistral · Notion · Ollama · OpenCode · Perplexity · Qoder · Sakana · T3 Chat · ZoomMate
 
+Cursor's **Cursor App** authentication tab lists **Cursor App** and **Cursor CLI** as
+separate sources. Sign in with the chosen application, then select its row. Tidemark reads
+the CLI's `$XDG_CONFIG_HOME/cursor/auth.json` (default `~/.config/cursor/auth.json`) on
+Linux, or `%APPDATA%\Cursor\auth.json` on Windows, without changing it.
+
 **No credential needed**
 
 Wayfinder

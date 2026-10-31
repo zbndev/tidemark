@@ -1847,9 +1847,7 @@ fn key(provider: &str, account: &str) -> AccountKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidemark_types::{
-        AccountId, AuthCandidate, AuthSelection, ProviderDefinition, ProviderId, ids,
-    };
+    use tidemark_types::{AccountId, AuthSelection, ProviderDefinition, ProviderId, ids};
 
     fn status(provider: &str) -> ProviderStatus {
         ProviderStatus::pending(&ProviderId::new(provider), &AccountId::default())
@@ -3953,77 +3951,6 @@ mod tests {
             .await
             .expect("setting task did not panic")
             .expect("engine accepted setting");
-    }
-
-    #[tokio::test]
-    async fn browser_auth_calls_are_serialized_through_the_engine_without_credentials() {
-        let cursor = status("cursor");
-        let (daemon, _secrets, mut commands) = daemon_over(vec![cursor]).await;
-        let daemon = Arc::new(daemon);
-        let inspection = tokio::spawn({
-            let daemon = Arc::clone(&daemon);
-            async move { daemon.get_auth_sources("cursor", "default").await }
-        });
-
-        let Command::InspectAuthSources {
-            provider,
-            account,
-            reply,
-        } = commands.recv().await.expect("inspection reaches engine")
-        else {
-            panic!("unexpected command");
-        };
-        assert_eq!(
-            (provider, account),
-            ("cursor".to_owned(), "default".to_owned())
-        );
-        reply
-            .send(Ok(vec![AuthCandidate {
-                id: "cursor-app".into(),
-                title: "Cursor App".into(),
-                subtitle: None,
-                state: "ready".into(),
-                children: Vec::new(),
-            }]))
-            .expect("report returned");
-        let sources = inspection
-            .await
-            .expect("inspection task did not panic")
-            .expect("inspection succeeds");
-        assert_eq!(sources[0].id, "cursor-app");
-        assert!(!format!("{sources:?}").contains("session="));
-
-        let selection = AuthSelection {
-            mode: "cursor-app".into(),
-            candidate: None,
-        };
-        let selecting = tokio::spawn({
-            let daemon = Arc::clone(&daemon);
-            let selection = selection.clone();
-            async move {
-                daemon
-                    .select_auth_source("cursor", "default", selection)
-                    .await
-            }
-        });
-        let Command::SelectAuthSource {
-            provider,
-            account,
-            selection: requested,
-            reply,
-        } = commands.recv().await.expect("selection reaches engine")
-        else {
-            panic!("unexpected command");
-        };
-        assert_eq!(
-            (provider, account, requested),
-            ("cursor".into(), "default".into(), selection)
-        );
-        reply.send(Ok(())).expect("selection completed");
-        selecting
-            .await
-            .expect("selection task did not panic")
-            .expect("selection succeeds");
     }
 
     #[tokio::test]

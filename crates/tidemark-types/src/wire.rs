@@ -238,12 +238,12 @@ pub struct ExternalLogin {
 
 /// One top-level local authentication method a provider can offer.
 ///
-/// Values are stable configuration values. A client draws `title`, but sends `value` back
-/// to the daemon unchanged so that it never needs to know provider-specific source names.
+/// Values are stable selector ids. A client draws `title`, but sends `value` and the
+/// candidate back unchanged; the daemon translates the pair into provider configuration.
 #[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
 #[zvariant(signature = "a{sv}")]
 pub struct AuthMode {
-    /// Stable value stored in the provider configuration.
+    /// Stable selector id sent back to the daemon.
     pub value: String,
     /// What to call this method on screen.
     pub title: String,
@@ -253,7 +253,7 @@ pub struct AuthMode {
 #[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
 #[zvariant(signature = "a{sv}")]
 pub struct AuthSelector {
-    /// The provider option that records the selected top-level mode.
+    /// The provider option that records the selected source.
     pub option: String,
     /// Top-level methods the client presents as authentication tabs.
     pub modes: Vec<AuthMode>,
@@ -317,9 +317,8 @@ impl std::fmt::Display for AuthCandidateState {
 
 /// One local source the daemon inspected, without its credential.
 ///
-/// `id` is opaque to clients and stable enough to record a selected browser or profile.
-/// Children represent the rare case where a source needs a second explicit choice, such as
-/// multiple usable profiles inside a browser.
+/// `id` is opaque to clients and stable enough to record a selected application or browser.
+/// Children list choices within a mode, or profiles within a browser.
 #[derive(Debug, Clone, PartialEq, Eq, SerializeDict, DeserializeDict, Type)]
 #[zvariant(signature = "a{sv}")]
 pub struct AuthCandidate {
