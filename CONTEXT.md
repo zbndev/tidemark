@@ -556,6 +556,8 @@ IPC, dialog lifetimes and pure presentation decisions.
   displaced cards move into their prospective slots. Each slot retains its current
   position so a changed target can animate from where the card already is. The grid
   uses pointer events, a drag threshold and a separate carrying layer in `ui/app.slint`.
+  The header is drawn above the grid: rotated cards' nested rectangular clips can extend
+  beyond the viewport in FemtoVG, but must not paint over the header.
 - **A provider moves with all its accounts.** Its own card carries the whole group as a
   stack under the pointer: the other accounts fly in behind it, a counter says how many,
   and the grid closes up over the slots they left. One slot stays open where the group
