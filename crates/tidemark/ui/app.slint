@@ -365,6 +365,8 @@ export component AppWindow inherits Window {
         // A header bar drawn by the window itself.
         Rectangle {
             height: 47px;
+            // Rotated cards' nested clips are approximate; keep the header above the grid.
+            z: 1;
             background: Theme.header-bg;
             border-top-left-radius: root.frame-radius;
             border-top-right-radius: root.frame-radius;
