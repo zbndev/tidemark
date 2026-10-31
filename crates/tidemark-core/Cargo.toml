@@ -52,7 +52,7 @@ tracing = "0.1.44"
 # unconditionally on boring2 (BoringSSL), which does not build on Windows yet —
 # reversible once boring-sys2 builds there.
 [target.'cfg(unix)'.dependencies]
-rusqlite = "0.40.2"
+rusqlite = "0.41.0"
 oo7 = { version = "0.6.0", default-features = false, features = ["native_crypto", "tokio"] }
 # wreq: the browser-emulating HTTP stack T3 Chat's Vercel edge demands — it gates on the
 # client's TLS/HTTP2 fingerprint, and no honest rustls ClientHello passes (see
