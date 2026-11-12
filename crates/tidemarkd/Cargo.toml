@@ -31,7 +31,7 @@ semver = { version = "1.0.27", optional = true }
 [dev-dependencies]
 # Only to hold a second write lock against the history database in tests: the same
 # version tidemark-core links, so one build of the C library serves the whole workspace.
-rusqlite = "0.40.2"
+rusqlite = "0.41.1"
 
 [build-dependencies]
 winresource = "0.1.31"
